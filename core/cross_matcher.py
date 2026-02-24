@@ -21,12 +21,6 @@ class CrossMatchingEngine:
         for buy_bank, buy_orders in buy_grouped.items():
             for sell_bank, sell_orders in sell_grouped.items():
 
-                # ОНОВЛЕНО: Тепер беремо біржу прямо з об'єктів ордерів
-                buy_ex = buy_orders[0].exchange if buy_orders else "Unknown"
-                sell_ex = sell_orders[0].exchange if sell_orders else "Unknown"
-
-                calculator = get_calculator(buy_bank, sell_bank, buy_ex, sell_ex)
-
                 sorted_buys = sorted(buy_orders, key=lambda o: o.price)[:3]
                 sorted_sells = sorted(sell_orders, key=lambda o: o.price, reverse=True)[:3]
 
@@ -34,6 +28,9 @@ class CrossMatchingEngine:
                     for sell in sorted_sells:
                         if sell.price <= buy.price:
                             continue
+
+                        # ✅ Калькулятор тут — для кожної конкретної пари
+                        calculator = get_calculator(buy_bank, sell_bank, buy.exchange, sell.exchange)
 
                         max_buy_fiat = min(self.max_capital, buy.max_limit, buy.available_amount * buy.price)
 
