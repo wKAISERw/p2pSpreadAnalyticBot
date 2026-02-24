@@ -1,0 +1,21 @@
+# Environments (Ніколи не пушимо віртуальне середовище)
+.env
+.venv/
+venv/
+env/
+
+# Logs (Логи серверу залишаються тільки на сервері)
+logs/
+*.log
+
+# Python Caches (Кеші пайтона)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# IDE & OS (Налаштування редакторів коду)
+.idea/
+.vscode/
+*.swp
+.DS_Store
