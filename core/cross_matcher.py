@@ -20,7 +20,12 @@ class CrossMatchingEngine:
 
         for buy_bank, buy_orders in buy_grouped.items():
             for sell_bank, sell_orders in sell_grouped.items():
-                calculator = get_calculator(buy_bank, sell_bank)
+
+                # ОНОВЛЕНО: Тепер беремо біржу прямо з об'єктів ордерів
+                buy_ex = buy_orders[0].exchange if buy_orders else "Unknown"
+                sell_ex = sell_orders[0].exchange if sell_orders else "Unknown"
+
+                calculator = get_calculator(buy_bank, sell_bank, buy_ex, sell_ex)
 
                 sorted_buys = sorted(buy_orders, key=lambda o: o.price)[:3]
                 sorted_sells = sorted(sell_orders, key=lambda o: o.price, reverse=True)[:3]
