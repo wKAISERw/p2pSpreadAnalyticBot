@@ -1,11 +1,16 @@
 import logging
 from typing import Optional, Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
+
+# Визначаємо абсолютний шлях до кореня проєкту (там де лежить config.py)
+BASE_DIR = Path(__file__).resolve().parent
 
 class Settings(BaseSettings):
     # Telegram налаштування
     telegram_bot_token: str
     telegram_chat_id: int
+    wallet_token: str = ""
 
     # Bybit налаштування
     bybit_base_url: str = "https://api2.bybit.com"
@@ -34,7 +39,7 @@ class Settings(BaseSettings):
 
     # Конфігурація Pydantic
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(BASE_DIR / ".env"),  # <--- ТЕПЕР ШЛЯХ АБСОЛЮТНИЙ
         env_file_encoding="utf-8",
         extra="ignore"
     )

@@ -5,8 +5,10 @@ import time
 from config import settings
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from infrastructure.http.okx_client import OkxClient
+from infrastructure.http.wallet_client import WalletClient  # <--- ДОДАНО ІМПОРТ КЛІЄНТА WALLET
 from exchanges.bybit import BybitExchange
 from exchanges.okx import OkxExchange
+from exchanges.wallet import WalletExchange  # <--- ДОДАНО ІМПОРТ БІРЖІ WALLET
 from filters.merchant_filter import MerchantFilter
 from notifications.telegram_notifier import TelegramNotifier, SpreadAlert
 
@@ -37,8 +39,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     # Окремі запобіжники для кожної біржі, щоб падіння однієї не зупиняло іншу
     cb_bybit = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
     cb_okx = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+    cb_wallet = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)  # <--- ДОДАНО ЗАПОБІЖНИК ДЛЯ WALLET
 
-    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX)...")
+    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet)...")
     logger.info("💼 Капітал: %s ₴ | Поріг: %s%% (+%s%% буфер)",
                 settings.working_capital_uah, settings.min_spread_pct, getattr(settings, "safety_buffer_pct", 0.0))
 
@@ -56,14 +59,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     target_banks = {"43": "Monobank", "14": "PrivatBank", "64": "PUMB"}
 
     try:
-        # Відкриваємо обидва HTTP клієнти паралельно
-        async with BybitP2PClient() as b_client, OkxClient() as o_client:
+        # Відкриваємо ТРИ HTTP клієнти паралельно (ДОДАНО WALLET)
+        async with BybitP2PClient() as b_client, OkxClient() as o_client, WalletClient() as w_client:
             bybit_ex = BybitExchange(b_client)
             okx_ex = OkxExchange(o_client)
+            wallet_ex = WalletExchange(w_client)
 
+            # ДОДАНО WALLET У СПИСОК КОНФІГІВ
             ex_configs = [
                 {"name": "Bybit", "instance": bybit_ex, "cb": cb_bybit},
-                {"name": "OKX", "instance": okx_ex, "cb": cb_okx}
+                {"name": "OKX", "instance": okx_ex, "cb": cb_okx},
+                {"name": "Wallet", "instance": wallet_ex, "cb": cb_wallet}
             ]
 
             while not stop_event.is_set():
@@ -92,16 +98,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         b_orders, s_orders = res
                         for o in b_orders:
-                         if merchant_filter.passed(o):
-                            for bank_code in o.bank_codes:
-                                if bank_code in buy_grouped:
-                                    buy_grouped[bank_code].append(o)
+                            if merchant_filter.passed(o):
+                                for bank_code in o.bank_codes:
+                                    if bank_code in buy_grouped:
+                                        buy_grouped[bank_code].append(o)
 
                         for o in s_orders:
-                         if merchant_filter.passed(o):
-                            for bank_code in o.bank_codes:
-                                if bank_code in sell_grouped:
-                                    sell_grouped[bank_code].append(o)
+                            if merchant_filter.passed(o):
+                                for bank_code in o.bank_codes:
+                                    if bank_code in sell_grouped:
+                                        sell_grouped[bank_code].append(o)
 
                     # 3. Крос-біржове та крос-банківське зіставлення
                     opportunities = matcher.match(buy_grouped, sell_grouped)
