@@ -161,7 +161,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                 latency, len(ex_configs), len(ex_configs) * len(target_banks), len(opportunities))
 
                     # 4. Обробка та відправка результатів
-                    # 4. Обробка та відправка результатів
                     for opp in opportunities:
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
@@ -204,7 +203,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                 # Якщо спред знайдено вперше, він чекає наступного циклу
                                 logger.debug("⏳ Спред %s ➔ %s на перевірці стабільності...", buy_o.exchange,
                                              sell_o.exchange)
-
+                    await asyncio.sleep(2.0)
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
                     await asyncio.sleep(10)
