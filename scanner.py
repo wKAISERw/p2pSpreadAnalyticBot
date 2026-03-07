@@ -20,6 +20,7 @@ from exchanges.mexc import MexcExchange
 from core.dedup_cache import TTLCache
 from core.circuit_breaker import CircuitBreaker
 from core.cross_matcher import CrossMatchingEngine
+from core.risk_engine import RiskEngine
 
 logger = logging.getLogger("Scanner")
 
@@ -35,7 +36,8 @@ async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
 
 
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
-    merchant_filter = MerchantFilter()
+    risk_mode = getattr(settings, 'risk_mode', 'WARNING')
+    merchant_filter = MerchantFilter(risk_mode=risk_mode)
 
     dedup_cache = TTLCache(
         ttl_seconds=settings.dedup_ttl_seconds,
@@ -50,7 +52,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     cb_mexc = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
 
 
-    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance)...")
+    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info("💼 Капітал: %s ₴ | Поріг: %s%% (+%s%% буфер)",
                 settings.working_capital_uah, settings.min_spread_pct, getattr(settings, "safety_buffer_pct", 0.0))
 
@@ -65,6 +67,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3)
     )
 
+    risk_engine = RiskEngine()
     target_banks = {"43": "Monobank", "14": "PrivatBank", "64": "PUMB"}
 
     try:
@@ -112,6 +115,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))  # Агрегатор нижче сам їх підхопить!
                     # ------------------------------------------------------
+
+                    # Risk Engine — аналіз всіх ордерів
+                    for res in results:
+                        if isinstance(res, Exception):
+                            continue
+                        b_orders, s_orders = res
+                        risk_engine.analyze_batch(b_orders)
+                        risk_engine.analyze_batch(s_orders)
 
                     last_cycle_time[0] = time.monotonic()
 

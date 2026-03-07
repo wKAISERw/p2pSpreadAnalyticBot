@@ -1,3 +1,4 @@
+# exchanges/base.py
 from dataclasses import dataclass, field
 from typing import List, Tuple
 from abc import ABC, abstractmethod
@@ -20,6 +21,14 @@ class Order:
     link: str = ""
     bank_codes: list[str] = field(default_factory=list)
 
+    # ── Risk Engine поля ──────────────────────────────────────────────────
+    # Умови угоди від мерчанта (нижній регістр, нормалізовані)
+    trade_terms: str = ""
+    # Вирок RiskEngine: "OK", "TRIANGLE", "CASINO", "LOW_STATS", "EMPTY_TERMS"
+    risk_flag: str = ""
+    # Верифікований мерчант (жовта/синя галочка де доступно)
+    is_verified: bool = False
+
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""
@@ -34,7 +43,6 @@ class BaseExchange(ABC):
         """Отримати ордери тих, хто скуповує USDT."""
         pass
 
-    # ВИПРАВЛЕНО ТУТ: Тепер інтерфейс вимагає мульти-запит
     @abstractmethod
     async def fetch_both_multi(self, amounts: list[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         """Паралельний мульти-запит для максимальної швидкості."""

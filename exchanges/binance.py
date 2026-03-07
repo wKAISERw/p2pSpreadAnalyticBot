@@ -58,6 +58,8 @@ class BinanceExchange(BaseExchange):
             exchange="Binance",
             link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo','')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
+            trade_terms=str(adv.get("remarks", "") or "").strip().lower(),
+            is_verified=str(user.get("userType", "")) == "merchant",
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:

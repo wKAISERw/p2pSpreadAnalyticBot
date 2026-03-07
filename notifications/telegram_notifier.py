@@ -24,6 +24,45 @@ class SpreadAlert:
     profit_uah: float
 
 
+def _risk_badge(order: Order) -> str:
+    """Повертає рядок з попередженням про ризик ТА причиною (коментарем)."""
+    # Якщо ордер не має ризику або прапорець пустий
+    if getattr(order, "risk_flag", "") in ["", "OK"]:
+        return ""
+
+    badges = {
+        "TRIANGLE": "🚨 <b>РИЗИК: ТРИКУТНИК</b>",
+        "CASINO": "🚨 <b>РИЗИК: КАЗИНО/ПРОЦЕСИНГ</b>",
+        "SUSPICIOUS": "⚠️ <b>ПІДОЗРІЛІ УМОВИ</b>",
+        "LOW_STATS": "⚠️ <b>МАЛО УГОД / НИЗЬКИЙ %</b>",
+        "SUSPICIOUS_LIMITS": "⚠️ <b>АНОМАЛЬНІ ЛІМІТИ</b>",
+        "EMPTY_TERMS": "💬 <i>Умови не вказані</i>",
+    }
+
+    flag = getattr(order, "risk_flag", "")
+    flag_text = badges.get(flag, "")
+
+    if not flag_text:
+        return ""
+
+    reason = f"{flag_text}\n"
+
+    # Якщо ризик текстовий — показуємо, на яких саме словах він попався
+    trade_terms = getattr(order, "trade_terms", "")
+    if flag in ["TRIANGLE", "CASINO", "SUSPICIOUS"] and trade_terms:
+        # Обрізаємо довгі тексти до 100 символів, щоб не спамити
+        safe_terms = trade_terms.replace('\n', ' ')[:100]
+        if len(trade_terms) > 100:
+            safe_terms += "..."
+        reason += f"📝 <i>Текст мерчанта:</i> <code>{safe_terms}</code>\n"
+
+    return reason
+
+
+def _verified_badge(order) -> str:
+    return " ✅" if getattr(order, "is_verified", False) else ""
+
+
 class TelegramNotifier:
     def __init__(
         self,
@@ -150,16 +189,18 @@ class TelegramNotifier:
             f"з {settings.working_capital_uah:.0f} ₴\n\n"
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{alert.buy_order.price}</code> ₴\n"
-            f"Мерчант: {alert.buy_order.merchant_name} "
+            f"Мерчант: {alert.buy_order.merchant_name}{_verified_badge(alert.buy_order)} "
             f"({alert.buy_order.finish_rate_pct:.1f}% | "
             f"{alert.buy_order.month_order_count} угод)\n"
-            f"Ліміти: {alert.buy_order.min_limit}–{alert.buy_order.max_limit} ₴\n\n"
-            f"💸 <b>ПРОДАЄМО</b>\n"
+            f"Ліміти: {alert.buy_order.min_limit}–{alert.buy_order.max_limit} ₴\n"
+            + _risk_badge(alert.buy_order) +
+            f"\n💸 <b>ПРОДАЄМО</b>\n"
             f"Курс: <code>{alert.sell_order.price}</code> ₴\n"
-            f"Мерчант: {alert.sell_order.merchant_name} "
+            f"Мерчант: {alert.sell_order.merchant_name}{_verified_badge(alert.sell_order)} "
             f"({alert.sell_order.finish_rate_pct:.1f}% | "
             f"{alert.sell_order.month_order_count} угод)\n"
-            f"Ліміти: {alert.sell_order.min_limit}–{alert.sell_order.max_limit} ₴"
+            f"Ліміти: {alert.sell_order.min_limit}–{alert.sell_order.max_limit} ₴\n"
+            + _risk_badge(alert.sell_order)
         )
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -180,8 +221,12 @@ class TelegramNotifier:
                 f"Профіт: {a.profit_uah:.2f}₴\n"
                 f"   Купівля <code>{a.buy_order.price}</code> ₴ → "
                 f"Продаж <code>{a.sell_order.price}</code> ₴\n"
-                f"   <a href='{a.buy_order.link}'>{a.buy_order.merchant_name}</a> → "
+                f"   <a href='{a.buy_order.link}'>{a.buy_order.merchant_name}</a>"
+                + _verified_badge(a.buy_order) +
+                f" → "
                 f"<a href='{a.sell_order.link}'>{a.sell_order.merchant_name}</a>"
+                + _verified_badge(a.sell_order) +
+                (_risk_badge(a.buy_order) or _risk_badge(a.sell_order))
             )
 
         text = "\n".join(lines)

@@ -82,8 +82,10 @@ class MexcExchange(BaseExchange):
             month_order_count=order_count,
             finish_rate_pct=round(finish_rate, 1),
             exchange="MEXC",
-            link="https://www.mexc.com/p2p",  # Прямих лінків на ордери в MEXC немає, ведемо на головну
+            link="https://www.mexc.com/p2p",
             bank_codes=[bank_code],
+            trade_terms=str(item.get("remark", "") or "").strip().lower(),
+            is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),
         )
 
     async def _fetch_orders(self, side: int, side_str: str, banks: List[str]) -> List[Order]:

@@ -35,7 +35,9 @@ class BybitExchange(BaseExchange):
             finish_rate_pct=float(item.get("recentExecuteRate", 0.0)),
             exchange="Bybit",
             link=f"https://www.bybit.com/fiat/trade/otc/profile/{item.get('userId', '')}",
-            bank_codes=parsed_banks  # <--- ПЕРЕДАЄМО СПИСОК БАНКІВ
+            bank_codes=parsed_banks,
+            trade_terms=str(item.get("remark", "") or "").strip().lower(),
+            is_verified=bool(item.get("authTag") or item.get("isVerified")),
         )
 
     async def _fetch_orders(self, amount: float, banks: List[str], side: str) -> List[Order]:

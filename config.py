@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     anomaly_threshold_multiplier: float = 2.5
     anomaly_method: Literal["mean", "median", "mad"] = "mean"
 
+    # Risk Engine
+    risk_mode: str = "WARNING"  # STRICT або WARNING
+
     # Логування
     log_level: str = "INFO"
 

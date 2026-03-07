@@ -1,25 +1,47 @@
+# filters/merchant_filter.py
+"""
+MerchantFilter — приймає рішення на основі risk_flag від RiskEngine.
+
+Режими (RISK_MODE в .env):
+  STRICT  — блокує все крім "OK" та "EMPTY_TERMS"
+  WARNING — пропускає все, але зберігає risk_flag для відображення в TG
+"""
+import logging
 from exchanges.base import Order
+
+logger = logging.getLogger("MerchantFilter")
+
+# Флаги які вважаються безпечними в обох режимах
+SAFE_FLAGS = {"OK", "EMPTY_TERMS", ""}
 
 
 class MerchantFilter:
-    # Встановили жорсткі ліміти: мінімум 50 угод за місяць і 95% успішних завершень
-    def __init__(self, min_orders: int = 50, min_finish_rate: float = 95.0, blocked_names: list[str] = None):
-        self.min_orders = min_orders
-        self.min_finish_rate = min_finish_rate
-        self.blocked_names = blocked_names or []  # Тут згодом зможеш вписати свій нік
+    def __init__(
+        self,
+        risk_mode: str = "WARNING",   # "STRICT" або "WARNING"
+        blocked_names: list[str] = None,
+    ):
+        self.risk_mode = risk_mode.upper()
+        self.blocked_names = set(blocked_names or [])
 
     def passed(self, order: Order) -> bool:
-        """Повертає True, якщо мерчант надійний як швейцарський банк."""
-        # 1. Відсікаємо себе та заблокованих
+        """
+        Повертає True якщо ордер проходить через фільтр.
+        В режимі WARNING завжди True (крім заблокованих).
+        В режимі STRICT блокує ризикові флаги.
+        """
+        # Завжди блокуємо себе
         if order.merchant_name in self.blocked_names:
             return False
 
-        # 2. Відсікаємо новачків (менше 50 угод)
-        if order.month_order_count < self.min_orders:
-            return False
+        # WARNING — пропускаємо все, risk_flag видно в TG
+        if self.risk_mode == "WARNING":
+            return True
 
-        # 3. Відсікаємо тих, хто часто скасовує або кидає в реф (успішність нижче 95%)
-        if order.finish_rate_pct < self.min_finish_rate:
+        # STRICT — блокуємо ризикові
+        if order.risk_flag not in SAFE_FLAGS:
+            logger.debug("🚫 STRICT блок: %s [%s] → %s",
+                         order.merchant_name, order.exchange, order.risk_flag)
             return False
 
         return True

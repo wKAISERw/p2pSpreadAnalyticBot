@@ -56,6 +56,8 @@ class OkxExchange(BaseExchange):
             exchange="OKX",
             link="https://www.okx.com/ua/p2p-markets/uah/buy-usdt",
             bank_codes=bank_codes,
+            trade_terms=str(item.get("tradingOrderInfo", {}).get("tradeOrderDesc", "") or "").strip().lower(),
+            is_verified=bool(item.get("isAuthenticatedMerchant") or item.get("isMerchant")),
         )
 
     async def _fetch_orders(self, amount: float, bank_code: str, side: str) -> List[Order]:
