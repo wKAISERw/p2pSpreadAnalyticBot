@@ -298,7 +298,7 @@ class CryptoBotUserbot:
         for back_cb in full_chain:
             clicked = await self._click(back_cb)
             if clicked:
-                logger.debug("back: %s", back_cb)
+                logger.info("↩️  back: %s", back_cb)
                 await asyncio.sleep(2.0)
         # Після ланцюжка маємо бути на P2P меню (market-trade-buy є)
         await asyncio.sleep(0.5)
@@ -339,7 +339,7 @@ class CryptoBotUserbot:
             )
             return True
         except Exception as e:
-            logger.debug("invoke_on_msg [%s]: %s", callback, e)
+            logger.warning("invoke_on_msg ПОМИЛКА [%s]: %s", callback, e)
             return False
 
     async def _click(self, callback: str) -> bool:

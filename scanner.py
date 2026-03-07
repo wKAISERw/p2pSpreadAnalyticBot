@@ -12,6 +12,8 @@ from exchanges.wallet import WalletExchange  # <--- ДОДАНО ІМПОРТ Б
 from filters.merchant_filter import MerchantFilter
 from notifications.telegram_notifier import TelegramNotifier, SpreadAlert
 from exchanges.cryptobot_userbot import CryptoBotUserbot
+from infrastructure.http.binance_client import BinanceClient
+from exchanges.binance import BinanceExchange
 
 
 from core.dedup_cache import TTLCache
@@ -43,8 +45,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     cb_bybit = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
     cb_okx = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
     cb_wallet = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)  # <--- ДОДАНО ЗАПОБІЖНИК ДЛЯ WALLET
+    cb_binance = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
 
-    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet)...")
+    logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance)...")
     logger.info("💼 Капітал: %s ₴ | Поріг: %s%% (+%s%% буфер)",
                 settings.working_capital_uah, settings.min_spread_pct, getattr(settings, "safety_buffer_pct", 0.0))
 
@@ -63,10 +66,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
     try:
         # Відкриваємо ТРИ HTTP клієнти паралельно (ДОДАНО WALLET)
-        async with BybitP2PClient() as b_client, OkxClient() as o_client, WalletClient() as w_client:
+        async with BybitP2PClient() as b_client, OkxClient() as o_client, WalletClient() as w_client, BinanceClient() as bn_client:
             bybit_ex = BybitExchange(b_client)
             okx_ex = OkxExchange(o_client)
             wallet_ex = WalletExchange(w_client)
+            binance_ex = BinanceExchange(bn_client)
 
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
@@ -81,13 +85,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
             ex_configs = [
                 {"name": "Bybit", "instance": bybit_ex, "cb": cb_bybit},
                 {"name": "OKX", "instance": okx_ex, "cb": cb_okx},
-                {"name": "Wallet", "instance": wallet_ex, "cb": cb_wallet}
+                {"name": "Wallet", "instance": wallet_ex, "cb": cb_wallet},
+                {"name": "Binance", "instance": binance_ex, "cb": cb_binance}
             ]
 
             while not stop_event.is_set():
                 try:
                     start_time = time.monotonic()
-                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2000.0, 3100.0])
+                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
 
                     tasks = []
                     for cfg in ex_configs:
@@ -131,7 +136,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     latency = time.monotonic() - start_time
 
                     logger.info("🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Знайдено: %d",
-                                latency, len(ex_configs), len(target_banks) ** 2, len(opportunities))
+                                latency, len(ex_configs), len(ex_configs) * len(target_banks), len(opportunities))
 
                     # 4. Обробка та відправка результатів
                     for opp in opportunities:

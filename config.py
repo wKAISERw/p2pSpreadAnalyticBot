@@ -23,9 +23,9 @@ class Settings(BaseSettings):
     min_spread_pct: float = 0.5  # Повернули 0.5
     safety_buffer_pct: float = 0.3  # Повернули буфер 0.3
     scan_interval_seconds: float = 5.0  # Повернули адекватну паузу (було 2.0)
-    working_capital_uah: float = 3000.0  # Перевизначимо у .env на твої 3100
-    search_amount_uah: float = 1000.0
-    search_amounts_uah: list[float] = [1000.0, 2000.0, 3100.0]
+    working_capital_uah: float = 5100.0
+    search_amount_uah: float = 1000.0  # мінімальна сума для пошуку
+    search_amounts_uah: list[float] = [1000.0, 2500.0, 5100.0]
     min_usdt_threshold: float = 50.0
 
     # Кеш і Дедуплікація

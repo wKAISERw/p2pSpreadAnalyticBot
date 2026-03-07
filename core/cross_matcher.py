@@ -29,6 +29,7 @@ class CrossMatchingEngine:
                         if sell.price <= buy.price:
                             continue
 
+
                         # ✅ Калькулятор тут — для кожної конкретної пари
                         calculator = get_calculator(buy_bank, sell_bank, buy.exchange, sell.exchange)
 

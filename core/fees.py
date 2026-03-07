@@ -57,20 +57,52 @@ PRIVAT_FEE = PercentFee("0.5", "ПриватБанк (0.5%)")
 PUMB_FEE = PercentFee("0.5", "ПУМБ (0.5%)")
 
 ROUTES = {
-    # 1. ВНУТРІШНЬОБІРЖОВІ (Bybit -> Bybit)
+    # ── Bybit internal ───────────────────────────────────────────────────────
     "Bybit_43_to_Bybit_43": FeeCalculator([]),
     "Bybit_43_to_Bybit_14": FeeCalculator([]),
     "Bybit_14_to_Bybit_43": FeeCalculator([PRIVAT_FEE]),
     "Bybit_64_to_Bybit_43": FeeCalculator([PUMB_FEE]),
 
-    # 2. МІЖБІРЖОВІ (Bybit -> OKX) - Додаємо комісію мережі!
-    "Bybit_43_to_OKX_43": FeeCalculator([CRYPTO_TRANSFER_FEE]),
-    "Bybit_43_to_OKX_14": FeeCalculator([CRYPTO_TRANSFER_FEE]),
-    "Bybit_14_to_OKX_43": FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    # ── Bybit ↔ OKX ──────────────────────────────────────────────────────────
+    "Bybit_43_to_OKX_43":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Bybit_43_to_OKX_14":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Bybit_14_to_OKX_43":   FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    "OKX_43_to_Bybit_43":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "OKX_14_to_Bybit_43":   FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
 
-    # 3. МІЖБІРЖОВІ (OKX -> Bybit)
-    "OKX_43_to_Bybit_43": FeeCalculator([CRYPTO_TRANSFER_FEE]),
-    "OKX_14_to_Bybit_43": FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    # ── Bybit ↔ Binance ───────────────────────────────────────────────────────
+    # Binance P2P — безкоштовний вивід USDT (TRC20) до 3 разів/міс
+    # Решта — CRYPTO_TRANSFER_FEE як у всіх
+    "Binance_43_to_Bybit_43":  FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Binance_14_to_Bybit_43":  FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    "Binance_43_to_Bybit_14":  FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Bybit_43_to_Binance_43":  FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Bybit_14_to_Binance_43":  FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+
+    # ── OKX ↔ Binance ────────────────────────────────────────────────────────
+    "Binance_43_to_OKX_43":    FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Binance_14_to_OKX_43":    FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    "OKX_43_to_Binance_43":    FeeCalculator([CRYPTO_TRANSFER_FEE]),
+
+    # ── Wallet ↔ всі ─────────────────────────────────────────────────────────
+    # Wallet не має власного гаманця — завжди потребує переказу
+    "Wallet_43_to_Bybit_43":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Wallet_43_to_OKX_43":     FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Wallet_43_to_Binance_43": FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Bybit_43_to_Wallet_43":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "OKX_43_to_Wallet_43":     FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Binance_43_to_Wallet_43": FeeCalculator([CRYPTO_TRANSFER_FEE]),
+
+    # ── CryptoBot ↔ всі ──────────────────────────────────────────────────────
+    # CryptoBot — внутрішній гаманець Telegram, вивід через TON/TRC20
+    "CryptoBot_43_to_Bybit_43":    FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "CryptoBot_43_to_OKX_43":      FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "CryptoBot_43_to_Binance_43":  FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "CryptoBot_43_to_Wallet_43":   FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "CryptoBot_14_to_Bybit_43":    FeeCalculator([PRIVAT_FEE, CRYPTO_TRANSFER_FEE]),
+    "Bybit_43_to_CryptoBot_43":    FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "OKX_43_to_CryptoBot_43":      FeeCalculator([CRYPTO_TRANSFER_FEE]),
+    "Binance_43_to_CryptoBot_43":  FeeCalculator([CRYPTO_TRANSFER_FEE]),
 }
 
 
