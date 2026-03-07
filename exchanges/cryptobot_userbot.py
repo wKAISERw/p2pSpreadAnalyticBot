@@ -225,27 +225,30 @@ class CryptoBotUserbot:
         side_cb = "market-trade-buy" if side == "buy" else "market-trade-sell"
 
         try:
-            # 1. Завжди починаємо з перевірки стану
-            if not await self._find_msg_with_button(side_cb):
+            # 1. Перевіряємо позицію ОДИН РАЗ — чи є P2P меню (market-trade-buy або sell)
+            on_p2p_menu = (
+                await self._find_msg_with_button("market-trade-buy") or
+                await self._find_msg_with_button("market-trade-sell")
+            )
+            if not on_p2p_menu:
+                # Не на P2P меню — повертаємось
                 await self._navigate_back_to_p2p()
+                await asyncio.sleep(1.0)
+                # Якщо все одно не на P2P меню — аварійний reset
+                if not await self._find_msg_with_button("market-trade-buy"):
+                    await self._reset_navigation()
+                    await asyncio.sleep(1.0)
 
-            if not await self._find_msg_with_button(side_cb):
-                await self._reset_navigation()
-
-            if not await self._find_msg_with_button(side_cb):
-                logger.warning("CryptoBot: не вдалося знайти/натиснути %s", side_cb)
-                return []
-
-            # 2. Йдемо по чіткому маршруту з ФІКСОВАНИМИ паузами (без спаму історії!)
+            # 2. Йдемо по маршруту з фіксованими паузами
             steps = [side_cb, "choose-asset-USDT", bank_cb]
             for cb in steps:
                 if not await self._click(cb):
-                    logger.warning("CryptoBot: не вдалося знайти/натиснути %s", cb)
+                    logger.warning("CryptoBot: не вдалося натиснути %r", cb)
+                    await self._reset_navigation()
                     return []
-                # Тупо чекаємо, поки бот відмалює нове меню. Жодних зайвих запитів!
                 await asyncio.sleep(2.5)
 
-            # 3. Ми на сторінці ордерів. Читаємо повідомлення ОДИН раз.
+            # 3. Читаємо список ордерів ОДИН раз
             msg = None
             async for m in self.app.get_chat_history(self._chat_id, limit=1):
                 msg = m
@@ -265,8 +268,9 @@ class CryptoBotUserbot:
 
             logger.info("✅ CryptoBot [%s/%s]: %d ордерів", bank_code, side, len(orders))
 
-            # 4. Акуратно виходимо
+            # 4. Повертаємось назад і чекаємо поки меню оновиться
             await self._navigate_back_to_p2p()
+            await asyncio.sleep(1.5)  # пауза перед наступним fetch
             return orders
 
         except Exception as e:
@@ -275,25 +279,29 @@ class CryptoBotUserbot:
             return []
 
     async def _navigate_back_to_p2p(self):
-        """Розумна навігація назад з безпечними паузами."""
-        for _ in range(4):
-            if await self._find_msg_with_button("market-trade-buy"):
-                return
+        """
+        Проходить весь ланцюжок back-кнопок від будь-якого рівня до P2P меню.
+        Натискає кожну кнопку якщо вона є. Не перевіряє стан між кліками.
 
-            if await self._find_msg_with_button("p2p"):
-                await self._click("p2p")
+        Повний ланцюжок (якщо ми всередині ордера):
+          Деталі ордера   -> back
+          Список ордерів  -> market-trade-payment-methods
+          Вибір банку     -> back
+          Вибір активу    -> market  (тут є market-trade-buy = P2P меню)
+        """
+        full_chain = [
+            "back",                         # деталі ордера -> список
+            "market-trade-payment-methods", # список -> вибір банку
+            "back",                         # вибір банку -> вибір активу
+            "market",                       # вибір активу -> P2P меню
+        ]
+        for back_cb in full_chain:
+            clicked = await self._click(back_cb)
+            if clicked:
+                logger.debug("back: %s", back_cb)
                 await asyncio.sleep(2.0)
-                return
-
-            clicked = False
-            for back_btn in ["market-trade-payment-methods", "back", "market", "back-to-main-menu"]:
-                if await self._click(back_btn):
-                    clicked = True
-                    await asyncio.sleep(2.0)  # Фіксована пауза замість спаму
-                    break
-
-            if not clicked:
-                break
+        # Після ланцюжка маємо бути на P2P меню (market-trade-buy є)
+        await asyncio.sleep(0.5)
 
     async def _reset_navigation(self):
         """Аварійний скид (Ядерна кнопка)."""
