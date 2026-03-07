@@ -1,0 +1,144 @@
+# exchanges/mexc.py
+import asyncio
+import logging
+from decimal import Decimal
+from typing import List, Tuple
+
+from exchanges.base import BaseExchange, Order
+from infrastructure.http.mexc_client import MexcClient
+
+logger = logging.getLogger(__name__)
+
+# ⚠️ УВАГА: Нові цифрові ID банків для MEXC.
+# Я прописав орієнтовні (з твоєї відповіді), але тобі ТРЕБА ЇХ ПЕРЕВІРИТИ (інструкція нижче)
+BANK_CODE_TO_MEXC = {
+    "43": "128",  # Умовно Monobank (Треба перевірити!)
+    "14": "131",  # Умовно PrivatBank (Треба перевірити!)
+    "64": "133",  # Умовно PUMB (Треба перевірити!)
+    "48": "134",  # A-Bank
+    "99": "130",  # Oschadbank
+    "380": "132",  # Raiffeisen Bank
+    "328": "135",  # Sense Bank
+    "319": "140",  # OTP Bank
+    "553": "142",  # izibank
+}
+
+MEXC_TO_CODE = {v: k for k, v in BANK_CODE_TO_MEXC.items()}
+
+
+class MexcExchange(BaseExchange):
+    def __init__(self, client: MexcClient):
+        self.client = client
+
+    def _build_payload(self, side: int, payment_method: str, page: int = 1) -> dict:
+        # side: 1 = BUY (ми купуємо), 2 = SELL (ми продаємо)
+        trade_str = "SELL" if side == 1 else "BUY"
+
+        return {
+            "adsType": "1",
+            "allowTrade": "false",
+            "amount": "",
+            "blockTrade": "false",
+            "certifiedMerchant": "false",
+            "coinId": "128f589271cb4951b03e71e6323eb7be",
+            "countryCode": "",
+            "currency": "UAH",
+            "follow": "false",
+            "haveTrade": "false",
+            "page": str(page),
+            "payMethod": payment_method,  # Передаємо цифровий ID банку
+            "tradeType": trade_str
+        }
+
+    def _parse_order(self, item: dict, bank_code: str, side: str) -> Order:
+        merchant = item.get("merchant", {})
+        stats = item.get("merchantStatistics", {})
+
+        adv_no = str(item.get("id", ""))
+        price = Decimal(str(item.get("price", "0")))
+        available = Decimal(str(item.get("availableQuantity", "0")))
+        min_limit = Decimal(str(item.get("minTradeLimit", "0")))
+        max_limit = Decimal(str(item.get("maxTradeLimit", "0")))
+        nickname = str(merchant.get("nickName", "Unknown"))
+        user_id = str(merchant.get("memberId", ""))
+
+        order_count = int(stats.get("doneLastMonthCount", 0))
+
+        # Парсимо відсоток (наприклад, "0.9942" -> 99.4%)
+        raw_rate = stats.get("lastMonthCompleteRate", "0")
+        try:
+            finish_rate = float(raw_rate) * 100
+        except ValueError:
+            finish_rate = 0.0
+
+        return Order(
+            id=f"mx_{adv_no}",
+            price=price,
+            available_amount=available,
+            min_limit=min_limit,
+            max_limit=max_limit,
+            merchant_id=user_id,
+            merchant_name=nickname,
+            month_order_count=order_count,
+            finish_rate_pct=round(finish_rate, 1),
+            exchange="MEXC",
+            link="https://www.mexc.com/p2p",  # Прямих лінків на ордери в MEXC немає, ведемо на головну
+            bank_codes=[bank_code],
+        )
+
+    async def _fetch_orders(self, side: int, side_str: str, banks: List[str]) -> List[Order]:
+        tasks = []
+        valid_banks = []
+        for bank_code in banks:
+            mexc_pay = BANK_CODE_TO_MEXC.get(bank_code)
+            if not mexc_pay:
+                continue
+            tasks.append(self.client.fetch(self._build_payload(side, mexc_pay)))
+            valid_banks.append(bank_code)
+
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        orders = []
+        for bank_code, result in zip(valid_banks, results):
+            if isinstance(result, Exception):
+                logger.error("MEXC fetch [%s]: %s", bank_code, result)
+                continue
+
+            items = result.get("data") or []
+            if not items:
+                logger.debug("MEXC [%s/%s]: порожня відповідь", bank_code, side_str)
+                continue
+
+            for item in items:
+                try:
+                    orders.append(self._parse_order(item, bank_code, side_str))
+                except Exception as e:
+                    logger.warning("MEXC parse [%s]: %s", bank_code, e)
+
+        return orders
+
+    async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
+        return await self._fetch_orders(1, "buy", banks)
+
+    async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
+        return await self._fetch_orders(2, "sell", banks)
+
+    async def fetch_both_multi(
+            self, amounts: List[float], banks: List[str]
+    ) -> Tuple[List[Order], List[Order]]:
+        buy_orders, sell_orders = await asyncio.gather(
+            self.get_buy_orders(0, banks),
+            self.get_sell_orders(0, banks),
+        )
+        return self._dedup(buy_orders), self._dedup(sell_orders)
+
+    def _dedup(self, orders: List[Order]) -> List[Order]:
+        seen, result = set(), []
+        for o in orders:
+            if o.id not in seen:
+                seen.add(o.id)
+                result.append(o)
+        return result

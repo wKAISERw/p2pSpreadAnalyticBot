@@ -53,7 +53,7 @@ class CrossMatchingEngine:
                         gross_profit = actual_sell_fiat - actual_buy_fiat
                         gross_spread_pct = (gross_profit / actual_buy_fiat) * Decimal("100.0")
 
-                        _, total_fee, fee_details = calculator.calculate_net(actual_buy_fiat)
+                        _, total_fee, fee_details = calculator.calculate_net(actual_buy_fiat, usdt_price=buy.price)
 
                         net_profit = gross_profit - total_fee
                         net_spread_pct = (net_profit / actual_buy_fiat) * Decimal("100.0")

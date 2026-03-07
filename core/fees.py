@@ -11,7 +11,7 @@ class FeeResult:
 
 class BaseFee(ABC):
     @abstractmethod
-    def calculate(self, current_amount: Decimal) -> FeeResult:
+    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
         pass
 
 
@@ -20,7 +20,7 @@ class FixedFee(BaseFee):
         self._fee_amount = Decimal(fee_amount)
         self._description = description
 
-    def calculate(self, current_amount: Decimal) -> FeeResult:
+    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
         actual_fee = min(self._fee_amount, current_amount)
         return FeeResult(actual_fee, self._description)
 
@@ -30,29 +30,41 @@ class PercentFee(BaseFee):
         self._rate = Decimal(rate_pct) / Decimal("100.0")
         self._description = description
 
-    def calculate(self, current_amount: Decimal) -> FeeResult:
+    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
         fee = current_amount * self._rate
         return FeeResult(fee, self._description)
+
+
+# === НОВИЙ КЛАС ДЛЯ ДИНАМІЧНОЇ КОМІСІЇ В USDT ===
+class NetworkFee(BaseFee):
+    def __init__(self, usdt_amount: str, description: str):
+        self._usdt_amount = Decimal(usdt_amount)
+        self._description = description
+
+    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+        # Рахуємо вартість комісії в гривнях по ЖИВОМУ курсу
+        fee_in_uah = self._usdt_amount * usdt_price
+        return FeeResult(fee_in_uah, self._description)
 
 
 class FeeCalculator:
     def __init__(self, fees: list[BaseFee]):
         self._fees = fees
 
-    def calculate_net(self, initial_amount: Decimal) -> tuple[Decimal, Decimal, list[FeeResult]]:
+    def calculate_net(self, initial_amount: Decimal, usdt_price: Decimal) -> tuple[Decimal, Decimal, list[FeeResult]]:
         current_amount = initial_amount
         results = []
         for fee in self._fees:
-            fee_result = fee.calculate(current_amount)
+            fee_result = fee.calculate(current_amount, usdt_price)
             current_amount -= fee_result.amount
             results.append(fee_result)
         total_fee = initial_amount - current_amount
         return current_amount, total_fee, results
 
 
-# === РЕЄСТР МАРШРУТІВ (Біржа_Банк ➔ Біржа_Банк) ===
-# Комісія мережі (TRC20 ~ 1 USDT = ~40 UAH)
-CRYPTO_TRANSFER_FEE = FixedFee("40.0", "Комісія мережі TRC20 (~1 USDT)")
+# === РЕЄСТР МАРШРУТІВ ===
+# Тепер комісія мережі — це рівно 1 USDT по плаваючому курсу!
+CRYPTO_TRANSFER_FEE = NetworkFee("1.0", "Комісія мережі TRC20 (1 USDT)")
 PRIVAT_FEE = PercentFee("0.5", "ПриватБанк (0.5%)")
 PUMB_FEE = PercentFee("0.5", "ПУМБ (0.5%)")
 
