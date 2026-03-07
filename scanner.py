@@ -11,12 +11,15 @@ from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange  # <--- ДОДАНО ІМПОРТ БІРЖІ WALLET
 from filters.merchant_filter import MerchantFilter
 from notifications.telegram_notifier import TelegramNotifier, SpreadAlert
+from exchanges.cryptobot_userbot import CryptoBotUserbot
+
 
 from core.dedup_cache import TTLCache
 from core.circuit_breaker import CircuitBreaker
 from core.cross_matcher import CrossMatchingEngine
 
 logger = logging.getLogger("Scanner")
+
 
 
 async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
@@ -65,6 +68,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
             okx_ex = OkxExchange(o_client)
             wallet_ex = WalletExchange(w_client)
 
+            cb_userbot = CryptoBotUserbot(
+                api_id=settings.telegram_api_id,
+                api_hash=settings.telegram_api_hash,
+                session_name="cryptobot_session",  # Файл сесії з'явиться в корені
+                update_interval=45.0,  # Безпечний інтервал для твінка
+                banks=list(target_banks.keys())
+            )
+            await cb_userbot.start()  # Запускаємо фоновий воркер
+
             # ДОДАНО WALLET У СПИСОК КОНФІГІВ
             ex_configs = [
                 {"name": "Bybit", "instance": bybit_ex, "cb": cb_bybit},
@@ -77,15 +89,20 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     start_time = time.monotonic()
                     search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2000.0, 3100.0])
 
-                    # 1. ПАРАЛЕЛЬНИЙ збір даних з усіх доступних бірж
                     tasks = []
                     for cfg in ex_configs:
                         tasks.append(cfg["cb"].call(
                             cfg["instance"].fetch_both_multi(amounts=search_amounts, banks=list(target_banks.keys()))
                         ))
 
-                    # results містить список кортежів (buy_orders, sell_orders) для кожної біржі
                     results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # --- НОВЕ: ДОДАЄМО ДАНІ З CRYPTOBOT В ЗАГАЛЬНИЙ ПУЛ ---
+                    cb_buy, cb_sell = cb_userbot.get_orders()
+                    if cb_buy or cb_sell:
+                        results.append((cb_buy, cb_sell))  # Агрегатор нижче сам їх підхопить!
+                    # ------------------------------------------------------
+
                     last_cycle_time[0] = time.monotonic()
 
                     # 2. Агрегація даних у спільні групи для CrossMatchingEngine
@@ -147,4 +164,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     await asyncio.sleep(10)
     finally:
         watchdog_task.cancel()
+        if 'cb_userbot' in locals():
+            await cb_userbot.stop()  # Вимикаємо сесію безпечно
         logger.info("Сканер завершив роботу.")

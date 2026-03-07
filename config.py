@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     telegram_chat_id: int
     wallet_token: str = ""
 
+    telegram_api_id: int  # з my.telegram.org
+    telegram_api_hash: str
+
     # Bybit налаштування
     bybit_base_url: str = "https://api2.bybit.com"
     proxy_url: Optional[str] = None
