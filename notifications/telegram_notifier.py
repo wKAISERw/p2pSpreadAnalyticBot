@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from aiogram import Bot
@@ -15,6 +16,16 @@ from exchanges.base import Order
 
 logger = logging.getLogger(__name__)
 
+# Словник іконок бірж для швидкого візуального сприйняття
+EXCHANGE_ICONS = {
+    "Binance": "🟡",
+    "Bybit": "🟣",
+    "OKX": "🟢",
+    "MEXC": "🔵",
+    "Wallet": "👛",
+    "CryptoBot": "🤖"
+}
+
 
 @dataclass
 class SpreadAlert:
@@ -22,11 +33,40 @@ class SpreadAlert:
     sell_order: Order
     spread_pct: float
     profit_uah: float
+    deal_amount_uah: float
+    buy_bank: str
+    sell_bank: str
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
 
 
-def _risk_badge(order: Order) -> str:
-    """Повертає рядок з попередженням про ризик ТА причиною (коментарем)."""
-    # Якщо ордер не має ризику або прапорець пустий
+def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
+    if not merchant_id:
+        return merchant_name
+
+    links = {
+        "Binance": f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}",
+        "Bybit": f"https://www.bybit.com/fiat/trade/otc/profile/{merchant_id}",
+        "OKX": f"https://www.okx.com/p2p/profile/{merchant_id}",
+        "MEXC": f"https://www.mexc.com/uk-UA/p2p/merchant/{merchant_id}", # Оновлений формат
+    }
+
+    url = links.get(exchange)
+    if url:
+        return f"<a href='{url}'>{merchant_name}</a>"
+
+    # Для Wallet/CryptoBot додаємо іконку додатка замість лінка
+    if exchange in ["Wallet", "CryptoBot"]:
+        return f"<b>{merchant_name}</b> 📱"
+
+    return merchant_name
+
+
+def _risk_badge(order: Order, short: bool = False) -> str:
+    """Класичні бейджі з правильними іконками (без зайвих кружечків)."""
     if getattr(order, "risk_flag", "") in ["", "OK"]:
         return ""
 
@@ -39,24 +79,44 @@ def _risk_badge(order: Order) -> str:
         "EMPTY_TERMS": "💬 <i>Умови не вказані</i>",
     }
 
-    flag = getattr(order, "risk_flag", "")
-    flag_text = badges.get(flag, "")
+    short_badges = {
+        "TRIANGLE": "🚨",
+        "CASINO": "🚨",
+        "SUSPICIOUS": "⚠️",
+        "LOW_STATS": "⚠️",
+        "SUSPICIOUS_LIMITS": "⚠️",
+        "EMPTY_TERMS": "💬",
+    }
 
-    if not flag_text:
+    flags = getattr(order, "risk_flag", "").split(",")
+    reasons = []
+    short_icons = []
+    has_text_risk = False
+
+    for f in flags:
+        f = f.strip()
+        if f in badges:
+            reasons.append(badges[f])
+            short_icons.append(short_badges[f])
+        if f in ["TRIANGLE", "CASINO", "SUSPICIOUS"]:
+            has_text_risk = True
+
+    if not reasons:
         return ""
 
-    reason = f"{flag_text}\n"
+    if short:
+        return "".join(short_icons)
 
-    # Якщо ризик текстовий — показуємо, на яких саме словах він попався
+    reason_str = "\n".join(reasons) + "\n"
+
     trade_terms = getattr(order, "trade_terms", "")
-    if flag in ["TRIANGLE", "CASINO", "SUSPICIOUS"] and trade_terms:
-        # Обрізаємо довгі тексти до 100 символів, щоб не спамити
-        safe_terms = trade_terms.replace('\n', ' ')[:100]
-        if len(trade_terms) > 100:
+    if has_text_risk and trade_terms:
+        safe_terms = trade_terms.replace('\n', ' ')[:80]
+        if len(trade_terms) > 80:
             safe_terms += "..."
-        reason += f"📝 <i>Текст мерчанта:</i> <code>{safe_terms}</code>\n"
+        reason_str += f"📝 <i>Текст:</i> <code>{safe_terms}</code>\n"
 
-    return reason
+    return reason_str
 
 
 def _verified_badge(order) -> str:
@@ -65,11 +125,11 @@ def _verified_badge(order) -> str:
 
 class TelegramNotifier:
     def __init__(
-        self,
-        send_interval: float = 2.0,
-        group_window: float = 1.5,
-        batch_size: int = 5,
-        max_queue_size: int = 100,
+            self,
+            send_interval: float = 2.0,
+            group_window: float = 1.5,
+            batch_size: int = 5,
+            max_queue_size: int = 100,
     ):
         self._bot = Bot(
             token=settings.telegram_bot_token,
@@ -83,47 +143,30 @@ class TelegramNotifier:
         self._queue: asyncio.Queue[SpreadAlert] = asyncio.Queue(maxsize=max_queue_size)
         self._worker_task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------------ #
-    # Public API                                                           #
-    # ------------------------------------------------------------------ #
-
     async def start(self) -> None:
-        """Запускає фоновий воркер. Викликати один раз при старті."""
-        self._worker_task = asyncio.create_task(
-            self._worker_loop(), name="tg-notifier-worker"
-        )
+        self._worker_task = asyncio.create_task(self._worker_loop(), name="tg-notifier-worker")
         logger.info("TelegramNotifier запущено")
 
     async def stop(self) -> None:
-        """Graceful shutdown: чекає поки черга спустіє (макс 10с)."""
         try:
             await asyncio.wait_for(self._queue.join(), timeout=10.0)
         except asyncio.TimeoutError:
-            logger.warning("Timeout при зупинці нотифікатора — деякі повідомлення втрачено")
+            logger.warning("Timeout при зупинці нотифікатора.")
         if self._worker_task:
             self._worker_task.cancel()
         await self._bot.session.close()
         logger.info("TelegramNotifier зупинено")
 
     async def push(self, alert: SpreadAlert) -> None:
-        """Неблокуючий push. При переповненні черги — скидає найстаріший алерт."""
         try:
             self._queue.put_nowait(alert)
         except asyncio.QueueFull:
             try:
-                dropped = self._queue.get_nowait()
+                self._queue.get_nowait()
                 self._queue.task_done()
-                logger.warning(
-                    "Черга переповнена — скинуто старий алерт: спред=%.2f%%",
-                    dropped.spread_pct,
-                )
             except asyncio.QueueEmpty:
                 pass
             await self._queue.put(alert)
-
-    # ------------------------------------------------------------------ #
-    # Worker                                                               #
-    # ------------------------------------------------------------------ #
 
     async def _worker_loop(self) -> None:
         while True:
@@ -149,14 +192,7 @@ class TelegramNotifier:
                 await asyncio.sleep(1.0)
 
     async def _collect_batch(self) -> list[SpreadAlert]:
-        """
-        Збирає батч:
-        1. Блокується на першому елементі (нескінченно)
-        2. Чекає group_window секунд щоб зібрати більше
-        3. Виходить раніше якщо досягнуто batch_size
-        """
         batch: list[SpreadAlert] = []
-
         try:
             first = await self._queue.get()
             batch.append(first)
@@ -177,73 +213,100 @@ class TelegramNotifier:
 
         return batch
 
-    # ------------------------------------------------------------------ #
-    # Formatting                                                           #
-    # ------------------------------------------------------------------ #
-
     async def _send_single(self, alert: SpreadAlert) -> None:
+        """Повернення до класичного чистого дизайну з додаванням нової інфи."""
         emoji = "🔥" if alert.spread_pct >= 1.0 else "💡"
+
+        banks_map = {"43": "Monobank", "14": "PrivatBank", "64": "ПУМБ", "48": "А-Банк"}
+        b_bank = banks_map.get(alert.buy_bank, alert.buy_bank)
+        s_bank = banks_map.get(alert.sell_bank, alert.sell_bank)
+
+        buy_profile = _profile_link(alert.buy_order.exchange, alert.buy_order.merchant_id,
+                                    alert.buy_order.merchant_name)
+        sell_profile = _profile_link(alert.sell_order.exchange, alert.sell_order.merchant_id,
+                                     alert.sell_order.merchant_name)
+        # Розрахунок шкали ліквідності (на основі суми угоди)
+        capacity = float(alert.deal_amount_uah)
+        # 5 поділок: кожна по 1000 грн (або налаштуй під свій капітал)
+        bars_count = min(5, int(capacity // 1000))
+        liquidity_bar = "█" * bars_count + "░" * (5 - bars_count)
+        time_str = alert.timestamp.strftime("%H:%M")
+
+        # Класична структура, що легко читається
         text = (
-            f"{emoji} <b>Спред: {alert.spread_pct:.2f}%</b>\n\n"
-            f"💰 Профіт: <b>{alert.profit_uah:.2f} ₴</b> "
-            f"з {settings.working_capital_uah:.0f} ₴\n\n"
+            f"{emoji} Спред: <b>{alert.spread_pct:.2f}%</b>\n\n"
+            f"💰 Профіт: <b>{alert.profit_uah:.2f} ₴</b>\n"
+            f"💼 Угода: {alert.deal_amount_uah:.0f} ₴ (з {settings.working_capital_uah:.0f} ₴)\n"
+            f"🔄 Маршрут: {alert.buy_order.exchange} ({b_bank}) ➔ {alert.sell_order.exchange} ({s_bank})\n\n"
+
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{alert.buy_order.price}</code> ₴\n"
-            f"Мерчант: {alert.buy_order.merchant_name}{_verified_badge(alert.buy_order)} "
-            f"({alert.buy_order.finish_rate_pct:.1f}% | "
-            f"{alert.buy_order.month_order_count} угод)\n"
+            f"Мерчант: {buy_profile}{_verified_badge(alert.buy_order)} ({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
             f"Ліміти: {alert.buy_order.min_limit}–{alert.buy_order.max_limit} ₴\n"
-            + _risk_badge(alert.buy_order) +
+            f"{_risk_badge(alert.buy_order)}"
+
             f"\n💸 <b>ПРОДАЄМО</b>\n"
             f"Курс: <code>{alert.sell_order.price}</code> ₴\n"
-            f"Мерчант: {alert.sell_order.merchant_name}{_verified_badge(alert.sell_order)} "
-            f"({alert.sell_order.finish_rate_pct:.1f}% | "
-            f"{alert.sell_order.month_order_count} угод)\n"
+            f"Мерчант: {sell_profile}{_verified_badge(alert.sell_order)} ({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
             f"Ліміти: {alert.sell_order.min_limit}–{alert.sell_order.max_limit} ₴\n"
-            + _risk_badge(alert.sell_order)
+            f"{_risk_badge(alert.sell_order)}"
+
+            f"\n⏱ <i>{time_str}</i>"
         )
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link),
-            InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link),
+            InlineKeyboardButton(text=f"🛒 Купити", url=alert.buy_order.link),
+            InlineKeyboardButton(text=f"💸 Продати", url=alert.sell_order.link),
         ]])
 
         await self._send_with_retry(text, keyboard)
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
+        """Мульти-вивід: клікабельні профілі, прямі лінки та чіткі назви мерчантів."""
         sorted_batch = sorted(batch, key=lambda a: a.spread_pct, reverse=True)
-        lines = [f"📊 <b>Знайдено {len(batch)} спреди — зведення:</b>\n"]
+        # Використовуємо цифри, вони виглядають професійніше в списку
+        numbers = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        banks_map = {"43": "Mono", "14": "Privat", "64": "ПУМБ", "48": "А-Банк"}
 
-        for i, a in enumerate(sorted_batch, 1):
-            emoji = "🔥" if a.spread_pct >= 1.0 else "💡"
+        lines = ["🔥 <b>ТОП СПРЕДИ (Multi-Route)</b>\n"]
+        lines.append("━━━━━━━━━━━━━━━\n")
+
+        for i, a in enumerate(sorted_batch[:5]):
+            num = numbers[i]
+            buy = a.buy_order
+            sell = a.sell_order
+
+            b_bank = banks_map.get(a.buy_bank, a.buy_bank)
+            s_bank = banks_map.get(a.sell_bank, a.sell_bank)
+
+            # Генеруємо клікабельні імена мерчантів
+            b_nick = _profile_link(buy.exchange, buy.merchant_id, buy.merchant_name)
+            s_nick = _profile_link(sell.exchange, sell.merchant_id, sell.merchant_name)
+
+            # Значки ризику (🔴🟡💬)
+            risks = _risk_badge(buy, short=True) + _risk_badge(sell, short=True)
+            risk_str = f" {risks}" if risks else ""
+
+            # Формуємо блок маршруту
             lines.append(
-                f"{emoji} <b>#{i} | {a.spread_pct:.2f}%</b> | "
-                f"Профіт: {a.profit_uah:.2f}₴\n"
-                f"   Купівля <code>{a.buy_order.price}</code> ₴ → "
-                f"Продаж <code>{a.sell_order.price}</code> ₴\n"
-                f"   <a href='{a.buy_order.link}'>{a.buy_order.merchant_name}</a>"
-                + _verified_badge(a.buy_order) +
-                f" → "
-                f"<a href='{a.sell_order.link}'>{a.sell_order.merchant_name}</a>"
-                + _verified_badge(a.sell_order) +
-                (_risk_badge(a.buy_order) or _risk_badge(a.sell_order))
+                f"{num} <b>{a.spread_pct:.2f}% | +{a.profit_uah:.0f} ₴</b>{risk_str}\n"
+                f"🔄 {buy.exchange} ➜ {sell.exchange} ({b_bank} ➜ {s_bank})\n"
+                f"👤 {b_nick} ➜ {s_nick}\n"
+                f"💼 <b>{a.deal_amount_uah:.0f} ₴</b> | <code>{buy.price}</code> ➜ <code>{sell.price}</code>\n"
+                f"🔗 <a href='{buy.link}'>Купити</a> | <a href='{sell.link}'>Продати</a>\n"
             )
+            lines.append("────────────────\n")
 
-        text = "\n".join(lines)
+        text = "".join(lines)
 
-        # Safe Split: якщо текст > 4096 — розбиваємо на частини
-        for chunk in self._split_message(text):
-            await self._send_with_retry(chunk)
-
-    # ------------------------------------------------------------------ #
-    # Helpers                                                              #
-    # ------------------------------------------------------------------ #
+        # Вимикаємо прев'ю, щоб посилання не створювали зайвого візуального шуму
+        await self._send_with_retry(text)
 
     async def _send_with_retry(
-        self,
-        text: str,
-        keyboard: InlineKeyboardMarkup | None = None,
-        max_attempts: int = 3,
+            self,
+            text: str,
+            keyboard: InlineKeyboardMarkup | None = None,
+            max_attempts: int = 3,
     ) -> None:
         for attempt in range(max_attempts):
             try:
@@ -251,14 +314,11 @@ class TelegramNotifier:
                     chat_id=self._chat_id,
                     text=text,
                     reply_markup=keyboard,
+                    disable_web_page_preview=True  # Вимикаємо прев'ю лінок, щоб не розтягувати повідомлення
                 )
                 return
             except TelegramRetryAfter as e:
                 wait = e.retry_after + 0.5
-                logger.warning(
-                    "Telegram rate limit — чекаємо %.1fs (спроба %d/%d)",
-                    wait, attempt + 1, max_attempts,
-                )
                 await asyncio.sleep(wait)
             except Exception as e:
                 logger.error("Помилка відправки в Telegram: %s", e)
@@ -268,7 +328,6 @@ class TelegramNotifier:
 
     @staticmethod
     def _split_message(text: str, limit: int = 4096) -> list[str]:
-        """Розбиває текст на частини не більше limit символів по межах рядків."""
         if len(text) <= limit:
             return [text]
 
@@ -283,5 +342,4 @@ class TelegramNotifier:
 
         if current:
             chunks.append(current)
-
         return chunks

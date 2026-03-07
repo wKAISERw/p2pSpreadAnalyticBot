@@ -16,6 +16,7 @@ from infrastructure.http.binance_client import BinanceClient
 from exchanges.binance import BinanceExchange
 from infrastructure.http.mexc_client import MexcClient
 from exchanges.mexc import MexcExchange
+from core.stability import SpreadStabilityFilter
 
 from core.dedup_cache import TTLCache
 from core.circuit_breaker import CircuitBreaker
@@ -68,6 +69,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     )
 
     risk_engine = RiskEngine()
+
+    # -------- ДОДАЄМО ІНІЦІАЛІЗАЦІЮ ФІЛЬТРА --------
+    stability_filter = SpreadStabilityFilter(required_hits=2, ttl_seconds=15.0)
+    # -----------------------------------------------
+
     target_banks = {"43": "Monobank", "14": "PrivatBank", "64": "PUMB"}
 
     try:
@@ -155,6 +161,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                 latency, len(ex_configs), len(ex_configs) * len(target_banks), len(opportunities))
 
                     # 4. Обробка та відправка результатів
+                    # 4. Обробка та відправка результатів
                     for opp in opportunities:
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
@@ -162,23 +169,41 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         # Створюємо унікальний ключ дедуплікації, що включає назви бірж
                         key = f"spread:{buy_o.exchange}_{buy_o.merchant_id}:{sell_o.exchange}_{sell_o.merchant_id}:{round(buy_o.price, 2)}"
 
+                        # Якщо ми ще НЕ відправляли цей алерт у Телеграм
                         if not dedup_cache.seen(key):
-                            dedup_cache.mark(key)
 
-                            # Формуємо назву маршруту: "Bybit(Mono) ➔ OKX(Privat)"
-                            route_name = f"{buy_o.exchange}({target_banks[opp['buy_bank']]}) ➔ {sell_o.exchange}({target_banks[opp['sell_bank']]})"
+                            # -------- ПЕРЕВІРКА СТАБІЛЬНОСТІ --------
+                            if stability_filter.check(
+                                    buy_o.exchange, sell_o.exchange,
+                                    str(buy_o.price), str(sell_o.price),
+                                    buy_o.merchant_name, sell_o.merchant_name
+                            ):
+                                dedup_cache.mark(key)  # Маркуємо, щоб більше не відправляти
 
-                            logger.warning(
-                                "🚨 СПРЕД! %s | Net: %.2f%% | Профіт: %.2f ₴",
-                                route_name, opp["net_spread_pct"], opp["net_profit"]
-                            )
+                                # Формуємо назву маршруту: "Bybit(Mono) ➔ OKX(Privat)"
+                                route_name = f"{buy_o.exchange}({target_banks[opp['buy_bank']]}) ➔ {sell_o.exchange}({target_banks[opp['sell_bank']]})"
 
-                            # Відправляємо сповіщення в Telegram
-                            alert = SpreadAlert(buy_o, sell_o, opp["net_spread_pct"], opp["net_profit"])
-                            await notifier.push(alert)
-                            break  # Відправляємо лише 1 найкращий варіант за цикл
+                                logger.warning(
+                                    "🚨 СПРЕД! %s | Net: %.2f%% | Профіт: %.2f ₴",
+                                    route_name, opp["net_spread_pct"], opp["net_profit"]
+                                )
 
-                    await asyncio.sleep(settings.scan_interval_seconds)
+                                # Відправляємо сповіщення в Telegram (з НОВИМИ параметрами!)
+                                alert = SpreadAlert(
+                                    buy_order=buy_o,
+                                    sell_order=sell_o,
+                                    spread_pct=opp["net_spread_pct"],
+                                    profit_uah=opp["net_profit"],
+                                    deal_amount_uah=opp["actual_entry_uah"],  # Реальна сума угоди
+                                    buy_bank=opp["buy_bank"],  # Банк купівлі
+                                    sell_bank=opp["sell_bank"]  # Банк продажу
+                                )
+                                await notifier.push(alert)
+                                break  # Відправляємо лише 1 найкращий стабільний варіант за цикл
+                            else:
+                                # Якщо спред знайдено вперше, він чекає наступного циклу
+                                logger.debug("⏳ Спред %s ➔ %s на перевірці стабільності...", buy_o.exchange,
+                                             sell_o.exchange)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)

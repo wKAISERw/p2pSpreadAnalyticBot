@@ -39,6 +39,12 @@ class WalletExchange(BaseExchange):
             exchange="Wallet",
             link="https://t.me/wallet",
             bank_codes=bank_codes,
+            trade_terms=str(
+                item.get("comment", "") or
+                item.get("notice", "") or
+                item.get("description", "") or
+                item.get("terms", "")
+            ).strip().lower()
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:

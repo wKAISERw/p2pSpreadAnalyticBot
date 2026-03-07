@@ -29,11 +29,11 @@ MIN_ORDERS: dict[str, int] = {
 
 MIN_COMPLETION: dict[str, float] = {
     "Binance":   95.0,
-    "Bybit":     92.0,
-    "OKX":       92.0,
-    "Wallet":    88.0,
-    "MEXC":      90.0,
-    "CryptoBot": 85.0,
+    "Bybit":     95.0,
+    "OKX":       95.0,
+    "Wallet":    95.0,
+    "MEXC":      95.0,
+    "CryptoBot": 95.0, # Тут можна лишити трохи нижче через специфіку платформи
 }
 
 
@@ -88,7 +88,12 @@ class TextAnalyzer:
     NLP-фільтр по умовах угоди.
     Всі патерни — заздалегідь скомпільовані regex для швидкості.
     """
-
+    # Додай в TextAnalyzer в core/risk_engine.py
+    _TRAP = re.compile(
+        r"тільки\s*для\s*нових|новым\s*пользователям|new\s*users\s*only"
+        r"|exclusive\s*for\s*new|акція\s*для\s*нових",
+        re.IGNORECASE
+    )
     # Трикутникові схеми — третя особа
     _TRIANGLE = re.compile(
         r"тре(тя|тіх|тіх)|третіх\s+осіб|3\s*особ|third\s*party|third\s*person"
@@ -136,29 +141,32 @@ class TextAnalyzer:
 class BehaviorAnalyzer:
     """
     Аналізує поведінкові ознаки на основі статистики мерчанта.
-    Плаваючі пороги залежно від біржі.
+    Плаваючі пороги залежно від біржі. Збирає ВСІ знайдені ризики.
     """
 
-    def analyze(self, order: Order) -> str:
-        """Повертає: 'LOW_STATS', 'SUSPICIOUS_LIMITS', 'OK'"""
+    def analyze(self, order: Order) -> list[str]:
+        """Повертає список знайдених ризиків, наприклад ['LOW_STATS', 'SUSPICIOUS_LIMITS'] або []"""
+        flags = []
         exchange = order.exchange
         min_orders = MIN_ORDERS.get(exchange, 30)
         min_completion = MIN_COMPLETION.get(exchange, 90.0)
 
-        # Перевірка статистики
-        if order.month_order_count < min_orders:
-            return "LOW_STATS"
-        if order.finish_rate_pct < min_completion:
-            return "LOW_STATS"
+        # 1. Перевірка статистики
+        if order.month_order_count < min_orders or order.finish_rate_pct < min_completion:
+            flags.append("LOW_STATS")
 
-        # Аномально вузькі ліміти — ознака схеми під конкретну суму
+        # 2. Аномально вузькі ліміти — ознака схеми під конкретну суму
         if order.min_limit > 0 and order.max_limit > 0:
             spread_ratio = float(order.max_limit - order.min_limit) / float(order.max_limit)
             # Якщо max - min < 2% від max → ліміт майже фіксований
             if spread_ratio < 0.02 and float(order.max_limit) > 500:
-                return "SUSPICIOUS_LIMITS"
+                # ВИНЯТОК: Пропускаємо "еліту" (є галочка АБО більше 1000 угод)
+                if order.is_verified or order.month_order_count > 1000:
+                    pass  # Це топ-мерчант, йому можна ставити фіксовані ліміти
+                else:
+                    flags.append("SUSPICIOUS_LIMITS")
 
-        return "OK"
+        return flags
 
 
 # ── RiskEngine (оркестратор) ──────────────────────────────────────────────────
@@ -180,7 +188,7 @@ class RiskEngine:
         Аналізує один ордер і встановлює order.risk_flag.
         Повертає той самий об'єкт (мутує in-place).
         """
-        # 1. Спочатку кеш — не витрачаємо час на вже відомих мерчантів
+        # 1. Спочатку кеш
         cached = self.cache.get(order.exchange, order.merchant_id)
         if cached is not None:
             order.risk_flag = cached
@@ -188,31 +196,30 @@ class RiskEngine:
             return order
 
         self._analyzed += 1
+        all_flags = []
 
         # 2. TextAnalyzer — умови угоди
         text_flag = self.text.analyze(order.trade_terms)
         if text_flag not in ("OK", "EMPTY_TERMS"):
-            order.risk_flag = text_flag
-            self.cache.set(order.exchange, order.merchant_id, text_flag)
+            all_flags.append(text_flag)
             logger.debug("🚩 %s [%s] → %s: %r",
                          order.merchant_name, order.exchange, text_flag, order.trade_terms[:60])
-            return order
 
-        # 3. BehaviorAnalyzer — статистика
-        behavior_flag = self.behavior.analyze(order)
-        if behavior_flag != "OK":
-            order.risk_flag = behavior_flag
-            # Поведінкові флаги НЕ кешуємо надовго — статистика змінюється
-            return order
+        # 3. BehaviorAnalyzer — статистика та ліміти (повертає список)
+        behavior_flags = self.behavior.analyze(order)
+        all_flags.extend(behavior_flags)
 
-        # 4. Якщо умови порожні але статистика ок — позначаємо окремо
-        if text_flag == "EMPTY_TERMS":
-            order.risk_flag = "EMPTY_TERMS"
+        # 4. Формуємо фінальний вирок
+        if not all_flags:
+            order.risk_flag = "EMPTY_TERMS" if text_flag == "EMPTY_TERMS" else "OK"
         else:
-            order.risk_flag = "OK"
+            # Об'єднуємо всі ризики через кому: "LOW_STATS,SUSPICIOUS_LIMITS"
+            order.risk_flag = ",".join(all_flags)
 
-        # Кешуємо тільки чистих мерчантів
-        self.cache.set(order.exchange, order.merchant_id, order.risk_flag)
+        # 5. Кешуємо тільки якщо немає проблем зі статистикою (бо стата змінюється)
+        if not behavior_flags:
+            self.cache.set(order.exchange, order.merchant_id, order.risk_flag)
+
         return order
 
     def analyze_batch(self, orders: list[Order]) -> list[Order]:
