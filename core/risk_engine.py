@@ -28,10 +28,31 @@ MIN_COMPLETION: dict[str, float] = {
     "CryptoBot": 85.0,
 }
 
+# ── Trusted merchant — знижений поріг для LLM ескалації ─────────────────────
+# Якщо мерчант відповідає всім умовам "довіреного" — слабкі regex сигнали
+# не ескалуються в LLM, щоб уникнути false positives
+TRUSTED_MIN_ORDERS      = 500    # Мінімум угод
+TRUSTED_MIN_COMPLETION  = 95.0   # Мінімум % виконання
+TRUSTED_MAX_RISK_SCORE  = 30     # Накопичений ризик не більше цього
+TRUSTED_LLM_MIN_SCORE   = 60     # Для trusted — ескалуємо тільки якщо regex score >= 60
+# (звичайний поріг — 30, тобто для топ-мерчантів планку підіймаємо вдвічі)
+
 REVIEW_WARN_NEG_PCT = 15.0
 REVIEW_WARN_MIN_NEG = 3
 REVIEW_BLOCK_NEG_PCT = 25.0
 REVIEW_BLOCK_MIN_NEG = 5
+
+
+def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
+    """
+    Повертає True якщо мерчант вважається довіреним.
+    Для таких мерчантів поріг LLM ескалації підвищується вдвічі.
+    """
+    return (
+        order.month_order_count >= TRUSTED_MIN_ORDERS
+        and order.finish_rate_pct >= TRUSTED_MIN_COMPLETION
+        and risk_score <= TRUSTED_MAX_RISK_SCORE
+    )
 
 
 class RiskEngine:
@@ -149,6 +170,44 @@ class RiskEngine:
                 return
 
             if regex_result.needs_llm and self._llm:
+                # ── Trusted merchant threshold ────────────────────────────────
+                # Для топ-мерчантів слабкі сигнали не ескалуємо — уникаємо false positives
+                risk_score = await self._db.get_risk_score(exchange, mid)
+                trusted = _is_trusted_merchant(order, risk_score)
+
+                llm_min_score = TRUSTED_LLM_MIN_SCORE if trusted else 0
+
+                if regex_result.score < llm_min_score:
+                    block_review = _pick_block_review(review_flags)
+                    if block_review:
+                        order.risk_flag = block_review
+                        return
+
+                    logger.debug(
+                        "✅ Trusted skip: %s [%s] score=%d < %d",
+                        order.merchant_name,
+                        exchange,
+                        regex_result.score,
+                        llm_min_score,
+                    )
+
+                    flags: list[str] = []
+                    flags.extend(review_flags)
+                    flags.extend(behavior_flags)
+
+                    if not flags and regex_result.reason:
+                        flags.append(_build_weak_regex_flag(regex_result))
+
+                    order.risk_flag = _join_flags(flags) or "OK"
+                    return
+
+                if trusted:
+                    logger.debug(
+                        "🔍 Trusted але score=%d >= %d → LLM: %s [%s]",
+                        regex_result.score, llm_min_score,
+                        order.merchant_name, exchange,
+                    )
+
                 scheduled = self._llm.schedule(
                     exchange, mid, order.merchant_name, terms, regex_result
                 )
@@ -236,6 +295,11 @@ class RiskEngine:
         return flags
 
     def analyze_batch(self, orders: list[Order]) -> list[Order]:
+        for order in orders:
+            self.analyze(order)
+        return orders
+
+    async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
         for order in orders:
             self.analyze(order)
         return orders

@@ -59,12 +59,14 @@ class BinanceExchange(BaseExchange):
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:
-        orders = []
-        # ЗАМІСТЬ GATHER РОБИМО ПОСЛІДОВНІ ЗАПИТИ ІЗ ЗАТРИМКОЮ
-        for bank_code in banks:
+        orders: List[Order] = []
+        sem = asyncio.Semaphore(2)
+
+        async def fetch_one(bank_code: str) -> List[Order]:
             binance_pay = BANK_CODE_TO_BINANCE.get(bank_code)
             if not binance_pay:
-                continue
+                return []
+
             payload = {
                 "asset": "USDT",
                 "fiat": "UAH",
@@ -76,21 +78,36 @@ class BinanceExchange(BaseExchange):
                 "side": side,
                 "tradeType": side,
             }
-            try:
-                result = await self.client.fetch(payload)
-                if isinstance(result, dict) and "data" in result:
-                    for item in result.get("data", []):
-                        try:
-                            orders.append(self._parse_order(item, bank_code))
-                        except Exception as e:
-                            logger.warning("Binance parse помилка: %s", e)
-                else:
-                    logger.error("Binance fetch помилка [%s]: невірний формат", bank_code)
-            except Exception as e:
-                logger.error("Помилка запиту Binance [%s]: %s", bank_code, e)
 
-            # 🛡 МІКРОПАУЗА ПРОТИ БАНУ 429
-            await asyncio.sleep(0.35)
+            async with sem:
+                try:
+                    result = await self.client.fetch(payload)
+                    parsed: List[Order] = []
+
+                    if isinstance(result, dict) and "data" in result:
+                        for item in result.get("data", []):
+                            try:
+                                parsed.append(self._parse_order(item, bank_code))
+                            except Exception as e:
+                                logger.warning("Binance parse помилка: %s", e)
+                    else:
+                        logger.error("Binance fetch помилка [%s]: невірний формат", bank_code)
+
+                    await asyncio.sleep(0.15)
+                    return parsed
+
+                except Exception as e:
+                    logger.error("Помилка запиту Binance [%s]: %s", bank_code, e)
+                    await asyncio.sleep(0.25)
+                    return []
+
+        chunks = await asyncio.gather(*(fetch_one(bank) for bank in banks), return_exceptions=True)
+
+        for chunk in chunks:
+            if isinstance(chunk, Exception):
+                logger.error("Binance gather error: %s", chunk)
+                continue
+            orders.extend(chunk)
 
         return orders
 
@@ -103,10 +120,10 @@ class BinanceExchange(BaseExchange):
     async def fetch_both_multi(
             self, amounts: List[float], banks: List[str]
     ) -> Tuple[List[Order], List[Order]]:
-        # ПОСЛІДОВНО: Спочатку всі на купівлю, потім всі на продаж (без gather)
-        buy_orders = await self.get_buy_orders(0, banks)
-        sell_orders = await self.get_sell_orders(0, banks)
-
+        buy_orders, sell_orders = await asyncio.gather(
+            self.get_buy_orders(0, banks),
+            self.get_sell_orders(0, banks),
+        )
         return self._dedup(buy_orders), self._dedup(sell_orders)
 
     def _dedup(self, orders: List[Order]) -> List[Order]:

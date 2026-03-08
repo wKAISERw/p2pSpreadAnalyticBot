@@ -166,8 +166,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             continue
 
                         b_orders, s_orders = res
-                        risk_engine.analyze_batch(b_orders)
-                        risk_engine.analyze_batch(s_orders)
+                        await risk_engine.analyze_batch_async(b_orders)
+                        await risk_engine.analyze_batch_async(s_orders)
 
                         for o in b_orders:
                             if o.merchant_id:
