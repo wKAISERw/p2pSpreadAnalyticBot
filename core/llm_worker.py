@@ -1,16 +1,23 @@
 # core/llm_worker.py
 """
-Асинхронний LLM-воркер (2 паралельних воркери).
+Асинхронний LLM-воркер.
 
-Pipeline:
-  scanner → pending_set + asyncio.Queue → llm_worker → MerchantDB
+Поточний pipeline:
+scanner -> RiskEngine -> asyncio.Queue -> llm_worker -> MerchantDB
+
+Апгрейд:
+- короткий структурований prompt замість сирого text dump
+- використання score / matches / normalized_text з RegexResult
+- жорсткіший JSON parsing
+- кращі логи для подальшого тюнінгу правил
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -21,69 +28,76 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from core.merchant_db import MerchantDB, hash_terms
+from core.merchant_db import MerchantDB
 from core.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
 
-# ── LLM лог ──────────────────────────────────────────────────────────────────
+
 def _setup_llm_log() -> logging.Logger:
     Path("logs").mkdir(exist_ok=True)
     llm_log = logging.getLogger("LLMDecisions")
     if not llm_log.handlers:
-        h = RotatingFileHandler("logs/llm_decisions.log",
-                                maxBytes=5 * 1024 * 1024, backupCount=3,
-                                encoding="utf-8")
+        h = RotatingFileHandler(
+            "logs/llm_decisions.log",
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
         h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
         llm_log.addHandler(h)
         llm_log.setLevel(logging.INFO)
         llm_log.propagate = False
     return llm_log
 
+
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS  = 1
-LLM_TIMEOUT  = 7.0
-MAX_QUEUE    = 200
+LLM_WORKERS = 1
+LLM_TIMEOUT = 7.0
+MAX_QUEUE = 200
+MAX_NORM_TERMS = 220
+MAX_MATCHES_IN_PROMPT = 3
+MAX_EXCERPT_LEN = 90
 
-# ── Системний промпт ──────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України.
-Аналізуй умови угоди мерчанта та визнач ризик шахрайства.
+Твоє завдання — визначити, чи умови мерчанта реально містять ризик, чи навпаки забороняють його.
 
-СХЕМИ ДЛЯ БЛОКУВАННЯ:
-- TRIANGLE: просить переказ від третьої особи, згадує дропів, чужі картки, "без коментарів у призначенні", "переказ від знайомого"
-- CASINO: букмекери (1xbet, melbet, mostbet), казино, ставки, процесинг, агрегатор
-- CHAT_FIRST: "пишіть перед оплатою", "напишіть в тг спочатку", контакт до угоди
-- SUSPICIOUS: анонімно, без перевірки, ФОП оплата, погроза апеляцією
+ГОЛОВНІ РИЗИКИ:
+- TRIANGLE: мерчант дозволяє або вимагає оплату від третьої особи, чужої картки, знайомого, дропа
+- CASINO: казино, ставки, букмекери, процесинг, агрегатор
+- CHAT_FIRST: просить написати до оплати
+- SUSPICIOUS_BIZ: ФОП / IBAN / бізнес-рахунок у дивному контексті
+- APPEAL_PRESSURE: тиск апеляцією, скаргою, погрози
+- ANONYMOUS: анонімність, "без перевірки", cash-in, термінал
+- EXTERNAL_LINK: вимагає перейти в Telegram, Viber, WhatsApp, Signal або інший зовнішній контакт
 
-КОНТЕКСТ УКРАЇНСЬКОГО P2P:
-- "дроп" = людина що дає картку шахраям → TRIANGLE
-- "без коментарів/призначення" = ознака трикутника → TRIANGLE  
-- "тільки Mono/Privat/ПУМБ" = нормально, не ризик
-- "переказ від знайомого/друга" = трикутник → TRIANGLE
-- Короткі нейтральні умови = нормально
+КРИТИЧНО:
+- Розрізняй "згадує" і "вимагає".
+- Якщо в тексті сказано "без третіх осіб", "лише зі своєї картки", "не пишіть у Telegram", "тільки в чаті біржі" — це НЕ BLOCK і зазвичай OK.
+- BLOCK став лише якщо мерчант реально вимагає або допускає ризикову поведінку.
+- Якщо кейс сумнівний, але не явний — SUSPICIOUS.
+- Враховуй summary reviews, якщо вони є: високий % негативу та скарги підсилюють ризик.
 
-ВІДПОВІДАЙ ВИКЛЮЧНО JSON (без markdown, без тексту навколо):
-{"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"TRIANGLE"|"CASINO"|"CHAT_FIRST"|"SUSPICIOUS"|"NONE","reason":"до 100 символів українською"}"""
+ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
+{"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"TRIANGLE"|"CASINO"|"CHAT_FIRST"|"SUSPICIOUS_BIZ"|"APPEAL_PRESSURE"|"ANONYMOUS"|"EXTERNAL_LINK"|"BADREVIEWS"|"NONE","reason":"до 120 символів українською"}"""
 
 
-# ── Task dataclass ────────────────────────────────────────────────────────────
 @dataclass
 class LLMTask:
-    exchange:      str
-    merchant_id:   str
+    exchange: str
+    merchant_id: str
     merchant_name: str
-    trade_terms:   str
-    regex_result:  RegexResult
+    trade_terms: str
+    regex_result: RegexResult
 
 
-# ── LLMWorkerPool ─────────────────────────────────────────────────────────────
 class LLMWorkerPool:
     def __init__(self, db: MerchantDB):
-        self._db               = db
+        self._db = db
         self._queue: asyncio.Queue[LLMTask] = asyncio.Queue(maxsize=MAX_QUEUE)
         self._pending: set[tuple[str, str]] = set()
-        self._workers: list[asyncio.Task]   = []
+        self._workers: list[asyncio.Task] = []
         self._session: Optional[aiohttp.ClientSession] = None
         self._stats = {"processed": 0, "blocks": 0, "timeouts": 0, "errors": 0}
 
@@ -103,18 +117,24 @@ class LLMWorkerPool:
         if self._session:
             await self._session.close()
         s = self._stats
-        logger.info("LLMWorkerPool зупинено: оброблено=%d блоків=%d таймаутів=%d помилок=%d",
-                    s["processed"], s["blocks"], s["timeouts"], s["errors"])
+        logger.info(
+            "LLMWorkerPool зупинено: оброблено=%d блоків=%d таймаутів=%d помилок=%d",
+            s["processed"], s["blocks"], s["timeouts"], s["errors"]
+        )
 
-    def schedule(self, exchange: str, merchant_id: str, merchant_name: str,
-                 trade_terms: str, regex_result: RegexResult) -> bool:
-        """Неблокуючий — scanner викликає і забуває."""
+    def schedule(
+        self,
+        exchange: str,
+        merchant_id: str,
+        merchant_name: str,
+        trade_terms: str,
+        regex_result: RegexResult,
+    ) -> bool:
         key = (exchange, merchant_id)
         if key in self._pending:
             return False
 
-        task = LLMTask(exchange, merchant_id, merchant_name,
-                       trade_terms, regex_result)
+        task = LLMTask(exchange, merchant_id, merchant_name, trade_terms, regex_result)
         try:
             self._queue.put_nowait(task)
             self._pending.add(key)
@@ -134,7 +154,6 @@ class LLMWorkerPool:
                     self._pending.discard((task.exchange, task.merchant_id))
                     self._queue.task_done()
 
-                # 🛡 ЗАХИСТ ВІД БАНУ GROQ (Не більше 28 запитів на хвилину)
                 await asyncio.sleep(2.1)
 
             except asyncio.CancelledError:
@@ -144,7 +163,6 @@ class LLMWorkerPool:
                 logger.error("LLM Worker %d помилка: %s", worker_id, e, exc_info=True)
                 await asyncio.sleep(1.0)
 
-
     async def _process(self, task: LLMTask) -> None:
         cached = await self._db.get_verdict(
             task.exchange, task.merchant_id, task.trade_terms
@@ -152,39 +170,55 @@ class LLMWorkerPool:
         if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
             return
 
-        result = await self._call_with_fallback(task)
+        review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
+        result = await self._call_with_fallback(task, review_summary)
         self._stats["processed"] += 1
 
-        verdict   = result.get("status", "UNKNOWN").upper()
-        risk_type = result.get("risk", "")
-        reason    = result.get("reason", "")
-        source    = result.get("_source", "unknown")
+        verdict = result.get("status", "UNKNOWN").upper()
+        risk_type = result.get("risk", "") or "NONE"
+        reason = (result.get("reason", "") or "")[:150]
+        source = result.get("_source", "unknown")
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
 
         await self._db.save_verdict(
-            task.exchange, task.merchant_id, task.merchant_name,
-            task.trade_terms, verdict, risk_type, reason, source
+            task.exchange,
+            task.merchant_id,
+            task.merchant_name,
+            task.trade_terms,
+            verdict,
+            risk_type,
+            reason,
+            source,
         )
 
+        rr = task.regex_result
+        score = getattr(rr, "score", 0)
+        cats = _regex_categories(rr)
+
         LLM_LOG.info(
-            "%-8s | %-10s | %-6s | %-12s | %-8s | %s | %s",
-            task.exchange, task.merchant_id[:10], verdict,
-            risk_type or "NONE", source,
+            "%-8s | %-10s | %-10s | %-14s | score=%-3s | cats=%-30s | %-8s | %s | %s",
+            task.exchange,
+            task.merchant_id[:10],
+            verdict,
+            risk_type,
+            score,
+            ",".join(cats)[:30] or "NONE",
+            source,
             task.merchant_name[:20],
-            reason[:80]
+            reason[:80],
         )
 
         if verdict == "BLOCK":
-            logger.warning("🚫 LLM BLOCK [%s] %s [%s]: %s — %s",
-                           source, task.merchant_name, task.exchange,
-                           risk_type, reason)
+            logger.warning(
+                "🚫 LLM BLOCK [%s] %s [%s]: %s — %s",
+                source, task.merchant_name, task.exchange, risk_type, reason
+            )
 
-    async def _call_with_fallback(self, task: LLMTask) -> dict:
-        user_msg = _build_prompt(task)
+    async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
+        user_msg = _build_prompt(task, review_summary)
 
-        # Groq спроба
         try:
             result = await asyncio.wait_for(
                 self._call_groq(user_msg), timeout=LLM_TIMEOUT
@@ -197,7 +231,6 @@ class LLMWorkerPool:
         except Exception as e:
             logger.error("❌ Groq помилка: %s", e)
 
-        # Gemini fallback
         try:
             result = await asyncio.wait_for(
                 self._call_gemini(user_msg), timeout=LLM_TIMEOUT
@@ -210,7 +243,12 @@ class LLMWorkerPool:
         except Exception as e:
             logger.error("❌ Gemini помилка: %s", e)
 
-        return {"status": "UNKNOWN", "risk": "", "reason": "LLM не відповіла", "_source": "timeout"}
+        return {
+            "status": "UNKNOWN",
+            "risk": "NONE",
+            "reason": "LLM не відповіла",
+            "_source": "timeout",
+        }
 
     async def _call_groq(self, user_msg: str) -> dict:
         api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -221,12 +259,13 @@ class LLMWorkerPool:
             "model": "llama-3.3-70b-versatile",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
+                {"role": "user", "content": user_msg},
             ],
             "temperature": 0.1,
-            "max_tokens":  120,
+            "max_tokens": 120,
             "response_format": {"type": "json_object"},
         }
+
         async with self._session.post(
             "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
@@ -256,12 +295,13 @@ class LLMWorkerPool:
             },
         }
 
-        # URL одним суцільним рядком
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"gemini-1.5-flash:generateContent?key={api_key}"
+        )
 
         async with self._session.post(url, json=payload) as resp:
             if resp.status != 200:
-                # Читаємо детальну відповідь від сервера Google
                 error_text = await resp.text()
                 raise RuntimeError(f"Gemini HTTP {resp.status} - Деталі: {error_text}")
             data = await resp.json()
@@ -270,29 +310,130 @@ class LLMWorkerPool:
         return _parse_json(text)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def _build_prompt(task: LLMTask) -> str:
-    lines = [f"Мерчант: {task.merchant_name}"]
-    terms = (task.trade_terms or "").strip()
-    lines.append(f"Умови: {terms[:300] if terms else '(не вказані)'}")
-    if task.regex_result.risk_type:
-        lines.append(f"Regex підозра: {task.regex_result.risk_type} — {task.regex_result.reason}")
+def _build_prompt(task: LLMTask, review_summary: dict) -> str:
+    rr = task.regex_result
+
+    score = getattr(rr, "score", 0)
+    norm_text = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
+    norm_text = norm_text[:MAX_NORM_TERMS] if norm_text else "(не вказані)"
+
+    risk_type = getattr(rr, "risk_type", "") or "NONE"
+    reason = getattr(rr, "reason", "") or "-"
+    categories = _regex_categories(rr)
+    excerpts = _top_excerpts(rr)
+
+    pos = int(review_summary.get("positive", 0) or 0)
+    neg = int(review_summary.get("negative", 0) or 0)
+    neutral = int(review_summary.get("neutral", 0) or 0)
+    total = pos + neg + neutral
+    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
+    bad_texts = review_summary.get("bad_texts", []) or []
+
+    lines = [
+        f"Біржа: {task.exchange}",
+        f"Мерчант: {task.merchant_name}",
+        f"Merchant ID: {task.merchant_id}",
+        f"Regex verdict: {rr.verdict}",
+        f"Regex score: {score}",
+        f"Regex main risk: {risk_type}",
+        f"Regex reason: {reason[:140]}",
+        f"Regex categories: {', '.join(categories) if categories else 'NONE'}",
+        f"Умови: {norm_text}",
+        "",
+        "ПЕРЕВІР КОНТЕКСТ:",
+        "- Чи merchant ВИМАГАЄ ризик, чи ЗАБОРОНЯЄ його?",
+        "- Якщо написано 'без третіх осіб' або 'не пишіть у Telegram' — це безпечний контекст.",
+        "",
+        f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}",
+    ]
+
+    if bad_texts:
+        lines.append("Негативні відгуки:")
+        for i, t in enumerate(bad_texts[:3], 1):
+            lines.append(f"{i}. {str(t).replace(chr(10), ' ')[:120]}")
+
+    if excerpts:
+        lines.append("Regex фрагменти:")
+        for i, ex in enumerate(excerpts, 1):
+            lines.append(f"{i}. {ex}")
+
+    lines.append(
+        'Поверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+    )
     return "\n".join(lines)
 
 
+
+def _regex_categories(regex_result: RegexResult) -> list[str]:
+    matches = getattr(regex_result, "matches", []) or []
+    seen = set()
+    out = []
+    for m in matches:
+        cat = getattr(m, "category", "")
+        weight = getattr(m, "weight", 0)
+        if not cat or weight <= 0:
+            continue
+        if cat not in seen:
+            seen.add(cat)
+            out.append(cat)
+    return out[:MAX_MATCHES_IN_PROMPT]
+
+
+def _top_excerpts(regex_result: RegexResult) -> list[str]:
+    matches = getattr(regex_result, "matches", []) or []
+    pos = [m for m in matches if getattr(m, "weight", 0) > 0]
+    pos.sort(key=lambda x: getattr(x, "weight", 0), reverse=True)
+
+    out = []
+    seen = set()
+    for m in pos[:MAX_MATCHES_IN_PROMPT]:
+        ex = (getattr(m, "excerpt", "") or "").replace("\n", " ").strip()
+        ex = ex[:MAX_EXCERPT_LEN]
+        if ex and ex not in seen:
+            seen.add(ex)
+            out.append(ex)
+    return out
+
+
 def _parse_json(text: str) -> dict:
-    clean = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    clean = (
+        text.strip()
+        .removeprefix("```json")
+        .removeprefix("```")
+        .removesuffix("```")
+        .strip()
+    )
+
     try:
         data = json.loads(clean)
     except json.JSONDecodeError:
-        return {"status": "UNKNOWN", "risk": "", "reason": "JSON parse error"}
+        start = clean.find("{")
+        end = clean.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                data = json.loads(clean[start:end + 1])
+            except json.JSONDecodeError:
+                return {
+                    "status": "UNKNOWN",
+                    "risk": "NONE",
+                    "reason": "JSON parse error",
+                }
+        else:
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "JSON parse error",
+            }
 
     status = str(data.get("status", "UNKNOWN")).upper()
     if status not in ("OK", "SUSPICIOUS", "BLOCK"):
         status = "UNKNOWN"
 
+    risk = str(data.get("risk", "NONE")).upper()[:32]
+    reason = str(data.get("reason", "")).strip()[:150]
+
     return {
         "status": status,
-        "risk":   str(data.get("risk", "")),
-        "reason": str(data.get("reason", ""))[:150],
+        "risk": risk or "NONE",
+        "reason": reason or "Без пояснення",
     }

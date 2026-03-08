@@ -50,11 +50,13 @@ class SpreadAlert:
     deal_amount_uah: float
     buy_bank: str
     sell_bank: str
-    timestamp: datetime = None
+    route_type: str = ""
+    timestamp: datetime | None = None
 
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
+
 
 
 def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
@@ -75,78 +77,122 @@ def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
 def _verified_badge(order: Order) -> str:
     return " ✅" if getattr(order, "is_verified", False) else ""
 
+def _alert_grade(spread_pct: float) -> tuple[str, bool]:
+    if spread_pct >= 2.0:
+        return "🦄 <b>СУПЕР ПРОФІТ</b> 🦄", False
+    if spread_pct >= 1.0:
+        return "🔥 <b>ГАРНИЙ СПРЕД</b> 🔥", False
+    if spread_pct >= 0.5:
+        return "💡 <b>БАЗОВИЙ СПРЕД</b>", True
+    return "🤏 <b>МІКРО-СПРЕД</b>", True
 
-def _risk_badge(order: Order) -> str:
+
+def _risk_badge(order: Order, short: bool = False) -> str:
     flag = getattr(order, "risk_flag", "")
-    if flag in ("", "OK"):
+
+    if flag in ("", "OK", "PENDING"):
         return ""
 
     badges = {
-        # Regex — критичні
-        "TRIANGLE":          "🚨 <b>РИЗИК: ТРИКУТНИК</b>",
-        "CASINO":            "🚨 <b>РИЗИК: КАЗИНО/ПРОЦЕСИНГ</b>",
-        "CHAT_FIRST":        "🚨 <b>РИЗИК: СПОЧАТКУ В ЧАТ</b>",
-        "SUSPICIOUS":        "⚠️ <b>ПІДОЗРІЛІ УМОВИ</b>",
-        "BLOCK":             "🚫 <b>ЗАБЛОКОВАНО</b>",
-        # Behavior
-        "LOW_STATS":         "⚠️ <b>МАЛО УГОД / НИЗЬКИЙ %</b>",
-        "SUSPICIOUS_LIMITS": "⚠️ <b>АНОМАЛЬНІ ЛІМІТИ</b>",
-        "PERFECT_RATING":    "🤖 <b>ПІДОЗРІЛИЙ РЕЙТИНГ</b>",
-        # LLM
-        "LLM_BLOCK":         "🚫 <b>AI: ЗАБЛОКОВАНО</b>",
-        "LLM_SUSPICIOUS":    "🤖 <b>AI: ПІДОЗРІЛИЙ</b>",
-        "LLM_PENDING":       "⏳ <i>AI перевіряє…</i>",
-        "LLM_UNKNOWN":       "⚠️ <i>AI не перевірив (timeout)</i>",
-        # Інфо
-        "EMPTY_TERMS":       "💬 <i>Умови не вказані</i>",
-        "BAD_REVIEWS":       "🚫 <b>ПОГАНІ ВІДГУКИ</b>",
-        "BLACKLIST":         "☠️ <b>ЧОРНИЙ СПИСОК</b>",
-        "HIGH_RISK_SCORE":   "🔴 <b>ВИСОКИЙ РИЗИК (накопичений)</b>",
+        "TRIANGLE": "🚫 ТРИКУТНИК\n" if not short else "🚫",
+        "CASINO": "🎰 КАЗИНО / GAMBLING\n" if not short else "🎰",
+        "CHAT_FIRST": "💬 СПОЧАТКУ В ЧАТ\n" if not short else "💬",
+        "SUSPICIOUS_BIZ": "🏢 ПІДОЗРІЛИЙ BIZ-КОНТЕКСТ\n" if not short else "🏢",
+        "APPEAL_PRESSURE": "⚠️ ТИСК АПЕЛЯЦІЄЮ\n" if not short else "⚠️",
+        "ANONYMOUS": "🕶 АНОНІМНИЙ КОНТЕКСТ\n" if not short else "🕶",
+        "EXTERNAL_LINK": "📲 ЗОВНІШНІЙ КОНТАКТ\n" if not short else "📲",
+        "LOW_STATS": "⚠️ МАЛО УГОД / НИЗЬКИЙ %\n" if not short else "📉",
+        "SUSPICIOUS_LIMITS": "⚠️ АНОМАЛЬНІ ЛІМІТИ\n" if not short else "📏",
+        "PERFECT_RATING": "🤖 ПІДОЗРІЛИЙ РЕЙТИНГ\n" if not short else "🤖",
+        "LLM_BLOCK": "🧠 AI BLOCK\n" if not short else "🧠",
+        "LLM_SUSPICIOUS": "🧠 AI ПІДОЗРА\n" if not short else "🧠",
+        "LLM_PENDING": "⏳ AI ANALYZE\n" if not short else "⏳",
+        "LLM_UNKNOWN": "⌛ AI TIMEOUT\n" if not short else "⌛",
+        "REGEX_WEAK": "🧩 WEAK REGEX\n" if not short else "🧩",
+        "BADREVIEWS": "🗣 ПОГАНІ ВІДГУКИ\n" if not short else "🗣",
+        "BLACKLIST": "⛔ BLACKLIST\n" if not short else "⛔",
+        "HIGH_RISK_SCORE": "📛 HIGH RISK SCORE\n" if not short else "📛",
+        "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
     }
 
-    flags = [f.strip() for f in flag.split(",")]
+    flags = [f.strip() for f in flag.split(",") if f.strip()]
     lines = []
+    reasons = []
     has_text_risk = False
-    review_reason = ""
 
     for f in flags:
-        if f.startswith("BAD_REVIEWS:"):
-            review_reason = f[len("BAD_REVIEWS:"):]
-            lines.append(badges["BAD_REVIEWS"])
-        elif f.startswith("LLM_BLOCK:"):
-            review_reason = f[len("LLM_BLOCK:"):]
-            lines.append(badges["LLM_BLOCK"])
-        elif f.startswith("BLOCK:"):
+        if f.startswith("BADREVIEWS:"):
+            lines.append(badges["BADREVIEWS"])
+            reasons.append(f[len("BADREVIEWS:"):])
+            continue
+
+        if f.startswith("BLOCK:"):
             parts = f.split(":", 2)
-            risk  = parts[1] if len(parts) > 1 else ""
-            review_reason = parts[2] if len(parts) > 2 else ""
+            risk = parts[1] if len(parts) > 1 else "BLOCK"
+            reason = parts[2] if len(parts) > 2 else ""
             if risk == "BLACKLIST":
                 lines.append(badges["BLACKLIST"])
             else:
-                label = badges.get(risk, badges["BLOCK"])
-                lines.append(label)
-        elif f in badges:
+                lines.append(badges.get(risk, badges["BLOCK"]))
+            if reason:
+                reasons.append(reason)
+            if risk in ("TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK"):
+                has_text_risk = True
+            continue
+
+        if f.startswith("LLM_SUSPICIOUS:"):
+            parts = f.split(":", 2)
+            lines.append(badges["LLM_SUSPICIOUS"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
+
+        if f.startswith("LLM_UNKNOWN:"):
+            parts = f.split(":", 2)
+            lines.append(badges["LLM_UNKNOWN"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
+
+        if f.startswith("REGEX_WEAK:"):
+            parts = f.split(":", 2)
+            lines.append(badges["REGEX_WEAK"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
+
+        if f.startswith("LLM_PENDING:"):
+            lines.append(badges["LLM_PENDING"])
+            continue
+
+        if f in badges:
             lines.append(badges[f])
-        if f in ("TRIANGLE", "CASINO", "CHAT_FIRST", "SUSPICIOUS"):
-            has_text_risk = True
 
     if not lines:
         return ""
 
-    result = "\n".join(lines) + "\n"
+    result = "".join(lines)
 
-    # Причина з відгуків або LLM
-    if review_reason:
-        label = "🤖 <i>AI причина:</i>" if "LLM" in flag else "📝 <i>З відгуків:</i>"
-        result += f"{label} <code>{review_reason[:120]}</code>\n"
+    if reasons and not short:
+        uniq = []
+        seen = set()
+        for r in reasons:
+            r = (r or "").strip()
+            if r and r not in seen:
+                seen.add(r)
+                uniq.append(r[:140])
+        if uniq:
+            result += "Причина:\n"
+            for r in uniq[:3]:
+                result += f"<code>{r}</code>\n"
 
-    # Підозрілий текст в умовах угоди
     trade_terms = getattr(order, "trade_terms", "")
-    if has_text_risk and trade_terms:
-        safe = trade_terms.replace("\n", " ")[:80]
-        if len(trade_terms) > 80:
+    if has_text_risk and trade_terms and not short:
+        safe = trade_terms.replace("\n", " ")[:120]
+        if len(trade_terms) > 120:
             safe += "…"
-        result += f"📝 <i>Текст мерчанта:</i> <code>{safe}</code>\n"
+        result += f"Умови:\n<code>{safe}</code>\n"
+
     return result
 
 
@@ -242,48 +288,57 @@ class TelegramNotifier:
         return batch
 
     async def _send_single(self, alert: SpreadAlert) -> None:
-        emoji  = "🔥" if alert.spread_pct >= 1.0 else "💡"
+        title, silent = _alert_grade(alert.spread_pct)
+
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
         s_icon = EXCHANGE_ICONS.get(alert.sell_order.exchange, "◽️")
         b_bank = BANKS_MAP.get(alert.buy_bank, alert.buy_bank)
         s_bank = BANKS_MAP.get(alert.sell_bank, alert.sell_bank)
 
-        buy_name  = _profile_link(alert.buy_order.exchange,
-                                   alert.buy_order.merchant_id,
-                                   alert.buy_order.merchant_name)
-        sell_name = _profile_link(alert.sell_order.exchange,
-                                   alert.sell_order.merchant_id,
-                                   alert.sell_order.merchant_name)
+        buy_name = _profile_link(
+            alert.buy_order.exchange,
+            alert.buy_order.merchant_id,
+            alert.buy_order.merchant_name,
+        )
+        sell_name = _profile_link(
+            alert.sell_order.exchange,
+            alert.sell_order.merchant_id,
+            alert.sell_order.merchant_name,
+        )
 
-        buy_risk  = _risk_badge(alert.buy_order)
+        buy_risk = _risk_badge(alert.buy_order)
         sell_risk = _risk_badge(alert.sell_order)
 
+        route_type = getattr(alert, "route_type", "")
+        if route_type == "CROSS":
+            route_marker = "🔀 CROSS"
+        elif route_type == "INTRA":
+            route_marker = "🔁 INTRA"
+        else:
+            route_marker = "📍 ROUTE"
+
         text = (
-            # ── Шапка ────────────────────────────────────────────────
-            f"⚡️ <b>ARBIX QUANTUM</b>  {emoji} <b>Спред: {alert.spread_pct:.2f}%</b>\n\n"
-
-            # ── Зведення угоди ────────────────────────────────────────
-            f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
-            f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b>\n"
-            f"🔄 Маршрут: {b_icon}{alert.buy_order.exchange} ({b_bank})"
-            f" → {s_icon}{alert.sell_order.exchange} ({s_bank})\n"
-            f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n\n"
-
-            # ── Купівля ───────────────────────────────────────────────
-            f"🛒 <b>КУПУЄМО</b>\n"
-            f"Курс: <code>{alert.buy_order.price}</code> ₴\n"
-            f"Мерчант: {buy_name}{_verified_badge(alert.buy_order)} "
-            f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
-            f"Ліміти: {alert.buy_order.min_limit}–{alert.buy_order.max_limit} ₴\n"
-            + (buy_risk if buy_risk else "")
-
-            # ── Продаж ────────────────────────────────────────────────
-            + f"\n💸 <b>ПРОДАЄМО</b>\n"
-            f"Курс: <code>{alert.sell_order.price}</code> ₴\n"
-            f"Мерчант: {sell_name}{_verified_badge(alert.sell_order)} "
-            f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
-            f"Ліміти: {alert.sell_order.min_limit}–{alert.sell_order.max_limit} ₴\n"
-            + (sell_risk if sell_risk else "")
+                f"{title}\n\n"
+                f"💰 Профіт: +{alert.profit_uah:.2f} ₴   "
+                f"💼 Угода: {alert.deal_amount_uah:.0f} ₴\n"
+                f"🔄 Маршрут: {route_marker} | "
+                f"{b_icon}{alert.buy_order.exchange} ({b_bank}) → "
+                f"{s_icon}{alert.sell_order.exchange} ({s_bank})\n"
+                f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
+                f"📈 Спред: {alert.spread_pct:.2f}%\n\n"
+                f"🛒 <b>КУПУЄМО</b>\n"
+                f"Курс: {alert.buy_order.price} ₴\n"
+                f"Мерчант: {buy_name}{_verified_badge(alert.buy_order)} "
+                f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
+                f"Ліміти: {alert.buy_order.min_limit}–{alert.buy_order.max_limit} ₴\n"
+                + (buy_risk if buy_risk else "")
+                + "\n"
+                  f"\n💸 <b>ПРОДАЄМО</b>\n"
+                  f"Курс: {alert.sell_order.price} ₴\n"
+                  f"Мерчант: {sell_name}{_verified_badge(alert.sell_order)} "
+                  f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
+                  f"Ліміти: {alert.sell_order.min_limit}–{alert.sell_order.max_limit} ₴\n"
+                + (sell_risk if sell_risk else "")
         )
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -291,7 +346,12 @@ class TelegramNotifier:
             InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link),
         ]])
 
-        await self._send_with_retry(text, keyboard)
+        await self._send_with_retry(
+            text,
+            keyboard=keyboard,
+            disable_notification=silent,
+        )
+
 
         # ── Компактний дашборд ────────────────────────────────────────────────────
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
@@ -329,12 +389,12 @@ class TelegramNotifier:
             for chunk in self._split_message(text):
                 await self._send_with_retry(chunk)
 
-
     async def _send_with_retry(
-        self,
-        text: str,
-        keyboard: InlineKeyboardMarkup | None = None,
-        max_attempts: int = 3,
+            self,
+            text: str,
+            keyboard: InlineKeyboardMarkup | None = None,
+            max_attempts: int = 3,
+            disable_notification: bool = False,
     ) -> None:
         for attempt in range(max_attempts):
             try:
@@ -343,6 +403,7 @@ class TelegramNotifier:
                     text=text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
+                    disable_notification=disable_notification,
                 )
                 return
             except TelegramRetryAfter as e:
