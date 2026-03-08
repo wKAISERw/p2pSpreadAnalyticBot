@@ -32,7 +32,7 @@ from core.merchant_db import MerchantDB
 from core.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
-
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
 
 def _setup_llm_log() -> logging.Logger:
     Path("logs").mkdir(exist_ok=True)
@@ -50,6 +50,16 @@ def _setup_llm_log() -> logging.Logger:
         llm_log.propagate = False
     return llm_log
 
+class RateLimitError(RuntimeError):
+    pass
+
+
+class PermanentModelError(RuntimeError):
+    pass
+
+
+class ProviderRateLimitError(RuntimeError):
+    pass
 
 LLM_LOG = _setup_llm_log()
 
@@ -154,7 +164,7 @@ class LLMWorkerPool:
                     self._pending.discard((task.exchange, task.merchant_id))
                     self._queue.task_done()
 
-                await asyncio.sleep(2.1)
+                await asyncio.sleep(0.25)
 
             except asyncio.CancelledError:
                 break
@@ -162,6 +172,7 @@ class LLMWorkerPool:
                 self._stats["errors"] += 1
                 logger.error("LLM Worker %d помилка: %s", worker_id, e, exc_info=True)
                 await asyncio.sleep(1.0)
+
 
     async def _process(self, task: LLMTask) -> None:
         cached = await self._db.get_verdict(
@@ -220,35 +231,49 @@ class LLMWorkerPool:
         user_msg = _build_prompt(task, review_summary)
 
         try:
-            result = await asyncio.wait_for(
-                self._call_groq(user_msg), timeout=LLM_TIMEOUT
-            )
+            result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
             result["_source"] = "groq"
             return result
-        except asyncio.TimeoutError:
-            self._stats["timeouts"] += 1
-            logger.warning("⏳ Groq timeout для %s", task.merchant_name)
         except Exception as e:
             logger.error("❌ Groq помилка: %s", e)
 
         try:
-            result = await asyncio.wait_for(
-                self._call_gemini(user_msg), timeout=LLM_TIMEOUT
-            )
-            result["_source"] = "gemini"
+            result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
+            result["_source"] = f"gemini:{GEMINI_MODEL}"
             return result
+        except PermanentModelError as e:
+            logger.error("❌ Gemini config помилка: %s", e)
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "Gemini model config error",
+                "_source": "gemini_404",
+            }
+        except ProviderRateLimitError as e:
+            logger.warning("⏳ Gemini rate limit: %s", e)
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "Gemini rate limit",
+                "_source": "gemini_429",
+            }
         except asyncio.TimeoutError:
             self._stats["timeouts"] += 1
             logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "Gemini timeout",
+                "_source": "gemini_timeout",
+            }
         except Exception as e:
             logger.error("❌ Gemini помилка: %s", e)
-
-        return {
-            "status": "UNKNOWN",
-            "risk": "NONE",
-            "reason": "LLM не відповіла",
-            "_source": "timeout",
-        }
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "Gemini error",
+                "_source": "gemini_error",
+            }
 
     async def _call_groq(self, user_msg: str) -> dict:
         api_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -272,7 +297,7 @@ class LLMWorkerPool:
             headers={"Authorization": f"Bearer {api_key}"},
         ) as resp:
             if resp.status == 429:
-                raise RuntimeError("Groq rate limit 429")
+                raise RateLimitError("Groq rate limit 429")
             if resp.status != 200:
                 raise RuntimeError(f"Groq HTTP {resp.status}")
             data = await resp.json()
@@ -297,7 +322,7 @@ class LLMWorkerPool:
 
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={api_key}"
+            f"{GEMINI_MODEL}:generateContent?key={api_key}"
         )
 
         async with self._session.post(url, json=payload) as resp:

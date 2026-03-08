@@ -1,19 +1,4 @@
 # core/review_fetcher.py
-"""
-Асинхронний фетчер відгуків мерчантів.
-
-Архітектура:
-- Черга задач (asyncio.Queue), щоб не блокувати основний цикл сканера
-- Rate limiting між запитами
-- Підтримка: Binance, Bybit, OKX
-- Wallet / CryptoBot / MEXC — не мають публічних відгуків
-
-Інтеграція:
-fetcher = ReviewFetcher(db)
-await fetcher.start()
-fetcher.schedule(exchange, merchant_id)  # sync, неблокуючий
-await fetcher.stop()
-"""
 
 from __future__ import annotations
 
@@ -61,6 +46,7 @@ class ReviewFetcher:
 
     async def start(self) -> None:
         if self._session and not self._session.closed:
+            logger.debug("ReviewFetcher start skipped: session already active")
             return
 
         self._session = aiohttp.ClientSession(
@@ -77,7 +63,7 @@ class ReviewFetcher:
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="review-fetcher"
         )
-        logger.info("ReviewFetcher запущено")
+        logger.info("ReviewFetcher запущено | ttl=%.1fh | max_queue=%d", self._review_ttl, self._queue.maxsize)
 
     async def stop(self) -> None:
         if self._worker_task:
@@ -91,32 +77,36 @@ class ReviewFetcher:
             self._session = None
 
         logger.info(
-            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d",
-            self._processed, self._errors
+            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d, queue: %d",
+            self._processed, self._errors, len(self._pending), self._queue.qsize()
         )
 
     def schedule(self, exchange: str, merchant_id: str) -> bool:
-        """
-        Неблокуючий виклик зі сканера.
-        Кладе мерчанта в чергу, якщо він ще не queued.
-        """
         if exchange not in RATE_LIMITS:
+            logger.debug("ReviewFetcher skip unsupported exchange %s [%s]", merchant_id, exchange)
             return False
+
         if not merchant_id:
+            logger.debug("ReviewFetcher skip empty merchant_id [%s]", exchange)
             return False
 
         key = (exchange, merchant_id)
         if key in self._pending:
+            logger.debug("ReviewFetcher skip duplicate in pending %s [%s]", merchant_id, exchange)
             return False
 
         try:
             self._queue.put_nowait(key)
             self._pending.add(key)
+            logger.debug(
+                "ReviewFetcher queued %s [%s] | queue=%d pending=%d",
+                merchant_id, exchange, self._queue.qsize(), len(self._pending)
+            )
             return True
         except asyncio.QueueFull:
-            logger.debug(
-                "ReviewFetcher queue full, skip %s [%s]",
-                merchant_id, exchange
+            logger.warning(
+                "ReviewFetcher queue full, skip %s [%s] | pending=%d",
+                merchant_id, exchange, len(self._pending)
             )
             return False
 
@@ -127,11 +117,22 @@ class ReviewFetcher:
                 key = (exchange, merchant_id)
 
                 try:
-                    if not await self._db.needs_review_fetch(
+                    logger.debug(
+                        "ReviewFetcher dequeued %s [%s] | queue=%d pending=%d",
+                        merchant_id, exchange, self._queue.qsize(), len(self._pending)
+                    )
+
+                    needs_fetch = await self._db.needs_review_fetch(
                         exchange, merchant_id, self._review_ttl
-                    ):
+                    )
+                    if not needs_fetch:
+                        logger.debug(
+                            "ReviewFetcher TTL skip %s [%s]",
+                            merchant_id, exchange
+                        )
                         continue
 
+                    logger.info("ReviewFetcher fetch start %s [%s]", merchant_id, exchange)
                     await self._fetch_and_save(exchange, merchant_id)
                     await asyncio.sleep(RATE_LIMITS.get(exchange, 2.0))
 
@@ -155,15 +156,26 @@ class ReviewFetcher:
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
             else:
+                logger.debug("ReviewFetcher unexpected exchange skip %s [%s]", merchant_id, exchange)
                 return
+
+            total = pos + neg + neutral
+            bad_pct = (neg / total * 100.0) if total > 0 else 0.0
+
+            logger.info(
+                "ReviewFetcher fetched %s [%s] | pos=%d neg=%d neu=%d total=%d bad_pct=%.1f bad_texts=%d",
+                merchant_id, exchange, pos, neg, neutral, total, bad_pct, len(bad_texts)
+            )
 
             await self._db.save_reviews(
                 exchange, merchant_id, pos, neg, neutral, bad_texts
             )
             self._processed += 1
 
-            total = pos + neg + neutral
-            bad_pct = (neg / total * 100.0) if total > 0 else 0.0
+            logger.info(
+                "ReviewFetcher saved %s [%s] | processed=%d",
+                merchant_id, exchange, self._processed
+            )
 
             if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
                 logger.warning(
@@ -173,8 +185,8 @@ class ReviewFetcher:
 
         except Exception as e:
             self._errors += 1
-            logger.debug(
-                "Помилка фетчингу відгуків %s [%s]: %s",
+            logger.exception(
+                "Помилка фетчингу/збереження відгуків %s [%s]: %s",
                 merchant_id, exchange, e
             )
 
@@ -195,12 +207,17 @@ class ReviewFetcher:
             },
         ) as resp:
             if resp.status == 429:
+                logger.warning("ReviewFetcher Binance 429 for %s", merchant_id)
                 await asyncio.sleep(10.0)
                 raise RuntimeError("Binance 429")
+            if resp.status != 200:
+                logger.warning("ReviewFetcher Binance profile status=%s for %s", resp.status, merchant_id)
+                return 0, 0, 0, []
             data = await resp.json()
 
         user = data.get("data", {}).get("advertiser", {})
         if not user:
+            logger.debug("ReviewFetcher Binance empty profile %s", merchant_id)
             return 0, 0, 0, []
 
         total = int(user.get("monthOrderCount") or 0)
@@ -233,9 +250,11 @@ class ReviewFetcher:
                 },
             ) as resp:
                 if resp.status != 200:
+                    logger.debug("ReviewFetcher Binance bad_texts status=%s for %s", resp.status, merchant_id)
                     return []
                 data = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.debug("ReviewFetcher Binance bad_texts error %s: %s", merchant_id, e)
             return []
 
         texts = []
@@ -251,11 +270,13 @@ class ReviewFetcher:
 
         async with self._session.get(url, params=params) as resp:
             if resp.status != 200:
+                logger.warning("ReviewFetcher Bybit profile status=%s for %s", resp.status, merchant_id)
                 return 0, 0, 0, []
             data = await resp.json()
 
         info = data.get("result", {}).get("userInfo", {})
         if not info:
+            logger.debug("ReviewFetcher Bybit empty profile %s", merchant_id)
             return 0, 0, 0, []
 
         pos = int(info.get("goodEvaluate") or 0)
@@ -277,9 +298,11 @@ class ReviewFetcher:
         try:
             async with self._session.post(url, json=payload) as resp:
                 if resp.status != 200:
+                    logger.debug("ReviewFetcher Bybit bad_texts status=%s for %s", resp.status, merchant_id)
                     return []
                 data = await resp.json()
-        except Exception:
+        except Exception as e:
+            logger.debug("ReviewFetcher Bybit bad_texts error %s: %s", merchant_id, e)
             return []
 
         texts = []
@@ -295,6 +318,7 @@ class ReviewFetcher:
 
         async with self._session.get(profile_url, params=params) as resp:
             if resp.status != 200:
+                logger.warning("ReviewFetcher OKX profile status=%s for %s", resp.status, merchant_id)
                 return 0, 0, 0, []
             data = await resp.json()
 

@@ -53,6 +53,75 @@ def _route_fingerprint(opp: dict) -> str:
         f"{_order_fingerprint(sell_o, opp['sell_bank'])}"
     )
 
+def _banks_sorted(codes: list[str] | None, target_banks: dict[str, str]) -> list[str]:
+    uniq = {c for c in (codes or []) if c}
+    return sorted(uniq, key=lambda c: target_banks.get(c, c))
+
+
+def _merge_opp_key(opp: dict) -> str:
+    buy_o = opp["buy_order"]
+    sell_o = opp["sell_order"]
+    return (
+        f"{opp.get('route_type', 'UNKNOWN')}|"
+        f"{buy_o.exchange}|{buy_o.merchant_id}|{buy_o.price}|{buy_o.min_limit}|{buy_o.max_limit}|{buy_o.link}|"
+        f"{sell_o.exchange}|{sell_o.merchant_id}|{sell_o.price}|{sell_o.min_limit}|{sell_o.max_limit}|{sell_o.link}|"
+        f"{round(float(opp['actual_entry_uah']), 2)}"
+    )
+
+
+def _group_opportunities(opportunities: list[dict], target_banks: dict[str, str]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+
+    for opp in opportunities:
+        key = _merge_opp_key(opp)
+        item = grouped.setdefault(
+            key,
+            {
+                "base": opp.copy(),
+                "route_pairs": set(),
+            },
+        )
+
+        item["route_pairs"].add((opp["buy_bank"], opp["sell_bank"]))
+
+        if float(opp["net_profit"]) > float(item["base"]["net_profit"]):
+            item["base"] = opp.copy()
+
+    merged: list[dict] = []
+
+    for item in grouped.values():
+        base = item["base"]
+        buy_o = base["buy_order"]
+        sell_o = base["sell_order"]
+
+        buy_all = _banks_sorted(getattr(buy_o, "bank_codes", []), target_banks)
+        sell_all = _banks_sorted(getattr(sell_o, "bank_codes", []), target_banks)
+
+        buy_fit = [b for b in buy_all if b in target_banks]
+        sell_fit = [b for b in sell_all if b in target_banks]
+
+        route_pairs = sorted(
+            item["route_pairs"],
+            key=lambda p: (target_banks.get(p[0], p[0]), target_banks.get(p[1], p[1])),
+        )
+
+        base["buy_banks_all"] = buy_all
+        base["sell_banks_all"] = sell_all
+        base["buy_banks_fit"] = buy_fit
+        base["sell_banks_fit"] = sell_fit
+        base["route_variants"] = [
+            f"{target_banks.get(b, b)} → {target_banks.get(s, s)}"
+            for b, s in route_pairs
+        ]
+
+        merged.append(base)
+
+    merged.sort(
+        key=lambda x: (float(x["net_profit"]), float(x["net_spread_pct"])),
+        reverse=True,
+    )
+    return merged
+
 
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     risk_mode = getattr(settings, "risk_mode", "WARNING")
@@ -200,19 +269,20 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
 
-                    opportunities = matcher.match(buy_grouped, sell_grouped)
+                    raw_opportunities = matcher.match(buy_grouped, sell_grouped)
+                    opportunities = _group_opportunities(raw_opportunities, target_banks)
                     latency = time.monotonic() - start_time
 
                     logger.info(
-                        "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Знайдено: %d",
+                        "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
                         latency,
                         len(ex_configs),
                         len(ex_configs) * len(target_banks),
+                        len(raw_opportunities),
                         len(opportunities),
                     )
 
                     sent_count = 0
-                    used_route_keys: set[str] = set()
 
                     for opp in opportunities:
                         if sent_count >= max_alerts_per_cycle:
@@ -221,28 +291,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        route_key = _route_fingerprint(opp)
-                        if route_key in used_route_keys:
-                            continue
-
-                        dedup_key = (
-                            f"spread:{buy_o.exchange}_{buy_o.merchant_id}:"
-                            f"{sell_o.exchange}_{sell_o.merchant_id}:"
-                            f"{opp['buy_bank']}:{opp['sell_bank']}:"
-                            f"{round(float(buy_o.price), 2)}:{round(float(sell_o.price), 2)}:"
-                            f"{round(float(opp['actual_entry_uah']), 2)}"
-                        )
-
+                        dedup_key = f"spread:{_merge_opp_key(opp)}"
                         if dedup_cache.seen(dedup_key):
                             continue
 
                         if not stability_filter.check(
-                            buy_o.exchange,
-                            sell_o.exchange,
-                            str(buy_o.price),
-                            str(sell_o.price),
-                            buy_o.merchant_name,
-                            sell_o.merchant_name,
+                                buy_o.exchange,
+                                sell_o.exchange,
+                                str(buy_o.price),
+                                str(sell_o.price),
+                                buy_o.merchant_name,
+                                sell_o.merchant_name,
                         ):
                             logger.debug(
                                 "⏳ Спред %s ➔ %s на перевірці стабільності...",
@@ -252,13 +311,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             continue
 
                         dedup_cache.mark(dedup_key)
-                        used_route_keys.add(route_key)
                         sent_count += 1
 
                         route_name = (
                             f"{opp.get('route_type', 'UNKNOWN')} | "
-                            f"{buy_o.exchange}({target_banks[opp['buy_bank']]}) "
-                            f"➔ {sell_o.exchange}({target_banks[opp['sell_bank']]})"
+                            f"{buy_o.exchange} ➔ {sell_o.exchange} | "
+                            f"{', '.join(opp.get('route_variants', [])[:4])}"
                         )
 
                         logger.warning(
@@ -274,10 +332,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             spread_pct=opp["net_spread_pct"],
                             profit_uah=opp["net_profit"],
                             deal_amount_uah=opp["actual_entry_uah"],
-                            buy_bank=opp["buy_bank"],
-                            sell_bank=opp["sell_bank"],
+                            buy_bank=opp.get("buy_bank", ""),
+                            sell_bank=opp.get("sell_bank", ""),
+                            buy_banks_all=opp.get("buy_banks_all"),
+                            sell_banks_all=opp.get("sell_banks_all"),
+                            buy_banks_fit=opp.get("buy_banks_fit"),
+                            sell_banks_fit=opp.get("sell_banks_fit"),
+                            route_variants=opp.get("route_variants"),
+                            route_type=opp.get("route_type", "UNKNOWN"),
                         )
-                        setattr(alert, "route_type", opp.get("route_type", "UNKNOWN"))
 
                         await notifier.push(alert)
 

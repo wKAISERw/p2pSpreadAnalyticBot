@@ -3,14 +3,13 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from html import escape
-
 
 from config import settings
 from exchanges.base import Order
@@ -33,13 +32,13 @@ BANKS_MAP = {
     "48": "А-Банк",
 }
 
-
 BANKS_SHORT = {
     "43": "Mono",
     "14": "Privat",
     "64": "ПУМБ",
     "48": "А-Банк",
 }
+
 
 
 @dataclass
@@ -49,185 +48,173 @@ class SpreadAlert:
     spread_pct: float
     profit_uah: float
     deal_amount_uah: float
-    buy_bank: str
-    sell_bank: str
-    timestamp: datetime = None
+    buy_bank: str = ""
+    sell_bank: str = ""
+    buy_banks_all: list[str] | None = None
+    sell_banks_all: list[str] | None = None
+    buy_banks_fit: list[str] | None = None
+    sell_banks_fit: list[str] | None = None
+    route_variants: list[str] | None = None
+    route_type: str = ""
+    timestamp: datetime | None = None
 
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
 
 
+def _format_bank_list(codes: list[str] | None) -> str:
+    if not codes:
+        return "—"
+    names = [BANKS_MAP.get(code, code) for code in codes]
+    return ", ".join(escape(str(x)) for x in names)
+
+
+def _format_route_variants(routes: list[str] | None, limit: int = 6) -> str:
+    if not routes:
+        return "—"
+    safe = [escape(str(x)) for x in routes[:limit]]
+    suffix = " …" if len(routes) > limit else ""
+    return ", ".join(safe) + suffix
+
+
 def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
+    safe_name = escape(str(merchant_name or "Unknown"))
     if not merchant_id:
-        return merchant_name
+        return safe_name
+
     links = {
         "Binance": f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}",
-        "Bybit":   f"https://www.bybit.com/fiat/trade/otc/profile/{merchant_id}",
-        "OKX":     f"https://www.okx.com/p2p/profile/{merchant_id}",
-        "MEXC":    f"https://www.mexc.com/uk-UA/p2p/merchant/{merchant_id}",
+        "Bybit": f"https://www.bybit.com/fiat/trade/otc/profile/{merchant_id}",
+        "OKX": f"https://www.okx.com/p2p/profile/{merchant_id}",
+        "MEXC": f"https://www.mexc.com/uk-UA/p2p/merchant/{merchant_id}",
     }
     url = links.get(exchange)
     if url:
-        return f"<a href='{url}'>{merchant_name}</a>"
-    return f"<b>{merchant_name}</b>"
+        return f'<a href="{escape(url, quote=True)}">{safe_name}</a>'
+    return f"<b>{safe_name}</b>"
+
 
 
 def _verified_badge(order: Order) -> str:
     return " ✅" if getattr(order, "is_verified", False) else ""
 
-
-RISK_NAMES_UA = {
-    "TRIANGLE":       "трикутник",
-    "CASINO":         "казино/ставки",
-    "CHAT_FIRST":     "спочатку в чат",
-    "EXTERNAL_LINK":  "зовнішній месенджер",
-    "NO_COMMENTS":    "заборона коментарів",
-    "SUSPICIOUS_BIZ": "ФОП/бізнес-рахунок",
-    "APPEAL_PRESSURE":"тиск апеляцією",
-    "ANONYMOUS":      "анонімність",
-    "THIRD_PARTY_HINT":"третя особа",
-    "SOFT_FLAG":      "нестандартні умови",
-    "NEW_USERS":      "таргет на новачків",
-    "PERFECT_RATING": "підозрілий рейтинг",
-    "BADREVIEWS":     "погані відгуки",
-    "BLACKLIST":      "чорний список",
-    "UNKNOWN_RISK":   "невідомий ризик",
-}
-
-
-def _risk_name_ua(risk_code: str) -> str:
-    return RISK_NAMES_UA.get(risk_code, risk_code.lower().replace("_", " "))
+def _alert_grade(spread_pct: float) -> tuple[str, bool]:
+    if spread_pct >= 2.0:
+        return "🦄 <b>СУПЕР ПРОФІТ</b> 🦄", False
+    if spread_pct >= 1.0:
+        return "🔥 <b>ГАРНИЙ СПРЕД</b> 🔥", False
+    if spread_pct >= 0.5:
+        return "💡 <b>БАЗОВИЙ СПРЕД</b>", True
+    return "🤏 <b>МІКРО-СПРЕД</b>", True
 
 
 def _risk_badge(order: Order, short: bool = False) -> str:
     flag = getattr(order, "risk_flag", "")
-    if flag in ("", "OK"):
+
+    if flag in ("", "OK", "PENDING"):
         return ""
 
     badges = {
-        "TRIANGLE": "🚨 <b>РИЗИК: ТРИКУТНИК</b>",
-        "CASINO": "🚨 <b>РИЗИК: КАЗИНО / БЕТ</b>",
-        "CHAT_FIRST": "🚨 <b>РИЗИК: СПОЧАТКУ В ЧАТ</b>",
-        "EXTERNAL_LINK": "🚨 <b>РИЗИК: ЗОВНІШНІЙ КОНТАКТ</b>",
-        "NO_COMMENTS": "🚨 <b>РИЗИК: ЗАБОРОНА КОМЕНТАРІВ</b>",
-        "SUSPICIOUS": "🚨 <b>ПІДОЗРІЛІ УМОВИ</b>",
-        "LOW_STATS": "⚠️ <b>МАЛО СТАТИСТИКИ</b>",
-        "SUSPICIOUS_LIMITS": "⚠️ <b>ПІДОЗРІЛІ ЛІМІТИ</b>",
-        "PERFECT_RATING": "⚠️ <b>ПІДОЗРІЛИЙ ІДЕАЛЬНИЙ РЕЙТИНГ</b>",
-        "HIGH_RISK_SCORE": "🚨 <b>ВИСОКИЙ НАКОПИЧЕНИЙ РИЗИК</b>",
-        "LLM_BLOCK": "🤖 <b>AI: ЗАБЛОКОВАНО</b>",
-        "LLM_SUSPICIOUS": "🤖 <b>AI: ПІДОЗРІЛО</b>",
-        "LLM_PENDING": "⏳ <i>AI перевіряє…</i>",
-        "LLM_UNKNOWN": "🤖 <i>AI timeout / unknown</i>",
-        "EMPTY_TERMS": "ℹ️ <i>Немає умов угоди</i>",
-        "BADREVIEWS": "⚠️ <b>ПОГАНІ ВІДГУКИ</b>",
-        "BLACKLIST": "⛔ <b>BLACKLIST</b>",
-        "BLOCK": "⛔ <b>ЗАБЛОКОВАНО</b>",
+        "TRIANGLE": "🚫 ТРИКУТНИК\n" if not short else "🚫",
+        "CASINO": "🎰 КАЗИНО / GAMBLING\n" if not short else "🎰",
+        "CHAT_FIRST": "💬 СПОЧАТКУ В ЧАТ\n" if not short else "💬",
+        "SUSPICIOUS_BIZ": "🏢 ПІДОЗРІЛИЙ BIZ-КОНТЕКСТ\n" if not short else "🏢",
+        "APPEAL_PRESSURE": "⚠️ ТИСК АПЕЛЯЦІЄЮ\n" if not short else "⚠️",
+        "ANONYMOUS": "🕶 АНОНІМНИЙ КОНТЕКСТ\n" if not short else "🕶",
+        "EXTERNAL_LINK": "📲 ЗОВНІШНІЙ КОНТАКТ\n" if not short else "📲",
+        "LOW_STATS": "⚠️ МАЛО УГОД / НИЗЬКИЙ %\n" if not short else "📉",
+        "SUSPICIOUS_LIMITS": "⚠️ АНОМАЛЬНІ ЛІМІТИ\n" if not short else "📏",
+        "PERFECT_RATING": "🤖 ПІДОЗРІЛИЙ РЕЙТИНГ\n" if not short else "🤖",
+        "LLM_BLOCK": "🧠 AI BLOCK\n" if not short else "🧠",
+        "LLM_SUSPICIOUS": "🧠 AI ПІДОЗРА\n" if not short else "🧠",
+        "LLM_PENDING": "⏳ AI ANALYZE\n" if not short else "⏳",
+        "LLM_UNKNOWN": "⌛ AI TIMEOUT\n" if not short else "⌛",
+        "REGEX_WEAK": "🧩 WEAK REGEX\n" if not short else "🧩",
+        "BADREVIEWS": "🗣 ПОГАНІ ВІДГУКИ\n" if not short else "🗣",
+        "BLACKLIST": "⛔ BLACKLIST\n" if not short else "⛔",
+        "HIGH_RISK_SCORE": "📛 HIGH RISK SCORE\n" if not short else "📛",
+        "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
     }
 
     flags = [f.strip() for f in flag.split(",") if f.strip()]
-    lines: list[str] = []
+    lines = []
+    reasons = []
     has_text_risk = False
-    review_reason = ""
 
     for f in flags:
-        if f.startswith("BLOCK:BLACKLIST:"):
-            reason = f[len("BLOCK:BLACKLIST:"):].strip()
-            lines.append("⛔ <b>BLACKLIST</b>")
-            if reason:
-                review_reason = reason
+        if f.startswith("BADREVIEWS:"):
+            lines.append(badges["BADREVIEWS"])
+            reasons.append(f[len("BADREVIEWS:"):])
+            continue
 
-        elif f.startswith("BLOCK:BADREVIEWS:"):
-            reason = f[len("BLOCK:BADREVIEWS:"):].strip()
-            lines.append("⛔ <b>БЛОК: ПОГАНІ ВІДГУКИ</b>")
-            if reason:
-                review_reason = reason
-
-        elif f.startswith("BLOCK:"):
+        if f.startswith("BLOCK:"):
             parts = f.split(":", 2)
             risk = parts[1] if len(parts) > 1 else "BLOCK"
             reason = parts[2] if len(parts) > 2 else ""
-            lines.append(badges.get(risk, badges["BLOCK"]))
+            if risk == "BLACKLIST":
+                lines.append(badges["BLACKLIST"])
+            else:
+                lines.append(badges.get(risk, badges["BLOCK"]))
             if reason:
-                review_reason = reason
-            if risk in ("TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "NO_COMMENTS", "SUSPICIOUS"):
+                reasons.append(reason)
+            if risk in ("TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK"):
                 has_text_risk = True
+            continue
 
-        elif f.startswith("BADREVIEWS:"):
-            reason = f[len("BADREVIEWS:"):].strip()
-            lines.append(badges["BADREVIEWS"])
-            if reason:
-                review_reason = reason
-
-        elif f.startswith("LLM_PENDING:"):
+        if f.startswith("LLM_SUSPICIOUS:"):
             parts = f.split(":", 2)
-            risk = parts[1] if len(parts) > 1 else "UNKNOWN_RISK"
-            score_raw = parts[2] if len(parts) > 2 else ""
-            score_num = score_raw.lstrip("S") if score_raw.startswith("S") else score_raw
-            risk_ua = _risk_name_ua(risk)
-            msg = f"⏳ <i>AI перевіряє…</i>\n📊 Regex: {escape(risk_ua)}"
-            if score_num:
-                msg += f", score {escape(score_num)}"
-            lines.append(msg)
+            lines.append(badges["LLM_SUSPICIOUS"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
 
-        elif f.startswith("REGEX_WEAK:"):
+        if f.startswith("LLM_UNKNOWN:"):
             parts = f.split(":", 2)
-            risk = parts[1] if len(parts) > 1 else "UNKNOWN_RISK"
-            score_raw = parts[2] if len(parts) > 2 else ""
-            score_num = score_raw.lstrip("S") if score_raw.startswith("S") else score_raw
-            risk_ua = _risk_name_ua(risk)
-            msg = f"📊 <i>Regex: {escape(risk_ua)}"
-            if score_num:
-                msg += f", score {escape(score_num)}"
-            msg += "</i>"
-            lines.append(msg)
-            has_text_risk = True
+            lines.append(badges["LLM_UNKNOWN"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
 
-        elif f.startswith("LLM_SUSPICIOUS:"):
+        if f.startswith("REGEX_WEAK:"):
             parts = f.split(":", 2)
-            risk = parts[1] if len(parts) > 1 else "SUSPICIOUS"
-            reason = parts[2] if len(parts) > 2 else ""
-            lines.append(f"🤖 <b>AI: ПІДОЗРІЛО</b> — {escape(_risk_name_ua(risk))}")
-            if reason:
-                review_reason = reason
+            lines.append(badges["REGEX_WEAK"])
+            if len(parts) > 2 and parts[2]:
+                reasons.append(parts[2])
+            continue
 
-        elif f.startswith("LLM_UNKNOWN"):
-            lines.append("🤖 <i>AI timeout / unknown</i>")
+        if f.startswith("LLM_PENDING:"):
+            lines.append(badges["LLM_PENDING"])
+            continue
 
-        elif f in badges:
+        if f in badges:
             lines.append(badges[f])
-            if f in ("TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "NO_COMMENTS", "SUSPICIOUS"):
-                has_text_risk = True
-
-        else:
-            lines.append(f"ℹ️ <i>{escape(f)}</i>")
 
     if not lines:
         return ""
 
-    if short:
-        compact = []
-        for line in lines[:2]:
-            plain = (
-                line.replace("<b>", "").replace("</b>", "")
-                .replace("<i>", "").replace("</i>", "")
-                .replace("<code>", "").replace("</code>", "")
-            )
-            compact.append(plain)
-        return " | ".join(compact)
+    result = "".join(lines)
 
-    result = "\n".join(lines)
+    if reasons and not short:
+        uniq = []
+        seen = set()
+        for r in reasons:
+            r = (r or "").strip()
+            if r and r not in seen:
+                seen.add(r)
+                uniq.append(r[:140])
 
-    if review_reason:
-        result += f"\nℹ️ Причина:\n<code>{escape(review_reason[:100])}</code>\n"
+        if uniq:
+            result += "\n"
+            for r in uniq[:3]:
+                result += f"<code>{escape(r)}</code>\n"
 
     trade_terms = getattr(order, "trade_terms", "")
-    if has_text_risk and trade_terms:
-        safe = trade_terms.replace("\n", " ").strip()[:80]
-        if len(trade_terms) > 80:
+    if has_text_risk and trade_terms and not short:
+        safe = trade_terms.replace("\n", " ")[:120]
+        if len(trade_terms) > 120:
             safe += "…"
-        result += f"\n📝 Умови:\n<code>{escape(safe)}</code>\n"
+        result += f"Умови:\n<code>{escape(safe)}</code>\n"
 
     return result
 
@@ -324,11 +311,10 @@ class TelegramNotifier:
         return batch
 
     async def _send_single(self, alert: SpreadAlert) -> None:
-        emoji = "🔥" if alert.spread_pct >= 1.0 else "💡"
+        title, silent = _alert_grade(alert.spread_pct)
+
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
         s_icon = EXCHANGE_ICONS.get(alert.sell_order.exchange, "◽️")
-        b_bank = BANKS_MAP.get(alert.buy_bank, alert.buy_bank)
-        s_bank = BANKS_MAP.get(alert.sell_bank, alert.sell_bank)
 
         buy_name = _profile_link(
             alert.buy_order.exchange,
@@ -344,39 +330,66 @@ class TelegramNotifier:
         buy_risk = _risk_badge(alert.buy_order)
         sell_risk = _risk_badge(alert.sell_order)
 
-        text = (
-            f"{emoji} <b>Арбітражний сигнал</b>\n"
-            f"Спред: <b>{alert.spread_pct:.2f}%</b>\n"
-            f"Профіт: <b>{alert.profit_uah:.2f} ₴</b>\n"
-            f"Сума: <b>{alert.deal_amount_uah:.0f} ₴</b>\n"
-            f"Маршрут: {b_icon} {escape(alert.buy_order.exchange)} ({escape(str(b_bank))}) "
-            f"→ {s_icon} {escape(alert.sell_order.exchange)} ({escape(str(s_bank))})\n"
-            f"Час: <code>{alert.timestamp.strftime('%H:%M:%S')}</code>\n\n"
+        route_type = getattr(alert, "route_type", "")
+        if route_type == "CROSS":
+            route_marker = "🔀 CROSS"
+        elif route_type == "INTRA":
+            route_marker = "🔁 INTRA"
+        else:
+            route_marker = "📍 ROUTE"
 
-            f"🛒 <b>Купівля</b>\n"
-            f"Ціна: <code>{escape(str(alert.buy_order.price))}</code>\n"
+        route_variants = _format_route_variants(getattr(alert, "route_variants", None))
+        buy_all = _format_bank_list(getattr(alert, "buy_banks_all", None))
+        sell_all = _format_bank_list(getattr(alert, "sell_banks_all", None))
+        buy_fit = _format_bank_list(getattr(alert, "buy_banks_fit", None))
+        sell_fit = _format_bank_list(getattr(alert, "sell_banks_fit", None))
+
+        text = (
+            f"{title}\n\n"
+            f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
+            f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b>\n"
+            f"🔄 Маршрут: {route_marker} | "
+            f"{b_icon}{escape(alert.buy_order.exchange)} → "
+            f"{s_icon}{escape(alert.sell_order.exchange)}\n"
+            f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
+            f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>\n\n"
+
+            f"🏦 Варіанти зв'язки: {route_variants}\n"
+            f"🛒 Buy-мерчант банки: {buy_all}\n"
+            f"✅ Buy під твій фільтр: {buy_fit}\n"
+            f"💸 Sell-мерчант банки: {sell_all}\n"
+            f"✅ Sell під твій фільтр: {sell_fit}\n\n"
+
+            f"🛒 <b>КУПУЄМО</b>\n"
+            f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
             f"Мерчант: {buy_name}{_verified_badge(alert.buy_order)} "
             f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
-            f"{buy_risk if buy_risk else ''}"
+            f"{buy_risk if buy_risk else ''}\n\n"
 
-            f"\n💸 <b>Продаж</b>\n"
-            f"Ціна: <code>{escape(str(alert.sell_order.price))}</code>\n"
+            f"💸 <b>ПРОДАЄМО</b>\n"
+            f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
             f"Мерчант: {sell_name}{_verified_badge(alert.sell_order)} "
             f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
             f"{sell_risk if sell_risk else ''}"
         )
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link),
-            InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link),
-        ]])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link),
+                InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link),
+            ]]
+        )
 
-        await self._send_with_retry(text, keyboard)
+        await self._send_with_retry(
+            text,
+            keyboard=keyboard,
+            disable_notification=silent,
+        )
 
         # ── Компактний дашборд ────────────────────────────────────────────────────
-        async def _send_batch(self, batch: list[SpreadAlert]) -> None:
+    async def _send_batch(self, batch: list[SpreadAlert]) -> None:
             """Підсумок усіх знайдених маршрутів за цикл."""
             medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
             lines = [
@@ -412,10 +425,11 @@ class TelegramNotifier:
                 await self._send_with_retry(chunk)
 
     async def _send_with_retry(
-        self,
-        text: str,
-        keyboard: InlineKeyboardMarkup | None = None,
-        max_attempts: int = 3,
+            self,
+            text: str,
+            keyboard: InlineKeyboardMarkup | None = None,
+            max_attempts: int = 3,
+            disable_notification: bool = False,
     ) -> None:
         for attempt in range(max_attempts):
             try:
@@ -424,6 +438,7 @@ class TelegramNotifier:
                     text=text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
+                    disable_notification=disable_notification,
                 )
                 return
             except TelegramRetryAfter as e:
