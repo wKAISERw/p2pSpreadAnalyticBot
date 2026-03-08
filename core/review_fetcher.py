@@ -1,0 +1,278 @@
+# core/review_fetcher.py
+"""
+Асинхронний фетчер відгуків мерчантів.
+
+Архітектура:
+  - Черга задач (asyncio.Queue) — щоб не блокувати основний цикл сканера
+  - Rate limiting — пауза між запитами щоб не словити 429
+  - Підтримка: Binance, Bybit, OKX
+  - Wallet / CryptoBot / MEXC — не мають публічних відгуків
+
+Інтеграція:
+    fetcher = ReviewFetcher(db)
+    await fetcher.start()
+    fetcher.schedule(exchange, merchant_id)   # неблокуючий виклик зі сканера
+    await fetcher.stop()
+"""
+
+import asyncio
+import logging
+import time
+from typing import Optional
+
+import aiohttp
+
+from core.merchant_db import MerchantDB
+
+logger = logging.getLogger("ReviewFetcher")
+
+# Скільки чекати між запитами до кожної біржі (секунд)
+RATE_LIMITS = {
+    "Binance": 2.0,
+    "Bybit":   1.5,
+    "OKX":     1.5,
+}
+
+# Поганий відгук якщо >X% негативних
+BAD_REVIEW_THRESHOLD_PCT = 15.0
+
+# Ключові слова для пошуку в текстах відгуків
+BAD_KEYWORDS = [
+    "scam", "шахрай", "шахрайство", "обман", "не платить", "не платив",
+    "кинув", "freeze", "blocked", "заморозив", "обманув", "fraud",
+    "fake", "фейк", "розводить", "розвів",
+]
+
+
+class ReviewFetcher:
+    def __init__(self, db: MerchantDB,
+                 max_queue: int = 500,
+                 review_ttl_hours: float = 24.0):
+        self._db = db
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
+        self._review_ttl = review_ttl_hours
+        self._worker_task: Optional[asyncio.Task] = None
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._processed = 0
+        self._errors = 0
+
+    async def start(self) -> None:
+        self._session = aiohttp.ClientSession(
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/124.0.0.0 Safari/537.36",
+                "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
+            },
+            timeout=aiohttp.ClientTimeout(total=10.0),
+        )
+        self._worker_task = asyncio.create_task(
+            self._worker_loop(), name="review-fetcher"
+        )
+        logger.info("ReviewFetcher запущено")
+
+    async def stop(self) -> None:
+        if self._worker_task:
+            self._worker_task.cancel()
+        if self._session:
+            await self._session.close()
+        logger.info("ReviewFetcher зупинено. Оброблено: %d, помилок: %d",
+                    self._processed, self._errors)
+
+    def schedule(self, exchange: str, merchant_id: str) -> None:
+        """Неблокуючий виклик зі сканера — додає в чергу якщо потрібно."""
+        if exchange not in RATE_LIMITS:
+            return  # MEXC/Wallet/CryptoBot — пропускаємо
+        if not merchant_id:
+            return
+        if not self._db.needs_review_fetch(exchange, merchant_id, self._review_ttl):
+            return  # Відгуки свіжі — не тягнемо
+
+        try:
+            self._queue.put_nowait((exchange, merchant_id))
+        except asyncio.QueueFull:
+            pass  # Черга переповнена — нічого страшного, наступного разу
+
+    # ── Worker ────────────────────────────────────────────────────────────────
+    async def _worker_loop(self) -> None:
+        while True:
+            try:
+                exchange, merchant_id = await self._queue.get()
+
+                # Повторна перевірка — може вже хтось встиг потягнути
+                if not self._db.needs_review_fetch(exchange, merchant_id, self._review_ttl):
+                    self._queue.task_done()
+                    continue
+
+                await self._fetch_and_save(exchange, merchant_id)
+                self._queue.task_done()
+
+                # Rate limit між запитами
+                await asyncio.sleep(RATE_LIMITS.get(exchange, 2.0))
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("ReviewFetcher worker помилка: %s", e, exc_info=True)
+                await asyncio.sleep(3.0)
+
+    async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
+        try:
+            if exchange == "Binance":
+                pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
+            elif exchange == "Bybit":
+                pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
+            elif exchange == "OKX":
+                pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            else:
+                return
+
+            self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts)
+            self._processed += 1
+
+            total = pos + neg + neutral
+            bad_pct = (neg / total * 100) if total > 0 else 0.0
+
+            if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
+                logger.warning("🚨 Поганий мерчант %s [%s]: %.0f%% негативних (%d/%d)",
+                               merchant_id, exchange, bad_pct, neg, total)
+
+        except Exception as e:
+            self._errors += 1
+            logger.debug("Помилка фетчингу відгуків %s [%s]: %s", merchant_id, exchange, e)
+
+    # ── Binance ───────────────────────────────────────────────────────────────
+    async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
+        """
+        Binance повертає feedback у profile endpoint.
+        positiveRate / negativeRate / monthOrderCount
+        """
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
+        payload = {
+            "advertiserNo": merchant_id,
+            "page": 1,
+            "rows": 1,
+        }
+        async with self._session.post(
+            url,
+            json=payload,
+            headers={"content-type": "application/json",
+                     "origin": "https://p2p.binance.com"},
+        ) as resp:
+            if resp.status == 429:
+                await asyncio.sleep(10.0)
+                raise RuntimeError("Binance 429")
+            data = await resp.json()
+
+        user = data.get("data", {}).get("advertiser", {})
+        if not user:
+            return 0, 0, 0, []
+
+        total = int(user.get("monthOrderCount") or 0)
+        pos_rate = float(user.get("positiveRate") or 0)
+        neg_rate = float(user.get("negativeRate") or 0)
+
+        pos     = int(total * pos_rate)
+        neg     = int(total * neg_rate)
+        neutral = total - pos - neg
+
+        # Тексти поганих відгуків — окремий ендпоінт
+        bad_texts = await self._fetch_binance_bad_texts(merchant_id)
+
+        return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
+
+    async def _fetch_binance_bad_texts(self, merchant_id: str) -> list[str]:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
+        payload = {
+            "advertiserNo": merchant_id,
+            "type": 2,  # 1=positive, 2=negative
+            "page": 1,
+            "rows": 10,
+        }
+        try:
+            async with self._session.post(
+                url,
+                json=payload,
+                headers={"content-type": "application/json",
+                         "origin": "https://p2p.binance.com"},
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+        except Exception:
+            return []
+
+        texts = []
+        for item in data.get("data", []):
+            text = (item.get("message") or "").strip()
+            if text and _has_bad_keywords(text):
+                texts.append(text[:200])
+        return texts
+
+    # ── Bybit ─────────────────────────────────────────────────────────────────
+    async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
+        url = "https://api2.bybit.com/fiat/otc/user/public/profile"
+        params = {"userId": merchant_id}
+        async with self._session.get(url, params=params) as resp:
+            if resp.status != 200:
+                return 0, 0, 0, []
+            data = await resp.json()
+
+        info = data.get("result", {}).get("userInfo", {})
+        if not info:
+            return 0, 0, 0, []
+
+        pos     = int(info.get("goodEvaluate")    or info.get("recentExecuteRate") or 0)
+        neg     = int(info.get("badEvaluate")     or 0)
+        neutral = int(info.get("neutralEvaluate") or 0)
+
+        # Тексти відгуків
+        bad_texts = await self._fetch_bybit_bad_texts(merchant_id)
+
+        return pos, neg, neutral, bad_texts
+
+    async def _fetch_bybit_bad_texts(self, merchant_id: str) -> list[str]:
+        url = "https://api2.bybit.com/fiat/otc/user/feedback/list"
+        payload = {
+            "userId": merchant_id,
+            "evaluateType": "bad",
+            "page": 1,
+            "size": 10,
+        }
+        try:
+            async with self._session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+        except Exception:
+            return []
+
+        texts = []
+        for item in data.get("result", {}).get("items", []):
+            text = (item.get("content") or item.get("feedback") or "").strip()
+            if text and _has_bad_keywords(text):
+                texts.append(text[:200])
+        return texts
+
+    # ── OKX ───────────────────────────────────────────────────────────────────
+    async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
+        url = f"https://www.okx.com/v3/c2c/tradingOrders/books"
+        # OKX профіль
+        profile_url = f"https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
+        params = {"userId": merchant_id, "language": "uk_UA"}
+        async with self._session.get(profile_url, params=params) as resp:
+            if resp.status != 200:
+                return 0, 0, 0, []
+            data = await resp.json()
+
+        info = (data.get("data") or {})
+        pos     = int(info.get("positiveFeedbackCount") or 0)
+        neg     = int(info.get("negativeFeedbackCount") or 0)
+        neutral = int(info.get("neutralFeedbackCount")  or 0)
+
+        return pos, neg, neutral, []  # OKX тексти відгуків не публічні
+
+
+def _has_bad_keywords(text: str) -> bool:
+    t = text.lower()
+    return any(kw in t for kw in BAD_KEYWORDS)

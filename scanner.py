@@ -22,6 +22,8 @@ from core.dedup_cache import TTLCache
 from core.circuit_breaker import CircuitBreaker
 from core.cross_matcher import CrossMatchingEngine
 from core.risk_engine import RiskEngine
+from core.merchant_db import MerchantDB
+from core.review_fetcher import ReviewFetcher
 
 logger = logging.getLogger("Scanner")
 
@@ -68,7 +70,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3)
     )
 
-    risk_engine = RiskEngine()
+    merchant_db = MerchantDB()
+    review_fetcher = ReviewFetcher(merchant_db)
+    await review_fetcher.start()
+    risk_engine = RiskEngine(db=merchant_db, review_fetcher=review_fetcher)
 
     # -------- ДОДАЄМО ІНІЦІАЛІЗАЦІЮ ФІЛЬТРА --------
     stability_filter = SpreadStabilityFilter(required_hits=2, ttl_seconds=15.0)
@@ -211,4 +216,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         watchdog_task.cancel()
         if 'cb_userbot' in locals():
             await cb_userbot.stop()  # Вимикаємо сесію безпечно
+        await review_fetcher.stop()
+        merchant_db.close()
         logger.info("Сканер завершив роботу.")
