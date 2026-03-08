@@ -9,18 +9,16 @@ from infrastructure.http.binance_client import BinanceClient
 
 logger = logging.getLogger(__name__)
 
-# Наші bank_code → Binance payTypes
 BANK_CODE_TO_BINANCE = {
-    "43":  "Monobank",
-    "14":  "PrivatBank",
-    "64":  "PUMB",
-    "48":  "A-Bank",
-    "99":  "Oschadbank",
+    "43": "Monobank",
+    "14": "PrivatBank",
+    "64": "PUMB",
+    "48": "A-Bank",
+    "99": "Oschadbank",
     "380": "RaiffeisenBankUkraine",
     "328": "SenseBank",
 }
 
-# Зворотній маппінг для нормалізації
 BINANCE_TO_CODE = {v: k for k, v in BANK_CODE_TO_BINANCE.items()}
 
 
@@ -29,10 +27,9 @@ class BinanceExchange(BaseExchange):
         self.client = client
 
     def _parse_order(self, item: dict, bank_code: str) -> Order:
-        adv   = item.get("adv", {})
-        user  = item.get("advertiser", {})
+        adv = item.get("adv", {})
+        user = item.get("advertiser", {})
 
-        # Збираємо всі банки з ордера
         trade_methods = adv.get("tradeMethods", [])
         bank_codes = []
         for m in trade_methods:
@@ -41,7 +38,6 @@ class BinanceExchange(BaseExchange):
             if code:
                 bank_codes.append(code)
 
-        # Статистика мерчанта
         finish_rate = float(user.get("monthFinishRate", 0)) * 100
         order_count = int(user.get("monthOrderCount", 0))
 
@@ -56,20 +52,15 @@ class BinanceExchange(BaseExchange):
             month_order_count=order_count,
             finish_rate_pct=round(finish_rate, 1),
             exchange="Binance",
-            link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo','')}",
+            link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo', '')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
             trade_terms=str(adv.get("remarks", "") or "").strip().lower(),
             is_verified=str(user.get("userType", "")) == "merchant",
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:
-        """
-        side: "BUY" = мерчанти продають USDT (ми купуємо)
-               "SELL" = мерчанти купують USDT (ми продаємо)
-        """
-        # Binance фільтрує по ONE банку за раз
-        # Збираємо всі банки паралельно
-        tasks = []
+        orders = []
+        # ЗАМІСТЬ GATHER РОБИМО ПОСЛІДОВНІ ЗАПИТИ ІЗ ЗАТРИМКОЮ
         for bank_code in banks:
             binance_pay = BANK_CODE_TO_BINANCE.get(bank_code)
             if not binance_pay:
@@ -85,43 +76,37 @@ class BinanceExchange(BaseExchange):
                 "side": side,
                 "tradeType": side,
             }
-            tasks.append(self.client.fetch(payload))
+            try:
+                result = await self.client.fetch(payload)
+                if isinstance(result, dict) and "data" in result:
+                    for item in result.get("data", []):
+                        try:
+                            orders.append(self._parse_order(item, bank_code))
+                        except Exception as e:
+                            logger.warning("Binance parse помилка: %s", e)
+                else:
+                    logger.error("Binance fetch помилка [%s]: невірний формат", bank_code)
+            except Exception as e:
+                logger.error("Помилка запиту Binance [%s]: %s", bank_code, e)
 
-        if not tasks:
-            return []
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        orders = []
-        for i, (bank_code, result) in enumerate(
-            zip([b for b in banks if BANK_CODE_TO_BINANCE.get(b)], results)
-        ):
-            if isinstance(result, Exception):
-                logger.error("Binance fetch помилка [%s]: %s", bank_code, result)
-                continue
-            for item in result.get("data", []):
-                try:
-                    orders.append(self._parse_order(item, bank_code))
-                except Exception as e:
-                    logger.warning("Binance parse помилка: %s", e)
+            # 🛡 МІКРОПАУЗА ПРОТИ БАНУ 429
+            await asyncio.sleep(0.35)
 
         return orders
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        """BUY = мерчанти продають USDT (ми купуємо)"""
         return await self._fetch_orders("BUY", banks)
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        """SELL = мерчанти купують USDT (ми продаємо)"""
         return await self._fetch_orders("SELL", banks)
 
     async def fetch_both_multi(
-        self, amounts: List[float], banks: List[str]
+            self, amounts: List[float], banks: List[str]
     ) -> Tuple[List[Order], List[Order]]:
-        buy_orders, sell_orders = await asyncio.gather(
-            self.get_buy_orders(0, banks),
-            self.get_sell_orders(0, banks),
-        )
+        # ПОСЛІДОВНО: Спочатку всі на купівлю, потім всі на продаж (без gather)
+        buy_orders = await self.get_buy_orders(0, banks)
+        sell_orders = await self.get_sell_orders(0, banks)
+
         return self._dedup(buy_orders), self._dedup(sell_orders)
 
     def _dedup(self, orders: List[Order]) -> List[Order]:

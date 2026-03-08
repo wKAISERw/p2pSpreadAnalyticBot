@@ -31,13 +31,14 @@ BANKS_MAP = {
     "48": "А-Банк",
 }
 
-
 BANKS_SHORT = {
     "43": "Mono",
     "14": "Privat",
     "64": "ПУМБ",
     "48": "А-Банк",
 }
+
+
 
 
 @dataclass
@@ -81,14 +82,26 @@ def _risk_badge(order: Order) -> str:
         return ""
 
     badges = {
+        # Regex — критичні
         "TRIANGLE":          "🚨 <b>РИЗИК: ТРИКУТНИК</b>",
         "CASINO":            "🚨 <b>РИЗИК: КАЗИНО/ПРОЦЕСИНГ</b>",
+        "CHAT_FIRST":        "🚨 <b>РИЗИК: СПОЧАТКУ В ЧАТ</b>",
         "SUSPICIOUS":        "⚠️ <b>ПІДОЗРІЛІ УМОВИ</b>",
+        "BLOCK":             "🚫 <b>ЗАБЛОКОВАНО</b>",
+        # Behavior
         "LOW_STATS":         "⚠️ <b>МАЛО УГОД / НИЗЬКИЙ %</b>",
         "SUSPICIOUS_LIMITS": "⚠️ <b>АНОМАЛЬНІ ЛІМІТИ</b>",
+        "PERFECT_RATING":    "🤖 <b>ПІДОЗРІЛИЙ РЕЙТИНГ</b>",
+        # LLM
+        "LLM_BLOCK":         "🚫 <b>AI: ЗАБЛОКОВАНО</b>",
+        "LLM_SUSPICIOUS":    "🤖 <b>AI: ПІДОЗРІЛИЙ</b>",
+        "LLM_PENDING":       "⏳ <i>AI перевіряє…</i>",
+        "LLM_UNKNOWN":       "⚠️ <i>AI не перевірив (timeout)</i>",
+        # Інфо
         "EMPTY_TERMS":       "💬 <i>Умови не вказані</i>",
         "BAD_REVIEWS":       "🚫 <b>ПОГАНІ ВІДГУКИ</b>",
-        "PERFECT_RATING":    "🤖 <b>ПІДОЗРІЛИЙ РЕЙТИНГ (накрутка?)</b>",
+        "BLACKLIST":         "☠️ <b>ЧОРНИЙ СПИСОК</b>",
+        "HIGH_RISK_SCORE":   "🔴 <b>ВИСОКИЙ РИЗИК (накопичений)</b>",
     }
 
     flags = [f.strip() for f in flag.split(",")]
@@ -97,13 +110,24 @@ def _risk_badge(order: Order) -> str:
     review_reason = ""
 
     for f in flags:
-        # BAD_REVIEWS може містити причину після ':'
         if f.startswith("BAD_REVIEWS:"):
             review_reason = f[len("BAD_REVIEWS:"):]
             lines.append(badges["BAD_REVIEWS"])
+        elif f.startswith("LLM_BLOCK:"):
+            review_reason = f[len("LLM_BLOCK:"):]
+            lines.append(badges["LLM_BLOCK"])
+        elif f.startswith("BLOCK:"):
+            parts = f.split(":", 2)
+            risk  = parts[1] if len(parts) > 1 else ""
+            review_reason = parts[2] if len(parts) > 2 else ""
+            if risk == "BLACKLIST":
+                lines.append(badges["BLACKLIST"])
+            else:
+                label = badges.get(risk, badges["BLOCK"])
+                lines.append(label)
         elif f in badges:
             lines.append(badges[f])
-        if f in ("TRIANGLE", "CASINO", "SUSPICIOUS"):
+        if f in ("TRIANGLE", "CASINO", "CHAT_FIRST", "SUSPICIOUS"):
             has_text_risk = True
 
     if not lines:
@@ -111,9 +135,10 @@ def _risk_badge(order: Order) -> str:
 
     result = "\n".join(lines) + "\n"
 
-    # Причина з відгуків
+    # Причина з відгуків або LLM
     if review_reason:
-        result += f"📝 <i>З відгуків:</i> <code>{review_reason[:100]}</code>\n"
+        label = "🤖 <i>AI причина:</i>" if "LLM" in flag else "📝 <i>З відгуків:</i>"
+        result += f"{label} <code>{review_reason[:120]}</code>\n"
 
     # Підозрілий текст в умовах угоди
     trade_terms = getattr(order, "trade_terms", "")
@@ -269,7 +294,7 @@ class TelegramNotifier:
         await self._send_with_retry(text, keyboard)
 
         # ── Компактний дашборд ────────────────────────────────────────────────────
-        async def _send_batch(self, batch: list[SpreadAlert]) -> None:
+    async def _send_batch(self, batch: list[SpreadAlert]) -> None:
             """Підсумок усіх знайдених маршрутів за цикл."""
             medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
             lines = [
@@ -303,6 +328,7 @@ class TelegramNotifier:
             text = "".join(lines)
             for chunk in self._split_message(text):
                 await self._send_with_retry(chunk)
+
 
     async def _send_with_retry(
         self,
