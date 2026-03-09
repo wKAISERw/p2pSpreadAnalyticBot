@@ -78,6 +78,9 @@ class RiskEngine:
             order.is_verified,
         )
 
+        order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+        order.regex_score = int(getattr(result, "score", 0) or 0)
+
         flags: list[str] = []
 
         if result.verdict == "BLOCK":
@@ -143,6 +146,9 @@ class RiskEngine:
                 order.month_order_count,
                 order.is_verified,
             )
+
+            order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
+            order.regex_score = int(getattr(regex_result, "score", 0) or 0)
 
             if regex_result.verdict == "BLOCK":
                 await self._db.save_verdict(

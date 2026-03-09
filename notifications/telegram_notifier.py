@@ -15,7 +15,9 @@ from config import settings
 from exchanges.base import Order
 
 logger = logging.getLogger(__name__)
-
+WARN_BADGES = {
+    "RECEIPT_REQUIRED": "🧾 ПРОСИТЬ КВИТАНЦІЮ",
+}
 EXCHANGE_ICONS = {
     "Binance":   "🟡",
     "Bybit":     "🟣",
@@ -108,6 +110,33 @@ def _alert_grade(spread_pct: float) -> tuple[str, bool]:
         return "💡 <b>БАЗОВИЙ СПРЕД</b>", True
     return "🤏 <b>МІКРО-СПРЕД</b>", True
 
+def _regex_warn_block(order: Order, short: bool = False) -> str:
+    warn_flags = getattr(order, "regex_warn_flags", None) or []
+    if not warn_flags:
+        return ""
+
+    if short:
+        return "🧾"
+
+    lines: list[str] = ["⚠️ <b>WARN-СИГНАЛИ</b>\n"]
+    seen = set()
+
+    for category, excerpt in warn_flags[:2]:
+        badge = WARN_BADGES.get(category, f"⚠️ {category}")
+        key = (category, excerpt)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        lines.append(f"{badge}\n")
+        if excerpt:
+            lines.append(f"<code>{escape(str(excerpt)[:140])}</code>\n")
+
+    score = int(getattr(order, "regex_score", 0) or 0)
+    if score > 0:
+        lines.append(f"Regex score: <code>{score}</code>\n")
+
+    return "".join(lines)
 
 def _risk_badge(order: Order, short: bool = False) -> str:
     flag = getattr(order, "risk_flag", "")
@@ -343,6 +372,9 @@ class TelegramNotifier:
         sell_all = _format_bank_list(getattr(alert, "sell_banks_all", None))
         buy_fit = _format_bank_list(getattr(alert, "buy_banks_fit", None))
         sell_fit = _format_bank_list(getattr(alert, "sell_banks_fit", None))
+        buy_warn = _regex_warn_block(alert.buy_order)
+        sell_warn = _regex_warn_block(alert.sell_order)
+
 
         text = (
             f"{title}\n\n"
@@ -365,7 +397,8 @@ class TelegramNotifier:
             f"Мерчант: {buy_name}{_verified_badge(alert.buy_order)} "
             f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
-            f"{buy_risk if buy_risk else ''}\n\n"
+            f"{buy_risk if buy_risk else ''}"
+            f"{buy_warn if buy_warn else ''}\n"
 
             f"💸 <b>ПРОДАЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
@@ -373,6 +406,7 @@ class TelegramNotifier:
             f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
             f"{sell_risk if sell_risk else ''}"
+            f"{sell_warn if sell_warn else ''}"
         )
 
         keyboard = InlineKeyboardMarkup(
@@ -389,40 +423,45 @@ class TelegramNotifier:
         )
 
         # ── Компактний дашборд ────────────────────────────────────────────────────
+
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
-            """Підсумок усіх знайдених маршрутів за цикл."""
-            medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
-            lines = [
-                f"📋 <b>ПІДСУМОК: АКТУАЛЬНІ МАРШРУТИ</b>  "
-                f"<code>[{batch[0].timestamp.strftime('%H:%M:%S')}]</code>\n"
+        """Підсумок усіх знайдених маршрутів за цикл."""
+        medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+        lines = [
+            f"📋 <b>ПІДСУМОК: АКТУАЛЬНІ МАРШРУТИ</b>  "
+            f"<code>[{batch[0].timestamp.strftime('%H:%M:%S')}]</code>\n"
+            f"<code>{'─' * 28}</code>\n"
+        ]
+
+        for i, a in enumerate(batch[:5]):
+            b_icon = EXCHANGE_ICONS.get(a.buy_order.exchange, "◽️")
+            s_icon = EXCHANGE_ICONS.get(a.sell_order.exchange, "◽️")
+            b_short = BANKS_SHORT.get(a.buy_bank, a.buy_bank)
+            s_short = BANKS_SHORT.get(a.sell_bank, a.sell_bank)
+
+            risks = _risk_badge(a.buy_order, short=True) + _risk_badge(a.sell_order, short=True)
+            warns = _regex_warn_block(a.buy_order, short=True) + _regex_warn_block(a.sell_order, short=True)
+            chips = (risks + warns).strip()
+
+            b_nick = _profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name)
+            s_nick = _profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name)
+
+            lines.append(
+                f"{medals[i]} <b>{a.spread_pct:.2f}%</b>  "
+                f"<code>+{a.profit_uah:.0f} ₴</code>"
+                f"{'  ' + chips if chips else ''}\n"
+                f"  {b_icon} {b_nick} <code>{a.buy_order.price}</code> {b_short}\n"
+                f"  {s_icon} {s_nick} <code>{a.sell_order.price}</code> {s_short}\n"
+                f"  📐 <code>{a.buy_order.min_limit}–{a.buy_order.max_limit}</code> "
+                f"→ <code>{a.sell_order.min_limit}–{a.sell_order.max_limit} ₴</code>\n"
+                f"  <a href='{a.buy_order.link}'>Купити</a>  ·  "
+                f"<a href='{a.sell_order.link}'>Продати</a>\n"
                 f"<code>{'─' * 28}</code>\n"
-            ]
+            )
 
-            for i, a in enumerate(batch[:5]):
-                b_icon = EXCHANGE_ICONS.get(a.buy_order.exchange, "◽️")
-                s_icon = EXCHANGE_ICONS.get(a.sell_order.exchange, "◽️")
-                b_short = BANKS_SHORT.get(a.buy_bank, a.buy_bank)
-                s_short = BANKS_SHORT.get(a.sell_bank, a.sell_bank)
-                risks = _risk_badge(a.buy_order, short=True) + _risk_badge(a.sell_order, short=True)
-                b_nick = _profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name)
-                s_nick = _profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name)
-
-                lines.append(
-                    f"{medals[i]} <b>{a.spread_pct:.2f}%</b>  "
-                    f"<code>+{a.profit_uah:.0f} ₴</code>"
-                    f"{'  ' + risks if risks else ''}\n"
-                    f"  {b_icon} {b_nick} <code>{a.buy_order.price}</code> {b_short}\n"
-                    f"  {s_icon} {s_nick} <code>{a.sell_order.price}</code> {s_short}\n"
-                    f"  📐 <code>{a.buy_order.min_limit}–{a.buy_order.max_limit}</code> "
-                    f"→ <code>{a.sell_order.min_limit}–{a.sell_order.max_limit} ₴</code>\n"
-                    f"  <a href='{a.buy_order.link}'>Купити</a>  ·  "
-                    f"<a href='{a.sell_order.link}'>Продати</a>\n"
-                    f"<code>{'─' * 28}</code>\n"
-                )
-
-            text = "".join(lines)
-            for chunk in self._split_message(text):
-                await self._send_with_retry(chunk)
+        text = "".join(lines)
+        for chunk in self._split_message(text):
+            await self._send_with_retry(chunk)
 
     async def _send_with_retry(
             self,
