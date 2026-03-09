@@ -43,7 +43,9 @@ class ReviewFetcher:
         self._processed = 0
         self._errors = 0
         self._pending: set[tuple[str, str]] = set()
-
+        # 🚀 ДОДАЄМО СТАН DEGRADE
+        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
+        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
     async def start(self) -> None:
         if self._session and not self._session.closed:
             logger.debug("ReviewFetcher start skipped: session already active")
@@ -117,10 +119,12 @@ class ReviewFetcher:
                 key = (exchange, merchant_id)
 
                 try:
-                    logger.debug(
-                        "ReviewFetcher dequeued %s [%s] | queue=%d pending=%d",
-                        merchant_id, exchange, self._queue.qsize(), len(self._pending)
-                    )
+                    # 🚀 ПЕРЕВІРКА НА DEGRADED MODE (Якщо кулдаун ще діє - пропускаємо)
+                    now = asyncio.get_event_loop().time()
+                    if now < self._exchange_cooldown.get(exchange, 0):
+                        logger.debug("ReviewFetcher в Degraded Mode для %s, пропускаємо", exchange)
+                        await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
+                        continue
 
                     needs_fetch = await self._db.needs_review_fetch(
                         exchange, merchant_id, self._review_ttl
@@ -160,6 +164,8 @@ class ReviewFetcher:
                 return
 
             total = pos + neg + neutral
+            # 🚀 ЯКЩО УСПІШНО — СКИДАЄМО ЛІЧИЛЬНИК
+            self._exchange_fails[exchange] = 0
             bad_pct = (neg / total * 100.0) if total > 0 else 0.0
 
             logger.info(
@@ -168,7 +174,7 @@ class ReviewFetcher:
             )
 
             await self._db.save_reviews(
-                exchange, merchant_id, pos, neg, neutral, bad_texts
+                exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK"
             )
             self._processed += 1
 
@@ -185,10 +191,15 @@ class ReviewFetcher:
 
         except Exception as e:
             self._errors += 1
-            logger.exception(
-                "Помилка фетчингу/збереження відгуків %s [%s]: %s",
-                merchant_id, exchange, e
-            )
+            # 🚀 НАКОПИЧУЄМО ПОМИЛКИ І ВМИКАЄМО DEGRADED MODE
+            self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
+            if self._exchange_fails[exchange] >= 3:
+                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + 7200.0  # 2 години
+                logger.error("🚨 %s API впало 3 рази підряд! Вмикаємо Degraded Mode на 2 години.", exchange)
+
+            await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
+            logger.warning("Помилка відгуків %s [%s]: %s", merchant_id, exchange, e)
+
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
@@ -284,11 +295,11 @@ class ReviewFetcher:
 
         except asyncio.TimeoutError:
             logger.warning("ReviewFetcher Bybit timeout for %s", merchant_id)
-            return 0, 0, 0, []
+            raise RuntimeError("Bybit API Timeout")  # <--- Замінили return
 
         except aiohttp.ClientError as e:
             logger.warning("ReviewFetcher Bybit client error for %s: %s", merchant_id, e)
-            return 0, 0, 0, []
+            raise RuntimeError(f"Bybit Client Error: {e}")  # <--- Замінили return
 
         info = data.get("result", {}).get("userInfo", {})
         if not info:
@@ -334,7 +345,7 @@ class ReviewFetcher:
         async with self._session.get(profile_url, params=params) as resp:
             if resp.status != 200:
                 logger.warning("ReviewFetcher OKX profile status=%s for %s", resp.status, merchant_id)
-                return 0, 0, 0, []
+                raise RuntimeError(f"OKX API HTTP {resp.status}") # <--- Замінили return 0,0,0,[]
             data = await resp.json()
 
         info = data.get("data") or {}

@@ -214,9 +214,21 @@ class RiskEngine:
                         order.merchant_name, exchange,
                     )
 
+                    # 🚀 ОНОВЛЕНИЙ ВИКЛИК SCHEDULE З ПЕРЕДАЧЕЮ ПАРАМЕТРІВ
                 scheduled = self._llm.schedule(
-                    exchange, mid, order.merchant_name, terms, regex_result
+                    exchange=exchange,
+                    merchant_id=mid,
+                    merchant_name=order.merchant_name,
+                    trade_terms=terms,
+                    regex_result=regex_result,
+                    finish_rate=float(order.finish_rate_pct),
+                    month_order_count=int(order.month_order_count),
+                    is_verified=bool(order.is_verified),
+                    min_limit=float(order.min_limit),
+                    max_limit=float(order.max_limit),
+                    behavior_flags=behavior_flags
                 )
+
                 if scheduled:
                     flags = [_build_pending_flag(regex_result)] + review_flags + behavior_flags
                     order.risk_flag = _join_flags(flags) or _build_pending_flag(regex_result)

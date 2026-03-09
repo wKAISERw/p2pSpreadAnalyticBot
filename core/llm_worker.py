@@ -88,10 +88,9 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 
 КРИТИЧНО:
 - Розрізняй "згадує" і "вимагає".
-- Якщо в тексті сказано "без третіх осіб", "лише зі своєї картки", "не пишіть у Telegram", "тільки в чаті біржі" — це НЕ BLOCK і зазвичай OK.
-- BLOCK став лише якщо мерчант реально вимагає або допускає ризикову поведінку.
-- Якщо кейс сумнівний, але не явний — SUSPICIOUS.
-- Враховуй summary reviews, якщо вони є: високий % негативу та скарги підсилюють ризик.
+- Враховуй СТАТИСТИКУ мерчанта! Якщо мерчант ВЕРИФІКОВАНИЙ (ТАК), має >500 угод і >95% успішності — він надійний. Його жорсткі вимоги (наприклад, скинути чек) або специфічний сленг — це заходи ЙОГО безпеки. Це НЕ BLOCK.
+- BLOCK став лише якщо мерчант реально вимагає або допускає ризикову поведінку (казино, дропи, перехід в ТГ).
+- Враховуй summary reviews: високий % негативу підсилюють ризик.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
 {"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"TRIANGLE"|"CASINO"|"CHAT_FIRST"|"SUSPICIOUS_BIZ"|"APPEAL_PRESSURE"|"ANONYMOUS"|"EXTERNAL_LINK"|"BADREVIEWS"|"NONE","reason":"до 120 символів українською"}"""
@@ -104,7 +103,12 @@ class LLMTask:
     merchant_name: str
     trade_terms: str
     regex_result: RegexResult
-
+    finish_rate: float
+    month_order_count: int
+    is_verified: bool
+    min_limit: float
+    max_limit: float
+    behavior_flags: list[str]
 
 class LLMWorkerPool:
     def __init__(self, db: MerchantDB):
@@ -143,12 +147,30 @@ class LLMWorkerPool:
         merchant_name: str,
         trade_terms: str,
         regex_result: RegexResult,
+        finish_rate: float = 0.0,
+        month_order_count: int = 0,
+        is_verified: bool = False,
+        min_limit: float = 0.0,
+        max_limit: float = 0.0,
+        behavior_flags: list[str] = None
     ) -> bool:
         key = (exchange, merchant_id)
         if key in self._pending:
             return False
 
-        task = LLMTask(exchange, merchant_id, merchant_name, trade_terms, regex_result)
+        task = LLMTask(
+            exchange=exchange,
+            merchant_id=merchant_id,
+            merchant_name=merchant_name,
+            trade_terms=trade_terms,
+            regex_result=regex_result,
+            finish_rate=finish_rate,
+            month_order_count=month_order_count,
+            is_verified=is_verified,
+            min_limit=min_limit,
+            max_limit=max_limit,
+            behavior_flags=behavior_flags or []
+        )
         try:
             self._queue.put_nowait(task)
             self._pending.add(key)
@@ -379,6 +401,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     reason = getattr(rr, "reason", "") or "-"
     categories = _regex_categories(rr)
     excerpts = _top_excerpts(rr)
+    rev_status = review_summary.get("status", "OK")
 
     pos = int(review_summary.get("positive", 0) or 0)
     neg = int(review_summary.get("negative", 0) or 0)
@@ -387,28 +410,37 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     neg_pct = (neg / total * 100.0) if total > 0 else 0.0
     bad_texts = review_summary.get("bad_texts", []) or []
 
+
     lines = [
         f"Біржа: {task.exchange}",
-        f"Мерчант: {task.merchant_name}",
-        f"Merchant ID: {task.merchant_id}",
-        f"Regex verdict: {rr.verdict}",
-        f"Regex score: {score}",
+        f"Мерчант: {task.merchant_name} (ID: {task.merchant_id})",
+        # ДОДАЄМО СТАТИСТИКУ:
+        f"Статистика: {task.finish_rate:.1f}% успішних, {task.month_order_count} угод/місяць",
+        f"Верифікація: {'ТАК (Надійний)' if task.is_verified else 'НІ'}",
+        f"Ліміти: {task.min_limit} - {task.max_limit} UAH",
+        f"Поведінка (RiskEngine): {', '.join(task.behavior_flags) if task.behavior_flags else 'Нормальна'}",
+        "",
+        f"Regex verdict: {rr.verdict} (Score: {score})",
         f"Regex main risk: {risk_type}",
-        f"Regex reason: {reason[:140]}",
         f"Regex categories: {', '.join(categories) if categories else 'NONE'}",
         f"Умови: {norm_text}",
         "",
         "ПЕРЕВІР КОНТЕКСТ:",
-        "- Чи merchant ВИМАГАЄ ризик, чи ЗАБОРОНЯЄ його?",
+        "- Зважай на рейтинг мерчанта. Трастовим мерчантам дозволено жорсткіше формулювати безпекові вимоги.",
         "- Якщо написано 'без третіх осіб' або 'не пишіть у Telegram' — це безпечний контекст.",
         "",
         f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}",
     ]
 
-    if bad_texts:
+    # 🚀 ЯКЩО АРІ БІРЖІ ВПАЛО — КАЖЕМО ПРО ЦЕ LLM
+    if rev_status != "OK":
+        lines.append(
+            f"Reviews summary: UNAVAILABLE (API біржі {task.exchange} тимчасово не відповідає. Вважай репутацію невідомою і суди лише по тексту).")
+    else:
+        lines.append(f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}")
+
+    if bad_texts and rev_status == "OK":
         lines.append("Негативні відгуки:")
-        for i, t in enumerate(bad_texts[:3], 1):
-            lines.append(f"{i}. {str(t).replace(chr(10), ' ')[:120]}")
 
     if excerpts:
         lines.append("Regex фрагменти:")

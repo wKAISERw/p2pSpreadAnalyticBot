@@ -139,6 +139,8 @@ class MerchantDB:
         await self._db.commit()
 
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
+        # 🚀 ДОДАЄМО СТАТУС ВІДГУКІВ
+        await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -352,64 +354,43 @@ class MerchantDB:
         return (time.time() - updated_at) > ttl_sec
 
     async def save_reviews(
-        self,
-        exchange: str,
-        merchant_id: str,
-        positive_count: int,
-        negative_count: int,
-        neutral_count: int,
-        bad_texts: list[str],
+        self, exchange: str, merchant_id: str,
+        positive_count: int, negative_count: int, neutral_count: int,
+        bad_texts: list[str], status: str = "OK"  # <--- Додали параметр
     ) -> None:
         import json
-
         now = time.time()
         bad_texts_json = json.dumps(bad_texts[:20], ensure_ascii=False)
 
         await self._db.execute(
             """
             INSERT INTO merchant_reviews
-            (exchange, merchant_id, positive_count, negative_count, neutral_count, bad_texts_json, updated_at)
-            VALUES (?,?,?,?,?,?,?)
+            (exchange, merchant_id, positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status)
+            VALUES (?,?,?,?,?,?,?,?)
             ON CONFLICT(exchange, merchant_id) DO UPDATE SET
                 positive_count = excluded.positive_count,
                 negative_count = excluded.negative_count,
                 neutral_count  = excluded.neutral_count,
                 bad_texts_json = excluded.bad_texts_json,
-                updated_at     = excluded.updated_at
+                updated_at     = excluded.updated_at,
+                status         = excluded.status
             """,
-            (
-                exchange,
-                merchant_id,
-                max(int(positive_count), 0),
-                max(int(negative_count), 0),
-                max(int(neutral_count), 0),
-                bad_texts_json,
-                now,
-            ),
+            (exchange, merchant_id, max(int(positive_count), 0), max(int(negative_count), 0),
+             max(int(neutral_count), 0), bad_texts_json, now, status),
         )
         await self._db.commit()
 
     async def get_reviews_summary(self, exchange: str, merchant_id: str) -> dict:
         import json
-
         async with self._db.execute(
-            """
-            SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at
-            FROM merchant_reviews
-            WHERE exchange=? AND merchant_id=?
-            """,
+            "SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status "
+            "FROM merchant_reviews WHERE exchange=? AND merchant_id=?",
             (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
 
         if not row:
-            return {
-                "positive": 0,
-                "negative": 0,
-                "neutral": 0,
-                "bad_texts": [],
-                "updated_at": 0,
-            }
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "updated_at": 0, "status": "UNKNOWN"}
 
         try:
             bad_texts = json.loads(row["bad_texts_json"] or "[]")
@@ -422,4 +403,5 @@ class MerchantDB:
             "neutral": row["neutral_count"] or 0,
             "bad_texts": bad_texts,
             "updated_at": row["updated_at"] or 0,
+            "status": row["status"] or "OK"  # <--- Повертаємо статус
         }
