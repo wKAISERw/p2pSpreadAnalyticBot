@@ -1,4 +1,7 @@
 # core/merchant_db.py
+# =============================================================================
+# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: WAL + канонічна версія)
+# =============================================================================
 """
 Асинхронна SQLite база мерчантів (aiosqlite).
 
@@ -7,6 +10,11 @@
 - risk_score та лічильники звернень
 - глобальний blacklist
 - review cache для Binance / Bybit / OKX
+
+WAL (Write-Ahead Logging):
+- вмикається при старті через PRAGMA journal_mode=WAL
+- захищає від database locked при паралельних async читаннях/записах
+- особливо важливо коли LLMWorkerPool і ReviewFetcher пишуть одночасно
 """
 
 from __future__ import annotations
@@ -55,8 +63,18 @@ class MerchantDB:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._path))
         self._db.row_factory = aiosqlite.Row
+
+        # WAL: захист від database locked при паралельних async операціях.
+        # LLMWorkerPool (2 воркери) + ReviewFetcher пишуть одночасно —
+        # без WAL можливі помилки при конкурентному доступі.
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA synchronous=NORMAL")   # безпечно + швидше
+        await self._db.execute("PRAGMA cache_size=-32000")     # 32 MB кеш
+        await self._db.execute("PRAGMA foreign_keys=ON")
+        await self._db.commit()
+
         await self._init_schema()
-        logger.info("MerchantDB запущено: %s", self._path)
+        logger.info("MerchantDB запущено (WAL): %s", self._path)
 
     async def stop(self) -> None:
         if self._db:

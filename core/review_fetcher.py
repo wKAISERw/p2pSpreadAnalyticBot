@@ -268,15 +268,30 @@ class ReviewFetcher:
         url = "https://api2.bybit.com/fiat/otc/user/public/profile"
         params = {"userId": merchant_id}
 
-        async with self._session.get(url, params=params) as resp:
-            if resp.status != 200:
-                logger.warning("ReviewFetcher Bybit profile status=%s for %s", resp.status, merchant_id)
-                return 0, 0, 0, []
-            data = await resp.json()
+        try:
+            timeout = aiohttp.ClientTimeout(total=6.0, connect=3.0, sock_read=4.0)
+
+            async with self._session.get(url, params=params, timeout=timeout) as resp:
+                if resp.status == 404:
+                    logger.warning("ReviewFetcher Bybit profile status=404 for %s", merchant_id)
+                    return 0, 0, 0, []
+
+                if resp.status != 200:
+                    logger.warning("ReviewFetcher Bybit profile status=%s for %s", resp.status, merchant_id)
+                    return 0, 0, 0, []
+
+                data = await resp.json(content_type=None)
+
+        except asyncio.TimeoutError:
+            logger.warning("ReviewFetcher Bybit timeout for %s", merchant_id)
+            return 0, 0, 0, []
+
+        except aiohttp.ClientError as e:
+            logger.warning("ReviewFetcher Bybit client error for %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
         info = data.get("result", {}).get("userInfo", {})
         if not info:
-            logger.debug("ReviewFetcher Bybit empty profile %s", merchant_id)
             return 0, 0, 0, []
 
         pos = int(info.get("goodEvaluate") or 0)

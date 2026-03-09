@@ -1,3 +1,7 @@
+# scanner.py
+# =============================================================================
+# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: канонічна версія)
+# =============================================================================
 import asyncio
 import logging
 import time
@@ -344,7 +348,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         await notifier.push(alert)
 
-                    await asyncio.sleep(2.0)
+                    # Адаптивний sleep: підтримуємо стабільний інтервал циклу ~3с
+                    # незалежно від того скільки зайняв сам цикл.
+                    # min=0.5с (не спамимо біржі), max=3.0с (не гальмуємо)
+                    cycle_elapsed = time.monotonic() - start_time
+                    adaptive_sleep = max(0.5, min(3.0, 3.0 - cycle_elapsed))
+                    await asyncio.sleep(adaptive_sleep)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)

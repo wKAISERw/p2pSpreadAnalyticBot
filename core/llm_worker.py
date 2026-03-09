@@ -1,4 +1,7 @@
 # core/llm_worker.py
+# =============================================================================
+# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: канонічна версія + Groq backoff)
+# =============================================================================
 """
 Асинхронний LLM-воркер.
 
@@ -33,6 +36,7 @@ from core.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+GROQ_MODEL   = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile").strip()
 
 def _setup_llm_log() -> logging.Logger:
     Path("logs").mkdir(exist_ok=True)
@@ -227,15 +231,44 @@ class LLMWorkerPool:
                 source, task.merchant_name, task.exchange, risk_type, reason
             )
 
+    # Groq cooldown — class-level щоб всі воркери бачили той самий стан
+    _groq_cooldown_until: float = 0.0
+    _groq_consecutive_429: int  = 0
+
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
+        import random, time as _time
         user_msg = _build_prompt(task, review_summary)
 
-        try:
-            result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
-            result["_source"] = "groq"
-            return result
-        except Exception as e:
-            logger.error("❌ Groq помилка: %s", e)
+        # Перевіряємо cooldown перед запитом
+        now = _time.monotonic()
+        groq_available = LLMWorkerPool._groq_cooldown_until <= now
+
+        if not groq_available:
+            remaining = LLMWorkerPool._groq_cooldown_until - now
+            logger.debug("Groq cooldown %.0fs → Gemini", remaining)
+
+        if groq_available:
+            try:
+                result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
+                result["_source"] = "groq"
+                LLMWorkerPool._groq_consecutive_429 = 0   # успіх → скидаємо
+                return result
+            except RateLimitError:
+                LLMWorkerPool._groq_consecutive_429 += 1
+                n = LLMWorkerPool._groq_consecutive_429
+                # Exponential backoff: 30s → 60s → 120s → 240s → 480s (max)
+                base = 30.0 * (2 ** min(n - 1, 4))
+                wait = base * random.uniform(0.85, 1.15)   # jitter ±15%
+                LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
+                self._stats["timeouts"] += 1
+                logger.warning(
+                    "⛔ Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait
+                )
+            except asyncio.TimeoutError:
+                self._stats["timeouts"] += 1
+                logger.warning("⏳ Groq timeout для %s", task.merchant_name)
+            except Exception as e:
+                logger.error("❌ Groq помилка: %s", e)
 
         try:
             result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
@@ -281,7 +314,7 @@ class LLMWorkerPool:
             raise RuntimeError("GROQ_API_KEY не встановлений")
 
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
