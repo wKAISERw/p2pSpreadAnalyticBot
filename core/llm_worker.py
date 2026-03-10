@@ -75,25 +75,29 @@ MAX_MATCHES_IN_PROMPT = 3
 MAX_EXCERPT_LEN = 90
 
 SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України.
-Твоє завдання — визначити, чи умови мерчанта реально містять ризик, чи навпаки забороняють його.
+Твоє завдання — визначити, чи умови мерчанта або його відгуки реально містять ризик, чи навпаки — це заходи його безпеки.
 
-ГОЛОВНІ РИЗИКИ:
-- TRIANGLE: мерчант дозволяє або вимагає оплату від третьої особи, чужої картки, знайомого, дропа
-- CASINO: казино, ставки, букмекери, процесинг, агрегатор
-- CHAT_FIRST: просить написати до оплати
-- SUSPICIOUS_BIZ: ФОП / IBAN / бізнес-рахунок у дивному контексті
-- APPEAL_PRESSURE: тиск апеляцією, скаргою, погрози
-- ANONYMOUS: анонімність, "без перевірки", cash-in, термінал
-- EXTERNAL_LINK: вимагає перейти в Telegram, Viber, WhatsApp, Signal або інший зовнішній контакт
+ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
+- TRIANGLE: вимагає або допускає оплату від третьої особи, знайомого, дропа.
+- THIRD_PARTY_HINT: двозначна згадка третіх осіб (уважно читай контекст).
+- CASINO: казино, ставки, букмекери, процесинг.
+- CHAT_FIRST: просить написати до оплати в чат.
+- SUSPICIOUS_BIZ: ФОП / бізнес-рахунок у дивному контексті.
+- APPEAL_PRESSURE: тиск апеляцією, скаргою, погрози.
+- ANONYMOUS: анонімність, "без перевірки", cash-in, термінал.
+- EXTERNAL_LINK: вимагає перейти в Telegram, Viber, Signal.
+- FINCRIME: фінмон, AML, брудні гроші, обнал, сірі схеми.
+- CHARGEBACK: рефанди, диспути, чарджбеки.
+- MIDDLEMAN: використання посередника, номіналу, прокладки.
+- NO_COMMENTS: вимагає пусте призначення платежу.
 
 КРИТИЧНО:
-- Розрізняй "згадує" і "вимагає".
-- Враховуй СТАТИСТИКУ мерчанта! Якщо мерчант ВЕРИФІКОВАНИЙ (ТАК), має >500 угод і >95% успішності — він надійний. Його жорсткі вимоги (наприклад, скинути чек) або специфічний сленг — це заходи ЙОГО безпеки. Це НЕ BLOCK.
-- BLOCK став лише якщо мерчант реально вимагає або допускає ризикову поведінку (казино, дропи, перехід в ТГ).
-- Враховуй summary reviews: високий % негативу підсилюють ризик.
+- Розрізняй "згадує" і "вимагає". Якщо пише "без третіх осіб" або "не приймаю грязь" — це БЕЗПЕЧНО (OK).
+- Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності — його жорсткі вимоги (наприклад, скинути чек) — це його безпека. Це НЕ BLOCK.
+- Якщо в негативних відгуках пишуть "скам", "трикутник", "рефанд", "заморозка" — це майже завжди BLOCK (вкажи risk: BADREVIEWS).
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
-{"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"TRIANGLE"|"CASINO"|"CHAT_FIRST"|"SUSPICIOUS_BIZ"|"APPEAL_PRESSURE"|"ANONYMOUS"|"EXTERNAL_LINK"|"BADREVIEWS"|"NONE","reason":"до 120 символів українською"}"""
+{"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ_ВИЩЕ","reason":"до 120 символів українською"}"""
 
 
 @dataclass
@@ -410,11 +414,9 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     neg_pct = (neg / total * 100.0) if total > 0 else 0.0
     bad_texts = review_summary.get("bad_texts", []) or []
 
-
     lines = [
         f"Біржа: {task.exchange}",
         f"Мерчант: {task.merchant_name} (ID: {task.merchant_id})",
-        # ДОДАЄМО СТАТИСТИКУ:
         f"Статистика: {task.finish_rate:.1f}% успішних, {task.month_order_count} угод/місяць",
         f"Верифікація: {'ТАК (Надійний)' if task.is_verified else 'НІ'}",
         f"Ліміти: {task.min_limit} - {task.max_limit} UAH",
@@ -429,26 +431,28 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "- Зважай на рейтинг мерчанта. Трастовим мерчантам дозволено жорсткіше формулювати безпекові вимоги.",
         "- Якщо написано 'без третіх осіб' або 'не пишіть у Telegram' — це безпечний контекст.",
         "",
-        f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}",
     ]
 
-    # 🚀 ЯКЩО АРІ БІРЖІ ВПАЛО — КАЖЕМО ПРО ЦЕ LLM
+    # Статус відгуків
     if rev_status != "OK":
-        lines.append(
-            f"Reviews summary: UNAVAILABLE (API біржі {task.exchange} тимчасово не відповідає. Вважай репутацію невідомою і суди лише по тексту).")
+        lines.append(f"Reviews summary: UNAVAILABLE (API біржі {task.exchange} тимчасово не відповідає. Вважай репутацію невідомою і суди лише по тексту).")
     else:
-        lines.append(f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}")
+        lines.append(f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}%")
 
+    # 🚀 ВИПРАВЛЕНИЙ БАГ: Тепер ми реально передаємо текст відгуків у нейронку!
     if bad_texts and rev_status == "OK":
         lines.append("Негативні відгуки:")
+        for i, t in enumerate(bad_texts[:3], 1):
+            clean_t = str(t).replace('\n', ' ').strip()
+            lines.append(f"  {i}. {clean_t[:120]}")
 
     if excerpts:
         lines.append("Regex фрагменти:")
         for i, ex in enumerate(excerpts, 1):
-            lines.append(f"{i}. {ex}")
+            lines.append(f"  {i}. {ex}")
 
     lines.append(
-        'Поверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
     )
     return "\n".join(lines)
 
