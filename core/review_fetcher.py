@@ -313,29 +313,43 @@ class ReviewFetcher:
         return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
 
     async def _fetch_bybit_bad_texts(self, merchant_id: str) -> list[str]:
-        url = "https://api2.bybit.com/fiat/otc/user/feedback/list"
+        # 🚀 Використовуємо внутрішній ендпоінт, який ти знайшов
+        url = "https://www.bybit.com/x-api/fiat/otc/order/appraiseList"
+
+        # Специфічний payload для цього API
         payload = {
-            "userId": merchant_id,
-            "evaluateType": "bad",
+            "userId": str(merchant_id),
+            "evaluateType": "bad",  # беремо тільки негатив для економії трафіку
             "page": 1,
             "size": 10,
         }
 
         try:
-            async with self._session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    logger.debug("ReviewFetcher Bybit bad_texts status=%s for %s", resp.status, merchant_id)
-                    return []
-                data = await resp.json()
+            # ⚠️ ВАЖЛИВО: використовуємо BybitP2PClient, щоб обійти Cloudflare 403
+            # Якщо у тебе в ReviewFetcher немає доступу до bybit_client,
+            # його треба передати в __init__ або створити окремо.
+            data = await self.bybit_client.fetch(url, payload)
+
+            if not data or data.get("ret_code") != 0:
+                logger.debug("ReviewFetcher Bybit appraiseList error: %s", data.get("ret_msg"))
+                return []
+
         except Exception as e:
-            logger.debug("ReviewFetcher Bybit bad_texts error %s: %s", merchant_id, e)
+            logger.debug("ReviewFetcher Bybit appraiseList exception: %s", e)
             return []
 
         texts = []
-        for item in data.get("result", {}).get("items", []):
+        # Bybit зазвичай повертає список у result -> items
+        items = data.get("result", {}).get("items", [])
+
+        for item in items:
+            # У новому API текст може бути в полі 'content' або 'evaluateContent'
             text = (item.get("content") or item.get("feedback") or "").strip()
+
             if text and _has_bad_keywords(text):
+                # Обмежуємо довжину, щоб не роздувати промпт для LLM
                 texts.append(text[:200])
+
         return texts
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:

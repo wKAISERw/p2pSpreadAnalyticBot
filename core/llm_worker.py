@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -74,11 +75,11 @@ MAX_NORM_TERMS = 220
 MAX_MATCHES_IN_PROMPT = 3
 MAX_EXCERPT_LEN = 90
 
-SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України.
-Твоє завдання — визначити, чи умови мерчанта або його відгуки реально містять ризик, чи навпаки — це заходи його безпеки.
+SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.0).
+Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
 
 ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
-- TRIANGLE: вимагає або допускає оплату від третьої особи, знайомого, дропа.
+- TRIANGLE: вимагає або допускає оплату від третьої особи, дропа.
 - THIRD_PARTY_HINT: двозначна згадка третіх осіб (уважно читай контекст).
 - CASINO: казино, ставки, букмекери, процесинг.
 - CHAT_FIRST: просить написати до оплати в чат.
@@ -87,14 +88,16 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - ANONYMOUS: анонімність, "без перевірки", cash-in, термінал.
 - EXTERNAL_LINK: вимагає перейти в Telegram, Viber, Signal.
 - FINCRIME: фінмон, AML, брудні гроші, обнал, сірі схеми.
-- CHARGEBACK: рефанди, диспути, чарджбеки.
 - MIDDLEMAN: використання посередника, номіналу, прокладки.
-- NO_COMMENTS: вимагає пусте призначення платежу.
+- CHARGEBACK: погроза рефандом, чарджбеком, поверненням через банк.
+- NO_COMMENTS: жорстка вимога нічого не писати в коментарях до платежу.
+- RECEIPT_REQUIRED: вимога чеку/квитанції як інструмент маніпуляції.
+- BOT_API: використання скриптів/процесингу (прапори API_REPLENISH).
 
 КРИТИЧНО:
-- Розрізняй "згадує" і "вимагає". Якщо пише "без третіх осіб" або "не приймаю грязь" — це БЕЗПЕЧНО (OK).
-- Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності — його жорсткі вимоги (наприклад, скинути чек) — це його безпека. Це НЕ BLOCK.
-- Якщо в негативних відгуках пишуть "скам", "трикутник", "рефанд", "заморозка" — це майже завжди BLOCK (вкажи risk: BADREVIEWS).
+- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант пише "тільки своя карта", але потім додає "від родичів приймаю з фото/паспортом" або "можу прийняти від довіреної особи" — ЦЕ РИЗИК. Ти ПОВИНЕН ставити verdict: SUSPICIOUS або BLOCK (ризик: THIRD_PARTY_HINT або TRIANGLE). Не знижуй до OK!
+- ⚖️ МАТРИЦЯ ДОКАЗІВ ТА БОТИ: Якщо в "Поведінці" є прапори API_REPLENISH, CROSS_EXCHANGE_BOT або COMPOSITE_RISK — це дуже сильний маркер бот-процесингу. Оціни його В КОМПЛЕКСІ з текстом! Якщо текст ІДЕАЛЬНО безпечний ("без третіх осіб", "тільки чат біржі") — ти маєш право виправдати мерчанта і поставити verdict: OK. Але якщо при цих прапорах є хоча б найменша підозра (просить чек, чат, або двозначно згадує 3-ті особи) — став verdict: BLOCK. Ти — фінальний арбітр.
+- Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності, але немає прапорів ботів — його жорсткі вимоги щодо своєї безпеки є нормою.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
 {"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ_ВИЩЕ","reason":"до 120 символів українською"}"""
@@ -122,6 +125,8 @@ class LLMWorkerPool:
         self._workers: list[asyncio.Task] = []
         self._session: Optional[aiohttp.ClientSession] = None
         self._stats = {"processed": 0, "blocks": 0, "timeouts": 0, "errors": 0}
+        # 🚀 ШАР 2: Anti-requeue кеш (останній виклик LLM)
+        self._recent_calls: dict[tuple[str, str], float] = {}
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
@@ -161,7 +166,10 @@ class LLMWorkerPool:
         key = (exchange, merchant_id)
         if key in self._pending:
             return False
-
+            # 🚀 Забороняємо ставити в чергу частіше ніж раз на 10 хвилин (600 сек)
+        now = time.time()
+        if now - self._recent_calls.get(key, 0) < 600:
+            return False
         task = LLMTask(
             exchange=exchange,
             merchant_id=merchant_id,
@@ -257,9 +265,20 @@ class LLMWorkerPool:
                 source, task.merchant_name, task.exchange, risk_type, reason
             )
 
+            # 🚀 Записуємо час останнього звернення, щоб не смикати LLM найближчі 10 хв
+        self._recent_calls[(task.exchange, task.merchant_id)] = time.time()
+
+        # Очищення словника від старих записів, щоб уникнути витоку пам'яті
+        if len(self._recent_calls) > 2000:
+            cutoff = time.time() - 600
+            self._recent_calls = {k: v for k, v in self._recent_calls.items() if v > cutoff}
+
     # Groq cooldown — class-level щоб всі воркери бачили той самий стан
     _groq_cooldown_until: float = 0.0
     _groq_consecutive_429: int  = 0
+
+    # 🚀 ДОДАЄМО: Gemini cooldown
+    _gemini_cooldown_until: float = 0.0
 
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
         import random, time as _time
@@ -268,6 +287,18 @@ class LLMWorkerPool:
         # Перевіряємо cooldown перед запитом
         now = _time.monotonic()
         groq_available = LLMWorkerPool._groq_cooldown_until <= now
+        gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
+
+        # 🚀 ФІКС: Якщо обидва сервіси на паузі - економимо час і не стукаємо
+        if not groq_available and not gemini_available:
+            self._stats["timeouts"] += 1
+            logger.warning("⛔ Обидві LLM на паузі (Rate Limit). Пропускаємо %s", task.merchant_name)
+            return {
+                "status": "UNKNOWN",
+                "risk": "NONE",
+                "reason": "Both APIs on rate limit cooldown",
+                "_source": "cooldown_skip",
+            }
 
         if not groq_available:
             remaining = LLMWorkerPool._groq_cooldown_until - now
@@ -277,14 +308,14 @@ class LLMWorkerPool:
             try:
                 result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
                 result["_source"] = "groq"
-                LLMWorkerPool._groq_consecutive_429 = 0   # успіх → скидаємо
+                LLMWorkerPool._groq_consecutive_429 = 0  # успіх → скидаємо
                 return result
             except RateLimitError:
                 LLMWorkerPool._groq_consecutive_429 += 1
                 n = LLMWorkerPool._groq_consecutive_429
                 # Exponential backoff: 30s → 60s → 120s → 240s → 480s (max)
                 base = 30.0 * (2 ** min(n - 1, 4))
-                wait = base * random.uniform(0.85, 1.15)   # jitter ±15%
+                wait = base * random.uniform(0.85, 1.15)  # jitter ±15%
                 LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
                 self._stats["timeouts"] += 1
                 logger.warning(
@@ -309,7 +340,9 @@ class LLMWorkerPool:
                 "_source": "gemini_404",
             }
         except ProviderRateLimitError as e:
-            logger.warning("⏳ Gemini rate limit: %s", e)
+            # 🚀 ФІКС: Якщо Gemini дає 429, ставимо його на паузу на 60 секунд
+            LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
+            logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
             return {
                 "status": "UNKNOWN",
                 "risk": "NONE",
@@ -385,6 +418,10 @@ class LLMWorkerPool:
         )
 
         async with self._session.post(url, json=payload) as resp:
+            # 🚀 ФІКС: Коректно ловимо 429 і прокидаємо його наверх
+            if resp.status == 429:
+                raise ProviderRateLimitError("Gemini rate limit 429 (Resource Exhausted)")
+
             if resp.status != 200:
                 error_text = await resp.text()
                 raise RuntimeError(f"Gemini HTTP {resp.status} - Деталі: {error_text}")

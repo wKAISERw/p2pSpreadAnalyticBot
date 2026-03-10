@@ -41,6 +41,21 @@ async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
             logger.error("🚨 [WATCHDOG] Головний цикл не відповідає %.0fs!", elapsed)
 
 
+async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
+    """Фонова задача для регулярного очищення старих снапшотів з БД (раз на годину)."""
+    while True:
+        await asyncio.sleep(interval_hours * 3600)
+        try:
+            # Зберігаємо дані за 7 днів (168 годин) для long-term патернів
+            deleted = await db.prune_snapshots(max_age_hours=168)
+            if deleted > 0:
+                logger.info("🧹 DB Maintenance: видалено %d старих снапшотів", deleted)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Помилка під час DB Maintenance: %s", e)
+
+
 def _order_fingerprint(order, bank_code: str) -> str:
     return (
         f"{order.exchange}|{order.merchant_id}|{bank_code}|"
@@ -56,6 +71,7 @@ def _route_fingerprint(opp: dict) -> str:
         f" -> "
         f"{_order_fingerprint(sell_o, opp['sell_bank'])}"
     )
+
 
 def _banks_sorted(codes: list[str] | None, target_banks: dict[str, str]) -> list[str]:
     uniq = {c for c in (codes or []) if c}
@@ -160,9 +176,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
 
+    # 1. Створюємо базу
     merchant_db = MerchantDB()
     await merchant_db.start()
     await merchant_db.load_blacklist_from_file()
+
+    # 2. 🚀 ТЕПЕР ЗАПУСКАЄМО MAINTENANCE (база вже існує)
+    maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     notifier.bind_db(merchant_db)
     llm_pool = LLMWorkerPool(merchant_db)
@@ -235,24 +255,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
-                    for res in results:
-                        if isinstance(res, Exception):
-                            continue
-
-                        b_orders, s_orders = res
-                        await risk_engine.analyze_batch_async(b_orders)
-                        await risk_engine.analyze_batch_async(s_orders)
-
-                        for o in b_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-
-                        for o in s_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-
-                    last_cycle_time[0] = time.monotonic()
-
+                    # 🚀 ЗБИРАЄМО ДАНІ ДЛЯ ГРУПУВАННЯ + АНАЛІЗУ (один прохід)
+                    all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
 
@@ -262,17 +266,42 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         b_orders, s_orders = res
 
+                        # Risk analysis (fire-and-forget via ensure_future в analyze())
+                        await risk_engine.analyze_batch_async(b_orders)
+                        await risk_engine.analyze_batch_async(s_orders)
+
+                        all_cycle_orders.extend(b_orders)
+                        all_cycle_orders.extend(s_orders)
+
+                        # Review scheduling
+                        for o in b_orders:
+                            if o.merchant_id:
+                                review_fetcher.schedule(o.exchange, o.merchant_id)
+                        for o in s_orders:
+                            if o.merchant_id:
+                                review_fetcher.schedule(o.exchange, o.merchant_id)
+
+                        # Spread grouping — одразу в цьому ж проході
                         for o in b_orders:
                             if merchant_filter.passed(o):
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
-
                         for o in s_orders:
                             if merchant_filter.passed(o):
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
+
+                    # 🚀 SNAPSHOT INGESTION — fire-and-forget, не блокує цикл.
+                    # Снапшоти потрібні для поведінкового аналізу який йде
+                    # async у _async_analyze — вони не потрібні ДО spread matching.
+                    if all_cycle_orders:
+                        asyncio.ensure_future(
+                            merchant_db.add_snapshots_batch(all_cycle_orders)
+                        )
+
+                    last_cycle_time[0] = time.monotonic()
 
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
                     opportunities = _group_opportunities(raw_opportunities, target_banks)
@@ -362,6 +391,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
     finally:
         watchdog_task.cancel()
+        maintenance_task.cancel()  # 🚀 ЗУПИНЯЄМО MAINTENANCE
 
         if "cb_userbot" in locals():
             await cb_userbot.stop()

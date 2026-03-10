@@ -185,10 +185,44 @@ def _risk_badge(order: Order, short: bool = False) -> str:
     reasons = []
     has_text_risk = False
 
+
+
     for f in flags:
         if f.startswith("BADREVIEWS:"):
             lines.append(badges["BADREVIEWS"])
             reasons.append(f[len("BADREVIEWS:"):])
+            continue
+        # 🚀 НОВІ ПОВЕДІНКОВІ МАРКЕРИ (Deep Research)
+        if f.startswith("API_REPLENISH:"):
+            parts = f.split(":", 1)
+            count = parts[1] if len(parts) > 1 else ""
+            lines.append(f"🤖 АВТОПОПОВНЕННЯ БОТОМ ({count} цикл.)\n" if not short else "🤖")
+            continue
+
+        if f.startswith("STATIC_DROP:"):
+            parts = f.split(":", 1)
+            count = parts[1] if len(parts) > 1 else ""
+            lines.append(f"📏 СТАТИЧНИЙ ДРОП ({count} цикл.)\n" if not short else "📏")
+            continue
+
+        if f.startswith("VELOCITY_SPIKE:"):
+            parts = f.split(":", 1)
+            vel = parts[1] if len(parts) > 1 else ""
+            lines.append(f"⚡ АНОМАЛЬНА АКТИВНІСТЬ ({vel})\n" if not short else "⚡")
+            continue
+
+        if f == "EXACT_LIMITS":
+            lines.append("🎯 ФІКСОВАНА СУМА (min=max)\n" if not short else "🎯")
+            continue
+
+        if f.startswith("BEHAVIOR_BOTLIKE:"):
+            lines.append("🤖 ПІДОЗРІЛА ПОВЕДІНКА (БОТ)\n" if not short else "🤖")
+            continue
+
+        if f.startswith("CROSS_EXCHANGE_BOT:"):
+            parts = f.split(":", 2)
+            ex_names = parts[2].replace("CLONES:", "") if len(parts) > 2 else ""
+            lines.append(f"👯 КЛОН НА БІРЖАХ: {ex_names}\n" if not short else "👯")
             continue
 
         if f.startswith("BLOCK:"):

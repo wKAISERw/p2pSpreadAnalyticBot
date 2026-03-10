@@ -3,10 +3,12 @@
 import asyncio
 import logging
 from typing import Optional
-
+import time
 from exchanges.base import Order
 from core.regex_analyzer import analyze as regex_analyze, RegexResult
 from core.merchant_db import MerchantDB
+from core.behavioral_analyzer import analyze_history
+from core.identity_analyzer import analyze_identity
 
 logger = logging.getLogger("RiskEngine")
 
@@ -28,14 +30,16 @@ MIN_COMPLETION: dict[str, float] = {
     "CryptoBot": 85.0,
 }
 
-# ── Trusted merchant — знижений поріг для LLM ескалації ─────────────────────
-# Якщо мерчант відповідає всім умовам "довіреного" — слабкі regex сигнали
-# не ескалуються в LLM, щоб уникнути false positives
-TRUSTED_MIN_ORDERS      = 500    # Мінімум угод
-TRUSTED_MIN_COMPLETION  = 95.0   # Мінімум % виконання
-TRUSTED_MAX_RISK_SCORE  = 30     # Накопичений ризик не більше цього
-TRUSTED_LLM_MIN_SCORE   = 60     # Для trusted — ескалуємо тільки якщо regex score >= 60
-# (звичайний поріг — 30, тобто для топ-мерчантів планку підіймаємо вдвічі)
+TRUSTED_MIN_ORDERS = 500
+TRUSTED_MIN_COMPLETION = 95.0
+TRUSTED_MAX_RISK_SCORE = 30
+TRUSTED_LLM_MIN_SCORE = 60
+
+BEHAVIOR_HISTORY_MINUTES = 60
+BEHAVIOR_ALERT_SCORE = 60
+BOT_ALERT_COOLDOWN_SEC = 900  # 15 хв
+
+_ASYNC_ANALYZE_CONCURRENCY = 8
 
 REVIEW_WARN_NEG_PCT = 15.0
 REVIEW_WARN_MIN_NEG = 3
@@ -43,15 +47,38 @@ REVIEW_BLOCK_NEG_PCT = 25.0
 REVIEW_BLOCK_MIN_NEG = 5
 
 
+class _BoundedTTLCache:
+    __slots__ = ("_ttl", "_max", "_data")
+
+    def __init__(self, ttl_seconds: float = 60.0, max_size: int = 2000):
+        self._ttl = ttl_seconds
+        self._max = max_size
+        self._data: dict[tuple, tuple[float, object]] = {}
+
+    def get(self, key: tuple, now: float):
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        ts, val = entry
+        if now - ts > self._ttl:
+            del self._data[key]
+            return None
+        return (ts, val)
+
+    def set(self, key: tuple, now: float, value) -> None:
+        if len(self._data) >= self._max:
+            evict_count = max(1, self._max // 10)
+            oldest = sorted(self._data.items(), key=lambda x: x[1][0])[:evict_count]
+            for k, _ in oldest:
+                del self._data[k]
+        self._data[key] = (now, value)
+
+
 def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
-    """
-    Повертає True якщо мерчант вважається довіреним.
-    Для таких мерчантів поріг LLM ескалації підвищується вдвічі.
-    """
     return (
-        order.month_order_count >= TRUSTED_MIN_ORDERS
-        and order.finish_rate_pct >= TRUSTED_MIN_COMPLETION
-        and risk_score <= TRUSTED_MAX_RISK_SCORE
+            order.month_order_count >= TRUSTED_MIN_ORDERS
+            and order.finish_rate_pct >= TRUSTED_MIN_COMPLETION
+            and risk_score <= TRUSTED_MAX_RISK_SCORE
     )
 
 
@@ -61,6 +88,10 @@ class RiskEngine:
         self._llm = llm_pool
         self._analyzed = 0
         self._db_hits = 0
+        self._bot_alert_cache: dict[tuple[str, str], tuple[str, float]] = {}
+        self._b_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
+        self._id_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
+        self._db_sem = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
     def analyze(self, order: Order) -> Order:
         self._analyzed += 1
@@ -68,7 +99,8 @@ class RiskEngine:
 
         if self._db and order.merchant_id:
             asyncio.ensure_future(self._async_analyze(order, behavior_flags))
-            order.risk_flag = ",".join(behavior_flags) if behavior_flags else "PENDING"
+            initial_flags = _dedupe_flags(behavior_flags)
+            order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
             return order
 
         result = regex_analyze(
@@ -91,40 +123,112 @@ class RiskEngine:
             flags.append(_build_weak_regex_flag(result))
 
         flags.extend(behavior_flags)
-        order.risk_flag = ",".join(flags) if flags else "OK"
+        flags = _dedupe_flags(flags)
+        order.risk_flag = _join_flags(flags) if flags else "OK"
         return order
 
     async def _async_analyze(self, order: Order, behavior_flags: list[str]) -> None:
+        async with self._db_sem:
+            await self._async_analyze_inner(order, behavior_flags)
+
+    async def _async_analyze_inner(self, order: Order, behavior_flags: list[str]) -> None:
         try:
             exchange = order.exchange
             mid = order.merchant_id
-            terms = order.trade_terms
+            terms = getattr(order, "trade_terms", "") or ""
+            now = time.time()
 
-            is_bl, bl_reason = await self._db.is_blacklisted(exchange, mid)
+            cache_key = (exchange, mid)
+
+            need_snapshots = not (self._b_cache.get(cache_key, now) is not None)
+            need_twins = bool(order.merchant_name) and not (self._id_cache.get(cache_key, now) is not None)
+
+            coros = [
+                self._db.is_blacklisted(exchange, mid),
+                self._db.get_reviews_summary(exchange, mid),
+                self._db.get_recent_snapshots(exchange, mid, minutes=BEHAVIOR_HISTORY_MINUTES)
+                if need_snapshots else _noop(None),
+                self._db.find_digital_twins(order.merchant_name, exchange, minutes=15)
+                if need_twins else _noop(None),
+                self._db.get_verdict(exchange, mid, terms),
+                self._db.get_risk_score(exchange, mid),
+            ]
+
+            (
+                (is_bl, bl_reason),
+                review_summary_raw,
+                snapshots_raw,
+                twins_raw,
+                cached_verdict,
+                score,
+            ) = await asyncio.gather(*coros)
+
             if is_bl:
                 order.risk_flag = f"BLOCK:BLACKLIST:{bl_reason}"
-                logger.warning(
-                    "🚫 Blacklist: %s [%s] — %s",
-                    order.merchant_name, exchange, bl_reason
-                )
+                logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
                 return
 
-            review_flags = await self._build_review_flags(exchange, mid)
+            review_flags = _build_review_flags_from_summary(review_summary_raw)
 
-            cached_verdict = await self._db.get_verdict(exchange, mid, terms)
+            # ── 1. ПОВЕДІНКОВИЙ ШАР ───────────────────────────────────────────
+            cached_b = self._b_cache.get(cache_key, now)
+            if cached_b is not None:
+                behavior_result = cached_b[1]
+            else:
+                behavior_result = analyze_history(order, snapshots_raw or [])
+                self._b_cache.set(cache_key, now, behavior_result)
+
+            if behavior_result.flags:
+                behavior_flags.extend(behavior_result.flags)
+
+            behavior_score = int(getattr(behavior_result, "score", 0) or 0)
+            behavior_reason = str(getattr(behavior_result, "reason", "") or "")
+            behavior_needs_llm = bool(getattr(behavior_result, "needs_llm", False))
+
+            # ── 2. ШАР ЦИФРОВИХ ДВІЙНИКІВ ─────────────────────────────────────
+            if order.merchant_name:
+                cached_id = self._id_cache.get(cache_key, now)
+                if cached_id is not None:
+                    id_result = cached_id[1]
+                else:
+                    id_result = analyze_identity(order, twins_raw or [])
+                    self._id_cache.set(cache_key, now, id_result)
+
+                if id_result.is_twin:
+                    behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")
+
+            if behavior_score >= BEHAVIOR_ALERT_SCORE or behavior_needs_llm:
+                behavior_flags.append(f"BEHAVIOR_BOTLIKE:S{behavior_score}")
+                signature = _behavior_signature(behavior_result.flags, behavior_score, behavior_reason)
+                if _should_log_behavior_alert(self._bot_alert_cache, exchange, mid, signature):
+                    logger.warning("🤖 Підозра на БОТА: %s [%s] — %s", order.merchant_name, exchange,
+                                   behavior_reason or signature)
+
+            behavior_flags = _dedupe_flags(behavior_flags)
+
+            # 🚀 МАТРИЦЯ ДОКАЗІВ: ПІДГОТОВКА ЗМІННИХ
+            has_exact_limits = any(f.startswith("EXACT_LIMITS") or f.startswith("STATIC_DROP") for f in behavior_flags)
+            has_cross_bot = any(f.startswith("CROSS_EXCHANGE_BOT") for f in behavior_flags)
+            has_api_replenish = any(f.startswith("API_REPLENISH") for f in behavior_flags)
+            has_bad_reviews = any(f.startswith("BADREVIEWS:") for f in review_flags)
+
+            # 🚨 CACHE OVERRIDE (ІНВАЛІДАЦІЯ)
+            has_anomalous_behavior = has_exact_limits or has_cross_bot or has_api_replenish
+            if has_anomalous_behavior and cached_verdict == "OK":
+                cached_verdict = None
+                logger.debug("💥 Cache Override: Знайдено поведінкові аномалії для %s", order.merchant_name)
+
+            # ── 3. ПОВЕРНЕННЯ З КЕШУ (Тільки якщо все чисто) ──────────────────
             if cached_verdict and cached_verdict not in ("NEEDS_LLM",):
                 self._db_hits += 1
 
-            score = await self._db.get_risk_score(exchange, mid)
             if score >= 80 and cached_verdict == "OK":
-                flags = ["HIGH_RISK_SCORE"] + review_flags + behavior_flags
+                flags = _dedupe_flags(["HIGH_RISK_SCORE"] + review_flags + behavior_flags)
                 order.risk_flag = _join_flags(flags) or "HIGH_RISK_SCORE"
                 return
 
             if cached_verdict is not None:
-                cached_flag = await _build_cached_flag(
-                    cached_verdict, exchange, mid, self._db
-                )
+                cached_flag = await _build_cached_flag(cached_verdict, exchange, mid, self._db)
 
                 block_review = _pick_block_review(review_flags)
                 if block_review:
@@ -137,9 +241,10 @@ class RiskEngine:
                 flags.extend(review_flags)
                 flags.extend(behavior_flags)
 
-                order.risk_flag = _join_flags(flags) or "OK"
+                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
                 return
 
+            # ── 4. REGEX АНАЛІЗ ───────────────────────────────────────────────
             regex_result = regex_analyze(
                 terms,
                 order.finish_rate_pct,
@@ -149,159 +254,133 @@ class RiskEngine:
 
             order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
             order.regex_score = int(getattr(regex_result, "score", 0) or 0)
+            has_soft_regex = order.regex_score > 0
 
+            # 🚀 HARD EVIDENCE 1: Детерміністичний REGEX BLOCK
             if regex_result.verdict == "BLOCK":
                 await self._db.save_verdict(
-                    exchange,
-                    mid,
-                    order.merchant_name,
-                    terms,
-                    "BLOCK",
-                    regex_result.risk_type,
-                    regex_result.reason,
-                    "regex",
+                    exchange, mid, order.merchant_name, terms,
+                    "BLOCK", regex_result.risk_type, regex_result.reason, "regex"
                 )
                 block_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
-
-                flags = [block_flag] + review_flags + behavior_flags
+                flags = _dedupe_flags([block_flag] + review_flags + behavior_flags)
                 order.risk_flag = _join_flags(flags) or block_flag
-
-                logger.warning(
-                    "🚫 Regex BLOCK: %s [%s] %s — %s",
-                    order.merchant_name,
-                    exchange,
-                    regex_result.risk_type,
-                    regex_result.reason,
-                )
+                logger.warning("🚫 Regex BLOCK: %s [%s] %s — %s", order.merchant_name, exchange, regex_result.risk_type,
+                               regex_result.reason)
                 return
 
-            if regex_result.needs_llm and self._llm:
-                # ── Trusted merchant threshold ────────────────────────────────
-                # Для топ-мерчантів слабкі сигнали не ескалуємо — уникаємо false positives
-                risk_score = await self._db.get_risk_score(exchange, mid)
-                trusted = _is_trusted_merchant(order, risk_score)
+            # 🚀 HARD EVIDENCE 2: Детерміністичний BAD REVIEWS BLOCK
+            block_review = _pick_block_review(review_flags)
+            if block_review:
+                order.risk_flag = block_review
+                return
 
-                llm_min_score = TRUSTED_LLM_MIN_SCORE if trusted else 0
+            # 🚀 COMPOSITE EVIDENCE (ДЕЛЕГУЄМО ФІНАЛЬНЕ РІШЕННЯ В LLM)
+            composite_risk = ""
+            if has_cross_bot and has_bad_reviews:
+                composite_risk = "Мережа клонів + Негативні відгуки"
+            elif has_api_replenish and has_soft_regex:
+                composite_risk = "Бот-автопоповнення + Підозрілі умови в тексті"
+            elif has_exact_limits and has_cross_bot and has_soft_regex:
+                composite_risk = "Фіксована сума + Клони на біржах + М'які ризики"
 
-                if regex_result.score < llm_min_score:
-                    block_review = _pick_block_review(review_flags)
-                    if block_review:
-                        order.risk_flag = block_review
-                        return
+            if composite_risk:
+                logger.info("⚖️ КОМПОЗИТНИЙ РИЗИК: %s [%s] — %s. Делегуємо фінальне рішення в LLM.",
+                            order.merchant_name, exchange, composite_risk)
+                behavior_needs_llm = True  # 🚀 Форсуємо виклик нейронки
+                behavior_flags.append("COMPOSITE_RISK")
 
-                    logger.debug(
-                        "✅ Trusted skip: %s [%s] score=%d < %d",
-                        order.merchant_name,
-                        exchange,
-                        regex_result.score,
-                        llm_min_score,
-                    )
+                # Інвалідуємо старий чистий кеш, щоб перепровірити
+                if cached_verdict == "OK":
+                    cached_verdict = None
 
+            # ── 5. LLM TIE-BREAKER ────────────────────────────────────────────
+            # 🚀 ФІКС: Нейронка тепер викликається і через текст (regex), і через поведінку (behavior)
+            if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
+                trusted = _is_trusted_merchant(order, score)
+
+                # ЗНЯТТЯ ІМУНІТЕТУ: поведінкові аномалії змушують VIP-мерчанта йти на перевірку LLM
+                if trusted and has_anomalous_behavior:
+                    logger.debug("🔍 Trusted immunity stripped for %s due to anomalous behavior.", order.merchant_name)
+                    trusted = False
+
+                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE:
+                    logger.debug("✅ Trusted skip: %s [%s] score=%d < %d", order.merchant_name, exchange,
+                                 regex_result.score, TRUSTED_LLM_MIN_SCORE)
                     flags: list[str] = []
                     flags.extend(review_flags)
                     flags.extend(behavior_flags)
-
                     if not flags and regex_result.reason:
                         flags.append(_build_weak_regex_flag(regex_result))
-
-                    order.risk_flag = _join_flags(flags) or "OK"
+                    order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
                     return
 
-                if trusted:
-                    logger.debug(
-                        "🔍 Trusted але score=%d >= %d → LLM: %s [%s]",
-                        regex_result.score, llm_min_score,
-                        order.merchant_name, exchange,
-                    )
-
-                    # 🚀 ОНОВЛЕНИЙ ВИКЛИК SCHEDULE З ПЕРЕДАЧЕЮ ПАРАМЕТРІВ
+                # 🚀 ФІКС: Передаємо всю статистику та ліміти у воркер!
                 scheduled = self._llm.schedule(
                     exchange=exchange,
                     merchant_id=mid,
                     merchant_name=order.merchant_name,
                     trade_terms=terms,
                     regex_result=regex_result,
-                    finish_rate=float(order.finish_rate_pct),
-                    month_order_count=int(order.month_order_count),
-                    is_verified=bool(order.is_verified),
-                    min_limit=float(order.min_limit),
-                    max_limit=float(order.max_limit),
+                    finish_rate=order.finish_rate_pct,
+                    month_order_count=order.month_order_count,
+                    is_verified=order.is_verified,
+                    min_limit=order.min_limit,
+                    max_limit=order.max_limit,
                     behavior_flags=behavior_flags
                 )
 
                 if scheduled:
-                    flags = [_build_pending_flag(regex_result)] + review_flags + behavior_flags
-                    order.risk_flag = _join_flags(flags) or _build_pending_flag(regex_result)
+                    # 🚀 Правильний PENDING маркер для поведінкових тригерів
+                    if composite_risk or behavior_needs_llm:
+                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}"
+                    else:
+                        pending_flag = _build_pending_flag(regex_result)
+
+                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
+                    order.risk_flag = _join_flags(flags) or pending_flag
                     return
 
-            block_review = _pick_block_review(review_flags)
-            if block_review:
-                order.risk_flag = block_review
-                return
+                if scheduled:
+                    # 🚀 ФІКС: Правильний PENDING маркер для поведінкових тригерів
+                    if composite_risk or behavior_needs_llm:
+                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}"
+                    else:
+                        pending_flag = _build_pending_flag(regex_result)
 
+                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
+                    order.risk_flag = _join_flags(flags) or pending_flag
+                    return
+                else:
+                    # 🚀 ЗАХИСТ ВІД СПАМУ: Якщо форсували LLM через бот-поведінку,
+                    # але спрацював кулдаун (щоб не платити за API) або черга повна —
+                    # заморожуємо статус у PENDING, щоб не було помилкових OK.
+                    if composite_risk or behavior_needs_llm:
+                        order.risk_flag = f"LLM_PENDING:COOLDOWN:Зачекайте_на_LLM"
+                        return
+
+            # Якщо не потребує LLM або не вдалося запланувати:
             flags: list[str] = []
-
             if regex_result.reason:
                 flags.append(_build_weak_regex_flag(regex_result))
-
             flags.extend(review_flags)
             flags.extend(behavior_flags)
-
-            order.risk_flag = _join_flags(flags) or "OK"
+            order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
 
         except Exception as e:
-            logger.error(
-                "RiskEngine async помилка для %s: %s",
-                order.merchant_name, e, exc_info=True
-            )
+            logger.error("RiskEngine async помилка для %s: %s", order.merchant_name, e, exc_info=True)
 
-    async def _build_review_flags(self, exchange: str, merchant_id: str) -> list[str]:
-        if not self._db or not merchant_id:
-            return []
-
-        summary = await self._db.get_reviews_summary(exchange, merchant_id)
-
-        pos = int(summary.get("positive", 0) or 0)
-        neg = int(summary.get("negative", 0) or 0)
-        neutral = int(summary.get("neutral", 0) or 0)
-        bad_texts = summary.get("bad_texts", []) or []
-
-        total = pos + neg + neutral
-        if total <= 0:
-            return []
-
-        neg_pct = (neg / total) * 100.0
-        sample = ""
-        if bad_texts:
-            sample = str(bad_texts[0]).replace("\n", " ").strip()[:120]
-
-        reason = f"{neg_pct:.0f}% neg ({neg}/{total})"
-        if sample:
-            reason += f" | {sample}"
-
-        if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
-            return [f"BLOCK:BADREVIEWS:{reason}"]
-
-        if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
-            return [f"BADREVIEWS:{reason}"]
-
-        return []
 
     def _behavior(self, order: Order) -> list[str]:
         flags = []
         exchange = order.exchange
-
         min_ord = MIN_ORDERS.get(exchange, 30)
         min_comp = MIN_COMPLETION.get(exchange, 90.0)
 
         if order.month_order_count < min_ord or order.finish_rate_pct < min_comp:
             flags.append("LOW_STATS")
 
-        if (
-            order.month_order_count >= 50
-            and order.finish_rate_pct >= 99.9
-            and not order.is_verified
-        ):
+        if order.month_order_count >= 50 and order.finish_rate_pct >= 99.9 and not order.is_verified:
             flags.append("PERFECT_RATING")
 
         if order.min_limit > 0 and order.max_limit > 0:
@@ -324,6 +403,41 @@ class RiskEngine:
 
     def stats(self) -> str:
         return f"RiskEngine: {self._analyzed} analyzed, {self._db_hits} db hits"
+
+
+async def _noop(value):
+    return value
+
+
+def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
+    if not summary:
+        return []
+
+    pos = int(summary.get("positive", 0) or 0)
+    neg = int(summary.get("negative", 0) or 0)
+    neutral = int(summary.get("neutral", 0) or 0)
+    bad_texts = summary.get("bad_texts", []) or []
+
+    total = pos + neg + neutral
+    if total <= 0:
+        return []
+
+    neg_pct = (neg / total) * 100.0
+    sample = ""
+    if bad_texts:
+        sample = str(bad_texts[0]).replace("\n", " ").strip()[:120]
+
+    reason = f"{neg_pct:.0f}% neg ({neg}/{total})"
+    if sample:
+        reason += f" | {sample}"
+
+    if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
+        return [f"BLOCK:BADREVIEWS:{reason}"]
+
+    if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
+        return [f"BADREVIEWS:{reason}"]
+
+    return []
 
 
 def _join_flags(flags: list[str]) -> str:
@@ -350,14 +464,8 @@ def _build_weak_regex_flag(result: RegexResult) -> str:
     return f"REGEX_WEAK:{risk}:S{score}"
 
 
-async def _build_cached_flag(
-    verdict: str,
-    exchange: str,
-    merchant_id: str,
-    db: MerchantDB,
-) -> str:
+async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: MerchantDB) -> str:
     risk_type, reason = await db.get_reason(exchange, merchant_id)
-
     risk_type = (risk_type or "").strip()
     reason = (reason or "").strip()[:120]
 
@@ -365,15 +473,47 @@ async def _build_cached_flag(
         if risk_type or reason:
             return f"BLOCK:{risk_type or 'CACHED'}:{reason or 'cached verdict'}"
         return "BLOCK:CACHED"
-
     if verdict == "SUSPICIOUS":
         if risk_type or reason:
             return f"LLM_SUSPICIOUS:{risk_type or 'SUSPICIOUS'}:{reason or 'cached suspicious'}"
         return "LLM_SUSPICIOUS"
-
     if verdict == "UNKNOWN":
         if reason:
             return f"LLM_UNKNOWN:NONE:{reason}"
         return "LLM_UNKNOWN"
-
     return "OK"
+
+
+def _behavior_signature(flags: list[str], score: int, reason: str = "") -> str:
+    core = ",".join(flags)
+    short_reason = (reason or "")[:160]
+    if short_reason:
+        return f"{core}|S{score}|{short_reason}"
+    return f"{core}|S{score}"
+
+
+def _should_log_behavior_alert(cache: dict[tuple[str, str], tuple[str, float]], exchange: str, merchant_id: str,
+                               signature: str, cooldown_sec: int = BOT_ALERT_COOLDOWN_SEC) -> bool:
+    import time
+    key = (exchange, merchant_id)
+    now = time.time()
+    prev = cache.get(key)
+    if prev is None:
+        cache[key] = (signature, now)
+        return True
+    prev_signature, prev_ts = prev
+    if signature != prev_signature or (now - prev_ts) >= cooldown_sec:
+        cache[key] = (signature, now)
+        return True
+    return False
+
+
+def _dedupe_flags(flags: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for f in flags:
+        if not f or f in seen:
+            continue
+        seen.add(f)
+        out.append(f)
+    return out
