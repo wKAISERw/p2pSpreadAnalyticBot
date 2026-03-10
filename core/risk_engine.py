@@ -370,24 +370,29 @@ class RiskEngine:
         except Exception as e:
             logger.error("RiskEngine async помилка для %s: %s", order.merchant_name, e, exc_info=True)
 
-
     def _behavior(self, order: Order) -> list[str]:
         flags = []
         exchange = order.exchange
-        min_ord = MIN_ORDERS.get(exchange, 30)
-        min_comp = MIN_COMPLETION.get(exchange, 90.0)
 
-        if order.month_order_count < min_ord or order.finish_rate_pct < min_comp:
+        # Базова перевірка статс
+        if order.month_order_count < MIN_ORDERS.get(exchange, 30) or \
+                order.finish_rate_pct < MIN_COMPLETION.get(exchange, 90.0):
             flags.append("LOW_STATS")
 
-        if order.month_order_count >= 50 and order.finish_rate_pct >= 99.9 and not order.is_verified:
-            flags.append("PERFECT_RATING")
-
+        # 🚀 ФІКС 3: ЗНЯТТЯ ІМУНІТЕТУ ДЛЯ ФІКСОВАНИХ СУМ
         if order.min_limit > 0 and order.max_limit > 0:
-            spread = float(order.max_limit - order.min_limit) / float(order.max_limit)
-            if spread < 0.02 and float(order.max_limit) > 500:
-                if not (order.is_verified or order.month_order_count > 1000):
-                    flags.append("SUSPICIOUS_LIMITS")
+            # Різниця до 5 грн — це вже аномалія (EXACT_TOLERANCE)
+            is_exact = abs(order.max_limit - order.min_limit) <= 5.0
+
+            if is_exact:
+                # ЖОДНОГО ІМУНІТЕТУ для фіксованих сум
+                flags.append("SUSPICIOUS_LIMITS")
+            else:
+                # Для звичайних ордерів залишаємо старе правило (імунітет > 1000 угод)
+                spread = float(order.max_limit - order.min_limit) / float(order.max_limit)
+                if spread < 0.02 and float(order.max_limit) > 500:
+                    if not (order.is_verified or order.month_order_count > 1000):
+                        flags.append("SUSPICIOUS_LIMITS")
 
         return flags
 
