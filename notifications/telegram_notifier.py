@@ -5,25 +5,27 @@ from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 
-from aiogram import Bot
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import settings
 from exchanges.base import Order
+from core.merchant_db import MerchantDB
 
 logger = logging.getLogger(__name__)
+
 WARN_BADGES = {
     "RECEIPT_REQUIRED": "🧾 ПРОСИТЬ КВИТАНЦІЮ",
 }
 EXCHANGE_ICONS = {
-    "Binance":   "🟡",
-    "Bybit":     "🟣",
-    "OKX":       "🟢",
-    "MEXC":      "🔵",
-    "Wallet":    "👛",
+    "Binance": "🟡",
+    "Bybit": "🟣",
+    "OKX": "🟢",
+    "MEXC": "🔵",
+    "Wallet": "👛",
     "CryptoBot": "🤖",
 }
 
@@ -40,7 +42,6 @@ BANKS_SHORT = {
     "64": "ПУМБ",
     "48": "А-Банк",
 }
-
 
 
 @dataclass
@@ -97,9 +98,9 @@ def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
     return f"<b>{safe_name}</b>"
 
 
-
 def _verified_badge(order: Order) -> str:
     return " ✅" if getattr(order, "is_verified", False) else ""
+
 
 def _alert_grade(spread_pct: float) -> tuple[str, bool]:
     if spread_pct >= 2.0:
@@ -109,6 +110,7 @@ def _alert_grade(spread_pct: float) -> tuple[str, bool]:
     if spread_pct >= 0.5:
         return "💡 <b>БАЗОВИЙ СПРЕД</b>", True
     return "🤏 <b>МІКРО-СПРЕД</b>", True
+
 
 def _regex_warn_block(order: Order, short: bool = False) -> str:
     warn_flags = getattr(order, "regex_warn_flags", None) or []
@@ -138,20 +140,28 @@ def _regex_warn_block(order: Order, short: bool = False) -> str:
 
     return "".join(lines)
 
+
 def _risk_badge(order: Order, short: bool = False) -> str:
     flag = getattr(order, "risk_flag", "")
 
     if flag in ("", "OK", "PENDING"):
         return ""
 
+    # 🚀 ОНОВЛЕНІ КАТЕГОРІЇ ЗГІДНО НОВИХ JSON-ПРАВИЛ
     badges = {
-        "TRIANGLE": "🚫 ТРИКУТНИК\n" if not short else "🚫",
+        "TRIANGLE": "🚫 ТРИКУТНИК / ДРОП\n" if not short else "🚫",
         "CASINO": "🎰 КАЗИНО / GAMBLING\n" if not short else "🎰",
         "CHAT_FIRST": "💬 СПОЧАТКУ В ЧАТ\n" if not short else "💬",
         "SUSPICIOUS_BIZ": "🏢 ПІДОЗРІЛИЙ BIZ-КОНТЕКСТ\n" if not short else "🏢",
         "APPEAL_PRESSURE": "⚠️ ТИСК АПЕЛЯЦІЄЮ\n" if not short else "⚠️",
         "ANONYMOUS": "🕶 АНОНІМНИЙ КОНТЕКСТ\n" if not short else "🕶",
         "EXTERNAL_LINK": "📲 ЗОВНІШНІЙ КОНТАКТ\n" if not short else "📲",
+        "FINCRIME": "🏴‍☠️ ФІНМОН / СІРА СХЕМА\n" if not short else "🏴‍☠️",
+        "CHARGEBACK": "🔙 РЕФАНД / ЧАРДЖБЕК\n" if not short else "🔙",
+        "NO_COMMENTS": "🤫 БЕЗ КОМЕНТАРІВ\n" if not short else "🤫",
+        "MIDDLEMAN": "👥 ПОСЕРЕДНИК / ПРОКЛАДКА\n" if not short else "👥",
+        "THIRD_PARTY_HINT": "👤 ЗГАДКА 3-Х ОСІБ\n" if not short else "👤",
+
         "LOW_STATS": "⚠️ МАЛО УГОД / НИЗЬКИЙ %\n" if not short else "📉",
         "SUSPICIOUS_LIMITS": "⚠️ АНОМАЛЬНІ ЛІМІТИ\n" if not short else "📏",
         "PERFECT_RATING": "🤖 ПІДОЗРІЛИЙ РЕЙТИНГ\n" if not short else "🤖",
@@ -165,6 +175,10 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "HIGH_RISK_SCORE": "📛 HIGH RISK SCORE\n" if not short else "📛",
         "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
     }
+
+    # Категорії, для яких обов'язково треба показати уривок тексту в телеграмі
+    show_text_cats = {"TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "FINCRIME", "CHARGEBACK", "NO_COMMENTS",
+                      "MIDDLEMAN"}
 
     flags = [f.strip() for f in flag.split(",") if f.strip()]
     lines = []
@@ -187,7 +201,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 lines.append(badges.get(risk, badges["BLOCK"]))
             if reason:
                 reasons.append(reason)
-            if risk in ("TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK"):
+            if risk in show_text_cats:
                 has_text_risk = True
             continue
 
@@ -250,30 +264,91 @@ def _risk_badge(order: Order, short: bool = False) -> str:
 
 class TelegramNotifier:
     def __init__(
-        self,
-        send_interval: float = 2.0,
-        group_window: float = 1.5,
-        batch_size: int = 5,
-        max_queue_size: int = 100,
+            self,
+            send_interval: float = 2.0,
+            group_window: float = 1.5,
+            batch_size: int = 5,
+            max_queue_size: int = 100,
     ):
         self._bot = Bot(
             token=settings.telegram_bot_token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
+
+        # 🚀 ДОДАЄМО РОУТЕР І ДИСПЕТЧЕР ДЛЯ КНОПОК
+        self._dp = Dispatcher()
+        self._router = Router()
+        self._dp.include_router(self._router)
+        self._db: MerchantDB | None = None
+        self._setup_handlers()
+
         self._chat_id = settings.telegram_chat_id
         self._send_interval = send_interval
         self._group_window = group_window
         self._batch_size = batch_size
         self._queue: asyncio.Queue[SpreadAlert] = asyncio.Queue(maxsize=max_queue_size)
         self._worker_task: asyncio.Task | None = None
+        self._polling_task: asyncio.Task | None = None
+
+    def bind_db(self, db: MerchantDB):
+        """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
+        self._db = db
+
+    def _setup_handlers(self):
+        """Обробник натискань на callback-кнопки."""
+
+        @self._router.callback_query(F.data.startswith("fb:"))
+        async def on_feedback(call: CallbackQuery):
+            if not self._db:
+                return await call.answer("База даних не підключена", show_alert=True)
+
+            try:
+                parts = call.data.split(":")
+                if len(parts) != 4:
+                    return await call.answer("Помилка формату кнопок")
+
+                _, exchange, mid, action = parts
+
+                reason_map = {
+                    "triangle": "🚫 ТРЕТІ ОСОБИ (Ручний Blacklist)",
+                    "receipt": "🧾 СКАМ З ЧЕКОМ (Ручний Blacklist)",
+                    "chat": "📲 ТЯГНЕ В ТГ (Ручний Blacklist)",
+                    "fincrime": "🏴‍☠️ ФІНМОН/СХЕМА (Ручний Blacklist)"
+                }
+
+                if action not in reason_map:
+                    return await call.answer("Невідома дія")
+
+                reason = reason_map[action]
+
+                # Записуємо в глобальний Blacklist
+                await self._db.add_to_blacklist(exchange, mid, "Unknown", reason, "manual_tg")
+                await call.answer(f"✅ Успіх! Заблоковано: {reason}", show_alert=True)
+
+                # Перекреслюємо повідомлення, щоб візуально закрити тікет
+                old_text = call.message.html_text or "Ордер"
+                new_text = f"🚨 <b>МЕРЧАНТ ЗАБЛОКОВАНИЙ (Blacklist)!</b>\nПричина: {reason}\nБіржа: {exchange}\n\n<del>{old_text[:3000]}</del>"
+
+                # Прибираємо кнопки
+                await call.message.edit_text(new_text, reply_markup=None)
+
+            except Exception as e:
+                logger.error("Помилка обробки кнопки: %s", e)
+                await call.answer("Помилка БД при блокуванні", show_alert=True)
 
     async def start(self) -> None:
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="tg-notifier-worker"
         )
-        logger.info("TelegramNotifier запущено")
+        # 🚀 ЗАПУСКАЄМО СЛУХАЧА КНОПОК
+        self._polling_task = asyncio.create_task(
+            self._dp.start_polling(self._bot), name="tg-polling"
+        )
+        logger.info("TelegramNotifier запущено (з інтерактивними кнопками)")
 
     async def stop(self) -> None:
+        if self._polling_task:
+            self._polling_task.cancel()
         try:
             await asyncio.wait_for(self._queue.join(), timeout=10.0)
         except asyncio.TimeoutError:
@@ -375,7 +450,6 @@ class TelegramNotifier:
         buy_warn = _regex_warn_block(alert.buy_order)
         sell_warn = _regex_warn_block(alert.sell_order)
 
-
         text = (
             f"{title}\n\n"
             f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
@@ -409,20 +483,39 @@ class TelegramNotifier:
             f"{sell_warn if sell_warn else ''}"
         )
 
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link),
-                InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link),
-            ]]
-        )
+        # 🚀 НОВІ ІНТЕРАКТИВНІ КНОПКИ
+        kb = [
+            [
+                InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link or "https://google.com"),
+                InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link or "https://google.com"),
+            ]
+        ]
+
+        b_mid = alert.buy_order.merchant_id
+        if b_mid:
+            kb.append([
+                InlineKeyboardButton(text="🔴 Buy: 3-ті",
+                                     callback_data=f"fb:{alert.buy_order.exchange}:{b_mid}:triangle"),
+                InlineKeyboardButton(text="🔴 Чек", callback_data=f"fb:{alert.buy_order.exchange}:{b_mid}:receipt"),
+                InlineKeyboardButton(text="🔴 ТГ", callback_data=f"fb:{alert.buy_order.exchange}:{b_mid}:chat"),
+            ])
+
+        s_mid = alert.sell_order.merchant_id
+        if s_mid:
+            kb.append([
+                InlineKeyboardButton(text="🔵 Sell: 3-ті",
+                                     callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:triangle"),
+                InlineKeyboardButton(text="🔵 Чек", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:receipt"),
+                InlineKeyboardButton(text="🔵 ТГ", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:chat"),
+            ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
         await self._send_with_retry(
             text,
             keyboard=keyboard,
             disable_notification=silent,
         )
-
-        # ── Компактний дашборд ────────────────────────────────────────────────────
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         """Підсумок усіх знайдених маршрутів за цикл."""
@@ -492,7 +585,7 @@ class TelegramNotifier:
     def _split_message(text: str, limit: int = 4096) -> list[str]:
         if len(text) <= limit:
             return [text]
-        chunks, current = [], ""
+        chunks, current = ""
         for line in text.split("\n"):
             if len(current) + len(line) + 1 > limit:
                 if current:

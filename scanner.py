@@ -164,6 +164,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     await merchant_db.start()
     await merchant_db.load_blacklist_from_file()
 
+    notifier.bind_db(merchant_db)
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
 
