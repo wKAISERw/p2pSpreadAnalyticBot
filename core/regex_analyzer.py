@@ -136,21 +136,30 @@ def analyze(
     result.normalized_text = raw_text
 
     # ── 0. PRE-SCAN SAFE_RULES — suppressors перед HARD ─────────────────────
-    # Які HARD категорії скасовуються — визначається з SUPPRESSOR_MAP (rules.py).
-    # Логіка suppression не залежить від magic чисел — тільки від suppress_hard поля.
+    # Читаємо rule.suppress_hard напряму (frozenset або list — обидва варіанти).
+    # suppress_hard містить імена HARD категорій що треба скасувати при збігу.
+    # Стара _SUPPRESSOR_MAP по назві категорії suppressor-правила — видалена.
     suppressed_hard: set[str] = set()
     for rule in SAFE_RULES:
-        if not rule.suppress_hard:
+        sh = getattr(rule, "suppress_hard", None)
+        if not sh:
             continue
         m = _search_rule(rule, raw_text, fuzzy)
         if m:
-            suppressed_hard |= rule.suppress_hard
-            logger.debug("Suppressor %s активний → скасовує %s", rule.category, rule.suppress_hard)
+            # Захист від type mismatch: frozenset|=list → TypeError у CPython < 3.9
+            suppressed_hard.update(sh)
+            logger.debug(
+                "Suppressor '%s' активний → скасовує %s",
+                rule.id, list(sh),
+            )
 
     # ── 1. HARD BLOCKS ────────────────────────────────────────────────────────
     for rule in HARD_RULES:
         if rule.category in suppressed_hard:
-            logger.debug("Suppressed HARD %s через suppressed_hard=%s", rule.category, suppressed_hard)
+            logger.debug(
+                "Suppressed HARD %s (rule %s) через suppressed_hard=%s",
+                rule.category, rule.id, suppressed_hard,
+            )
             continue
         m = _search_rule(rule, raw_text, fuzzy)
         if not m:
