@@ -9,7 +9,7 @@ from typing import Optional
 
 import aiohttp
 
-from core.merchant_db import MerchantDB
+from core.storage.merchant_db import MerchantDB
 
 logger = logging.getLogger("ReviewFetcher")
 

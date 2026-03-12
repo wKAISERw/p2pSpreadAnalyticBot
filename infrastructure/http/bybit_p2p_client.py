@@ -9,7 +9,7 @@ from typing import Dict, Any
 from curl_cffi.requests import AsyncSession
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from core.circuit_breaker import CircuitBreaker
+from core.utils.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 

@@ -32,8 +32,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from core.merchant_db import MerchantDB
-from core.regex_analyzer import RegexResult
+from core.storage.merchant_db import MerchantDB
+from core.analysis.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()

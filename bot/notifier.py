@@ -13,7 +13,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 
 from config import settings
 from exchanges.base import Order
-from core.merchant_db import MerchantDB
+from core.storage.merchant_db import MerchantDB
 
 logger = logging.getLogger(__name__)
 

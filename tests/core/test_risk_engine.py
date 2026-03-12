@@ -45,7 +45,7 @@ def _load(module_name: str, rel_path: str):
 
 risk_mod = _load("core.risk_engine", "core/risk_engine.py")
 
-from core.risk_engine import (
+from core.engine.risk_engine import (
     RiskEngine,
     _build_pending_flag,
     _build_weak_regex_flag,

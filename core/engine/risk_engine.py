@@ -5,10 +5,10 @@ import logging
 from typing import Optional
 import time
 from exchanges.base import Order
-from core.regex_analyzer import analyze as regex_analyze, RegexResult
-from core.merchant_db import MerchantDB
-from core.behavioral_analyzer import analyze_history
-from core.identity_analyzer import analyze_identity
+from core.analysis.regex_analyzer import analyze as regex_analyze, RegexResult
+from core.storage.merchant_db import MerchantDB
+from core.analysis.behavioral_analyzer import analyze_history
+from core.analysis.identity_analyzer import analyze_identity
 
 logger = logging.getLogger("RiskEngine")
 

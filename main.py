@@ -6,7 +6,7 @@ import os
 from logging.handlers import RotatingFileHandler
 
 # Імпортуємо компоненти нашої системи
-from notifications.telegram_notifier import TelegramNotifier
+from bot.notifier import TelegramNotifier
 from scanner import run_scanner
 
 

@@ -19,3 +19,10 @@ __pycache__/
 .vscode/
 *.swp
 .DS_Store
+
+# === v2 migration ===
+*.session
+data/*.db
+data/*.db-shm
+data/*.db-wal
+_backup_v1/

@@ -1,7 +1,7 @@
 from decimal import Decimal, getcontext
 import logging
 from exchanges.base import Order
-from core.fees import get_calculator
+from core.utils.fees import get_calculator
 
 getcontext().prec = 28
 logger = logging.getLogger("CrossMatcher")

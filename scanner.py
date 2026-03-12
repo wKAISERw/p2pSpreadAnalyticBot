@@ -14,21 +14,21 @@ from exchanges.bybit import BybitExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
 from filters.merchant_filter import MerchantFilter
-from notifications.telegram_notifier import TelegramNotifier, SpreadAlert
+from bot.notifier import TelegramNotifier, SpreadAlert
 from exchanges.cryptobot_userbot import CryptoBotUserbot
 from infrastructure.http.binance_client import BinanceClient
 from exchanges.binance import BinanceExchange
 from infrastructure.http.mexc_client import MexcClient
 from exchanges.mexc import MexcExchange
-from core.stability import SpreadStabilityFilter
+from core.engine.stability import SpreadStabilityFilter
 
-from core.dedup_cache import TTLCache
-from core.circuit_breaker import CircuitBreaker
-from core.cross_matcher import CrossMatchingEngine
-from core.risk_engine import RiskEngine
-from core.merchant_db import MerchantDB
-from core.llm_worker import LLMWorkerPool
-from core.review_fetcher import ReviewFetcher
+from core.utils.dedup_cache import TTLCache
+from core.utils.circuit_breaker import CircuitBreaker
+from core.engine.cross_matcher import CrossMatchingEngine
+from core.engine.risk_engine import RiskEngine
+from core.storage.merchant_db import MerchantDB
+from core.workers.llm_worker import LLMWorkerPool
+from core.workers.review_fetcher import ReviewFetcher
 
 logger = logging.getLogger("Scanner")
 

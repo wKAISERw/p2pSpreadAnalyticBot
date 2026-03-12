@@ -1,5 +1,5 @@
 import asyncio
-from core.circuit_breaker import CircuitBreaker
+from core.utils.circuit_breaker import CircuitBreaker
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

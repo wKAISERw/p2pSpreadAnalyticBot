@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from core.rules import (
+from core.analysis.rules import (
     HARD_RULES,
     SOFT_RULES,
     SAFE_RULES,

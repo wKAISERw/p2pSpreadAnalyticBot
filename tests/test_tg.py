@@ -1,7 +1,7 @@
 import asyncio
 from decimal import Decimal
 from exchanges.base import Order
-from notifications.telegram_notifier import TelegramNotifier, SpreadAlert
+from bot.notifier import TelegramNotifier, SpreadAlert
 
 async def main():
     notifier = TelegramNotifier()
