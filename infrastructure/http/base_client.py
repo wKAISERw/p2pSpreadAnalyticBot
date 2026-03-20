@@ -1,51 +1,53 @@
-"""
-infrastructure/http/base_client.py — Спільна логіка HTTP-клієнтів.
-Всі клієнти успадковують або використовують цей клас.
-"""
+# infrastructure/http/base_client.py
 from __future__ import annotations
 import asyncio
 import logging
+import random
 from typing import Any, Optional
-import aiohttp
+from curl_cffi.requests import AsyncSession, errors
 
 logger = logging.getLogger("BaseHttpClient")
 
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-}
-
-DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=10.0, connect=5.0, sock_read=8.0)
-
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
 
 class BaseHttpClient:
     """
-    Базовий клас для всіх P2P HTTP-клієнтів.
-    Надає: retry з backoff, спільні заголовки, централізоване логування.
+    Базовий клієнт на основі curl_cffi.
+    Імітує Chrome 124 для обходу Cloudflare, має вбудовані ретраї.
     """
     MAX_RETRIES = 3
     RETRY_BACKOFF = [1.0, 2.0, 4.0]
 
     def __init__(
         self,
-        base_url: str = "",
+        proxy: Optional[str] = None,
         extra_headers: Optional[dict] = None,
-        timeout: Optional[aiohttp.ClientTimeout] = None,
+        timeout: float = 10.0,
     ):
-        self._base_url = base_url
-        self._headers = {**DEFAULT_HEADERS, **(extra_headers or {})}
-        self._timeout = timeout or DEFAULT_TIMEOUT
-        self._session: Optional[aiohttp.ClientSession] = None
+        self.proxy = proxy
+        self._timeout = timeout
+        self._extra_headers = extra_headers or {}
+        self._session: Optional[AsyncSession] = None
 
     async def __aenter__(self) -> "BaseHttpClient":
-        self._session = aiohttp.ClientSession(
-            headers=self._headers,
-            timeout=self._timeout,
+        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+        
+        self._session = AsyncSession(
+            impersonate="chrome124", 
+            proxies=proxies, 
+            timeout=self._timeout
         )
+        
+        self._session.headers.update({
+            "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
+            "User-Agent": random.choice(USER_AGENTS),
+        })
+        self._session.headers.update(self._extra_headers)
+        
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -61,26 +63,33 @@ class BaseHttpClient:
 
     async def _request(self, method: str, url: str, **kwargs) -> Any:
         last_exc: Optional[Exception] = None
+        
         for attempt, backoff in enumerate(self.RETRY_BACKOFF, 1):
             try:
-                async with self._session.request(method, url, **kwargs) as resp:
-                    if resp.status == 429:
-                        logger.warning(
-                            "%s 429 RateLimit on %s (attempt %d)",
-                            self.__class__.__name__, url, attempt,
-                        )
-                        await asyncio.sleep(backoff * 3)
-                        continue
-                    resp.raise_for_status()
-                    return await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                response = await self._session.request(method, url, **kwargs)
+                
+                if response.status_code == 429:
+                    logger.warning("%s 429 RateLimit on %s (attempt %d)", self.__class__.__name__, url, attempt)
+                    await asyncio.sleep(backoff * 3)
+                    continue
+
+                if response.status_code in (403, 502, 503, 504):
+                    logger.warning("%s HTTP %d on %s (attempt %d)", self.__class__.__name__, response.status_code, url,
+                                   attempt)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                if response.status_code != 200:
+                    # 🚀 ХОТФІКС: Викидаємо помилку замість return {}
+                    raise RuntimeError(f"Unexpected Status {response.status_code}: {response.text}")
+
+                return response.json()
+
+            except errors.RequestsError as e:
                 last_exc = e
-                logger.debug(
-                    "%s request error (attempt %d/%d): %s",
-                    self.__class__.__name__, attempt, self.MAX_RETRIES, e,
-                )
+                logger.debug("%s request error (attempt %d/%d): %s", self.__class__.__name__, attempt, self.MAX_RETRIES,
+                             e)
                 if attempt < self.MAX_RETRIES:
                     await asyncio.sleep(backoff)
-        raise RuntimeError(
-            f"{self.__class__.__name__} failed after {self.MAX_RETRIES} retries: {last_exc}"
-        )
+        # 🚀 ХОТФІКС: Викидаємо помилку, коли вичерпано ретраї
+        raise RuntimeError(f"{self.__class__.__name__} failed after {self.MAX_RETRIES} retries: {last_exc}")

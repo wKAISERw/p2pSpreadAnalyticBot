@@ -1,6 +1,6 @@
 # scanner.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: канонічна версія)
+# БОЙОВА ВЕРСІЯ v1.1 (Крок 4: Чистий сканер без хардкоду)
 # =============================================================================
 import asyncio
 import logging
@@ -21,7 +21,7 @@ from exchanges.binance import BinanceExchange
 from infrastructure.http.mexc_client import MexcClient
 from exchanges.mexc import MexcExchange
 from core.engine.stability import SpreadStabilityFilter
-
+from config.runtime import runtime_config
 from core.utils.dedup_cache import TTLCache
 from core.utils.circuit_breaker import CircuitBreaker
 from core.engine.cross_matcher import CrossMatchingEngine
@@ -34,7 +34,7 @@ from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 logger = logging.getLogger("Scanner")
 
 
-async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
+async def _watchdog(last_cycle_time: list[float], interval: float = getattr(settings, "watchdog_interval", 30.0)):
     while True:
         await asyncio.sleep(interval)
         elapsed = time.monotonic() - last_cycle_time[0]
@@ -42,13 +42,13 @@ async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
             logger.error("🚨 [WATCHDOG] Головний цикл не відповідає %.0fs!", elapsed)
 
 
-async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
-    """Фонова задача для регулярного очищення старих снапшотів з БД (раз на годину)."""
+async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0)):
+    """Фонова задача для регулярного очищення старих снапшотів з БД."""
+    max_age = getattr(settings, "db_snapshot_max_age_h", 168)
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
-            # Зберігаємо дані за 7 днів (168 годин) для long-term патернів
-            deleted = await db.prune_snapshots(max_age_hours=168)
+            deleted = await db.prune_snapshots(max_age_hours=max_age)
             if deleted > 0:
                 logger.info("🧹 DB Maintenance: видалено %d старих снапшотів", deleted)
         except asyncio.CancelledError:
@@ -57,26 +57,24 @@ async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
             logger.error("Помилка під час DB Maintenance: %s", e)
 
 
-# _order_fingerprint, _banks_sorted, _merge_opp_key → cross_matcher.py
-
-
-# _group_opportunities → matcher.group() в cross_matcher.py
-
-
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     risk_mode = getattr(settings, "risk_mode", "WARNING")
     merchant_filter = MerchantFilter(risk_mode=risk_mode)
 
     dedup_cache = TTLCache(
-        ttl_seconds=settings.dedup_ttl_seconds,
+        ttl_seconds=getattr(settings, "dedup_ttl_seconds", 60.0),
         max_size=getattr(settings, "dedup_max_size", 1000),
     )
 
-    cb_bybit = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_okx = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_wallet = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_binance = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_mexc = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+    # Виносимо Circuit Breaker параметри в settings
+    cb_fails = getattr(settings, "cb_failure_threshold", 3)
+    cb_timeout = getattr(settings, "cb_recovery_timeout", 60.0)
+
+    cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
@@ -96,12 +94,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
 
-    # 1. Створюємо базу
     merchant_db = MerchantDB()
     await merchant_db.start()
     await merchant_db.load_blacklist_from_file()
 
-    # 2. 🚀 ТЕПЕР ЗАПУСКАЄМО MAINTENANCE (база вже існує)
+    runtime_config._db = merchant_db
+    await runtime_config.load()
+
     maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     notifier.bind_db(merchant_db)
@@ -115,10 +114,19 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     await review_fetcher.start()
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
-    stability_filter = SpreadStabilityFilter(required_hits=2, ttl_seconds=15.0)
+
+    # Виносимо Stability Filter параметри
+    stability_filter = SpreadStabilityFilter(
+        required_hits=getattr(settings, "stability_hits", 2),
+        ttl_seconds=getattr(settings, "stability_ttl", 15.0)
+    )
 
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
-    max_alerts_per_cycle = getattr(settings, "max_alerts_per_cycle", 4)
+
+    # Таймінги циклу
+    cycle_min_sleep = getattr(settings, "cycle_min_sleep", 0.5)
+    cycle_max_sleep = getattr(settings, "cycle_max_sleep", 3.0)
+    cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
 
     try:
         async with (
@@ -138,7 +146,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
                 session_name="cryptobot_session",
-                update_interval=45.0,
+                update_interval=getattr(settings, "cb_userbot_interval", 45.0),
                 banks=list(target_banks.keys()),
             )
             await cb_userbot.start()
@@ -151,31 +159,63 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                 {"name": "MEXC", "instance": mexc_ex, "cb": cb_mexc},
             ]
 
+            async def safe_fetch_exchange(cfg, amounts, banks):
+                """Обгортка для кожної біржі з гільйотиною по часу і логуванням."""
+                try:
+                    # 🚀 ГІЛЬЙОТИНА: Жодна біржа не має права затримувати цикл довше ніж на 8 секунд
+                    # Wallet має менший timeout — він часто 429-ить
+                    # і краще нехай CB трипнеться швидко ніж блокувати цикл
+                    per_exchange_timeout = 3.0 if cfg["name"] == "Wallet" else 7.0
+                    return await asyncio.wait_for(
+                        cfg["cb"].call(
+                            cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)
+                        ),
+                        timeout=per_exchange_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("🐌 %s занадто довго відповідає! Відрізаємо від поточного циклу.", cfg["name"])
+                    # Примусово реєструємо помилку в CircuitBreaker
+                    cfg["cb"].record_failure()
+                    raise
+                except Exception as e:
+                    # Якщо CircuitBreaker відкритий (біржа впала 3 рази), він викидає свою помилку
+                    if type(e).__name__ == "CircuitBreakerOpenException":
+                        logger.warning("📉 Degraded Mode: %s тимчасово ВІДКЛЮЧЕНА (Запобіжник відкритий)", cfg["name"])
+                    raise
+            _runtime_last_load: float = 0.0  # timestamp останнього runtime_config.load()
             while not stop_event.is_set():
                 try:
                     start_time = time.monotonic()
-                    search_amounts = getattr(
-                        settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]
-                    )
 
-                    tasks = []
-                    for cfg in ex_configs:
-                        tasks.append(
-                            cfg["cb"].call(
-                                cfg["instance"].fetch_both_multi(
-                                    amounts=search_amounts,
-                                    banks=list(target_banks.keys()),
-                                )
-                            )
-                        )
+                    # RuntimeConfig: перезавантажуємо не частіше ніж раз на 10с
+                    # (не на кожному циклі — зайвий SELECT блокує WAL при конкуренції)
+                    if time.monotonic() - _runtime_last_load >= 10.0:
+                        await runtime_config.load()
+                        _runtime_last_load = time.monotonic()
+                    current_capital = float(runtime_config.get("working_capital_uah", settings.working_capital_uah))
+                    current_spread = float(runtime_config.get("min_spread_pct", settings.min_spread_pct))
+                    current_max_alerts = int(
+                        runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
 
+                    matcher.max_capital_uah = current_capital
+                    matcher.min_spread_pct = current_spread
+
+                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
+
+                    # 🚀 СТАЛО:
+                    tasks = [
+                        safe_fetch_exchange(cfg, search_amounts, list(target_banks.keys()))
+                        for cfg in ex_configs
+                    ]
+
+                    # gather зловить помилки відключених бірж (return_exceptions=True),
+                    # а успішні результати підуть далі в обробку!
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     cb_buy, cb_sell = cb_userbot.get_orders()
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
-                    # 🚀 ЗБИРАЄМО ДАНІ ДЛЯ ГРУПУВАННЯ + АНАЛІЗУ (один прохід)
                     all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
@@ -186,14 +226,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         b_orders, s_orders = res
 
-                        # ВИДАЛЯЄМО: Risk analysis (fire-and-forget) для всього стакану
-                        # await risk_engine.analyze_batch_async(b_orders)
-                        # await risk_engine.analyze_batch_async(s_orders)
-
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
-                        # Review scheduling
                         for o in b_orders:
                             if o.merchant_id:
                                 review_fetcher.schedule(o.exchange, o.merchant_id)
@@ -201,7 +236,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             if o.merchant_id:
                                 review_fetcher.schedule(o.exchange, o.merchant_id)
 
-                        # Spread grouping — одразу в цьому ж проході
                         for o in b_orders:
                             if merchant_filter.passed(o):
                                 for bank_code in o.bank_codes:
@@ -213,9 +247,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
 
-                    # 🚀 SNAPSHOT INGESTION — fire-and-forget, не блокує цикл.
-                    # Снапшоти потрібні для поведінкового аналізу який йде
-                    # async у _async_analyze — вони не потрібні ДО spread matching.
                     if all_cycle_orders:
                         asyncio.ensure_future(
                             merchant_db.add_snapshots_batch(all_cycle_orders)
@@ -239,13 +270,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     sent_count = 0
 
                     for opp in opportunities:
-                        if sent_count >= max_alerts_per_cycle:
+                        if sent_count >= current_max_alerts:
                             break
 
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        # 🚀 ХОТФІКС 1: Аналіз ТІЛЬКИ тих, хто утворив профітний спред!
                         if not getattr(buy_o, "_risk_analyzed", False):
                             risk_engine.analyze(buy_o)
                             buy_o._risk_analyzed = True
@@ -254,7 +284,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             risk_engine.analyze(sell_o)
                             sell_o._risk_analyzed = True
 
-                        # Якщо Regex одразу дав BLOCK — пропускаємо цей спред
                         risk_buy = getattr(buy_o, "risk_flag", "") or ""
                         risk_sell = getattr(sell_o, "risk_flag", "") or ""
                         if "BLOCK" in risk_buy or "BLOCK" in risk_sell:
@@ -272,11 +301,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                 buy_o.merchant_name,
                                 sell_o.merchant_name,
                         ):
-                            logger.debug(
-                                "⏳ Спред %s ➔ %s на перевірці стабільності...",
-                                buy_o.exchange,
-                                sell_o.exchange,
-                            )
                             continue
 
                         dedup_cache.mark(dedup_key)
@@ -313,20 +337,18 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         await notifier.push(alert)
 
-                    # Адаптивний sleep: підтримуємо стабільний інтервал циклу ~3с
-                    # незалежно від того скільки зайняв сам цикл.
-                    # min=0.5с (не спамимо біржі), max=3.0с (не гальмуємо)
                     cycle_elapsed = time.monotonic() - start_time
-                    adaptive_sleep = max(0.5, min(3.0, 3.0 - cycle_elapsed))
+                    # Використовуємо динамічні таймінги з settings
+                    adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(cycle_error_sleep)
 
     finally:
         watchdog_task.cancel()
-        maintenance_task.cancel()  # 🚀 ЗУПИНЯЄМО MAINTENANCE
+        maintenance_task.cancel()
 
         if "cb_userbot" in locals():
             await cb_userbot.stop()
