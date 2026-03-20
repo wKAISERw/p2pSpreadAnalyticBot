@@ -6,20 +6,9 @@ from typing import List, Tuple
 
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.binance_client import BinanceClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
-
-BANK_CODE_TO_BINANCE = {
-    "43": "Monobank",
-    "14": "PrivatBank",
-    "64": "PUMB",
-    "48": "A-Bank",
-    "99": "Oschadbank",
-    "380": "RaiffeisenBankUkraine",
-    "328": "SenseBank",
-}
-
-BINANCE_TO_CODE = {v: k for k, v in BANK_CODE_TO_BINANCE.items()}
 
 
 class BinanceExchange(BaseExchange):
@@ -34,7 +23,7 @@ class BinanceExchange(BaseExchange):
         bank_codes = []
         for m in trade_methods:
             identifier = m.get("identifier", "")
-            code = BINANCE_TO_CODE.get(identifier)
+            code = BankRegistry.from_api_code(identifier, "Binance")
             if code:
                 bank_codes.append(code)
 
@@ -63,7 +52,7 @@ class BinanceExchange(BaseExchange):
         sem = asyncio.Semaphore(2)
 
         async def fetch_one(bank_code: str) -> List[Order]:
-            binance_pay = BANK_CODE_TO_BINANCE.get(bank_code)
+            binance_pay = BankRegistry.get_exchange_code(bank_code, "Binance")
             if not binance_pay:
                 return []
 
@@ -117,9 +106,7 @@ class BinanceExchange(BaseExchange):
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         return await self._fetch_orders("SELL", banks)
 
-    async def fetch_both_multi(
-            self, amounts: List[float], banks: List[str]
-    ) -> Tuple[List[Order], List[Order]]:
+    async def fetch_both_multi(self, amounts: List[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         buy_orders, sell_orders = await asyncio.gather(
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),

@@ -8,8 +8,9 @@ from __future__ import annotations
 RISK_BADGES = {
     # Поведінкові (Deep Research)
     "BEHAVIOR_BOTLIKE":      "🤖",
-    "EXACT_LIMITS":          "📏",
-    "STICKY_LIMITS":         "📏",
+    "EXACT_LIMITS":          "🎯",
+    "API_REPLENISH":         "🤖",   # бот-авто-поповнення
+    "STATIC_DROP":           "📏",   # статичний дроп min=max
     "VELOCITY_SPIKE":        "⚡",
     "CROSS_EXCHANGE_BOT":    "👥",
     "FLICKER_RELIST":        "🔄",
@@ -77,17 +78,34 @@ def format_behavioral_summary(risk_flag: str) -> str:
     """
     if not risk_flag:
         return ""
-    behavioral_keys = {
-        "BEHAVIOR_BOTLIKE", "EXACT_LIMITS", "STICKY_LIMITS",
-        "VELOCITY_SPIKE", "CROSS_EXCHANGE_BOT", "FLICKER_RELIST",
+
+    import re
+
+    # Флаги що мають значення після двокрапки (напр. API_REPLENISH:42)
+    VALUE_FLAGS = {
+        "API_REPLENISH":    ("🤖", "АВТО-БОТ"),
+        "STATIC_DROP":      ("📏", "СТАТИК-ДРОП"),
+        "VELOCITY_SPIKE":   ("⚡", "VELOCITY"),
+        "FLICKER_RELIST":   ("🔄", "РІЛІСТИНГ"),
+        "CROSS_EXCHANGE_BOT": ("👥", "КЛОН"),
+        "BEHAVIOR_BOTLIKE": ("🤖", "BOTLIKE"),
     }
+    # Флаги без значення
+    SIMPLE_FLAGS = {
+        "EXACT_LIMITS": ("🎯", "ФІКС.ЛІМІТ"),
+    }
+
     found = []
-    for key in behavioral_keys:
+
+    for key, (badge, label) in VALUE_FLAGS.items():
+        m = re.search(rf"{key}:([\w./]+)", risk_flag, re.IGNORECASE)
+        if m:
+            found.append(f"{badge} {label}:{m.group(1)}")
+        elif key in risk_flag.upper():
+            found.append(f"{badge} {label}")
+
+    for key, (badge, label) in SIMPLE_FLAGS.items():
         if key in risk_flag.upper():
-            badge = RISK_BADGES.get(key, "⚠️")
-            # Витягуємо значення після ключа якщо є (напр. STICKY_LIMITS:42)
-            pattern = key + "[:\\w./]*"
-            import re
-            m = re.search(pattern, risk_flag, re.IGNORECASE)
-            found.append(f"{badge} {m.group(0) if m else key}")
+            found.append(f"{badge} {label}")
+
     return " | ".join(found)

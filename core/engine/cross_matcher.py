@@ -107,3 +107,80 @@ class CrossMatchingEngine:
 
         best_opportunities.sort(key=lambda x: x["net_spread_pct"], reverse=True)
         return best_opportunities
+
+    # ─── Grouping ─────────────────────────────────────────────────────────────
+
+    def group(
+        self,
+        opportunities: list[dict],
+        bank_names: dict[str, str],
+    ) -> list[dict]:
+        """
+        Групує сирі можливості за унікальним маршрутом (мерчант+ціна).
+        Збирає всі варіанти банківських пар в один алерт.
+        bank_names: {internal_code: human_name}
+
+        Перенесено з scanner.py._group_opportunities()
+        """
+        grouped: dict[str, dict] = {}
+
+        for opp in opportunities:
+            key = self._merge_key(opp)
+            item = grouped.setdefault(key, {"base": opp.copy(), "route_pairs": set()})
+            item["route_pairs"].add((opp["buy_bank"], opp["sell_bank"]))
+            if float(opp["net_profit"]) > float(item["base"]["net_profit"]):
+                item["base"] = opp.copy()
+
+        merged: list[dict] = []
+        for item in grouped.values():
+            base = item["base"]
+            buy_o = base["buy_order"]
+            sell_o = base["sell_order"]
+
+            buy_all = self._banks_sorted(getattr(buy_o, "bank_codes", []), bank_names)
+            sell_all = self._banks_sorted(getattr(sell_o, "bank_codes", []), bank_names)
+
+            base["buy_banks_all"]  = buy_all
+            base["sell_banks_all"] = sell_all
+            base["buy_banks_fit"]  = [b for b in buy_all if b in bank_names]
+            base["sell_banks_fit"] = [b for b in sell_all if b in bank_names]
+            base["route_variants"] = [
+                f"{bank_names.get(b, b)} → {bank_names.get(s, s)}"
+                for b, s in sorted(
+                    item["route_pairs"],
+                    key=lambda p: (bank_names.get(p[0], p[0]), bank_names.get(p[1], p[1])),
+                )
+            ]
+            merged.append(base)
+
+        merged.sort(
+            key=lambda x: (float(x["net_profit"]), float(x["net_spread_pct"])),
+            reverse=True,
+        )
+        return merged
+
+    # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _merge_key(opp: dict) -> str:
+        b = opp["buy_order"]
+        s = opp["sell_order"]
+        return (
+            f"{opp.get('route_type','UNKNOWN')}|"
+            f"{b.exchange}|{b.merchant_id}|{b.price}|{b.min_limit}|{b.max_limit}|{b.link}|"
+            f"{s.exchange}|{s.merchant_id}|{s.price}|{s.min_limit}|{s.max_limit}|{s.link}|"
+            f"{round(float(opp['actual_entry_uah']), 2)}"
+        )
+
+    @staticmethod
+    def _banks_sorted(codes: list[str] | None, bank_names: dict[str, str]) -> list[str]:
+        uniq = {c for c in (codes or []) if c}
+        return sorted(uniq, key=lambda c: bank_names.get(c, c))
+
+    @staticmethod
+    def order_fingerprint(order, bank_code: str) -> str:
+        """Унікальний відбиток ордера для дедуплікації."""
+        return (
+            f"{order.exchange}|{order.merchant_id}|{bank_code}|"
+            f"{order.price}|{order.min_limit}|{order.max_limit}|{order.link}"
+        )

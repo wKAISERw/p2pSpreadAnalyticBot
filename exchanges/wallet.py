@@ -5,24 +5,23 @@ from typing import List, Tuple
 from decimal import Decimal
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.wallet_client import WalletClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
+
 
 class WalletExchange(BaseExchange):
     def __init__(self, client: WalletClient):
         self.client = client
-        # НОВИЙ ОФІЦІЙНИЙ URL
         self.url = "https://p2p.walletbot.me/p2p/integration-api/v1/item/online"
 
     def _parse_order(self, item: dict) -> Order:
-        # Додаємо словник перекладу
-        bank_map = {"monobank": "43", "privatbank": "14", "pumb": "64", "abank": "48"}
-
         raw_banks = item.get("payments", [])
         bank_codes = []
         for b in raw_banks:
-            if b.lower() in bank_map:
-                bank_codes.append(bank_map[b.lower()])
+            code = BankRegistry.from_api_code(b.lower(), "Wallet")
+            if code:
+                bank_codes.append(code)
 
         finish_rate = float(item.get("executeRate", "0")) * 100
 
@@ -68,7 +67,6 @@ class WalletExchange(BaseExchange):
             for item in items:
                 try:
                     order = self._parse_order(item)
-                    # Фільтруємо банки
                     if not banks or any(b.lower() in [pb.lower() for pb in order.bank_codes] for b in banks):
                         orders.append(order)
                 except Exception as e:
@@ -80,11 +78,9 @@ class WalletExchange(BaseExchange):
             return []
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        # "SELL" = мерчант продає USDT (а ми купуємо)
         return await self._fetch_orders("SELL", banks)
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        # "BUY" = мерчант купує USDT (а ми йому продаємо)
         return await self._fetch_orders("BUY", banks)
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:

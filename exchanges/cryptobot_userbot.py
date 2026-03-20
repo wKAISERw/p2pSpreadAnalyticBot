@@ -22,18 +22,17 @@ logger = logging.getLogger("CryptoBotUserbot")
 
 CRYPTOBOT_USERNAME = "CryptoBot"
 
+from config.banks import BankRegistry as _BankRegistry
+
+# Автоматично будується з BankRegistry — не редагувати вручну
 BANK_CALLBACK_TO_CODE = {
-    "choose-method-monobank":           "43",
-    "choose-method-privatbank":         "14",
-    "choose-method-pumb":               "64",
-    "choose-method-abank":              "48",
-    "choose-method-oschadbank":         "99",
-    "choose-method-raiffeisenua":       "380",
-    "choose-method-alfabankua":         "328",
-    "choose-method-otpbank":            "319",
-    "choose-method-izibank":            "553",
-    "choose-method-globalbanktransfer": "transfer",
+    cb: code
+    for code, bank in [(b.internal_code, b) for b in _BankRegistry._by_code.values()]
+    for cb in [bank.get_code("CryptoBot")]
+    if cb and cb.startswith("choose-method-")
 }
+# Додаємо спеціальний запис що не в BankRegistry
+BANK_CALLBACK_TO_CODE["choose-method-globalbanktransfer"] = "transfer"
 
 NAV_CALLBACKS = {
     "market-trade-open-filters",
@@ -398,7 +397,8 @@ class CryptoBotUserbot:
     # ─── Utils ────────────────────────────────────────────────────────────
 
     def _code_to_callback(self, code: str) -> Optional[str]:
-        return {v: k for k, v in BANK_CALLBACK_TO_CODE.items()}.get(code)
+        """internal_code → CryptoBot callback data."""
+        return _BankRegistry.get_exchange_code(code, "CryptoBot")
 
     def _dedup(self, orders: list[Order]) -> list[Order]:
         seen, result = set(), []

@@ -29,6 +29,7 @@ from core.engine.risk_engine import RiskEngine
 from core.storage.merchant_db import MerchantDB
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
+from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 
 logger = logging.getLogger("Scanner")
 
@@ -56,91 +57,10 @@ async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
             logger.error("Помилка під час DB Maintenance: %s", e)
 
 
-def _order_fingerprint(order, bank_code: str) -> str:
-    return (
-        f"{order.exchange}|{order.merchant_id}|{bank_code}|"
-        f"{order.price}|{order.min_limit}|{order.max_limit}|{order.link}"
-    )
+# _order_fingerprint, _banks_sorted, _merge_opp_key → cross_matcher.py
 
 
-def _route_fingerprint(opp: dict) -> str:
-    buy_o = opp["buy_order"]
-    sell_o = opp["sell_order"]
-    return (
-        f"{_order_fingerprint(buy_o, opp['buy_bank'])}"
-        f" -> "
-        f"{_order_fingerprint(sell_o, opp['sell_bank'])}"
-    )
-
-
-def _banks_sorted(codes: list[str] | None, target_banks: dict[str, str]) -> list[str]:
-    uniq = {c for c in (codes or []) if c}
-    return sorted(uniq, key=lambda c: target_banks.get(c, c))
-
-
-def _merge_opp_key(opp: dict) -> str:
-    buy_o = opp["buy_order"]
-    sell_o = opp["sell_order"]
-    return (
-        f"{opp.get('route_type', 'UNKNOWN')}|"
-        f"{buy_o.exchange}|{buy_o.merchant_id}|{buy_o.price}|{buy_o.min_limit}|{buy_o.max_limit}|{buy_o.link}|"
-        f"{sell_o.exchange}|{sell_o.merchant_id}|{sell_o.price}|{sell_o.min_limit}|{sell_o.max_limit}|{sell_o.link}|"
-        f"{round(float(opp['actual_entry_uah']), 2)}"
-    )
-
-
-def _group_opportunities(opportunities: list[dict], target_banks: dict[str, str]) -> list[dict]:
-    grouped: dict[str, dict] = {}
-
-    for opp in opportunities:
-        key = _merge_opp_key(opp)
-        item = grouped.setdefault(
-            key,
-            {
-                "base": opp.copy(),
-                "route_pairs": set(),
-            },
-        )
-
-        item["route_pairs"].add((opp["buy_bank"], opp["sell_bank"]))
-
-        if float(opp["net_profit"]) > float(item["base"]["net_profit"]):
-            item["base"] = opp.copy()
-
-    merged: list[dict] = []
-
-    for item in grouped.values():
-        base = item["base"]
-        buy_o = base["buy_order"]
-        sell_o = base["sell_order"]
-
-        buy_all = _banks_sorted(getattr(buy_o, "bank_codes", []), target_banks)
-        sell_all = _banks_sorted(getattr(sell_o, "bank_codes", []), target_banks)
-
-        buy_fit = [b for b in buy_all if b in target_banks]
-        sell_fit = [b for b in sell_all if b in target_banks]
-
-        route_pairs = sorted(
-            item["route_pairs"],
-            key=lambda p: (target_banks.get(p[0], p[0]), target_banks.get(p[1], p[1])),
-        )
-
-        base["buy_banks_all"] = buy_all
-        base["sell_banks_all"] = sell_all
-        base["buy_banks_fit"] = buy_fit
-        base["sell_banks_fit"] = sell_fit
-        base["route_variants"] = [
-            f"{target_banks.get(b, b)} → {target_banks.get(s, s)}"
-            for b, s in route_pairs
-        ]
-
-        merged.append(base)
-
-    merged.sort(
-        key=lambda x: (float(x["net_profit"]), float(x["net_spread_pct"])),
-        reverse=True,
-    )
-    return merged
+# _group_opportunities → matcher.group() в cross_matcher.py
 
 
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
@@ -197,7 +117,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
     stability_filter = SpreadStabilityFilter(required_hits=2, ttl_seconds=15.0)
 
-    target_banks = {"43": "Monobank", "14": "PrivatBank", "64": "PUMB"}
+    target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
     max_alerts_per_cycle = getattr(settings, "max_alerts_per_cycle", 4)
 
     try:
@@ -266,9 +186,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         b_orders, s_orders = res
 
-                        # Risk analysis (fire-and-forget via ensure_future в analyze())
-                        await risk_engine.analyze_batch_async(b_orders)
-                        await risk_engine.analyze_batch_async(s_orders)
+                        # ВИДАЛЯЄМО: Risk analysis (fire-and-forget) для всього стакану
+                        # await risk_engine.analyze_batch_async(b_orders)
+                        # await risk_engine.analyze_batch_async(s_orders)
 
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
@@ -304,7 +224,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     last_cycle_time[0] = time.monotonic()
 
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
-                    opportunities = _group_opportunities(raw_opportunities, target_banks)
+                    opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
 
                     logger.info(
@@ -325,7 +245,22 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        dedup_key = f"spread:{_merge_opp_key(opp)}"
+                        # 🚀 ХОТФІКС 1: Аналіз ТІЛЬКИ тих, хто утворив профітний спред!
+                        if not getattr(buy_o, "_risk_analyzed", False):
+                            risk_engine.analyze(buy_o)
+                            buy_o._risk_analyzed = True
+
+                        if not getattr(sell_o, "_risk_analyzed", False):
+                            risk_engine.analyze(sell_o)
+                            sell_o._risk_analyzed = True
+
+                        # Якщо Regex одразу дав BLOCK — пропускаємо цей спред
+                        risk_buy = getattr(buy_o, "risk_flag", "") or ""
+                        risk_sell = getattr(sell_o, "risk_flag", "") or ""
+                        if "BLOCK" in risk_buy or "BLOCK" in risk_sell:
+                            continue
+
+                        dedup_key = f"spread:{matcher._merge_key(opp)}"
                         if dedup_cache.seen(dedup_key):
                             continue
 

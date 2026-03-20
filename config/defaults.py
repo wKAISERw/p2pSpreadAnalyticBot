@@ -1,32 +1,36 @@
 """
 config/defaults.py — Всі константи проекту з коментарями.
 Змінювати тут або через .env (Settings) або через UI бота (RuntimeConfig).
-Автоматично згенеровано migrate_to_v2.py — 2026-03-12
 """
 
 # ── Поведінковий аналіз ────────────────────────────────────────────────
-BEHAVIOR_HISTORY_MINUTES: int = 60       # глибина history для аналізу
-BEHAVIOR_ALERT_SCORE: int = 60           # поріг для логування підозри
-BEHAVIOR_LLM_THRESHOLD: int = 60         # поріг для ескалації в LLM
+BEHAVIOR_HISTORY_MINUTES: int = 60
+BEHAVIOR_ALERT_SCORE: int = 60
+BEHAVIOR_LLM_THRESHOLD: int = 60
 
 EXACT_LIMITS_SCORE: int = 20
 STICKY_LIMITS_SCORE: int = 40
 VELOCITY_SPIKE_SCORE: int = 30
 
-STICKY_MIN_CHAIN: int = 3               # мін. кількість snapshot-ів підряд
-VELOCITY_MIN_WINDOW_HOURS: float = 0.16  # ~10 хв
+STICKY_MIN_CHAIN: int = 3
+VELOCITY_MIN_WINDOW_HOURS: float = 0.16
 VELOCITY_SPIKE_PER_HOUR: float = 20.0
 
 # ── Risk Engine ────────────────────────────────────────────────────────
 MIN_ORDERS: dict[str, int] = {
-    "Binance": 30, "Bybit": 30, "OKX": 30,
-    "Wallet": 10, "MEXC": 10, "CryptoBot": 5,
+    "Binance": 50, "Bybit": 30, "OKX": 30,
+    "Wallet": 10, "MEXC": 20, "CryptoBot": 15,
 }
 MIN_COMPLETION: dict[str, float] = {
-    "Binance": 90.0, "Bybit": 90.0, "OKX": 90.0,
-    "Wallet": 85.0, "MEXC": 85.0, "CryptoBot": 80.0,
+    "Binance": 95.0, "Bybit": 92.0, "OKX": 92.0,
+    "Wallet": 88.0, "MEXC": 90.0, "CryptoBot": 85.0,
 }
-BOT_ALERT_COOLDOWN_SEC: int = 900        # 15 хв між повторними алертами
+TRUSTED_MIN_ORDERS: int = 500
+TRUSTED_MIN_COMPLETION: float = 95.0
+TRUSTED_MAX_RISK_SCORE: int = 30
+TRUSTED_LLM_MIN_SCORE: int = 60
+BOT_ALERT_COOLDOWN_SEC: int = 900
+DB_ASYNC_ANALYZE_CONCURRENCY: int = 8
 
 # ── Regex аналіз ──────────────────────────────────────────────────────
 LLM_SCORE_THRESHOLD: int = 30
@@ -50,13 +54,12 @@ LLM_MAX_QUEUE: int = 100
 LLM_WORKERS: int = 2
 
 # ── Identity аналіз ────────────────────────────────────────────────────
-LIMIT_EPSILON: float = 0.01             # допуск для порівняння лімітів
-IDENTITY_TWIN_MINUTES: int = 15         # вікно пошуку двійників
+LIMIT_EPSILON: float = 0.01
+IDENTITY_TWIN_MINUTES: int = 15
 
 # ── DB / Storage ──────────────────────────────────────────────────────
-SNAPSHOT_RETENTION_HOURS: int = 168     # 7 днів
+SNAPSHOT_RETENTION_HOURS: int = 168
 SNAPSHOT_HEARTBEAT_MINUTES: int = 10
-DB_ASYNC_ANALYZE_CONCURRENCY: int = 8
 
 # ── Scanner ────────────────────────────────────────────────────────────
 ADAPTIVE_SLEEP_MIN: float = 0.5

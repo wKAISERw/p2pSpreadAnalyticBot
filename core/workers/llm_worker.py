@@ -95,13 +95,14 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - BOT_API: використання скриптів/процесингу (прапори API_REPLENISH).
 
 КРИТИЧНО:
-- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант пише "тільки своя карта", але потім додає "від родичів приймаю з фото/паспортом" або "можу прийняти від довіреної особи" — ЦЕ РИЗИК. Ти ПОВИНЕН ставити verdict: SUSPICIOUS або BLOCK (ризик: THIRD_PARTY_HINT або TRIANGLE). Не знижуй до OK!
-- ⚖️ МАТРИЦЯ ДОКАЗІВ ТА БОТИ: Якщо в "Поведінці" є прапори API_REPLENISH, CROSS_EXCHANGE_BOT або COMPOSITE_RISK — це дуже сильний маркер бот-процесингу. Оціни його В КОМПЛЕКСІ з текстом! Якщо текст ІДЕАЛЬНО безпечний ("без третіх осіб", "тільки чат біржі") — ти маєш право виправдати мерчанта і поставити verdict: OK. Але якщо при цих прапорах є хоча б найменша підозра (просить чек, чат, або двозначно згадує 3-ті особи) — став verdict: BLOCK. Ти — фінальний арбітр.
+- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант чітко пише "тільки своя карта", "без 3-х осіб", "з 3 особами не працюю" — ЦЕ БЕЗПЕЧНО (OK). НЕ видумуй прихованих ризиків і НЕ припускай винятків, якщо про них прямо не написано!
+- 🧾 КВИТАНЦІЇ ТА ЧЕКИ: Прохання надати чек, квитанцію або відео екрану після оплати — це НОРМАЛЬНО і БЕЗПЕЧНО. НІКОЛИ не блокуй і не став SUSPICIOUS тільки за те, що мерчант вимагає чек.
+- 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — це БЕЗПЕЧНО (OK). Ризиком є лише довірені особи З ІНШИМ прізвищем.
+- ПОВЕДІНКА СТАКАНУ: Якщо в полі "Поведінка" є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. Ти ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
 - Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності, але немає прапорів ботів — його жорсткі вимоги щодо своєї безпеки є нормою.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
 {"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ_ВИЩЕ","reason":"до 120 символів українською"}"""
-
 
 @dataclass
 class LLMTask:
@@ -431,6 +432,48 @@ class LLMWorkerPool:
         return _parse_json(text)
 
 
+def _build_behavior_block(task: "LLMTask") -> list[str]:
+    """
+    Формує структурований behavioral блок для промпту.
+    LLM бачить конкретні факти, а не просто список флагів.
+    """
+    flags = task.behavior_flags or []
+    if not flags:
+        return ["ПОВЕДІНКА: Нормальна"]
+
+    lines = ["ПОВЕДІНКА (аномалії):"]
+
+    for f in flags:
+        if f.startswith("API_REPLENISH:"):
+            n = f.split(":", 1)[1]
+            lines.append(f"  - БОТ-АВТО-ПОПОВНЕННЯ: ліміти стабільні {n} циклів, кількість угод зростає (скрипт)")
+        elif f.startswith("STATIC_DROP:"):
+            n = f.split(":", 1)[1]
+            lines.append(f"  - СТАТИЧНИЙ ДРОП: ліміти min=max, незмінні {n} циклів, угоди не ростуть")
+        elif f.startswith("VELOCITY_SPIKE:"):
+            v = f.split(":", 1)[1]
+            lines.append(f"  - АНОМАЛЬНА ШВИДКІСТЬ: {v} угод/год (норма <20/год)")
+        elif f == "EXACT_LIMITS":
+            lines.append(f"  - ФІКСОВАНА СУМА: min_limit ≈ max_limit ({task.min_limit}–{task.max_limit} UAH)")
+        elif f.startswith("FLICKER_RELIST:"):
+            n = f.split(":", 1)[1]
+            lines.append(f"  - РІЛІСТИНГ: зникав і повертався з тими ж умовами {n} раз (маніпуляція)")
+        elif f.startswith("CROSS_EXCHANGE_BOT:"):
+            ex = f.split(":", 2)[-1] if f.count(":") >= 2 else ""
+            lines.append(f"  - КЛОН НА БІРЖАХ: однакові ліміти знайдено на {ex}")
+        elif f.startswith("BEHAVIOR_BOTLIKE:"):
+            s = f.split(":", 1)[1]
+            lines.append(f"  - ЗАГАЛЬНА ПІДОЗРА НА БОТА: score={s}")
+        else:
+            lines.append(f"  - {f}")
+
+    # Додаємо контекст лімітів для LLM
+    lines.append(f"  Поточні ліміти: {task.min_limit}–{task.max_limit} UAH")
+
+    return lines
+
+
+
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
@@ -459,7 +502,9 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"- Успішність: {task.finish_rate}%",
         f"- Верифікація: {'ТАК' if task.is_verified else 'НІ'}",
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
-        f"ПОВЕДІНКА: {', '.join(task.behavior_flags) if task.behavior_flags else 'Нормальна'}",
+        # ── Behavioral block ──────────────────────────────────────────────
+        *_build_behavior_block(task),
+        # ─────────────────────────────────────────────────────────────────
         "",
         f"Regex verdict: {rr.verdict} (Score: {score})",
         f"Regex main risk: {risk_type}",

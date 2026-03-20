@@ -9,69 +9,35 @@ from core.analysis.regex_analyzer import analyze as regex_analyze, RegexResult
 from core.storage.merchant_db import MerchantDB
 from core.analysis.behavioral_analyzer import analyze_history
 from core.analysis.identity_analyzer import analyze_identity
-
+from core.utils.cache import TTLCache
+from config.defaults import (
+    MIN_ORDERS, MIN_COMPLETION,
+    TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
+    TRUSTED_MAX_RISK_SCORE, TRUSTED_LLM_MIN_SCORE,
+    BEHAVIOR_HISTORY_MINUTES, BOT_ALERT_COOLDOWN_SEC,
+    DB_ASYNC_ANALYZE_CONCURRENCY,
+    REVIEW_WARN_NEG_PCT, REVIEW_WARN_MIN_NEG,
+    REVIEW_BLOCK_NEG_PCT, REVIEW_BLOCK_MIN_NEG,
+)
 logger = logging.getLogger("RiskEngine")
 
-MIN_ORDERS: dict[str, int] = {
-    "Binance": 50,
-    "Bybit": 30,
-    "OKX": 30,
-    "Wallet": 10,
-    "MEXC": 20,
-    "CryptoBot": 15,
-}
+# MIN_ORDERS — з config/defaults.py
 
-MIN_COMPLETION: dict[str, float] = {
-    "Binance": 95.0,
-    "Bybit": 92.0,
-    "OKX": 92.0,
-    "Wallet": 88.0,
-    "MEXC": 90.0,
-    "CryptoBot": 85.0,
-}
+# MIN_COMPLETION — з config/defaults.py
 
-TRUSTED_MIN_ORDERS = 500
-TRUSTED_MIN_COMPLETION = 95.0
-TRUSTED_MAX_RISK_SCORE = 30
-TRUSTED_LLM_MIN_SCORE = 60
+# TRUSTED_MAX_RISK_SCORE — з config/defaults.py
+# TRUSTED_LLM_MIN_SCORE — з config/defaults.py
 
-BEHAVIOR_HISTORY_MINUTES = 60
+# BEHAVIOR_HISTORY_MINUTES — з config/defaults.py
 BEHAVIOR_ALERT_SCORE = 60
-BOT_ALERT_COOLDOWN_SEC = 900  # 15 хв
+# BOT_ALERT_COOLDOWN_SEC — з config/defaults.py
 
-_ASYNC_ANALYZE_CONCURRENCY = 8
+_ASYNC_ANALYZE_CONCURRENCY = DB_ASYNC_ANALYZE_CONCURRENCY
 
-REVIEW_WARN_NEG_PCT = 15.0
-REVIEW_WARN_MIN_NEG = 3
-REVIEW_BLOCK_NEG_PCT = 25.0
-REVIEW_BLOCK_MIN_NEG = 5
+# REVIEW_* — з config/defaults.py
 
 
-class _BoundedTTLCache:
-    __slots__ = ("_ttl", "_max", "_data")
-
-    def __init__(self, ttl_seconds: float = 60.0, max_size: int = 2000):
-        self._ttl = ttl_seconds
-        self._max = max_size
-        self._data: dict[tuple, tuple[float, object]] = {}
-
-    def get(self, key: tuple, now: float):
-        entry = self._data.get(key)
-        if entry is None:
-            return None
-        ts, val = entry
-        if now - ts > self._ttl:
-            del self._data[key]
-            return None
-        return (ts, val)
-
-    def set(self, key: tuple, now: float, value) -> None:
-        if len(self._data) >= self._max:
-            evict_count = max(1, self._max // 10)
-            oldest = sorted(self._data.items(), key=lambda x: x[1][0])[:evict_count]
-            for k, _ in oldest:
-                del self._data[k]
-        self._data[key] = (now, value)
+# _BoundedTTLCache → замінено на core/utils/cache.py TTLCache
 
 
 def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
@@ -89,8 +55,8 @@ class RiskEngine:
         self._analyzed = 0
         self._db_hits = 0
         self._bot_alert_cache: dict[tuple[str, str], tuple[str, float]] = {}
-        self._b_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
-        self._id_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
+        self._b_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
+        self._id_cache = TTLCache(ttl_seconds=60.0, max_size=2000)
         self._db_sem = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
     def analyze(self, order: Order) -> Order:
@@ -140,8 +106,8 @@ class RiskEngine:
 
             cache_key = (exchange, mid)
 
-            need_snapshots = not (self._b_cache.get(cache_key, now) is not None)
-            need_twins = bool(order.merchant_name) and not (self._id_cache.get(cache_key, now) is not None)
+            need_snapshots = self._b_cache.get(cache_key) is None
+            need_twins = bool(order.merchant_name) and self._id_cache.get(cache_key) is None
 
             coros = [
                 self._db.is_blacklisted(exchange, mid),
@@ -171,12 +137,12 @@ class RiskEngine:
             review_flags = _build_review_flags_from_summary(review_summary_raw)
 
             # ── 1. ПОВЕДІНКОВИЙ ШАР ───────────────────────────────────────────
-            cached_b = self._b_cache.get(cache_key, now)
+            cached_b = self._b_cache.get(cache_key)
             if cached_b is not None:
-                behavior_result = cached_b[1]
+                behavior_result = cached_b
             else:
                 behavior_result = analyze_history(order, snapshots_raw or [])
-                self._b_cache.set(cache_key, now, behavior_result)
+                self._b_cache.set(cache_key, behavior_result)
 
             if behavior_result.flags:
                 behavior_flags.extend(behavior_result.flags)
@@ -187,12 +153,12 @@ class RiskEngine:
 
             # ── 2. ШАР ЦИФРОВИХ ДВІЙНИКІВ ─────────────────────────────────────
             if order.merchant_name:
-                cached_id = self._id_cache.get(cache_key, now)
+                cached_id = self._id_cache.get(cache_key)
                 if cached_id is not None:
-                    id_result = cached_id[1]
+                    id_result = cached_id
                 else:
                     id_result = analyze_identity(order, twins_raw or [])
-                    self._id_cache.set(cache_key, now, id_result)
+                    self._id_cache.set(cache_key, id_result)
 
                 if id_result.is_twin:
                     behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")

@@ -1,20 +1,29 @@
-# core/behavioral_analyzer.py
+# core/analysis/behavioral_analyzer.py
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-MIN_SNAPSHOTS = 3
-LIMIT_EPSILON = 0.01
-EXACT_TOLERANCE = 5.0  # 🚀 НОВЕ: ловимо трюк з різницею в 1-5 грн (напр. 4991-4992)
-# Нова вага балів
-API_REPLENISH_SCORE = 50   # 100% бот, який авто-поповнює об'єм
-STATIC_DROP_SCORE = 30     # Висить фіксований дроп (напр. 4150-4150) і чекає
-VELOCITY_SPIKE_SCORE = 30  # Дуже швидка накрутка
+from config.defaults import (
+    LIMIT_EPSILON, STICKY_MIN_CHAIN,
+    VELOCITY_MIN_WINDOW_HOURS, VELOCITY_SPIKE_PER_HOUR,
+    BEHAVIOR_LLM_THRESHOLD,
+)
 
-STICKY_MIN_CHAIN = 3
-VELOCITY_MIN_WINDOW_HOURS = 0.16   # ~10 хв
-VELOCITY_SPIKE_PER_HOUR = 20.0
-BEHAVIOR_LLM_THRESHOLD = 60
+MIN_SNAPSHOTS = 3
+
+# Бали детекторів — тут бо специфічні для behavioral шару
+API_REPLENISH_SCORE = 50   # бот що авто-поповнює об'єм: sticky + delta > 0
+STATIC_DROP_SCORE   = 30   # фіксований дроп: sticky + exact + delta == 0
+VELOCITY_SPIKE_SCORE = 30  # аномальна швидкість угод
+
+# EXACT_TOLERANCE: різниця до 5 грн вважається "рівними" лімітами
+# (напр. 4991–4992 — класичний трюк ботів)
+EXACT_TOLERANCE = 5.0
+
+# FLICKER_RELIST: параметри детектора зникнення/повернення
+FLICKER_MIN_GAP_MIN   = 10     # мін. пауза між сесіями (хв) — менше це не зникнення
+FLICKER_MAX_GAP_HOURS = 6.0    # макс. пауза — більше це просто офлайн на ніч
+FLICKER_SCORE         = 15     # ЗНИЖЕНО: бал за кожен flicker (щоб не спамило LLM)   # бал за кожен flicker (додається до загального)
 
 @dataclass(slots=True)
 class BehavioralResult:
@@ -88,6 +97,13 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
             result.score += VELOCITY_SPIKE_SCORE
             result.flags.append(f"VELOCITY_SPIKE:{velocity:.1f}/h")
 
+    # ── 3. FLICKER_RELIST ────────────────────────────────────────────────────
+    # Мерчант зникає і повертається з тим самим terms_hash за короткий час.
+    flicker_count = _detect_flicker(snapshots)
+    if flicker_count > 1:  # 🚀 ХОТФІКС 3: Реагуємо ТІЛЬКИ якщо блимав хоча б 2 рази!
+        result.score += FLICKER_SCORE * flicker_count
+        result.flags.append(f"FLICKER_RELIST:{flicker_count}")
+
     result.needs_llm = result.score >= BEHAVIOR_LLM_THRESHOLD
 
     if result.flags:
@@ -98,7 +114,43 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
             velocity = delta_orders / time_span_hours
             parts.append(f"orders_delta={delta_orders}")
             parts.append(f"velocity={velocity:.1f}/h")
+        if flicker_count > 0:
+            parts.append(f"flicker={flicker_count}")
         result.reason = " | ".join(parts)
 
     return result
 
+
+def _detect_flicker(snapshots: List[Dict[str, Any]]) -> int:
+    """
+    Рахує кількість flicker-подій у history мерчанта.
+    Flicker = пауза між двома snapshot-ами більша за FLICKER_MIN_GAP_MIN
+              але менша за FLICKER_MAX_GAP_HOURS, при тому що terms_hash збігається.
+
+    Умова terms_hash: виключає звичайні зміни умов — нам цікаво лише
+    повернення з ТИМИ САМИМИ умовами (класична поведінка скрипту).
+    """
+    if len(snapshots) < 2:
+        return 0
+
+    min_gap_sec  = FLICKER_MIN_GAP_MIN * 60
+    max_gap_sec  = FLICKER_MAX_GAP_HOURS * 3600
+    flicker_count = 0
+
+    for i in range(1, len(snapshots)):
+        prev = snapshots[i - 1]
+        curr = snapshots[i]
+
+        gap = _to_float(curr.get("recorded_at", 0)) - _to_float(prev.get("recorded_at", 0))
+
+        if gap < min_gap_sec or gap > max_gap_sec:
+            continue
+
+        prev_hash = prev.get("terms_hash") or ""
+        curr_hash = curr.get("terms_hash") or ""
+
+        # Обидва хеші мають бути непорожніми і збігатись
+        if prev_hash and curr_hash and prev_hash == curr_hash:
+            flicker_count += 1
+
+    return flicker_count

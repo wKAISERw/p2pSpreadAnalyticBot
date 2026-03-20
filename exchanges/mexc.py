@@ -6,24 +6,9 @@ from typing import List, Tuple
 
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.mexc_client import MexcClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
-
-# ⚠️ УВАГА: Нові цифрові ID банків для MEXC.
-# Я прописав орієнтовні (з твоєї відповіді), але тобі ТРЕБА ЇХ ПЕРЕВІРИТИ (інструкція нижче)
-BANK_CODE_TO_MEXC = {
-    "43": "128",  # Умовно Monobank (Треба перевірити!)
-    "14": "131",  # Умовно PrivatBank (Треба перевірити!)
-    "64": "133",  # Умовно PUMB (Треба перевірити!)
-    "48": "134",  # A-Bank
-    "99": "130",  # Oschadbank
-    "380": "132",  # Raiffeisen Bank
-    "328": "135",  # Sense Bank
-    "319": "140",  # OTP Bank
-    "553": "142",  # izibank
-}
-
-MEXC_TO_CODE = {v: k for k, v in BANK_CODE_TO_MEXC.items()}
 
 
 class MexcExchange(BaseExchange):
@@ -31,9 +16,7 @@ class MexcExchange(BaseExchange):
         self.client = client
 
     def _build_payload(self, side: int, payment_method: str, page: int = 1) -> dict:
-        # side: 1 = BUY (ми купуємо), 2 = SELL (ми продаємо)
         trade_str = "SELL" if side == 1 else "BUY"
-
         return {
             "adsType": "1",
             "allowTrade": "false",
@@ -46,7 +29,7 @@ class MexcExchange(BaseExchange):
             "follow": "false",
             "haveTrade": "false",
             "page": str(page),
-            "payMethod": payment_method,  # Передаємо цифровий ID банку
+            "payMethod": payment_method,
             "tradeType": trade_str
         }
 
@@ -61,10 +44,8 @@ class MexcExchange(BaseExchange):
         max_limit = Decimal(str(item.get("maxTradeLimit", "0")))
         nickname = str(merchant.get("nickName", "Unknown"))
         user_id = str(merchant.get("memberId", ""))
-
         order_count = int(stats.get("doneLastMonthCount", 0))
 
-        # Парсимо відсоток (наприклад, "0.9942" -> 99.4%)
         raw_rate = stats.get("lastMonthCompleteRate", "0")
         try:
             finish_rate = float(raw_rate) * 100
@@ -92,7 +73,7 @@ class MexcExchange(BaseExchange):
         tasks = []
         valid_banks = []
         for bank_code in banks:
-            mexc_pay = BANK_CODE_TO_MEXC.get(bank_code)
+            mexc_pay = BankRegistry.get_exchange_code(bank_code, "MEXC")
             if not mexc_pay:
                 continue
             tasks.append(self.client.fetch(self._build_payload(side, mexc_pay)))
@@ -128,9 +109,7 @@ class MexcExchange(BaseExchange):
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         return await self._fetch_orders(2, "sell", banks)
 
-    async def fetch_both_multi(
-            self, amounts: List[float], banks: List[str]
-    ) -> Tuple[List[Order], List[Order]]:
+    async def fetch_both_multi(self, amounts: List[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         buy_orders, sell_orders = await asyncio.gather(
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
