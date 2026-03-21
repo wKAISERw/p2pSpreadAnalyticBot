@@ -10,15 +10,15 @@ from typing import Any, Optional
 logger = logging.getLogger("RuntimeConfig")
 
 # Ключі що дозволено змінювати через UI
+# Тільки системні параметри — персональні (capital/spread/banks) в scanner_users
 ALLOWED_KEYS = frozenset({
-    "min_spread_pct",
-    "working_capital_uah",
     "risk_mode",
     "behavior_alert_score",
     "velocity_spike_per_hour",
     "sticky_min_chain",
     "review_ttl_hours",
     "max_alerts_per_cycle",
+    "is_scanner_active",
 })
 
 
@@ -41,16 +41,28 @@ class RuntimeConfig:
             if conn:
                 await conn.execute(
                     """CREATE TABLE IF NOT EXISTS bot_settings
+                    (
+                        user_id
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        key
+                        TEXT
+                        NOT
+                        NULL,
+                        value
+                        TEXT,
+                        updated_at
+                        REAL,
+                        PRIMARY
+                        KEY
                        (
-                           key
-                           TEXT
-                           PRIMARY
-                           KEY,
-                           value
-                           TEXT,
-                           updated_at
-                           REAL
-                       )"""
+                        user_id,
+                        key
+                       )
+                        )"""
                 )
                 await conn.commit()
         except Exception as e:
@@ -61,23 +73,19 @@ class RuntimeConfig:
         if not self._db:
             return
         try:
-            # 🚀 1. Перевіряємо/Створюємо таблицю
             await self.init_table()
-
-            # 🚀 2. Шукаємо реальний об'єкт aiosqlite з'єднання
             conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
-            async with conn.execute("SELECT key, value FROM bot_settings") as cur:
+
+            # 🚀 ФІКС: Завантажуємо тільки глобальні налаштування (user_id = 0)
+            async with conn.execute("SELECT key, value FROM bot_settings WHERE user_id = 0") as cur:
                 rows = await cur.fetchall()
 
-            # 🚀 3. Безпечно дістаємо дані (працює і для aiosqlite.Row, і для звичайних tuple)
             self._cache = {r[0]: r[1] for r in rows} if rows and isinstance(rows[0], tuple) else {r["key"]: r["value"]
                                                                                                   for r in rows}
-
             logger.debug("RuntimeConfig: loaded %d overrides", len(self._cache))
         except Exception as e:
             logger.warning("RuntimeConfig load error: %s", e)
 
-    # 🚀 ОТОЙ САМИЙ ЗАГУБЛЕНИЙ МЕТОД:
     def get(self, key: str, default: Any = None) -> Any:
         return self._cache.get(key, default)
 
@@ -90,11 +98,13 @@ class RuntimeConfig:
         import time
         try:
             conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+
+            # 🚀 ФІКС: Правильний ON CONFLICT(user_id, key)
             await conn.execute(
-                """INSERT INTO bot_settings (key, value, updated_at)
-                   VALUES (?, ?, ?) ON CONFLICT(key) DO
-                UPDATE SET value =excluded.value,
-                    updated_at=excluded.updated_at""",
+                """INSERT INTO bot_settings (user_id, key, value, updated_at)
+                   VALUES (0, ?, ?, ?) ON CONFLICT(user_id, key) DO
+                UPDATE SET value = excluded.value,
+                    updated_at = excluded.updated_at""",
                 (key, str(value), time.time()),
             )
             await conn.commit()

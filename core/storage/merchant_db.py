@@ -72,10 +72,8 @@ class MerchantDB:
         # LLMWorkerPool (2 воркери) + ReviewFetcher пишуть одночасно —
         # без WAL можливі помилки при конкурентному доступі.
         await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA cache_size=-65536")   # 64MB RAM кеш
-        await self._db.execute("PRAGMA synchronous=NORMAL")  # швидше без втрати надійності
         await self._db.execute("PRAGMA synchronous=NORMAL")  # безпечно + швидше
-        await self._db.execute("PRAGMA cache_size=-32000")  # 32 MB кеш
+        await self._db.execute("PRAGMA cache_size=-65536")   # 64 MB кеш
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.commit()
 

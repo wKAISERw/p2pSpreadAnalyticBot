@@ -8,39 +8,40 @@ class SpreadStabilityFilter:
     """
     Фільтр стабільності. Пропускає спред тільки якщо він протримався
     в стакані N сканувань підряд (захист від фантомів і скамерів-маніпуляторів).
+
+    ВАЖЛИВО: first_seen НЕ оновлюється при кожному хіті — тільки при першому.
+    Якщо спред оновлюється частіше ніж TTL, він проходить як тільки набирає hits.
+    last_seen оновлюється — це час до якого запис живе.
     """
 
     def __init__(self, required_hits: int = 2, ttl_seconds: float = 15.0):
         self.required_hits = required_hits
         self.ttl = ttl_seconds
-        self.cache = {}
+        self.cache: dict[str, dict] = {}
 
-    def check(self, buy_ex: str, sell_ex: str, buy_price: str, sell_price: str,
-              buy_merchant: str, sell_merchant: str) -> bool:
-
+    def check(
+        self,
+        buy_ex: str, sell_ex: str,
+        buy_price: str, sell_price: str,
+        buy_merchant: str, sell_merchant: str,
+    ) -> bool:
         now = time.monotonic()
-
-        # Робимо ключ по ціні та мерчанту (надійніше ніж Order ID)
         key = f"{buy_ex}:{buy_merchant}:{buy_price}::{sell_ex}:{sell_merchant}:{sell_price}"
 
-        # Очистка старих записів
         self._cleanup(now)
 
         if key not in self.cache:
-            # Бачимо вперше
-            self.cache[key] = {"hits": 1, "first_seen": now}
+            self.cache[key] = {"hits": 1, "first_seen": now, "last_seen": now}
             return False
 
         data = self.cache[key]
         data["hits"] += 1
-        data["first_seen"] = now  # Оновлюємо час життя
+        data["last_seen"] = now  # ← оновлюємо ТІЛЬКИ last_seen, не first_seen
 
-        if data["hits"] >= self.required_hits:
-            return True
+        return data["hits"] >= self.required_hits
 
-        return False
-
-    def _cleanup(self, now: float):
-        keys_to_delete = [k for k, v in self.cache.items() if now - v["first_seen"] > self.ttl]
-        for k in keys_to_delete:
+    def _cleanup(self, now: float) -> None:
+        # Видаляємо по last_seen — якщо спред зник зі стакану
+        expired = [k for k, v in self.cache.items() if now - v["last_seen"] > self.ttl]
+        for k in expired:
             del self.cache[k]

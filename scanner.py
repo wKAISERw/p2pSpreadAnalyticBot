@@ -1,44 +1,179 @@
 # scanner.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v1.1 (Крок 4: Чистий сканер без хардкоду)
+# БОЙОВА ВЕРСІЯ v2.0 (Рефакторинг: AlertDispatcher + ProviderFactory)
 # =============================================================================
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 from config import settings
-from infrastructure.http.bybit_p2p_client import BybitP2PClient
-from infrastructure.http.okx_client import OkxClient
-from infrastructure.http.wallet_client import WalletClient
+from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
+from config.runtime import runtime_config
+from bot.commands import update_stats, is_muted
+from bot.notifier import TelegramNotifier, SpreadAlert
+from core.engine.cross_matcher import CrossMatchingEngine
+from core.engine.risk_engine import RiskEngine
+from core.engine.stability import SpreadStabilityFilter
+from core.storage.merchant_db import MerchantDB
+from core.utils.circuit_breaker import CircuitBreaker
+from core.utils.dedup_cache import TTLCache
+from core.workers.llm_worker import LLMWorkerPool
+from core.workers.review_fetcher import ReviewFetcher
+from exchanges.binance import BinanceExchange
 from exchanges.bybit import BybitExchange
+from exchanges.cryptobot_userbot import CryptoBotUserbot
+from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
 from filters.merchant_filter import MerchantFilter
-from bot.notifier import TelegramNotifier, SpreadAlert
-from exchanges.cryptobot_userbot import CryptoBotUserbot
-from infrastructure.http.binance_client import BinanceClient
-from exchanges.binance import BinanceExchange
-from infrastructure.http.mexc_client import MexcClient
-from exchanges.mexc import MexcExchange
-from core.engine.stability import SpreadStabilityFilter
-from config.runtime import runtime_config
-from core.utils.dedup_cache import TTLCache
-from core.utils.circuit_breaker import CircuitBreaker
-from core.engine.cross_matcher import CrossMatchingEngine
-from core.engine.risk_engine import RiskEngine
-from core.storage.merchant_db import MerchantDB
-from core.workers.llm_worker import LLMWorkerPool
-from core.workers.review_fetcher import ReviewFetcher
-from infrastructure.api.bybit_account import BybitAccountClient
 from infrastructure.api.binance_account import BinanceAccountClient
-from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.api.bybit_account import BybitAccountClient
 from infrastructure.api.mexc_account import MEXCAccountClient
-from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
+from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.http.base_client import BaseHttpClient
+from infrastructure.http.binance_client import BinanceClient
+from infrastructure.http.bybit_p2p_client import BybitP2PClient
+from infrastructure.http.mexc_client import MexcClient
+from infrastructure.http.okx_client import OkxClient
+from infrastructure.http.wallet_client import WalletClient
 
 logger = logging.getLogger("Scanner")
 
 
-async def _watchdog(last_cycle_time: list[float], interval: float = getattr(settings, "watchdog_interval", 30.0)):
+# ═══════════════════════════════════════════════════════════════════════════════
+# AlertDispatcher — персоналізована розсилка алертів
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class AlertDispatcher:
+    """
+    Відповідає ТІЛЬКИ за одне: взяти SpreadAlert і розіслати його
+    правильним людям з правильними фільтрами.
+
+    Кешує список активних юзерів з TTL щоб не смикати БД на кожному алерті.
+    """
+
+    def __init__(self, db: MerchantDB, notifier: TelegramNotifier, cache_ttl: float = 5.0):
+        self._db = db
+        self._notifier = notifier
+        self._cache_ttl = cache_ttl
+        self._users_cache: list[dict] = []
+        self._cache_loaded_at: float = 0.0
+
+    async def _get_users(self) -> list[dict]:
+        """Повертає active_users з кешем TTL=5s — не запит на кожний алерт."""
+        if time.monotonic() - self._cache_loaded_at >= self._cache_ttl:
+            self._users_cache = await self._db.get_active_users()
+            self._cache_loaded_at = time.monotonic()
+        return self._users_cache
+
+    def _user_wants(self, user: dict, opp: dict) -> bool:
+        """Чи підходить спред під параметри юзера."""
+        if float(opp["net_spread_pct"]) < float(user["min_spread"]):
+            return False
+        if float(opp["actual_entry_uah"]) > float(user["capital"]):
+            return False
+        user_banks     = set(user["bank_codes"])
+        opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
+        opp_sell_banks = set(opp.get("sell_banks_fit") or [])
+        if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
+            return False
+        return True
+
+    async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
+        """Відправляє алерт всім підходящим юзерам."""
+        users = await self._get_users()
+        if users:
+            for user in users:
+                if self._user_wants(user, opp):
+                    try:
+                        await self._notifier.send_to_user(user["chat_id"], alert)
+                    except Exception as e:
+                        # Юзер заблокував бота або інша помилка — не зупиняємо розсилку іншим
+                        logger.warning("dispatch failed for user %s: %s", user.get("user_id"), e)
+        else:
+            # Fallback: single-user (ніхто не написав /start)
+            await self._notifier.push(alert)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ProviderFactory — ініціалізація клієнтів і credentials
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class AccountClients:
+    bybit:   BybitAccountClient
+    binance: BinanceAccountClient
+    okx:     OKXAccountClient
+    mexc:    MEXCAccountClient
+
+    def as_dict(self) -> dict:
+        return {
+            "Bybit": self.bybit, "Binance": self.binance,
+            "OKX": self.okx, "MEXC": self.mexc,
+        }
+
+
+async def _load_credentials(db: MerchantDB) -> AccountClients:
+    """
+    Завантажує зашифровані credentials з БД і ініціалізує account клієнтів.
+    Повертає AccountClients — навіть якщо credentials немає (порожні клієнти).
+    """
+    creds = await db.get_all_credentials()
+
+    bybit_acc   = BybitAccountClient()
+    binance_acc = BinanceAccountClient()
+    okx_acc     = OKXAccountClient()
+    mexc_acc    = MEXCAccountClient()
+
+    if "Bybit" in creds:
+        bybit_acc.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
+        logger.info("✅ Bybit API credentials завантажено")
+    if "Binance" in creds:
+        binance_acc.set_credentials(creds["Binance"]["api_key"], creds["Binance"]["api_secret"])
+        logger.info("✅ Binance API credentials завантажено")
+    if "OKX" in creds:
+        okx_acc.set_credentials(
+            creds["OKX"]["api_key"], creds["OKX"]["api_secret"],
+            creds["OKX"].get("passphrase", ""),
+        )
+        logger.info("✅ OKX API credentials завантажено")
+    if "MEXC" in creds:
+        mexc_acc.set_credentials(creds["MEXC"]["api_key"], creds["MEXC"]["api_secret"])
+        logger.info("✅ MEXC API credentials завантажено")
+
+    return AccountClients(bybit_acc, binance_acc, okx_acc, mexc_acc)
+
+
+def _bind_http_credentials(
+    creds: dict,
+    b_client: BybitP2PClient,
+    bn_client: BinanceClient,
+    o_client: OkxClient,
+) -> None:
+    """Прив'язує ті самі credentials до HTTP клієнтів (для ReviewFetcher)."""
+    if "Bybit" in creds:
+        b_client.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
+    if "Binance" in creds:
+        bn_client.set_credentials(creds["Binance"]["api_key"], creds["Binance"]["api_secret"])
+    if "OKX" in creds:
+        o_client.set_credentials(
+            creds["OKX"]["api_key"], creds["OKX"]["api_secret"],
+            creds["OKX"].get("passphrase", ""),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Watchdog і DB Maintenance (без змін — вже чисто)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _watchdog(
+    last_cycle_time: list[float],
+    interval: float = getattr(settings, "watchdog_interval", 30.0),
+) -> None:
     while True:
         await asyncio.sleep(interval)
         elapsed = time.monotonic() - last_cycle_time[0]
@@ -46,8 +181,10 @@ async def _watchdog(last_cycle_time: list[float], interval: float = getattr(sett
             logger.error("🚨 [WATCHDOG] Головний цикл не відповідає %.0fs!", elapsed)
 
 
-async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0)):
-    """Фонова задача для регулярного очищення старих снапшотів з БД."""
+async def _db_maintenance_loop(
+    db: MerchantDB,
+    interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
+) -> None:
     max_age = getattr(settings, "db_snapshot_max_age_h", 168)
     while True:
         await asyncio.sleep(interval_hours * 3600)
@@ -61,24 +198,65 @@ async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = getattr(s
             logger.error("Помилка під час DB Maintenance: %s", e)
 
 
-async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
-    risk_mode = getattr(settings, "risk_mode", "WARNING")
-    merchant_filter = MerchantFilter(risk_mode=risk_mode)
+# ═══════════════════════════════════════════════════════════════════════════════
+# run_scanner — тільки оркестрація
+# ═══════════════════════════════════════════════════════════════════════════════
 
+async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> None:
+
+    # ── Ініціалізація ──────────────────────────────────────────────────────
+    merchant_db = MerchantDB()
+    await merchant_db.start()
+    await merchant_db.load_blacklist_from_file()
+
+    runtime_config._db = merchant_db
+    await runtime_config.load()
+
+    # Завантажуємо credentials один раз через ProviderFactory
+    all_creds    = await merchant_db.get_all_credentials()
+    account_clients = await _load_credentials(merchant_db)
+
+    notifier.bind_db(merchant_db)
+    notifier.bind_commands(merchant_db, account_clients.as_dict())
+
+    llm_pool = LLMWorkerPool(merchant_db)
+    await llm_pool.start()
+
+    review_fetcher = ReviewFetcher(
+        merchant_db,
+        review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
+    )
+    await review_fetcher.start()
+
+    risk_engine      = RiskEngine(db=merchant_db, llm_pool=llm_pool)
+    merchant_filter  = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
+    stability_filter = SpreadStabilityFilter(
+        required_hits=getattr(settings, "stability_hits", 2),
+        ttl_seconds=getattr(settings, "stability_ttl", 15.0),
+    )
     dedup_cache = TTLCache(
         ttl_seconds=getattr(settings, "dedup_ttl_seconds", 60.0),
         max_size=getattr(settings, "dedup_max_size", 1000),
     )
+    matcher = CrossMatchingEngine(
+        max_capital_uah=settings.working_capital_uah,
+        min_trade_uah=getattr(settings, "search_amount_uah", 1000.0),
+        min_spread_pct=settings.min_spread_pct,
+        safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
+    )
+    target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
+    dispatcher   = AlertDispatcher(merchant_db, notifier)
 
-    # Виносимо Circuit Breaker параметри в settings
-    cb_fails = getattr(settings, "cb_failure_threshold", 3)
-    cb_timeout = getattr(settings, "cb_recovery_timeout", 60.0)
+    # Таймінги
+    cb_fails       = getattr(settings, "cb_failure_threshold", 3)
+    cb_timeout     = getattr(settings, "cb_recovery_timeout", 60.0)
+    cycle_min_sleep  = getattr(settings, "cycle_min_sleep", 0.5)
+    cycle_max_sleep  = getattr(settings, "cycle_max_sleep", 3.0)
+    cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
 
-    cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-    cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-    cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-    cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-    cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    last_cycle_time  = [time.monotonic()]
+    watchdog_task    = asyncio.create_task(_watchdog(last_cycle_time))
+    maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
@@ -88,120 +266,31 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         getattr(settings, "safety_buffer_pct", 0.0),
     )
 
-    last_cycle_time = [time.monotonic()]
-    watchdog_task = asyncio.create_task(_watchdog(last_cycle_time))
-
-    matcher = CrossMatchingEngine(
-        max_capital_uah=settings.working_capital_uah,
-        min_trade_uah=getattr(settings, "search_amount_uah", 1000.0),
-        min_spread_pct=settings.min_spread_pct,
-        safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
-    )
-
-    merchant_db = MerchantDB()
-    await merchant_db.start()
-    await merchant_db.load_blacklist_from_file()
-
-    runtime_config._db = merchant_db
-    await runtime_config.load()
-
-    # ── Завантажуємо API credentials з БД ────────────────────────────────
-    # Credentials зберігаються зашифровано через /connect команду бота (майбутнє)
-    # При старті читаємо і ініціалізуємо account клієнтів
-    all_creds = await merchant_db.get_all_credentials()
-
-    bybit_account   = BybitAccountClient()
-    binance_account = BinanceAccountClient()
-    okx_account     = OKXAccountClient()
-    mexc_account    = MEXCAccountClient()
-
-    if "Bybit" in all_creds:
-        bybit_account.set_credentials(all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"])
-        logger.info("✅ Bybit API credentials завантажено")
-    if "Binance" in all_creds:
-        binance_account.set_credentials(all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"])
-        logger.info("✅ Binance API credentials завантажено")
-    if "OKX" in all_creds:
-        okx_account.set_credentials(
-            all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
-            all_creds["OKX"].get("passphrase", ""),
-        )
-        logger.info("✅ OKX API credentials завантажено")
-    if "MEXC" in all_creds:
-        mexc_account.set_credentials(all_creds["MEXC"]["api_key"], all_creds["MEXC"]["api_secret"])
-        logger.info("✅ MEXC API credentials завантажено")
-
-    maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
-
-    notifier.bind_db(merchant_db)
-    notifier.bind_commands(merchant_db, {
-        "Bybit":   bybit_account,
-        "Binance": binance_account,
-        "OKX":     okx_account,
-        "MEXC":    mexc_account,
-    })
-    llm_pool = LLMWorkerPool(merchant_db)
-    await llm_pool.start()
-
-    review_fetcher = ReviewFetcher(
-        merchant_db,
-        review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
-    )
-    await review_fetcher.start()
-    # Клієнти будуть прив'язані після їх ініціалізації в async with блоці нижче
-
-    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
-
-    # Виносимо Stability Filter параметри
-    stability_filter = SpreadStabilityFilter(
-        required_hits=getattr(settings, "stability_hits", 2),
-        ttl_seconds=getattr(settings, "stability_ttl", 15.0)
-    )
-
-    target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
-
-    # Таймінги циклу
-    cycle_min_sleep = getattr(settings, "cycle_min_sleep", 0.5)
-    cycle_max_sleep = getattr(settings, "cycle_max_sleep", 3.0)
-    cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
-
     try:
         async with (
-            BybitP2PClient() as b_client,
-            OkxClient() as o_client,
-            WalletClient() as w_client,
-            BinanceClient() as bn_client,
-            MexcClient() as m_client,
+            BybitP2PClient()  as b_client,
+            OkxClient()       as o_client,
+            WalletClient()    as w_client,
+            BinanceClient()   as bn_client,
+            MexcClient()      as m_client,
         ):
-            bybit_ex = BybitExchange(b_client)
-            okx_ex = OkxExchange(o_client)
-            wallet_ex = WalletExchange(w_client)
-            binance_ex = BinanceExchange(bn_client)
-            mexc_ex = MexcExchange(m_client)
+            # Прив'язуємо credentials до HTTP клієнтів
+            _bind_http_credentials(all_creds, b_client, bn_client, o_client)
+            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client)
 
-            # ── Прив'язуємо API credentials до HTTP клієнтів ─────────────
-            # HTTP клієнти використовують ті самі ключі для автентифікованих
-            # запитів до P2P профілів мерчантів (review_fetcher)
-            if "Bybit" in all_creds:
-                b_client.set_credentials(
-                    all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"]
-                )
-            if "Binance" in all_creds:
-                bn_client.set_credentials(
-                    all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"]
-                )
-            if "OKX" in all_creds:
-                o_client.set_credentials(
-                    all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
-                    all_creds["OKX"].get("passphrase", ""),
-                )
+            cb_bybit   = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_okx     = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_wallet  = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_mexc    = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
-            # ── Підключаємо HTTP клієнти до ReviewFetcher ────────────────
-            review_fetcher.bind_clients(
-                binance=bn_client,
-                bybit=b_client,
-                okx=o_client,
-            )
+            ex_configs = [
+                {"name": "Bybit",   "instance": BybitExchange(b_client),   "cb": cb_bybit},
+                {"name": "OKX",     "instance": OkxExchange(o_client),     "cb": cb_okx},
+                {"name": "Wallet",  "instance": WalletExchange(w_client),  "cb": cb_wallet},
+                {"name": "Binance", "instance": BinanceExchange(bn_client),"cb": cb_binance},
+                {"name": "MEXC",    "instance": MexcExchange(m_client),    "cb": cb_mexc},
+            ]
 
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
@@ -212,72 +301,78 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
             )
             await cb_userbot.start()
 
-            ex_configs = [
-                {"name": "Bybit", "instance": bybit_ex, "cb": cb_bybit},
-                {"name": "OKX", "instance": okx_ex, "cb": cb_okx},
-                {"name": "Wallet", "instance": wallet_ex, "cb": cb_wallet},
-                {"name": "Binance", "instance": binance_ex, "cb": cb_binance},
-                {"name": "MEXC", "instance": mexc_ex, "cb": cb_mexc},
-            ]
-
-            async def safe_fetch_exchange(cfg, amounts, banks):
-                """Обгортка для кожної біржі з гільйотиною по часу і логуванням."""
+            async def safe_fetch(cfg: dict, amounts: list, banks: list):
+                timeout = 3.0 if cfg["name"] == "Wallet" else 7.0
                 try:
-                    # 🚀 ГІЛЬЙОТИНА: Жодна біржа не має права затримувати цикл довше ніж на 8 секунд
-                    # Wallet має менший timeout — він часто 429-ить
-                    # і краще нехай CB трипнеться швидко ніж блокувати цикл
-                    per_exchange_timeout = 3.0 if cfg["name"] == "Wallet" else 7.0
                     return await asyncio.wait_for(
-                        cfg["cb"].call(
-                            cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)
-                        ),
-                        timeout=per_exchange_timeout
+                        cfg["cb"].call(cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)),
+                        timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning("🐌 %s занадто довго відповідає! Відрізаємо від поточного циклу.", cfg["name"])
-                    # Примусово реєструємо помилку в CircuitBreaker
+                    logger.warning("🐌 %s занадто довго відповідає!", cfg["name"])
                     cfg["cb"].record_failure()
                     raise
                 except Exception as e:
-                    # Якщо CircuitBreaker відкритий (біржа впала 3 рази), він викидає свою помилку
                     if type(e).__name__ == "CircuitBreakerOpenException":
-                        logger.warning("📉 Degraded Mode: %s тимчасово ВІДКЛЮЧЕНА (Запобіжник відкритий)", cfg["name"])
+                        logger.warning("📉 Degraded Mode: %s ВІДКЛЮЧЕНА", cfg["name"])
                     raise
-            _runtime_last_load: float = 0.0  # timestamp останнього runtime_config.load()
+
+            # ── Головний цикл ──────────────────────────────────────────────
+            _runtime_last_load: float = 0.0
             _cycle_counter: int = 0
+
             while not stop_event.is_set():
                 try:
                     start_time = time.monotonic()
 
-                    # RuntimeConfig: перезавантажуємо не частіше ніж раз на 10с
-                    # (не на кожному циклі — зайвий SELECT блокує WAL при конкуренції)
+                    # Runtime config — не частіше ніж раз на 10s
                     if time.monotonic() - _runtime_last_load >= 10.0:
                         await runtime_config.load()
                         _runtime_last_load = time.monotonic()
-                    current_capital = float(runtime_config.get("working_capital_uah", settings.working_capital_uah))
-                    current_spread = float(runtime_config.get("min_spread_pct", settings.min_spread_pct))
+
+                    # 🚀 ФІКС: Перевірка чи сканер на паузі
+                    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+                    if not is_active:
+                        last_cycle_time[0] = time.monotonic()  # <--- ДОДАЙ ЦЕЙ РЯДОК ДЛЯ WATCHDOG
+                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
+                        continue
+
+                        # 🚀 ФІКС: Перевірка чи сканер на паузі
+                    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+                    if not is_active:
+                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
+                        continue
+
                     current_max_alerts = int(
                         runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
 
+                    active_users = await merchant_db.get_active_users()
+                    if active_users:
+                        # Матчер шукає широко (макс. капітал, мін. спред серед юзерів)
+                        # AlertDispatcher фільтрує окремо для кожного юзера
+                        current_capital = max(float(u["capital"]) for u in active_users)
+                        current_spread  = min(float(u["min_spread"]) for u in active_users)
+                    else:
+                        # Fallback: поки ніхто не написав /start — беремо з .env
+                        current_capital = settings.working_capital_uah
+                        current_spread  = settings.min_spread_pct
+
                     matcher.max_capital_uah = current_capital
-                    matcher.min_spread_pct = current_spread
+                    matcher.min_spread_pct  = current_spread
 
                     search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
 
-                    # 🚀 СТАЛО:
-                    tasks = [
-                        safe_fetch_exchange(cfg, search_amounts, list(target_banks.keys()))
-                        for cfg in ex_configs
-                    ]
-
-                    # gather зловить помилки відключених бірж (return_exceptions=True),
-                    # а успішні результати підуть далі в обробку!
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    # Паралельний збір ордерів з усіх бірж
+                    results = await asyncio.gather(
+                        *(safe_fetch(cfg, search_amounts, list(target_banks.keys())) for cfg in ex_configs),
+                        return_exceptions=True,
+                    )
 
                     cb_buy, cb_sell = cb_userbot.get_orders()
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
+                    # Групування ордерів по банках
                     all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
@@ -285,13 +380,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     for res in results:
                         if isinstance(res, Exception):
                             continue
-
                         b_orders, s_orders = res
-
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
-                        # 🚀 ОПТИМІЗАЦІЯ: Перевіряємо відгуки ТІЛЬКИ для тих, хто пройшов наші фільтри!
                         for o in b_orders:
                             if merchant_filter.passed(o):
                                 if o.merchant_id:
@@ -309,35 +401,36 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                         sell_grouped[bank_code].append(o)
 
                     if all_cycle_orders:
-                        asyncio.ensure_future(
-                            merchant_db.add_snapshots_batch(all_cycle_orders)
-                        )
+                        asyncio.ensure_future(merchant_db.add_snapshots_batch(all_cycle_orders))
 
                     last_cycle_time[0] = time.monotonic()
 
+                    # Матчинг і групування спредів
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
                     opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
 
-                    # Оновлюємо статистику для /status команди
-                    from bot.commands import update_stats
                     _cycle_counter += 1
                     update_stats(
                         cycles=_cycle_counter,
                         last_cycle_ms=latency * 1000,
+                        llm_queue=llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0,
+                        review_queue=review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0,
+                        cb_status={
+                            cfg["name"]: cfg["cb"].state.value
+                            for cfg in ex_configs
+                        },
                     )
 
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
-                        latency,
-                        len(ex_configs),
+                        latency, len(ex_configs),
                         len(ex_configs) * len(target_banks),
-                        len(raw_opportunities),
-                        len(opportunities),
+                        len(raw_opportunities), len(opportunities),
                     )
 
+                    # ── Обробка можливостей ────────────────────────────────
                     sent_count = 0
-
                     for opp in opportunities:
                         if sent_count >= current_max_alerts:
                             break
@@ -345,17 +438,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
+                        # Risk аналіз (один раз на ордер)
                         if not getattr(buy_o, "_risk_analyzed", False):
-                            risk_engine.analyze(buy_o)
+                            risk_engine.analyze(buy_o);
                             buy_o._risk_analyzed = True
-
                         if not getattr(sell_o, "_risk_analyzed", False):
-                            risk_engine.analyze(sell_o)
+                            risk_engine.analyze(sell_o);
                             sell_o._risk_analyzed = True
 
-                        risk_buy = getattr(buy_o, "risk_flag", "") or ""
-                        risk_sell = getattr(sell_o, "risk_flag", "") or ""
-                        if "BLOCK" in risk_buy or "BLOCK" in risk_sell:
+                        if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
+                            continue
+                        if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
                             continue
 
                         dedup_key = f"spread:{matcher._merge_key(opp)}"
@@ -363,29 +456,21 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             continue
 
                         if not stability_filter.check(
-                                buy_o.exchange,
-                                sell_o.exchange,
-                                str(buy_o.price),
-                                str(sell_o.price),
-                                buy_o.merchant_name,
-                                sell_o.merchant_name,
+                                buy_o.exchange, sell_o.exchange,
+                                str(buy_o.price), str(sell_o.price),
+                                buy_o.merchant_name, sell_o.merchant_name,
                         ):
                             continue
 
                         dedup_cache.mark(dedup_key)
                         sent_count += 1
 
-                        route_name = (
-                            f"{opp.get('route_type', 'UNKNOWN')} | "
-                            f"{buy_o.exchange} ➔ {sell_o.exchange} | "
-                            f"{', '.join(opp.get('route_variants', [])[:4])}"
-                        )
-
                         logger.warning(
-                            "🚨 СПРЕД! %s | Net: %.2f%% | Профіт: %.2f ₴",
-                            route_name,
-                            opp["net_spread_pct"],
-                            opp["net_profit"],
+                            "🚨 СПРЕД! %s | %s ➔ %s | %s | Net: %.2f%% | Профіт: %.2f ₴",
+                            opp.get("route_type", "?"),
+                            buy_o.exchange, sell_o.exchange,
+                            ", ".join(opp.get("route_variants", [])[:4]),
+                            opp["net_spread_pct"], opp["net_profit"],
                         )
 
                         alert = SpreadAlert(
@@ -404,41 +489,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             route_type=opp.get("route_type", "UNKNOWN"),
                         )
 
-                        # ── Multi-user dispatch ───────────────────────────
-                        # Отримуємо активних підписників і фільтруємо
-                        # спред під їхні персональні параметри.
-                        # Якщо юзерів немає (перший запуск) — шлемо в default chat.
-                        active_users = await merchant_db.get_active_users()
-
-                        if active_users:
-                            for user in active_users:
-                                # Перевіряємо чи спред підходить під капітал юзера
-                                user_capital = float(user["capital"])
-                                user_spread  = float(user["min_spread"])
-                                user_banks   = set(user["bank_codes"])
-
-                                if float(opp["net_spread_pct"]) < user_spread:
-                                    continue
-
-                                # Перевіряємо чи банки перетинаються
-                                opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
-                                opp_sell_banks = set(opp.get("sell_banks_fit") or [])
-                                if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
-                                    continue
-
-                                # Перевіряємо чи угода влізає в капітал юзера
-                                if float(opp["actual_entry_uah"]) > user_capital:
-                                    continue
-
-                                await notifier.send_to_user(user["chat_id"], alert)
-                        else:
-                            # Fallback: single-user режим (перший запуск або немає /start)
-                            await notifier.push(alert)
+                        # Не шлемо якщо юзер поставив паузу
+                        if not is_muted():
+                            await dispatcher.dispatch(alert, opp)
 
                     cycle_elapsed = time.monotonic() - start_time
-                    # Використовуємо динамічні таймінги з settings
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
+
+                except Exception as e:
+                    logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
+                    await asyncio.sleep(cycle_error_sleep)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
@@ -447,12 +508,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     finally:
         watchdog_task.cancel()
         maintenance_task.cancel()
-
         if "cb_userbot" in locals():
             await cb_userbot.stop()
-
         await review_fetcher.stop()
         await llm_pool.stop()
         await merchant_db.stop()
-
-        logger.info("Сканер завершив роботу.")

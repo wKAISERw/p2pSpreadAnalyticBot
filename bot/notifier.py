@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
-
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -394,14 +394,26 @@ class TelegramNotifier:
                 await call.answer("Помилка БД при блокуванні", show_alert=True)
 
     async def start(self) -> None:
+        # 🚀 СТВОРЮЄМО СИСТЕМНЕ МЕНЮ КНОПКОЮ (Повний список)
+        commands = [
+            BotCommand(command="start", description="🏠 Головне меню (Дашборд)"),
+            BotCommand(command="balance", description="💰 Перевірити баланси"),
+            BotCommand(command="keys", description="🔑 Підключені API Ключі"),
+            BotCommand(command="connect", description="🔌 Підключити біржу"),
+            BotCommand(command="disconnect", description="❌ Відключити біржу"),
+            BotCommand(command="status", description="📊 Системний статус сканера"),
+            BotCommand(command="settings", description="⚙️ Глобальні налаштування"),
+            BotCommand(command="help", description="📖 Довідка"),
+        ]
+        await self._bot.set_my_commands(commands)
+
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="tg-notifier-worker"
         )
-        # 🚀 ЗАПУСКАЄМО СЛУХАЧА КНОПОК
         self._polling_task = asyncio.create_task(
             self._dp.start_polling(self._bot), name="tg-polling"
         )
-        logger.info("TelegramNotifier запущено (з інтерактивними кнопками)")
+        logger.info("TelegramNotifier запущено (з інтерактивними кнопками та Меню)")
 
     async def stop(self) -> None:
         if self._polling_task:

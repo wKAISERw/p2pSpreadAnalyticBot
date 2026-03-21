@@ -34,6 +34,26 @@ _BASIC_BAD = [
 _TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
 
+
+def _has_bad_keywords(text: str) -> bool:
+    """
+    Фільтрує відгуки по двох рівнях:
+    1. Швидкий фільтр по базових словах
+    2. Regex по цільових категоріях з rules.py
+    """
+    if not text:
+        return False
+    t = text.lower()
+    if any(w in t for w in _BASIC_BAD):
+        return True
+    for rule in ALL_RULES:
+        if rule.category in _TARGET_CATEGORIES:
+            if rule.pattern.search(t):
+                return True
+    return False
+
+
+
 class ReviewFetcher:
     def __init__(
         self,
@@ -219,8 +239,14 @@ class ReviewFetcher:
             # 🚀 НАКОПИЧУЄМО ПОМИЛКИ І ВМИКАЄМО DEGRADED MODE
             self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
             if self._exchange_fails[exchange] >= 3:
-                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + 7200.0  # 2 години
-                logger.error("🚨 %s API впало 3 рази підряд! Вмикаємо Degraded Mode на 2 години.", exchange)
+                # Таймаут залежить від типу біржі:
+                # Bybit/OKX можуть впасти на хвилини, Binance — рідко
+                cooldown_sec = {"Binance": 300.0, "OKX": 600.0}.get(exchange, 7200.0)
+                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
+                logger.error(
+                    "🚨 %s API впало 3 рази підряд! Degraded Mode на %.0f хв.",
+                    exchange, cooldown_sec / 60,
+                )
 
             await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
             logger.warning("Помилка відгуків %s [%s]: %s", merchant_id, exchange, e)
