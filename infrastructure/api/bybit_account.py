@@ -1,0 +1,92 @@
+# infrastructure/api/bybit_account.py
+"""
+Bybit V5 офіційний API — акаунт і торгівля.
+Документація: https://bybit-exchange.github.io/docs/v5/intro
+
+Відповідальність:
+  - Баланс (Unified + Funding)
+  - Свої активні P2P оголошення
+  - Історія P2P угод
+
+НЕ відповідає за: сканування ринку → infrastructure/http/bybit_p2p_client.py
+"""
+from __future__ import annotations
+import hashlib, hmac, logging, time
+from typing import Any, Optional
+from infrastructure.http.base_client import BaseHttpClient
+
+logger = logging.getLogger("BybitAccount")
+BASE_URL = "https://api.bybit.com"
+RECV_WINDOW = "5000"
+
+class BybitAccountClient(BaseHttpClient):
+    def __init__(self, api_key: str = "", api_secret: str = "", proxy: Optional[str] = None):
+        super().__init__(proxy=proxy, extra_headers={"content-type": "application/json"})
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign_headers(self, query_string: str = "") -> dict:
+        ts = str(int(time.time() * 1000))
+        sign_str = ts + self._api_key + RECV_WINDOW + (query_string or "")
+        signature = hmac.new(self._api_secret.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+        return {
+            "X-BAPI-API-KEY": self._api_key,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+        }
+
+    async def get_balance(self, account_type: str = "UNIFIED") -> list[dict]:
+        """Баланс по монетах. account_type: UNIFIED | FUND | SPOT"""
+        if not self.is_authenticated: return []
+        query = f"accountType={account_type}"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/account/wallet-balance?{query}", headers=self._sign_headers(query))
+            coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
+            return [{"coin": c["coin"], "free": float(c.get("availableToWithdraw") or 0),
+                     "locked": float(c.get("locked") or 0), "total": float(c.get("walletBalance") or 0),
+                     "usd_value": float(c.get("usdValue") or 0)}
+                    for c in coins if float(c.get("walletBalance") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_balance: %s", e); return []
+
+    async def get_funding_balance(self) -> list[dict]:
+        """Баланс Funding акаунта (для P2P)."""
+        return await self.get_balance("FUND")
+
+    async def get_my_ads(self, status: str = "ONLINE") -> list[dict]:
+        """Мої активні P2P оголошення. status: ONLINE | OFFLINE | CANCELED"""
+        if not self.is_authenticated: return []
+        query = f"status={status}&tokenId=USDT&currencyId=UAH&limit=20"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/p2p/item/personal/list?{query}", headers=self._sign_headers(query))
+            return data.get("result", {}).get("items", []) or []
+        except Exception as e:
+            logger.warning("get_my_ads: %s", e); return []
+
+    async def get_my_orders(self, status: str = "TRADING", limit: int = 20) -> list[dict]:
+        """Мої P2P угоди. status: PENDING | TRADING | SOLD | FINISHED | CANCELLED"""
+        if not self.is_authenticated: return []
+        query = f"status={status}&tokenId=USDT&limit={limit}"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/p2p/order/simplifyList?{query}", headers=self._sign_headers(query))
+            return data.get("result", {}).get("items", []) or []
+        except Exception as e:
+            logger.warning("get_my_orders: %s", e); return []
+
+    async def get_account_info(self) -> dict:
+        """Базова інформація акаунта (UID, рівень, статус верифікації)."""
+        if not self.is_authenticated: return {}
+        try:
+            data = await self._get(f"{BASE_URL}/v5/user/query-api", headers=self._sign_headers())
+            return data.get("result", {}) or {}
+        except Exception as e:
+            logger.warning("get_account_info: %s", e); return {}

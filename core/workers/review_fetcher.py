@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from typing import Optional
-
-import aiohttp
+from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
+
+if TYPE_CHECKING:
+    from infrastructure.api.binance_account import BinanceAccountClient
+    from infrastructure.api.bybit_account import BybitAccountClient
+    from infrastructure.api.okx_account import OkxAccountClient
 
 logger = logging.getLogger("ReviewFetcher")
 
@@ -34,38 +37,62 @@ class ReviewFetcher:
         db: MerchantDB,
         max_queue: int = 500,
         review_ttl_hours: float = 24.0,
+        # HTTP клієнти передаються з scanner.py (вже мають session)
+        binance_client=None,
+        bybit_client=None,
+        okx_client=None,
     ):
         self._db = db
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
         self._review_ttl = review_ttl_hours
         self._worker_task: Optional[asyncio.Task] = None
-        self._session: Optional[aiohttp.ClientSession] = None
         self._processed = 0
         self._errors = 0
         self._pending: set[tuple[str, str]] = set()
-        # 🚀 ДОДАЄМО СТАН DEGRADE
+
+        # Account клієнти (infrastructure/api/) — підключаються з scanner.py
+        # Якщо є API ключ → повні профілі мерчантів + реальні відгуки
+        # Якщо немає → анонімний fallback (може давати 404)
+        self._binance: Optional["BinanceAccountClient"] = binance_client
+        self._bybit:   Optional["BybitAccountClient"]   = bybit_client
+        self._okx:     Optional["OkxAccountClient"]     = okx_client
+
         self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
         self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
-    async def start(self) -> None:
-        if self._session and not self._session.closed:
-            logger.debug("ReviewFetcher start skipped: session already active")
-            return
 
-        self._session = aiohttp.ClientSession(
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-            },
-            timeout=aiohttp.ClientTimeout(total=10.0),
+    def bind_clients(self, binance=None, bybit=None, okx=None) -> None:
+        """
+        Прив'язує HTTP клієнти після ініціалізації.
+        Викликається з scanner.py після старту клієнтів.
+        В майбутньому — викликається з /connect команди бота.
+        """
+        if binance is not None:
+            self._binance = binance
+        if bybit is not None:
+            self._bybit = bybit
+        if okx is not None:
+            self._okx = okx
+        logger.info(
+            "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s",
+            "✅" if self._binance and self._binance.is_authenticated else "❌",
+            "✅" if self._bybit  and self._bybit.is_authenticated  else "❌",
+            "✅" if self._okx   and self._okx.is_authenticated    else "❌",
         )
+    async def start(self) -> None:
+        # Сесія більше не потрібна — використовуємо клієнти від scanner.py
+        if self._worker_task and not self._worker_task.done():
+            logger.debug("ReviewFetcher start skipped: already running")
+            return
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="review-fetcher"
         )
-        logger.info("ReviewFetcher запущено | ttl=%.1fh | max_queue=%d", self._review_ttl, self._queue.maxsize)
+        logger.info(
+            "ReviewFetcher запущено | ttl=%.1fh | max_queue=%d | auth: Binance=%s Bybit=%s OKX=%s",
+            self._review_ttl, self._queue.maxsize,
+            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
+            "✅" if self._bybit  and getattr(self._bybit,   "is_authenticated", False) else "❌",
+            "✅" if self._okx   and getattr(self._okx,    "is_authenticated", False) else "❌",
+        )
 
     async def stop(self) -> None:
         if self._worker_task:
@@ -73,11 +100,6 @@ class ReviewFetcher:
             with suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
-
-        if self._session:
-            await self._session.close()
-            self._session = None
-
         logger.info(
             "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d, queue: %d",
             self._processed, self._errors, len(self._pending), self._queue.qsize()
@@ -202,172 +224,126 @@ class ReviewFetcher:
 
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
-        payload = {
-            "advertiserNo": merchant_id,
-            "page": 1,
-            "rows": 1,
-        }
+        """
+        Отримує профіль і відгуки Binance мерчанта.
+        Якщо є API ключ → автентифікований запит → повні дані.
+        Якщо немає → анонімний → можливі 404.
+        """
+        client = self._binance
+        if client and getattr(client, "is_authenticated", False):
+            return await self._fetch_binance_authenticated(merchant_id, client)
+        return await self._fetch_binance_anonymous(merchant_id)
 
-        async with self._session.post(
-            url,
-            json=payload,
-            headers={
-                "content-type": "application/json",
-                "origin": "https://p2p.binance.com",
-            },
-        ) as resp:
-            if resp.status == 429:
-                logger.warning("ReviewFetcher Binance 429 for %s", merchant_id)
-                await asyncio.sleep(10.0)
-                raise RuntimeError("Binance 429")
-            if resp.status != 200:
-                logger.warning("ReviewFetcher Binance profile status=%s for %s", resp.status, merchant_id)
-                return 0, 0, 0, []
-            data = await resp.json()
-
-        user = data.get("data", {}).get("advertiser", {})
-        if not user:
-            logger.debug("ReviewFetcher Binance empty profile %s", merchant_id)
-            return 0, 0, 0, []
-
-        total = int(user.get("monthOrderCount") or 0)
-        pos_rate = float(user.get("positiveRate") or 0)
-        neg_rate = float(user.get("negativeRate") or 0)
-
-        pos = int(total * pos_rate)
-        neg = int(total * neg_rate)
-        neutral = total - pos - neg
-
-        bad_texts = await self._fetch_binance_bad_texts(merchant_id)
-        return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
-
-    async def _fetch_binance_bad_texts(self, merchant_id: str) -> list[str]:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
-        payload = {
-            "advertiserNo": merchant_id,
-            "type": 2,
-            "page": 1,
-            "rows": 10,
-        }
-
+    async def _fetch_binance_authenticated(self, merchant_id: str, client) -> tuple[int, int, int, list[str]]:
+        """Автентифікований запит через BinanceAccountClient."""
         try:
-            async with self._session.post(
-                url,
-                json=payload,
-                headers={
-                    "content-type": "application/json",
-                    "origin": "https://p2p.binance.com",
-                },
-            ) as resp:
-                if resp.status != 200:
-                    logger.debug("ReviewFetcher Binance bad_texts status=%s for %s", resp.status, merchant_id)
-                    return []
-                data = await resp.json()
-        except Exception as e:
-            logger.debug("ReviewFetcher Binance bad_texts error %s: %s", merchant_id, e)
-            return []
+            profile = await client.fetch_merchant_profile(merchant_id)
+            advertiser = profile.get("advertiser", {})
+            if not advertiser:
+                return 0, 0, 0, []
 
-        texts = []
-        for item in data.get("data", []):
-            text = (item.get("message") or "").strip()
-            if text and _has_bad_keywords(text):
-                texts.append(text[:200])
-        return texts
+            total    = int(advertiser.get("monthOrderCount") or 0)
+            pos_rate = float(advertiser.get("positiveRate") or 0)
+            neg_rate = float(advertiser.get("negativeRate") or 0)
+            pos     = max(int(total * pos_rate), 0)
+            neg     = max(int(total * neg_rate), 0)
+            neutral = max(total - pos - neg, 0)
+
+            raw_reviews = await client.fetch_negative_reviews(merchant_id)
+            bad_texts = [
+                item.get("message", "")[:200]
+                for item in raw_reviews
+                if _has_bad_keywords(item.get("message", ""))
+            ]
+            logger.debug(
+                "ReviewFetcher Binance [auth] %s: pos=%d neg=%d bad_texts=%d",
+                merchant_id, pos, neg, len(bad_texts),
+            )
+            return pos, neg, neutral, bad_texts
+        except Exception as e:
+            logger.warning("ReviewFetcher Binance [auth] error %s: %s", merchant_id, e)
+            return await self._fetch_binance_anonymous(merchant_id)
+
+    async def _fetch_binance_anonymous(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
+        """Анонімний fallback через BinanceAccountClient (може давати 404)."""
+        if not self._binance:
+            return 0, 0, 0, []
+        try:
+            profile = await self._binance.fetch_merchant_profile(merchant_id)
+            advertiser = profile.get("advertiser", {})
+            if not advertiser:
+                logger.warning("ReviewFetcher Binance profile status=404 for %s", merchant_id)
+                return 0, 0, 0, []
+
+            total    = int(advertiser.get("monthOrderCount") or 0)
+            pos_rate = float(advertiser.get("positiveRate") or 0)
+            neg_rate = float(advertiser.get("negativeRate") or 0)
+            pos     = max(int(total * pos_rate), 0)
+            neg     = max(int(total * neg_rate), 0)
+            neutral = max(total - pos - neg, 0)
+            return pos, neg, neutral, []
+        except Exception as e:
+            raise RuntimeError(f"Binance anon error: {e}") from e
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        url = "https://api2.bybit.com/fiat/otc/user/public/profile"
-        params = {"userId": merchant_id}
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=6.0, connect=3.0, sock_read=4.0)
-
-            async with self._session.get(url, params=params, timeout=timeout) as resp:
-                if resp.status == 404:
-                    logger.warning("ReviewFetcher Bybit profile status=404 for %s", merchant_id)
-                    return 0, 0, 0, []
-
-                if resp.status != 200:
-                    logger.warning("ReviewFetcher Bybit profile status=%s for %s", resp.status, merchant_id)
-                    return 0, 0, 0, []
-
-                data = await resp.json(content_type=None)
-
-        except asyncio.TimeoutError:
-            logger.warning("ReviewFetcher Bybit timeout for %s", merchant_id)
-            raise RuntimeError("Bybit API Timeout")  # <--- Замінили return
-
-        except aiohttp.ClientError as e:
-            logger.warning("ReviewFetcher Bybit client error for %s: %s", merchant_id, e)
-            raise RuntimeError(f"Bybit Client Error: {e}")  # <--- Замінили return
-
-        info = data.get("result", {}).get("userInfo", {})
-        if not info:
+        """Bybit: обходимо 404 помилку. Беремо відгуки напряму через автентифіковане API."""
+        client = self._bybit
+        if not client:
             return 0, 0, 0, []
 
-        pos = int(info.get("goodEvaluate") or 0)
-        neg = int(info.get("badEvaluate") or 0)
-        neutral = int(info.get("neutralEvaluate") or 0)
-
-        bad_texts = await self._fetch_bybit_bad_texts(merchant_id)
-        return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
-
-    async def _fetch_bybit_bad_texts(self, merchant_id: str) -> list[str]:
-        # 🚀 Використовуємо внутрішній ендпоінт, який ти знайшов
-        url = "https://www.bybit.com/x-api/fiat/otc/order/appraiseList"
-
-        # Специфічний payload для цього API
-        payload = {
-            "userId": str(merchant_id),
-            "evaluateType": "bad",  # беремо тільки негатив для економії трафіку
-            "page": 1,
-            "size": 10,
-        }
+        # Якщо ключі не підключені, краще повернути нулі, щоб не ловити 404
+        if not getattr(client, "is_authenticated", False):
+            return 0, 0, 0, []
 
         try:
-            # ⚠️ ВАЖЛИВО: використовуємо BybitP2PClient, щоб обійти Cloudflare 403
-            # Якщо у тебе в ReviewFetcher немає доступу до bybit_client,
-            # його треба передати в __init__ або створити окремо.
-            data = await self.bybit_client.fetch(url, payload)
+            # Отримуємо сирі негативні відгуки через BybitP2PClient
+            raw_bad_reviews = await client.fetch_merchant_feedback(merchant_id)
+            bad_texts = [
+                str(item.get("content") or "")[:200]
+                for item in raw_bad_reviews
+                if _has_bad_keywords(str(item.get("content") or ""))
+            ]
 
-            if not data or data.get("ret_code") != 0:
-                logger.debug("ReviewFetcher Bybit appraiseList error: %s", data.get("ret_msg"))
-                return []
+            # Оскільки Bybit сховав публічну статистику (pos/neg count), ми віддаємо знайдені тексти.
+            # RiskEngine відправить їх в LLM, і LLM сама заблокує скамера за фактом цих текстів.
+            # Ставимо pos=100 (фейковий траст), щоб не спрацьовувало примітивне блокування 100% bad_pct.
+            neg = len(bad_texts)
+            return 100, neg, 0, bad_texts
 
         except Exception as e:
-            logger.debug("ReviewFetcher Bybit appraiseList exception: %s", e)
-            return []
-
-        texts = []
-        # Bybit зазвичай повертає список у result -> items
-        items = data.get("result", {}).get("items", [])
-
-        for item in items:
-            # У новому API текст може бути в полі 'content' або 'evaluateContent'
-            text = (item.get("content") or item.get("feedback") or "").strip()
-
-            if text and _has_bad_keywords(text):
-                # Обмежуємо довжину, щоб не роздувати промпт для LLM
-                texts.append(text[:200])
-
-        return texts
+            raise RuntimeError(f"Bybit API Error: {e}") from e
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        profile_url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
-        params = {"userId": merchant_id, "language": "uk_UA"}
+        """OKX: автентифікований запит якщо є ключі, інакше публічний."""
+        client = self._okx
+        if not client:
+            raise RuntimeError("OkxClient не підключений до ReviewFetcher")
 
-        async with self._session.get(profile_url, params=params) as resp:
-            if resp.status != 200:
-                logger.warning("ReviewFetcher OKX profile status=%s for %s", resp.status, merchant_id)
-                raise RuntimeError(f"OKX API HTTP {resp.status}") # <--- Замінили return 0,0,0,[]
-            data = await resp.json()
+        # Публічний endpoint для базових лічильників
+        url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
+        try:
+            data = await client._get(url, params={"userId": merchant_id, "language": "uk_UA"})
+        except Exception as e:
+            raise RuntimeError(f"OKX API error: {e}") from e
 
         info = data.get("data") or {}
-        pos = int(info.get("positiveFeedbackCount") or 0)
-        neg = int(info.get("negativeFeedbackCount") or 0)
-        neutral = int(info.get("neutralFeedbackCount") or 0)
+        if not info:
+            raise RuntimeError(f"OKX API HTTP 404")
 
-        return max(pos, 0), max(neg, 0), max(neutral, 0), []
+        pos     = max(int(info.get("positiveFeedbackCount") or 0), 0)
+        neg     = max(int(info.get("negativeFeedbackCount") or 0), 0)
+        neutral = max(int(info.get("neutralFeedbackCount") or 0), 0)
+
+        # Тексти відгуків — тільки якщо є API ключ
+        bad_texts: list[str] = []
+        if getattr(client, "is_authenticated", False):
+            raw = await client.fetch_merchant_feedback(merchant_id)
+            bad_texts = [
+                str(item.get("content") or item.get("feedback") or "")[:200]
+                for item in raw
+                if _has_bad_keywords(str(item.get("content") or item.get("feedback") or ""))
+            ]
+        return pos, neg, neutral, bad_texts
 
 
 def _has_bad_keywords(text: str) -> bool:

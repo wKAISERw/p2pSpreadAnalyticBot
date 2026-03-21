@@ -445,7 +445,7 @@ def _build_behavior_block(task: "LLMTask") -> list[str]:
 
     for f in flags:
         if f.startswith("API_REPLENISH:"):
-            n = f.split(":", 1)[1]
+            n = f.split(":", 1)[1] if ":" in f else "?"
             lines.append(f"  - БОТ-АВТО-ПОПОВНЕННЯ: ліміти стабільні {n} циклів, кількість угод зростає (скрипт)")
         elif f.startswith("STATIC_DROP:"):
             n = f.split(":", 1)[1]

@@ -12,10 +12,9 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import settings
+from bot import commands as bot_commands
 from exchanges.base import Order
 from core.storage.merchant_db import MerchantDB
-from config.banks import BankRegistry
-from bot.formatters import format_behavioral_summary
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +30,19 @@ EXCHANGE_ICONS = {
     "CryptoBot": "🤖",
 }
 
-# Назви банків тепер з BankRegistry — не дублюємо хардкод
-def _bank_name(code: str) -> str:
-    return BankRegistry.get_name(code)
+BANKS_MAP = {
+    "43": "Monobank",
+    "14": "PrivatBank",
+    "64": "ПУМБ",
+    "48": "А-Банк",
+}
 
-def _bank_short(code: str) -> str:
-    name = BankRegistry.get_name(code)
-    # Скорочуємо до 6 символів для компактного підсумку
-    return name[:6] if name != code else code
+BANKS_SHORT = {
+    "43": "Mono",
+    "14": "Privat",
+    "64": "ПУМБ",
+    "48": "А-Банк",
+}
 
 
 @dataclass
@@ -66,7 +70,7 @@ class SpreadAlert:
 def _format_bank_list(codes: list[str] | None) -> str:
     if not codes:
         return "—"
-    names = [_bank_name(code) for code in codes]
+    names = [BANKS_MAP.get(code, code) for code in codes]
     return ", ".join(escape(str(x)) for x in names)
 
 
@@ -310,6 +314,7 @@ class TelegramNotifier:
         self._dp = Dispatcher()
         self._router = Router()
         self._dp.include_router(self._router)
+        self._dp.include_router(bot_commands.router)
         self._db: MerchantDB | None = None
         self._setup_handlers()
 
@@ -324,6 +329,10 @@ class TelegramNotifier:
     def bind_db(self, db: MerchantDB):
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
+
+    def bind_commands(self, db, account_clients: dict) -> None:
+        """Ініціалізує command center з посиланнями на компоненти."""
+        bot_commands.setup(db, account_clients)
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -464,8 +473,6 @@ class TelegramNotifier:
 
         buy_risk = _risk_badge(alert.buy_order)
         sell_risk = _risk_badge(alert.sell_order)
-        buy_behavior  = format_behavioral_summary(getattr(alert.buy_order, "risk_flag", "") or "")
-        sell_behavior = format_behavioral_summary(getattr(alert.sell_order, "risk_flag", "") or "")
 
         route_type = getattr(alert, "route_type", "")
         if route_type == "CROSS":
@@ -505,7 +512,6 @@ class TelegramNotifier:
             f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
             f"{buy_risk if buy_risk else ''}"
-            f"{('🔬 ' + buy_behavior + chr(10)) if buy_behavior else ''}"
             f"{buy_warn if buy_warn else ''}\n"
 
             f"💸 <b>ПРОДАЄМО</b>\n"
@@ -514,7 +520,6 @@ class TelegramNotifier:
             f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
             f"{sell_risk if sell_risk else ''}"
-            f"{('🔬 ' + sell_behavior + chr(10)) if sell_behavior else ''}"
             f"{sell_warn if sell_warn else ''}"
         )
 
@@ -564,8 +569,8 @@ class TelegramNotifier:
         for i, a in enumerate(batch[:5]):
             b_icon = EXCHANGE_ICONS.get(a.buy_order.exchange, "◽️")
             s_icon = EXCHANGE_ICONS.get(a.sell_order.exchange, "◽️")
-            b_short = _bank_short(a.buy_bank)
-            s_short = _bank_short(a.sell_bank)
+            b_short = BANKS_SHORT.get(a.buy_bank, a.buy_bank)
+            s_short = BANKS_SHORT.get(a.sell_bank, a.sell_bank)
 
             risks = _risk_badge(a.buy_order, short=True) + _risk_badge(a.sell_order, short=True)
             warns = _regex_warn_block(a.buy_order, short=True) + _regex_warn_block(a.sell_order, short=True)

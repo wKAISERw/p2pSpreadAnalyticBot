@@ -26,3 +26,4 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 _backup_v1/
+project_dump.txt

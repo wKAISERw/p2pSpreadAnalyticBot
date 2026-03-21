@@ -67,6 +67,10 @@ class CircuitBreaker:
         self._state = State.CLOSED
         self._opened_at = None
 
+    def record_failure(self, reason: str = "") -> None:
+        """Публічний метод для ручної реєстрації помилки (напр. TimeoutError з зовні)."""
+        self._record_failure(Exception(reason or "manual failure"))
+
     def _record_failure(self, error: Exception):
         """Рахує помилки і переходить в OPEN тільки після threshold."""
         self._failures += 1

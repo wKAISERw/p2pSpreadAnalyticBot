@@ -1,11 +1,12 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-20 20:22
-# Files: 66
+# Generated: 2026-03-21 15:14
+# Files: 73
 #
 # STRUCTURE:
 #   config\settings.py
 #   config\defaults.py
 #   config\runtime.py
+#   config\banks.py
 #   scanner.py
 #   main.py
 #   core\engine\risk_engine.py
@@ -19,6 +20,8 @@
 #   core\engine\cross_matcher.py
 #   core\engine\stability.py
 #   core\utils\circuit_breaker.py
+#   core\utils\cache.py
+#   core\utils\crypto.py
 #   core\utils\dedup_cache.py
 #   core\utils\fees.py
 #   bot\notifier.py
@@ -38,6 +41,10 @@
 #   infrastructure\http\okx_client.py
 #   infrastructure\http\mexc_client.py
 #   infrastructure\http\wallet_client.py
+#   infrastructure\api\mexc_account.py
+#   infrastructure\api\binance_account.py
+#   infrastructure\api\bybit_account.py
+#   infrastructure\api\okx_account.py
 #   filters\merchant_filter.py
 #   filters\bank_filter.py
 #   filters\limit_filter.py
@@ -162,32 +169,36 @@ FILE: config/defaults.py
 """
 config/defaults.py — Всі константи проекту з коментарями.
 Змінювати тут або через .env (Settings) або через UI бота (RuntimeConfig).
-Автоматично згенеровано migrate_to_v2.py — 2026-03-12
 """
 
 # ── Поведінковий аналіз ────────────────────────────────────────────────
-BEHAVIOR_HISTORY_MINUTES: int = 60       # глибина history для аналізу
-BEHAVIOR_ALERT_SCORE: int = 60           # поріг для логування підозри
-BEHAVIOR_LLM_THRESHOLD: int = 60         # поріг для ескалації в LLM
+BEHAVIOR_HISTORY_MINUTES: int = 60
+BEHAVIOR_ALERT_SCORE: int = 60
+BEHAVIOR_LLM_THRESHOLD: int = 60
 
 EXACT_LIMITS_SCORE: int = 20
 STICKY_LIMITS_SCORE: int = 40
 VELOCITY_SPIKE_SCORE: int = 30
 
-STICKY_MIN_CHAIN: int = 3               # мін. кількість snapshot-ів підряд
-VELOCITY_MIN_WINDOW_HOURS: float = 0.16  # ~10 хв
+STICKY_MIN_CHAIN: int = 3
+VELOCITY_MIN_WINDOW_HOURS: float = 0.16
 VELOCITY_SPIKE_PER_HOUR: float = 20.0
 
 # ── Risk Engine ────────────────────────────────────────────────────────
 MIN_ORDERS: dict[str, int] = {
-    "Binance": 30, "Bybit": 30, "OKX": 30,
-    "Wallet": 10, "MEXC": 10, "CryptoBot": 5,
+    "Binance": 50, "Bybit": 30, "OKX": 30,
+    "Wallet": 10, "MEXC": 20, "CryptoBot": 15,
 }
 MIN_COMPLETION: dict[str, float] = {
-    "Binance": 90.0, "Bybit": 90.0, "OKX": 90.0,
-    "Wallet": 85.0, "MEXC": 85.0, "CryptoBot": 80.0,
+    "Binance": 95.0, "Bybit": 92.0, "OKX": 92.0,
+    "Wallet": 88.0, "MEXC": 90.0, "CryptoBot": 85.0,
 }
-BOT_ALERT_COOLDOWN_SEC: int = 900        # 15 хв між повторними алертами
+TRUSTED_MIN_ORDERS: int = 500
+TRUSTED_MIN_COMPLETION: float = 95.0
+TRUSTED_MAX_RISK_SCORE: int = 30
+TRUSTED_LLM_MIN_SCORE: int = 60
+BOT_ALERT_COOLDOWN_SEC: int = 900
+DB_ASYNC_ANALYZE_CONCURRENCY: int = 8
 
 # ── Regex аналіз ──────────────────────────────────────────────────────
 LLM_SCORE_THRESHOLD: int = 30
@@ -211,13 +222,12 @@ LLM_MAX_QUEUE: int = 100
 LLM_WORKERS: int = 2
 
 # ── Identity аналіз ────────────────────────────────────────────────────
-LIMIT_EPSILON: float = 0.01             # допуск для порівняння лімітів
-IDENTITY_TWIN_MINUTES: int = 15         # вікно пошуку двійників
+LIMIT_EPSILON: float = 0.01
+IDENTITY_TWIN_MINUTES: int = 15
 
 # ── DB / Storage ──────────────────────────────────────────────────────
-SNAPSHOT_RETENTION_HOURS: int = 168     # 7 днів
+SNAPSHOT_RETENTION_HOURS: int = 168
 SNAPSHOT_HEARTBEAT_MINUTES: int = 10
-DB_ASYNC_ANALYZE_CONCURRENCY: int = 8
 
 # ── Scanner ────────────────────────────────────────────────────────────
 ADAPTIVE_SLEEP_MIN: float = 0.5
@@ -260,24 +270,57 @@ class RuntimeConfig:
     Читає overrides з таблиці bot_settings.
     Якщо override є → повертає його, інакше → settings.*
     """
+
     def __init__(self, db=None):
         self._db = db
         self._cache: dict[str, Any] = {}
+
+    async def init_table(self) -> None:
+        """Створює таблицю, якщо вона ще не існує."""
+        if not self._db:
+            return
+        try:
+            conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+            if conn:
+                await conn.execute(
+                    """CREATE TABLE IF NOT EXISTS bot_settings
+                       (
+                           key
+                           TEXT
+                           PRIMARY
+                           KEY,
+                           value
+                           TEXT,
+                           updated_at
+                           REAL
+                       )"""
+                )
+                await conn.commit()
+        except Exception as e:
+            logger.error("RuntimeConfig init_table error: %s", e)
 
     async def load(self) -> None:
         """Завантажує всі overrides з БД у кеш."""
         if not self._db:
             return
         try:
-            async with self._db.execute(
-                "SELECT key, value FROM bot_settings"
-            ) as cur:
+            # 🚀 1. Перевіряємо/Створюємо таблицю
+            await self.init_table()
+
+            # 🚀 2. Шукаємо реальний об'єкт aiosqlite з'єднання
+            conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+            async with conn.execute("SELECT key, value FROM bot_settings") as cur:
                 rows = await cur.fetchall()
-            self._cache = {r["key"]: r["value"] for r in rows}
+
+            # 🚀 3. Безпечно дістаємо дані (працює і для aiosqlite.Row, і для звичайних tuple)
+            self._cache = {r[0]: r[1] for r in rows} if rows and isinstance(rows[0], tuple) else {r["key"]: r["value"]
+                                                                                                  for r in rows}
+
             logger.debug("RuntimeConfig: loaded %d overrides", len(self._cache))
         except Exception as e:
             logger.warning("RuntimeConfig load error: %s", e)
 
+    # 🚀 ОТОЙ САМИЙ ЗАГУБЛЕНИЙ МЕТОД:
     def get(self, key: str, default: Any = None) -> Any:
         return self._cache.get(key, default)
 
@@ -289,14 +332,15 @@ class RuntimeConfig:
             return False
         import time
         try:
-            await self._db.execute(
+            conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+            await conn.execute(
                 """INSERT INTO bot_settings (key, value, updated_at)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-                   updated_at=excluded.updated_at""",
+                   VALUES (?, ?, ?) ON CONFLICT(key) DO
+                UPDATE SET value =excluded.value,
+                    updated_at=excluded.updated_at""",
                 (key, str(value), time.time()),
             )
-            await self._db.commit()
+            await conn.commit()
             self._cache[key] = str(value)
             return True
         except Exception as e:
@@ -307,12 +351,232 @@ class RuntimeConfig:
 runtime_config = RuntimeConfig()
 
 ============================================================
+FILE: config/banks.py
+============================================================
+
+# config/banks.py
+"""
+Єдиний реєстр банків для всіх бірж.
+
+Внутрішній код (INTERNAL_CODE) — уніфікований ідентифікатор банку
+в системі. За основу взято коди Binance/Bybit як найпоширеніші.
+
+Щоб додати новий банк:
+  1. Додай рядок в BANKS з internal_code, name і кодами для кожної біржі
+  2. Все — жоден інший файл чіпати не треба
+
+Щоб додати нову біржу:
+  1. Додай ключ в exchange_codes для кожного банку
+  2. Використай BankRegistry.get_exchange_code(internal_code, "NewExchange")
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Модель банку
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class Bank:
+    __slots__ = ("internal_code", "name", "exchange_codes")
+
+    def __init__(self, internal_code: str, name: str, exchange_codes: dict):
+        self.internal_code = internal_code
+        self.name = name
+        self.exchange_codes = exchange_codes
+
+    def get_code(self, exchange: str) -> Optional[str]:
+        """Повертає API-код банку для конкретної біржі або None."""
+        return self.exchange_codes.get(exchange)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Реєстр банків — єдине джерело правди
+# Коди взяті з реальних API відповідей бірж
+# ─────────────────────────────────────────────────────────────────────────────
+
+BANKS: list[Bank] = [
+    Bank(
+        internal_code="43",
+        name="Monobank",
+        exchange_codes={
+            "Binance":   "Monobank",
+            "Bybit":     "43",
+            "OKX":       "Monobank",
+            "Wallet":    "monobank",
+            "MEXC":      "128",
+            "CryptoBot": "choose-method-monobank",
+        },
+    ),
+    Bank(
+        internal_code="14",
+        name="PrivatBank",
+        exchange_codes={
+            "Binance":   "PrivatBank",
+            "Bybit":     "14",
+            "OKX":       "PrivatBank",
+            "Wallet":    "privatbank",
+            "MEXC":      "131",
+            "CryptoBot": "choose-method-privatbank",
+        },
+    ),
+    Bank(
+        internal_code="64",
+        name="ПУМБ",
+        exchange_codes={
+            "Binance":   "PUMB",
+            "Bybit":     "64",
+            "OKX":       "PUMB",
+            "Wallet":    "pumb",
+            "MEXC":      "133",
+            "CryptoBot": "choose-method-pumb",
+        },
+    ),
+    Bank(
+        internal_code="48",
+        name="А-Банк",
+        exchange_codes={
+            "Binance":   "A-Bank",
+            "Bybit":     "48",
+            "OKX":       "A-Bank",
+            "Wallet":    "abank",
+            "MEXC":      "134",
+        },
+    ),
+    Bank(
+        internal_code="99",
+        name="Ощадбанк",
+        exchange_codes={
+            "Binance":   "Oschadbank",
+            "Bybit":     "99",
+            "MEXC":      "130",
+        },
+    ),
+    Bank(
+        internal_code="380",
+        name="Raiffeisen Bank",
+        exchange_codes={
+            "Binance":   "RaiffeisenBankUkraine",
+            "Bybit":     "380",
+            "MEXC":      "132",
+            "CryptoBot": "choose-method-raiffeisenua",
+        },
+    ),
+    Bank(
+        internal_code="328",
+        name="Sense Bank",
+        exchange_codes={
+            "Binance":   "SenseBank",
+            "Bybit":     "328",
+            "OKX":       "Sense SuperApp",
+            "MEXC":      "135",
+            "CryptoBot": "choose-method-alfabankua",
+        },
+    ),
+    Bank(
+        internal_code="319",
+        name="OTP Bank",
+        exchange_codes={
+            "MEXC":      "140",
+            "CryptoBot": "choose-method-otpbank",
+        },
+    ),
+    Bank(
+        internal_code="553",
+        name="izibank",
+        exchange_codes={
+            "MEXC":      "142",
+            "CryptoBot": "choose-method-izibank",
+        },
+    ),
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BankRegistry — lookup таблиці (будуються один раз при імпорті)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class BankRegistry:
+    # internal_code → Bank
+    _by_code: dict[str, Bank] = {b.internal_code: b for b in BANKS}
+
+    # (exchange, api_code) → internal_code  — для парсингу відповідей API
+    _reverse: dict[tuple[str, str], str] = {}
+
+    def __init_subclass__(cls, **kwargs):
+        pass
+
+    @classmethod
+    def _build_reverse(cls) -> None:
+        for bank in BANKS:
+            for exchange, api_code in bank.exchange_codes.items():
+                cls._reverse[(exchange, str(api_code).lower())] = bank.internal_code
+
+    @classmethod
+    def get_exchange_code(cls, internal_code: str, exchange: str) -> Optional[str]:
+        """internal_code + exchange → API код для запиту до біржі."""
+        bank = cls._by_code.get(internal_code)
+        return bank.get_code(exchange) if bank else None
+
+    @classmethod
+    def get_exchange_codes(cls, internal_codes: list[str], exchange: str) -> list[str]:
+        """Список internal_codes → список API кодів для конкретної біржі."""
+        result = []
+        for code in internal_codes:
+            api_code = cls.get_exchange_code(code, exchange)
+            if api_code:
+                result.append(api_code)
+        return result
+
+    @classmethod
+    def from_api_code(cls, api_code: str, exchange: str) -> Optional[str]:
+        """API код біржі → internal_code. Для парсингу відповідей."""
+        if not cls._reverse:
+            cls._build_reverse()
+        return cls._reverse.get((exchange, str(api_code).lower()))
+
+    @classmethod
+    def get_name(cls, internal_code: str) -> str:
+        """internal_code → людська назва для Telegram."""
+        bank = cls._by_code.get(internal_code)
+        return bank.name if bank else internal_code
+
+    @classmethod
+    def all_codes(cls) -> list[str]:
+        """Всі внутрішні коди банків."""
+        return list(cls._by_code.keys())
+
+    @classmethod
+    def supported_by(cls, exchange: str) -> list[str]:
+        """Список internal_codes банків що підтримуються конкретною біржею."""
+        return [
+            b.internal_code for b in BANKS
+            if exchange in b.exchange_codes
+        ]
+
+
+# Ініціалізуємо reverse lookup при імпорті
+BankRegistry._build_reverse()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Зручні константи — для scanner.py і налаштувань
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Банки що скануємо за замовчуванням (можна змінити через RuntimeConfig)
+DEFAULT_BANK_CODES = ["43", "14", "64"]
+
+# Повна назва для логів і алертів
+BANK_NAMES = {b.internal_code: b.name for b in BANKS}
+
+============================================================
 FILE: scanner.py
 ============================================================
 
 # scanner.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: канонічна версія)
+# БОЙОВА ВЕРСІЯ v1.1 (Крок 4: Чистий сканер без хардкоду)
 # =============================================================================
 import asyncio
 import logging
@@ -333,7 +597,7 @@ from exchanges.binance import BinanceExchange
 from infrastructure.http.mexc_client import MexcClient
 from exchanges.mexc import MexcExchange
 from core.engine.stability import SpreadStabilityFilter
-
+from config.runtime import runtime_config
 from core.utils.dedup_cache import TTLCache
 from core.utils.circuit_breaker import CircuitBreaker
 from core.engine.cross_matcher import CrossMatchingEngine
@@ -341,11 +605,16 @@ from core.engine.risk_engine import RiskEngine
 from core.storage.merchant_db import MerchantDB
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
+from infrastructure.api.bybit_account import BybitAccountClient
+from infrastructure.api.binance_account import BinanceAccountClient
+from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.api.mexc_account import MEXCAccountClient
+from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 
 logger = logging.getLogger("Scanner")
 
 
-async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
+async def _watchdog(last_cycle_time: list[float], interval: float = getattr(settings, "watchdog_interval", 30.0)):
     while True:
         await asyncio.sleep(interval)
         elapsed = time.monotonic() - last_cycle_time[0]
@@ -353,13 +622,13 @@ async def _watchdog(last_cycle_time: list[float], interval: float = 30.0):
             logger.error("🚨 [WATCHDOG] Головний цикл не відповідає %.0fs!", elapsed)
 
 
-async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
-    """Фонова задача для регулярного очищення старих снапшотів з БД (раз на годину)."""
+async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0)):
+    """Фонова задача для регулярного очищення старих снапшотів з БД."""
+    max_age = getattr(settings, "db_snapshot_max_age_h", 168)
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
-            # Зберігаємо дані за 7 днів (168 годин) для long-term патернів
-            deleted = await db.prune_snapshots(max_age_hours=168)
+            deleted = await db.prune_snapshots(max_age_hours=max_age)
             if deleted > 0:
                 logger.info("🧹 DB Maintenance: видалено %d старих снапшотів", deleted)
         except asyncio.CancelledError:
@@ -368,107 +637,24 @@ async def _db_maintenance_loop(db: MerchantDB, interval_hours: float = 1.0):
             logger.error("Помилка під час DB Maintenance: %s", e)
 
 
-def _order_fingerprint(order, bank_code: str) -> str:
-    return (
-        f"{order.exchange}|{order.merchant_id}|{bank_code}|"
-        f"{order.price}|{order.min_limit}|{order.max_limit}|{order.link}"
-    )
-
-
-def _route_fingerprint(opp: dict) -> str:
-    buy_o = opp["buy_order"]
-    sell_o = opp["sell_order"]
-    return (
-        f"{_order_fingerprint(buy_o, opp['buy_bank'])}"
-        f" -> "
-        f"{_order_fingerprint(sell_o, opp['sell_bank'])}"
-    )
-
-
-def _banks_sorted(codes: list[str] | None, target_banks: dict[str, str]) -> list[str]:
-    uniq = {c for c in (codes or []) if c}
-    return sorted(uniq, key=lambda c: target_banks.get(c, c))
-
-
-def _merge_opp_key(opp: dict) -> str:
-    buy_o = opp["buy_order"]
-    sell_o = opp["sell_order"]
-    return (
-        f"{opp.get('route_type', 'UNKNOWN')}|"
-        f"{buy_o.exchange}|{buy_o.merchant_id}|{buy_o.price}|{buy_o.min_limit}|{buy_o.max_limit}|{buy_o.link}|"
-        f"{sell_o.exchange}|{sell_o.merchant_id}|{sell_o.price}|{sell_o.min_limit}|{sell_o.max_limit}|{sell_o.link}|"
-        f"{round(float(opp['actual_entry_uah']), 2)}"
-    )
-
-
-def _group_opportunities(opportunities: list[dict], target_banks: dict[str, str]) -> list[dict]:
-    grouped: dict[str, dict] = {}
-
-    for opp in opportunities:
-        key = _merge_opp_key(opp)
-        item = grouped.setdefault(
-            key,
-            {
-                "base": opp.copy(),
-                "route_pairs": set(),
-            },
-        )
-
-        item["route_pairs"].add((opp["buy_bank"], opp["sell_bank"]))
-
-        if float(opp["net_profit"]) > float(item["base"]["net_profit"]):
-            item["base"] = opp.copy()
-
-    merged: list[dict] = []
-
-    for item in grouped.values():
-        base = item["base"]
-        buy_o = base["buy_order"]
-        sell_o = base["sell_order"]
-
-        buy_all = _banks_sorted(getattr(buy_o, "bank_codes", []), target_banks)
-        sell_all = _banks_sorted(getattr(sell_o, "bank_codes", []), target_banks)
-
-        buy_fit = [b for b in buy_all if b in target_banks]
-        sell_fit = [b for b in sell_all if b in target_banks]
-
-        route_pairs = sorted(
-            item["route_pairs"],
-            key=lambda p: (target_banks.get(p[0], p[0]), target_banks.get(p[1], p[1])),
-        )
-
-        base["buy_banks_all"] = buy_all
-        base["sell_banks_all"] = sell_all
-        base["buy_banks_fit"] = buy_fit
-        base["sell_banks_fit"] = sell_fit
-        base["route_variants"] = [
-            f"{target_banks.get(b, b)} → {target_banks.get(s, s)}"
-            for b, s in route_pairs
-        ]
-
-        merged.append(base)
-
-    merged.sort(
-        key=lambda x: (float(x["net_profit"]), float(x["net_spread_pct"])),
-        reverse=True,
-    )
-    return merged
-
-
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     risk_mode = getattr(settings, "risk_mode", "WARNING")
     merchant_filter = MerchantFilter(risk_mode=risk_mode)
 
     dedup_cache = TTLCache(
-        ttl_seconds=settings.dedup_ttl_seconds,
+        ttl_seconds=getattr(settings, "dedup_ttl_seconds", 60.0),
         max_size=getattr(settings, "dedup_max_size", 1000),
     )
 
-    cb_bybit = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_okx = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_wallet = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_binance = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-    cb_mexc = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+    # Виносимо Circuit Breaker параметри в settings
+    cb_fails = getattr(settings, "cb_failure_threshold", 3)
+    cb_timeout = getattr(settings, "cb_recovery_timeout", 60.0)
+
+    cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+    cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
@@ -488,15 +674,48 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
 
-    # 1. Створюємо базу
     merchant_db = MerchantDB()
     await merchant_db.start()
     await merchant_db.load_blacklist_from_file()
 
-    # 2. 🚀 ТЕПЕР ЗАПУСКАЄМО MAINTENANCE (база вже існує)
+    runtime_config._db = merchant_db
+    await runtime_config.load()
+
+    # ── Завантажуємо API credentials з БД ────────────────────────────────
+    # Credentials зберігаються зашифровано через /connect команду бота (майбутнє)
+    # При старті читаємо і ініціалізуємо account клієнтів
+    all_creds = await merchant_db.get_all_credentials()
+
+    bybit_account   = BybitAccountClient()
+    binance_account = BinanceAccountClient()
+    okx_account     = OKXAccountClient()
+    mexc_account    = MEXCAccountClient()
+
+    if "Bybit" in all_creds:
+        bybit_account.set_credentials(all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"])
+        logger.info("✅ Bybit API credentials завантажено")
+    if "Binance" in all_creds:
+        binance_account.set_credentials(all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"])
+        logger.info("✅ Binance API credentials завантажено")
+    if "OKX" in all_creds:
+        okx_account.set_credentials(
+            all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
+            all_creds["OKX"].get("passphrase", ""),
+        )
+        logger.info("✅ OKX API credentials завантажено")
+    if "MEXC" in all_creds:
+        mexc_account.set_credentials(all_creds["MEXC"]["api_key"], all_creds["MEXC"]["api_secret"])
+        logger.info("✅ MEXC API credentials завантажено")
+
     maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     notifier.bind_db(merchant_db)
+    notifier.bind_commands(merchant_db, {
+        "Bybit":   bybit_account,
+        "Binance": binance_account,
+        "OKX":     okx_account,
+        "MEXC":    mexc_account,
+    })
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
 
@@ -505,12 +724,22 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
+    # Клієнти будуть прив'язані після їх ініціалізації в async with блоці нижче
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
-    stability_filter = SpreadStabilityFilter(required_hits=2, ttl_seconds=15.0)
 
-    target_banks = {"43": "Monobank", "14": "PrivatBank", "64": "PUMB"}
-    max_alerts_per_cycle = getattr(settings, "max_alerts_per_cycle", 4)
+    # Виносимо Stability Filter параметри
+    stability_filter = SpreadStabilityFilter(
+        required_hits=getattr(settings, "stability_hits", 2),
+        ttl_seconds=getattr(settings, "stability_ttl", 15.0)
+    )
+
+    target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
+
+    # Таймінги циклу
+    cycle_min_sleep = getattr(settings, "cycle_min_sleep", 0.5)
+    cycle_max_sleep = getattr(settings, "cycle_max_sleep", 3.0)
+    cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
 
     try:
         async with (
@@ -526,11 +755,35 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
             binance_ex = BinanceExchange(bn_client)
             mexc_ex = MexcExchange(m_client)
 
+            # ── Прив'язуємо API credentials до HTTP клієнтів ─────────────
+            # HTTP клієнти використовують ті самі ключі для автентифікованих
+            # запитів до P2P профілів мерчантів (review_fetcher)
+            if "Bybit" in all_creds:
+                b_client.set_credentials(
+                    all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"]
+                )
+            if "Binance" in all_creds:
+                bn_client.set_credentials(
+                    all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"]
+                )
+            if "OKX" in all_creds:
+                o_client.set_credentials(
+                    all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
+                    all_creds["OKX"].get("passphrase", ""),
+                )
+
+            # ── Підключаємо HTTP клієнти до ReviewFetcher ────────────────
+            review_fetcher.bind_clients(
+                binance=bn_client,
+                bybit=b_client,
+                okx=o_client,
+            )
+
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
                 session_name="cryptobot_session",
-                update_interval=45.0,
+                update_interval=getattr(settings, "cb_userbot_interval", 45.0),
                 banks=list(target_banks.keys()),
             )
             await cb_userbot.start()
@@ -543,31 +796,64 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                 {"name": "MEXC", "instance": mexc_ex, "cb": cb_mexc},
             ]
 
+            async def safe_fetch_exchange(cfg, amounts, banks):
+                """Обгортка для кожної біржі з гільйотиною по часу і логуванням."""
+                try:
+                    # 🚀 ГІЛЬЙОТИНА: Жодна біржа не має права затримувати цикл довше ніж на 8 секунд
+                    # Wallet має менший timeout — він часто 429-ить
+                    # і краще нехай CB трипнеться швидко ніж блокувати цикл
+                    per_exchange_timeout = 3.0 if cfg["name"] == "Wallet" else 7.0
+                    return await asyncio.wait_for(
+                        cfg["cb"].call(
+                            cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)
+                        ),
+                        timeout=per_exchange_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("🐌 %s занадто довго відповідає! Відрізаємо від поточного циклу.", cfg["name"])
+                    # Примусово реєструємо помилку в CircuitBreaker
+                    cfg["cb"].record_failure()
+                    raise
+                except Exception as e:
+                    # Якщо CircuitBreaker відкритий (біржа впала 3 рази), він викидає свою помилку
+                    if type(e).__name__ == "CircuitBreakerOpenException":
+                        logger.warning("📉 Degraded Mode: %s тимчасово ВІДКЛЮЧЕНА (Запобіжник відкритий)", cfg["name"])
+                    raise
+            _runtime_last_load: float = 0.0  # timestamp останнього runtime_config.load()
+            _cycle_counter: int = 0
             while not stop_event.is_set():
                 try:
                     start_time = time.monotonic()
-                    search_amounts = getattr(
-                        settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]
-                    )
 
-                    tasks = []
-                    for cfg in ex_configs:
-                        tasks.append(
-                            cfg["cb"].call(
-                                cfg["instance"].fetch_both_multi(
-                                    amounts=search_amounts,
-                                    banks=list(target_banks.keys()),
-                                )
-                            )
-                        )
+                    # RuntimeConfig: перезавантажуємо не частіше ніж раз на 10с
+                    # (не на кожному циклі — зайвий SELECT блокує WAL при конкуренції)
+                    if time.monotonic() - _runtime_last_load >= 10.0:
+                        await runtime_config.load()
+                        _runtime_last_load = time.monotonic()
+                    current_capital = float(runtime_config.get("working_capital_uah", settings.working_capital_uah))
+                    current_spread = float(runtime_config.get("min_spread_pct", settings.min_spread_pct))
+                    current_max_alerts = int(
+                        runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
 
+                    matcher.max_capital_uah = current_capital
+                    matcher.min_spread_pct = current_spread
+
+                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
+
+                    # 🚀 СТАЛО:
+                    tasks = [
+                        safe_fetch_exchange(cfg, search_amounts, list(target_banks.keys()))
+                        for cfg in ex_configs
+                    ]
+
+                    # gather зловить помилки відключених бірж (return_exceptions=True),
+                    # а успішні результати підуть далі в обробку!
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     cb_buy, cb_sell = cb_userbot.get_orders()
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
-                    # 🚀 ЗБИРАЄМО ДАНІ ДЛЯ ГРУПУВАННЯ + АНАЛІЗУ (один прохід)
                     all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
@@ -578,36 +864,26 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         b_orders, s_orders = res
 
-                        # Risk analysis (fire-and-forget via ensure_future в analyze())
-                        await risk_engine.analyze_batch_async(b_orders)
-                        await risk_engine.analyze_batch_async(s_orders)
-
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
-                        # Review scheduling
-                        for o in b_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-                        for o in s_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-
-                        # Spread grouping — одразу в цьому ж проході
+                        # 🚀 ОПТИМІЗАЦІЯ: Перевіряємо відгуки ТІЛЬКИ для тих, хто пройшов наші фільтри!
                         for o in b_orders:
                             if merchant_filter.passed(o):
+                                if o.merchant_id:
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
+
                         for o in s_orders:
                             if merchant_filter.passed(o):
+                                if o.merchant_id:
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
 
-                    # 🚀 SNAPSHOT INGESTION — fire-and-forget, не блокує цикл.
-                    # Снапшоти потрібні для поведінкового аналізу який йде
-                    # async у _async_analyze — вони не потрібні ДО spread matching.
                     if all_cycle_orders:
                         asyncio.ensure_future(
                             merchant_db.add_snapshots_batch(all_cycle_orders)
@@ -616,8 +892,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     last_cycle_time[0] = time.monotonic()
 
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
-                    opportunities = _group_opportunities(raw_opportunities, target_banks)
+                    opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
+
+                    # Оновлюємо статистику для /status команди
+                    from bot.commands import update_stats
+                    _cycle_counter += 1
+                    update_stats(
+                        cycles=_cycle_counter,
+                        last_cycle_ms=latency * 1000,
+                    )
 
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
@@ -631,13 +915,26 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     sent_count = 0
 
                     for opp in opportunities:
-                        if sent_count >= max_alerts_per_cycle:
+                        if sent_count >= current_max_alerts:
                             break
 
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        dedup_key = f"spread:{_merge_opp_key(opp)}"
+                        if not getattr(buy_o, "_risk_analyzed", False):
+                            risk_engine.analyze(buy_o)
+                            buy_o._risk_analyzed = True
+
+                        if not getattr(sell_o, "_risk_analyzed", False):
+                            risk_engine.analyze(sell_o)
+                            sell_o._risk_analyzed = True
+
+                        risk_buy = getattr(buy_o, "risk_flag", "") or ""
+                        risk_sell = getattr(sell_o, "risk_flag", "") or ""
+                        if "BLOCK" in risk_buy or "BLOCK" in risk_sell:
+                            continue
+
+                        dedup_key = f"spread:{matcher._merge_key(opp)}"
                         if dedup_cache.seen(dedup_key):
                             continue
 
@@ -649,11 +946,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                                 buy_o.merchant_name,
                                 sell_o.merchant_name,
                         ):
-                            logger.debug(
-                                "⏳ Спред %s ➔ %s на перевірці стабільності...",
-                                buy_o.exchange,
-                                sell_o.exchange,
-                            )
                             continue
 
                         dedup_cache.mark(dedup_key)
@@ -690,20 +982,18 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
 
                         await notifier.push(alert)
 
-                    # Адаптивний sleep: підтримуємо стабільний інтервал циклу ~3с
-                    # незалежно від того скільки зайняв сам цикл.
-                    # min=0.5с (не спамимо біржі), max=3.0с (не гальмуємо)
                     cycle_elapsed = time.monotonic() - start_time
-                    adaptive_sleep = max(0.5, min(3.0, 3.0 - cycle_elapsed))
+                    # Використовуємо динамічні таймінги з settings
+                    adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(cycle_error_sleep)
 
     finally:
         watchdog_task.cancel()
-        maintenance_task.cancel()  # 🚀 ЗУПИНЯЄМО MAINTENANCE
+        maintenance_task.cancel()
 
         if "cb_userbot" in locals():
             await cb_userbot.stop()
@@ -849,69 +1139,35 @@ from core.analysis.regex_analyzer import analyze as regex_analyze, RegexResult
 from core.storage.merchant_db import MerchantDB
 from core.analysis.behavioral_analyzer import analyze_history
 from core.analysis.identity_analyzer import analyze_identity
-
+from core.utils.cache import TTLCache
+from config.defaults import (
+    MIN_ORDERS, MIN_COMPLETION,
+    TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
+    TRUSTED_MAX_RISK_SCORE, TRUSTED_LLM_MIN_SCORE,
+    BEHAVIOR_HISTORY_MINUTES, BOT_ALERT_COOLDOWN_SEC,
+    DB_ASYNC_ANALYZE_CONCURRENCY,
+    REVIEW_WARN_NEG_PCT, REVIEW_WARN_MIN_NEG,
+    REVIEW_BLOCK_NEG_PCT, REVIEW_BLOCK_MIN_NEG,
+)
 logger = logging.getLogger("RiskEngine")
 
-MIN_ORDERS: dict[str, int] = {
-    "Binance": 50,
-    "Bybit": 30,
-    "OKX": 30,
-    "Wallet": 10,
-    "MEXC": 20,
-    "CryptoBot": 15,
-}
+# MIN_ORDERS — з config/defaults.py
 
-MIN_COMPLETION: dict[str, float] = {
-    "Binance": 95.0,
-    "Bybit": 92.0,
-    "OKX": 92.0,
-    "Wallet": 88.0,
-    "MEXC": 90.0,
-    "CryptoBot": 85.0,
-}
+# MIN_COMPLETION — з config/defaults.py
 
-TRUSTED_MIN_ORDERS = 500
-TRUSTED_MIN_COMPLETION = 95.0
-TRUSTED_MAX_RISK_SCORE = 30
-TRUSTED_LLM_MIN_SCORE = 60
+# TRUSTED_MAX_RISK_SCORE — з config/defaults.py
+# TRUSTED_LLM_MIN_SCORE — з config/defaults.py
 
-BEHAVIOR_HISTORY_MINUTES = 60
+# BEHAVIOR_HISTORY_MINUTES — з config/defaults.py
 BEHAVIOR_ALERT_SCORE = 60
-BOT_ALERT_COOLDOWN_SEC = 900  # 15 хв
+# BOT_ALERT_COOLDOWN_SEC — з config/defaults.py
 
-_ASYNC_ANALYZE_CONCURRENCY = 8
+_ASYNC_ANALYZE_CONCURRENCY = DB_ASYNC_ANALYZE_CONCURRENCY
 
-REVIEW_WARN_NEG_PCT = 15.0
-REVIEW_WARN_MIN_NEG = 3
-REVIEW_BLOCK_NEG_PCT = 25.0
-REVIEW_BLOCK_MIN_NEG = 5
+# REVIEW_* — з config/defaults.py
 
 
-class _BoundedTTLCache:
-    __slots__ = ("_ttl", "_max", "_data")
-
-    def __init__(self, ttl_seconds: float = 60.0, max_size: int = 2000):
-        self._ttl = ttl_seconds
-        self._max = max_size
-        self._data: dict[tuple, tuple[float, object]] = {}
-
-    def get(self, key: tuple, now: float):
-        entry = self._data.get(key)
-        if entry is None:
-            return None
-        ts, val = entry
-        if now - ts > self._ttl:
-            del self._data[key]
-            return None
-        return (ts, val)
-
-    def set(self, key: tuple, now: float, value) -> None:
-        if len(self._data) >= self._max:
-            evict_count = max(1, self._max // 10)
-            oldest = sorted(self._data.items(), key=lambda x: x[1][0])[:evict_count]
-            for k, _ in oldest:
-                del self._data[k]
-        self._data[key] = (now, value)
+# _BoundedTTLCache → замінено на core/utils/cache.py TTLCache
 
 
 def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
@@ -929,8 +1185,8 @@ class RiskEngine:
         self._analyzed = 0
         self._db_hits = 0
         self._bot_alert_cache: dict[tuple[str, str], tuple[str, float]] = {}
-        self._b_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
-        self._id_cache = _BoundedTTLCache(ttl_seconds=60.0, max_size=2000)
+        self._b_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
+        self._id_cache = TTLCache(ttl_seconds=60.0, max_size=2000)
         self._db_sem = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
     def analyze(self, order: Order) -> Order:
@@ -980,8 +1236,8 @@ class RiskEngine:
 
             cache_key = (exchange, mid)
 
-            need_snapshots = not (self._b_cache.get(cache_key, now) is not None)
-            need_twins = bool(order.merchant_name) and not (self._id_cache.get(cache_key, now) is not None)
+            need_snapshots = self._b_cache.get(cache_key) is None
+            need_twins = bool(order.merchant_name) and self._id_cache.get(cache_key) is None
 
             coros = [
                 self._db.is_blacklisted(exchange, mid),
@@ -1011,12 +1267,12 @@ class RiskEngine:
             review_flags = _build_review_flags_from_summary(review_summary_raw)
 
             # ── 1. ПОВЕДІНКОВИЙ ШАР ───────────────────────────────────────────
-            cached_b = self._b_cache.get(cache_key, now)
+            cached_b = self._b_cache.get(cache_key)
             if cached_b is not None:
-                behavior_result = cached_b[1]
+                behavior_result = cached_b
             else:
                 behavior_result = analyze_history(order, snapshots_raw or [])
-                self._b_cache.set(cache_key, now, behavior_result)
+                self._b_cache.set(cache_key, behavior_result)
 
             if behavior_result.flags:
                 behavior_flags.extend(behavior_result.flags)
@@ -1027,12 +1283,12 @@ class RiskEngine:
 
             # ── 2. ШАР ЦИФРОВИХ ДВІЙНИКІВ ─────────────────────────────────────
             if order.merchant_name:
-                cached_id = self._id_cache.get(cache_key, now)
+                cached_id = self._id_cache.get(cache_key)
                 if cached_id is not None:
-                    id_result = cached_id[1]
+                    id_result = cached_id
                 else:
                     id_result = analyze_identity(order, twins_raw or [])
-                    self._id_cache.set(cache_key, now, id_result)
+                    self._id_cache.set(cache_key, id_result)
 
                 if id_result.is_twin:
                     behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")
@@ -1395,6 +1651,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+from core.utils.crypto import encrypt, decrypt
 
 logger = logging.getLogger("MerchantDB")
 
@@ -1644,6 +1901,25 @@ class MerchantDB:
                                      /* 🚀 Для find_digital_twins — без цього індексу full table scan */
                                      CREATE INDEX IF NOT EXISTS idx_snap_name
                                          ON merchant_snapshots (merchant_name, exchange, recorded_at);
+
+                                     -- API credentials (зашифровані Fernet)
+                                     -- Одна строка на біржу, ключі зберігаються encrypted
+                                     CREATE TABLE IF NOT EXISTS user_credentials (
+                                         exchange    TEXT NOT NULL PRIMARY KEY,
+                                         api_key     TEXT NOT NULL,
+                                         api_secret  TEXT NOT NULL,
+                                         passphrase  TEXT DEFAULT '',
+                                         label       TEXT DEFAULT '',
+                                         created_at  REAL DEFAULT 0,
+                                         updated_at  REAL DEFAULT 0
+                                     );
+
+                                     -- Runtime overrides від UI бота
+                                     CREATE TABLE IF NOT EXISTS bot_settings (
+                                         key        TEXT NOT NULL PRIMARY KEY,
+                                         value      TEXT NOT NULL,
+                                         updated_at REAL DEFAULT 0
+                                     );
                                      """)
         await self._db.commit()
 
@@ -2105,6 +2381,130 @@ class MerchantDB:
 
         return deleted
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # API Credentials (encrypted storage)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def save_credentials(
+        self,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        passphrase: str = "",
+        label: str = "",
+    ) -> bool:
+        """
+        Зберігає API ключі для біржі (зашифровано Fernet).
+        Викликається з bot/commands.py при /connect.
+        """
+        if not self._db:
+            return False
+        import time
+        try:
+            now = time.time()
+            await self._db.execute(
+                """INSERT INTO user_credentials
+                       (exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(exchange) DO UPDATE SET
+                       api_key    = excluded.api_key,
+                       api_secret = excluded.api_secret,
+                       passphrase = excluded.passphrase,
+                       label      = excluded.label,
+                       updated_at = excluded.updated_at""",
+                (
+                    exchange,
+                    encrypt(api_key),
+                    encrypt(api_secret),
+                    encrypt(passphrase) if passphrase else "",
+                    label,
+                    now, now,
+                ),
+            )
+            await self._db.commit()
+            logger.info("Credentials saved for %s", exchange)
+            return True
+        except Exception as e:
+            logger.error("save_credentials [%s]: %s", exchange, e)
+            return False
+
+    async def get_credentials(self, exchange: str) -> dict | None:
+        """
+        Повертає розшифровані credentials для біржі або None.
+        Повертає: {"api_key": str, "api_secret": str, "passphrase": str}
+        """
+        if not self._db:
+            return None
+        try:
+            async with self._db.execute(
+                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE exchange = ?",
+                (exchange,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            return {
+                "api_key":    decrypt(row["api_key"]),
+                "api_secret": decrypt(row["api_secret"]),
+                "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
+                "label":      row["label"] or "",
+            }
+        except Exception as e:
+            logger.error("get_credentials [%s]: %s", exchange, e)
+            return None
+
+    async def get_all_credentials(self) -> dict[str, dict]:
+        """
+        Повертає всі збережені credentials як {exchange: {api_key, api_secret, passphrase}}.
+        Для ініціалізації ReviewFetcher і account clients при старті.
+        """
+        if not self._db:
+            return {}
+        try:
+            async with self._db.execute(
+                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials"
+            ) as cur:
+                rows = await cur.fetchall()
+            return {
+                row["exchange"]: {
+                    "api_key":    decrypt(row["api_key"]),
+                    "api_secret": decrypt(row["api_secret"]),
+                    "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
+                    "label":      row["label"] or "",
+                }
+                for row in rows
+            }
+        except Exception as e:
+            logger.error("get_all_credentials: %s", e)
+            return {}
+
+    async def delete_credentials(self, exchange: str) -> bool:
+        """Видаляє credentials для біржі. Викликається з /disconnect."""
+        if not self._db:
+            return False
+        try:
+            await self._db.execute(
+                "DELETE FROM user_credentials WHERE exchange = ?", (exchange,)
+            )
+            await self._db.commit()
+            logger.info("Credentials deleted for %s", exchange)
+            return True
+        except Exception as e:
+            logger.error("delete_credentials [%s]: %s", exchange, e)
+            return False
+
+    async def has_credentials(self, exchange: str) -> bool:
+        """Швидка перевірка чи є ключі для біржі."""
+        if not self._db:
+            return False
+        try:
+            async with self._db.execute(
+                "SELECT 1 FROM user_credentials WHERE exchange = ? LIMIT 1", (exchange,)
+            ) as cur:
+                return await cur.fetchone() is not None
+        except Exception:
+            return False
+
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""
         if not self._db or not merchant_name:
@@ -2377,23 +2777,32 @@ def analyze(
 FILE: core/analysis/behavioral_analyzer.py
 ============================================================
 
-# core/behavioral_analyzer.py
+# core/analysis/behavioral_analyzer.py
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-MIN_SNAPSHOTS = 3
-LIMIT_EPSILON = 0.01
-EXACT_TOLERANCE = 5.0  # 🚀 НОВЕ: ловимо трюк з різницею в 1-5 грн (напр. 4991-4992)
-# Нова вага балів
-API_REPLENISH_SCORE = 50   # 100% бот, який авто-поповнює об'єм
-STATIC_DROP_SCORE = 30     # Висить фіксований дроп (напр. 4150-4150) і чекає
-VELOCITY_SPIKE_SCORE = 30  # Дуже швидка накрутка
+from config.defaults import (
+    LIMIT_EPSILON, STICKY_MIN_CHAIN,
+    VELOCITY_MIN_WINDOW_HOURS, VELOCITY_SPIKE_PER_HOUR,
+    BEHAVIOR_LLM_THRESHOLD,
+)
 
-STICKY_MIN_CHAIN = 3
-VELOCITY_MIN_WINDOW_HOURS = 0.16   # ~10 хв
-VELOCITY_SPIKE_PER_HOUR = 20.0
-BEHAVIOR_LLM_THRESHOLD = 60
+MIN_SNAPSHOTS = 3
+
+# Бали детекторів — тут бо специфічні для behavioral шару
+API_REPLENISH_SCORE = 50   # бот що авто-поповнює об'єм: sticky + delta > 0
+STATIC_DROP_SCORE   = 30   # фіксований дроп: sticky + exact + delta == 0
+VELOCITY_SPIKE_SCORE = 30  # аномальна швидкість угод
+
+# EXACT_TOLERANCE: різниця до 5 грн вважається "рівними" лімітами
+# (напр. 4991–4992 — класичний трюк ботів)
+EXACT_TOLERANCE = 5.0
+
+# FLICKER_RELIST: параметри детектора зникнення/повернення
+FLICKER_MIN_GAP_MIN   = 10     # мін. пауза між сесіями (хв) — менше це не зникнення
+FLICKER_MAX_GAP_HOURS = 6.0    # макс. пауза — більше це просто офлайн на ніч
+FLICKER_SCORE         = 15     # ЗНИЖЕНО: бал за кожен flicker (щоб не спамило LLM)   # бал за кожен flicker (додається до загального)
 
 @dataclass(slots=True)
 class BehavioralResult:
@@ -2467,6 +2876,13 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
             result.score += VELOCITY_SPIKE_SCORE
             result.flags.append(f"VELOCITY_SPIKE:{velocity:.1f}/h")
 
+    # ── 3. FLICKER_RELIST ────────────────────────────────────────────────────
+    # Мерчант зникає і повертається з тим самим terms_hash за короткий час.
+    flicker_count = _detect_flicker(snapshots)
+    if flicker_count > 1:  # 🚀 ХОТФІКС 3: Реагуємо ТІЛЬКИ якщо блимав хоча б 2 рази!
+        result.score += FLICKER_SCORE * flicker_count
+        result.flags.append(f"FLICKER_RELIST:{flicker_count}")
+
     result.needs_llm = result.score >= BEHAVIOR_LLM_THRESHOLD
 
     if result.flags:
@@ -2477,21 +2893,60 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
             velocity = delta_orders / time_span_hours
             parts.append(f"orders_delta={delta_orders}")
             parts.append(f"velocity={velocity:.1f}/h")
+        if flicker_count > 0:
+            parts.append(f"flicker={flicker_count}")
         result.reason = " | ".join(parts)
 
     return result
 
 
+def _detect_flicker(snapshots: List[Dict[str, Any]]) -> int:
+    """
+    Рахує кількість flicker-подій у history мерчанта.
+    Flicker = пауза між двома snapshot-ами більша за FLICKER_MIN_GAP_MIN
+              але менша за FLICKER_MAX_GAP_HOURS, при тому що terms_hash збігається.
+
+    Умова terms_hash: виключає звичайні зміни умов — нам цікаво лише
+    повернення з ТИМИ САМИМИ умовами (класична поведінка скрипту).
+    """
+    if len(snapshots) < 2:
+        return 0
+
+    min_gap_sec  = FLICKER_MIN_GAP_MIN * 60
+    max_gap_sec  = FLICKER_MAX_GAP_HOURS * 3600
+    flicker_count = 0
+
+    for i in range(1, len(snapshots)):
+        prev = snapshots[i - 1]
+        curr = snapshots[i]
+
+        gap = _to_float(curr.get("recorded_at", 0)) - _to_float(prev.get("recorded_at", 0))
+
+        if gap < min_gap_sec or gap > max_gap_sec:
+            continue
+
+        prev_hash = prev.get("terms_hash") or ""
+        curr_hash = curr.get("terms_hash") or ""
+
+        # Обидва хеші мають бути непорожніми і збігатись
+        if prev_hash and curr_hash and prev_hash == curr_hash:
+            flicker_count += 1
+
+    return flicker_count
+
 ============================================================
 FILE: core/analysis/identity_analyzer.py
 ============================================================
 
-# core/identity_analyzer.py
+# core/analysis/identity_analyzer.py
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 LIMIT_EPSILON = 0.01
+PRICE_BAND_TOLERANCE = 0.005  # ±0.5% для ціни
+
 
 @dataclass(slots=True)
 class IdentityResult:
@@ -2499,23 +2954,38 @@ class IdentityResult:
     twin_exchanges: List[str] = field(default_factory=list)
     reason: str = ""
 
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
 
+
+def _get_hash(terms: str) -> str:
+    """Генерує MD5 хеш для тексту умов, якщо його немає."""
+    if not terms:
+        return ""
+    return hashlib.md5(terms.encode('utf-8')).hexdigest()
+
+
 def analyze_identity(current_order, twins_snapshots: List[Dict[str, Any]]) -> IdentityResult:
     """
-    Порівнює поточний ордер з унікальними станами двійників.
+    Identity V2: Порівнює поточний ордер з двійниками.
+    Умова (збіг всіх трьох): terms_hash + price_band (±0.5%) + limit_pair.
     """
     if not twins_snapshots:
         return IdentityResult()
 
     c_min = _to_float(getattr(current_order, "min_limit", 0.0))
     c_max = _to_float(getattr(current_order, "max_limit", 0.0))
+    c_price = _to_float(getattr(current_order, "price", 0.0))
 
-    if c_min <= 0 or c_max <= 0:
+    c_terms = getattr(current_order, "trade_terms", "") or ""
+    c_terms_hash = getattr(current_order, "terms_hash", "") or _get_hash(c_terms)
+
+    # Якщо немає базових даних, аналіз неможливий
+    if c_min <= 0 or c_max <= 0 or c_price <= 0 or not c_terms_hash:
         return IdentityResult()
 
     matched = set()
@@ -2523,9 +2993,24 @@ def analyze_identity(current_order, twins_snapshots: List[Dict[str, Any]]) -> Id
     for snap in twins_snapshots:
         s_min = _to_float(snap.get("min_limit", 0.0))
         s_max = _to_float(snap.get("max_limit", 0.0))
+        s_price = _to_float(snap.get("price", 0.0))
+        s_terms_hash = snap.get("terms_hash", "")
 
-        if abs(c_min - s_min) <= LIMIT_EPSILON and abs(c_max - s_max) <= LIMIT_EPSILON:
-            matched.add(snap["exchange"])
+        # 1. Збіг лімітів (limit_pair)
+        limits_match = abs(c_min - s_min) <= LIMIT_EPSILON and abs(c_max - s_max) <= LIMIT_EPSILON
+
+        # 2. Збіг ціни (price_band ±0.5%)
+        price_match = False
+        if s_price > 0:
+            price_diff_pct = abs(c_price - s_price) / s_price
+            price_match = price_diff_pct <= PRICE_BAND_TOLERANCE
+
+        # 3. Збіг тексту умов (terms_hash)
+        hash_match = bool(s_terms_hash) and c_terms_hash == s_terms_hash
+
+        # ТІЛЬКИ ПРИ ЗБІГУ ВСІХ ТРЬОХ ФАКТОРІВ
+        if limits_match and price_match and hash_match:
+            matched.add(snap.get("exchange", "Unknown"))
 
     if matched:
         ex_str = ",".join(sorted(matched))
@@ -3164,13 +3649,14 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - BOT_API: використання скриптів/процесингу (прапори API_REPLENISH).
 
 КРИТИЧНО:
-- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант пише "тільки своя карта", але потім додає "від родичів приймаю з фото/паспортом" або "можу прийняти від довіреної особи" — ЦЕ РИЗИК. Ти ПОВИНЕН ставити verdict: SUSPICIOUS або BLOCK (ризик: THIRD_PARTY_HINT або TRIANGLE). Не знижуй до OK!
-- ⚖️ МАТРИЦЯ ДОКАЗІВ ТА БОТИ: Якщо в "Поведінці" є прапори API_REPLENISH, CROSS_EXCHANGE_BOT або COMPOSITE_RISK — це дуже сильний маркер бот-процесингу. Оціни його В КОМПЛЕКСІ з текстом! Якщо текст ІДЕАЛЬНО безпечний ("без третіх осіб", "тільки чат біржі") — ти маєш право виправдати мерчанта і поставити verdict: OK. Але якщо при цих прапорах є хоча б найменша підозра (просить чек, чат, або двозначно згадує 3-ті особи) — став verdict: BLOCK. Ти — фінальний арбітр.
+- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант чітко пише "тільки своя карта", "без 3-х осіб", "з 3 особами не працюю" — ЦЕ БЕЗПЕЧНО (OK). НЕ видумуй прихованих ризиків і НЕ припускай винятків, якщо про них прямо не написано!
+- 🧾 КВИТАНЦІЇ ТА ЧЕКИ: Прохання надати чек, квитанцію або відео екрану після оплати — це НОРМАЛЬНО і БЕЗПЕЧНО. НІКОЛИ не блокуй і не став SUSPICIOUS тільки за те, що мерчант вимагає чек.
+- 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — це БЕЗПЕЧНО (OK). Ризиком є лише довірені особи З ІНШИМ прізвищем.
+- ПОВЕДІНКА СТАКАНУ: Якщо в полі "Поведінка" є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. Ти ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
 - Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності, але немає прапорів ботів — його жорсткі вимоги щодо своєї безпеки є нормою.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
 {"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ_ВИЩЕ","reason":"до 120 символів українською"}"""
-
 
 @dataclass
 class LLMTask:
@@ -3500,6 +3986,48 @@ class LLMWorkerPool:
         return _parse_json(text)
 
 
+def _build_behavior_block(task: "LLMTask") -> list[str]:
+    """
+    Формує структурований behavioral блок для промпту.
+    LLM бачить конкретні факти, а не просто список флагів.
+    """
+    flags = task.behavior_flags or []
+    if not flags:
+        return ["ПОВЕДІНКА: Нормальна"]
+
+    lines = ["ПОВЕДІНКА (аномалії):"]
+
+    for f in flags:
+        if f.startswith("API_REPLENISH:"):
+            n = f.split(":", 1)[1] if ":" in f else "?"
+            lines.append(f"  - БОТ-АВТО-ПОПОВНЕННЯ: ліміти стабільні {n} циклів, кількість угод зростає (скрипт)")
+        elif f.startswith("STATIC_DROP:"):
+            n = f.split(":", 1)[1]
+            lines.append(f"  - СТАТИЧНИЙ ДРОП: ліміти min=max, незмінні {n} циклів, угоди не ростуть")
+        elif f.startswith("VELOCITY_SPIKE:"):
+            v = f.split(":", 1)[1]
+            lines.append(f"  - АНОМАЛЬНА ШВИДКІСТЬ: {v} угод/год (норма <20/год)")
+        elif f == "EXACT_LIMITS":
+            lines.append(f"  - ФІКСОВАНА СУМА: min_limit ≈ max_limit ({task.min_limit}–{task.max_limit} UAH)")
+        elif f.startswith("FLICKER_RELIST:"):
+            n = f.split(":", 1)[1]
+            lines.append(f"  - РІЛІСТИНГ: зникав і повертався з тими ж умовами {n} раз (маніпуляція)")
+        elif f.startswith("CROSS_EXCHANGE_BOT:"):
+            ex = f.split(":", 2)[-1] if f.count(":") >= 2 else ""
+            lines.append(f"  - КЛОН НА БІРЖАХ: однакові ліміти знайдено на {ex}")
+        elif f.startswith("BEHAVIOR_BOTLIKE:"):
+            s = f.split(":", 1)[1]
+            lines.append(f"  - ЗАГАЛЬНА ПІДОЗРА НА БОТА: score={s}")
+        else:
+            lines.append(f"  - {f}")
+
+    # Додаємо контекст лімітів для LLM
+    lines.append(f"  Поточні ліміти: {task.min_limit}–{task.max_limit} UAH")
+
+    return lines
+
+
+
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
@@ -3528,7 +4056,9 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"- Успішність: {task.finish_rate}%",
         f"- Верифікація: {'ТАК' if task.is_verified else 'НІ'}",
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
-        f"ПОВЕДІНКА: {', '.join(task.behavior_flags) if task.behavior_flags else 'Нормальна'}",
+        # ── Behavioral block ──────────────────────────────────────────────
+        *_build_behavior_block(task),
+        # ─────────────────────────────────────────────────────────────────
         "",
         f"Regex verdict: {rr.verdict} (Score: {score})",
         f"Regex main risk: {risk_type}",
@@ -3651,11 +4181,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
-from typing import Optional
-
-import aiohttp
+from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
+
+if TYPE_CHECKING:
+    from infrastructure.api.binance_account import BinanceAccountClient
+    from infrastructure.api.bybit_account import BybitAccountClient
+    from infrastructure.api.okx_account import OkxAccountClient
 
 logger = logging.getLogger("ReviewFetcher")
 
@@ -3680,38 +4213,62 @@ class ReviewFetcher:
         db: MerchantDB,
         max_queue: int = 500,
         review_ttl_hours: float = 24.0,
+        # HTTP клієнти передаються з scanner.py (вже мають session)
+        binance_client=None,
+        bybit_client=None,
+        okx_client=None,
     ):
         self._db = db
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
         self._review_ttl = review_ttl_hours
         self._worker_task: Optional[asyncio.Task] = None
-        self._session: Optional[aiohttp.ClientSession] = None
         self._processed = 0
         self._errors = 0
         self._pending: set[tuple[str, str]] = set()
-        # 🚀 ДОДАЄМО СТАН DEGRADE
+
+        # Account клієнти (infrastructure/api/) — підключаються з scanner.py
+        # Якщо є API ключ → повні профілі мерчантів + реальні відгуки
+        # Якщо немає → анонімний fallback (може давати 404)
+        self._binance: Optional["BinanceAccountClient"] = binance_client
+        self._bybit:   Optional["BybitAccountClient"]   = bybit_client
+        self._okx:     Optional["OkxAccountClient"]     = okx_client
+
         self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
         self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
-    async def start(self) -> None:
-        if self._session and not self._session.closed:
-            logger.debug("ReviewFetcher start skipped: session already active")
-            return
 
-        self._session = aiohttp.ClientSession(
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-            },
-            timeout=aiohttp.ClientTimeout(total=10.0),
+    def bind_clients(self, binance=None, bybit=None, okx=None) -> None:
+        """
+        Прив'язує HTTP клієнти після ініціалізації.
+        Викликається з scanner.py після старту клієнтів.
+        В майбутньому — викликається з /connect команди бота.
+        """
+        if binance is not None:
+            self._binance = binance
+        if bybit is not None:
+            self._bybit = bybit
+        if okx is not None:
+            self._okx = okx
+        logger.info(
+            "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s",
+            "✅" if self._binance and self._binance.is_authenticated else "❌",
+            "✅" if self._bybit  and self._bybit.is_authenticated  else "❌",
+            "✅" if self._okx   and self._okx.is_authenticated    else "❌",
         )
+    async def start(self) -> None:
+        # Сесія більше не потрібна — використовуємо клієнти від scanner.py
+        if self._worker_task and not self._worker_task.done():
+            logger.debug("ReviewFetcher start skipped: already running")
+            return
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="review-fetcher"
         )
-        logger.info("ReviewFetcher запущено | ttl=%.1fh | max_queue=%d", self._review_ttl, self._queue.maxsize)
+        logger.info(
+            "ReviewFetcher запущено | ttl=%.1fh | max_queue=%d | auth: Binance=%s Bybit=%s OKX=%s",
+            self._review_ttl, self._queue.maxsize,
+            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
+            "✅" if self._bybit  and getattr(self._bybit,   "is_authenticated", False) else "❌",
+            "✅" if self._okx   and getattr(self._okx,    "is_authenticated", False) else "❌",
+        )
 
     async def stop(self) -> None:
         if self._worker_task:
@@ -3719,11 +4276,6 @@ class ReviewFetcher:
             with suppress(asyncio.CancelledError):
                 await self._worker_task
             self._worker_task = None
-
-        if self._session:
-            await self._session.close()
-            self._session = None
-
         logger.info(
             "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d, queue: %d",
             self._processed, self._errors, len(self._pending), self._queue.qsize()
@@ -3848,172 +4400,126 @@ class ReviewFetcher:
 
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
-        payload = {
-            "advertiserNo": merchant_id,
-            "page": 1,
-            "rows": 1,
-        }
+        """
+        Отримує профіль і відгуки Binance мерчанта.
+        Якщо є API ключ → автентифікований запит → повні дані.
+        Якщо немає → анонімний → можливі 404.
+        """
+        client = self._binance
+        if client and getattr(client, "is_authenticated", False):
+            return await self._fetch_binance_authenticated(merchant_id, client)
+        return await self._fetch_binance_anonymous(merchant_id)
 
-        async with self._session.post(
-            url,
-            json=payload,
-            headers={
-                "content-type": "application/json",
-                "origin": "https://p2p.binance.com",
-            },
-        ) as resp:
-            if resp.status == 429:
-                logger.warning("ReviewFetcher Binance 429 for %s", merchant_id)
-                await asyncio.sleep(10.0)
-                raise RuntimeError("Binance 429")
-            if resp.status != 200:
-                logger.warning("ReviewFetcher Binance profile status=%s for %s", resp.status, merchant_id)
-                return 0, 0, 0, []
-            data = await resp.json()
-
-        user = data.get("data", {}).get("advertiser", {})
-        if not user:
-            logger.debug("ReviewFetcher Binance empty profile %s", merchant_id)
-            return 0, 0, 0, []
-
-        total = int(user.get("monthOrderCount") or 0)
-        pos_rate = float(user.get("positiveRate") or 0)
-        neg_rate = float(user.get("negativeRate") or 0)
-
-        pos = int(total * pos_rate)
-        neg = int(total * neg_rate)
-        neutral = total - pos - neg
-
-        bad_texts = await self._fetch_binance_bad_texts(merchant_id)
-        return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
-
-    async def _fetch_binance_bad_texts(self, merchant_id: str) -> list[str]:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
-        payload = {
-            "advertiserNo": merchant_id,
-            "type": 2,
-            "page": 1,
-            "rows": 10,
-        }
-
+    async def _fetch_binance_authenticated(self, merchant_id: str, client) -> tuple[int, int, int, list[str]]:
+        """Автентифікований запит через BinanceAccountClient."""
         try:
-            async with self._session.post(
-                url,
-                json=payload,
-                headers={
-                    "content-type": "application/json",
-                    "origin": "https://p2p.binance.com",
-                },
-            ) as resp:
-                if resp.status != 200:
-                    logger.debug("ReviewFetcher Binance bad_texts status=%s for %s", resp.status, merchant_id)
-                    return []
-                data = await resp.json()
-        except Exception as e:
-            logger.debug("ReviewFetcher Binance bad_texts error %s: %s", merchant_id, e)
-            return []
+            profile = await client.fetch_merchant_profile(merchant_id)
+            advertiser = profile.get("advertiser", {})
+            if not advertiser:
+                return 0, 0, 0, []
 
-        texts = []
-        for item in data.get("data", []):
-            text = (item.get("message") or "").strip()
-            if text and _has_bad_keywords(text):
-                texts.append(text[:200])
-        return texts
+            total    = int(advertiser.get("monthOrderCount") or 0)
+            pos_rate = float(advertiser.get("positiveRate") or 0)
+            neg_rate = float(advertiser.get("negativeRate") or 0)
+            pos     = max(int(total * pos_rate), 0)
+            neg     = max(int(total * neg_rate), 0)
+            neutral = max(total - pos - neg, 0)
+
+            raw_reviews = await client.fetch_negative_reviews(merchant_id)
+            bad_texts = [
+                item.get("message", "")[:200]
+                for item in raw_reviews
+                if _has_bad_keywords(item.get("message", ""))
+            ]
+            logger.debug(
+                "ReviewFetcher Binance [auth] %s: pos=%d neg=%d bad_texts=%d",
+                merchant_id, pos, neg, len(bad_texts),
+            )
+            return pos, neg, neutral, bad_texts
+        except Exception as e:
+            logger.warning("ReviewFetcher Binance [auth] error %s: %s", merchant_id, e)
+            return await self._fetch_binance_anonymous(merchant_id)
+
+    async def _fetch_binance_anonymous(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
+        """Анонімний fallback через BinanceAccountClient (може давати 404)."""
+        if not self._binance:
+            return 0, 0, 0, []
+        try:
+            profile = await self._binance.fetch_merchant_profile(merchant_id)
+            advertiser = profile.get("advertiser", {})
+            if not advertiser:
+                logger.warning("ReviewFetcher Binance profile status=404 for %s", merchant_id)
+                return 0, 0, 0, []
+
+            total    = int(advertiser.get("monthOrderCount") or 0)
+            pos_rate = float(advertiser.get("positiveRate") or 0)
+            neg_rate = float(advertiser.get("negativeRate") or 0)
+            pos     = max(int(total * pos_rate), 0)
+            neg     = max(int(total * neg_rate), 0)
+            neutral = max(total - pos - neg, 0)
+            return pos, neg, neutral, []
+        except Exception as e:
+            raise RuntimeError(f"Binance anon error: {e}") from e
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        url = "https://api2.bybit.com/fiat/otc/user/public/profile"
-        params = {"userId": merchant_id}
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=6.0, connect=3.0, sock_read=4.0)
-
-            async with self._session.get(url, params=params, timeout=timeout) as resp:
-                if resp.status == 404:
-                    logger.warning("ReviewFetcher Bybit profile status=404 for %s", merchant_id)
-                    return 0, 0, 0, []
-
-                if resp.status != 200:
-                    logger.warning("ReviewFetcher Bybit profile status=%s for %s", resp.status, merchant_id)
-                    return 0, 0, 0, []
-
-                data = await resp.json(content_type=None)
-
-        except asyncio.TimeoutError:
-            logger.warning("ReviewFetcher Bybit timeout for %s", merchant_id)
-            raise RuntimeError("Bybit API Timeout")  # <--- Замінили return
-
-        except aiohttp.ClientError as e:
-            logger.warning("ReviewFetcher Bybit client error for %s: %s", merchant_id, e)
-            raise RuntimeError(f"Bybit Client Error: {e}")  # <--- Замінили return
-
-        info = data.get("result", {}).get("userInfo", {})
-        if not info:
+        """Bybit: обходимо 404 помилку. Беремо відгуки напряму через автентифіковане API."""
+        client = self._bybit
+        if not client:
             return 0, 0, 0, []
 
-        pos = int(info.get("goodEvaluate") or 0)
-        neg = int(info.get("badEvaluate") or 0)
-        neutral = int(info.get("neutralEvaluate") or 0)
-
-        bad_texts = await self._fetch_bybit_bad_texts(merchant_id)
-        return max(pos, 0), max(neg, 0), max(neutral, 0), bad_texts
-
-    async def _fetch_bybit_bad_texts(self, merchant_id: str) -> list[str]:
-        # 🚀 Використовуємо внутрішній ендпоінт, який ти знайшов
-        url = "https://www.bybit.com/x-api/fiat/otc/order/appraiseList"
-
-        # Специфічний payload для цього API
-        payload = {
-            "userId": str(merchant_id),
-            "evaluateType": "bad",  # беремо тільки негатив для економії трафіку
-            "page": 1,
-            "size": 10,
-        }
+        # Якщо ключі не підключені, краще повернути нулі, щоб не ловити 404
+        if not getattr(client, "is_authenticated", False):
+            return 0, 0, 0, []
 
         try:
-            # ⚠️ ВАЖЛИВО: використовуємо BybitP2PClient, щоб обійти Cloudflare 403
-            # Якщо у тебе в ReviewFetcher немає доступу до bybit_client,
-            # його треба передати в __init__ або створити окремо.
-            data = await self.bybit_client.fetch(url, payload)
+            # Отримуємо сирі негативні відгуки через BybitP2PClient
+            raw_bad_reviews = await client.fetch_merchant_feedback(merchant_id)
+            bad_texts = [
+                str(item.get("content") or "")[:200]
+                for item in raw_bad_reviews
+                if _has_bad_keywords(str(item.get("content") or ""))
+            ]
 
-            if not data or data.get("ret_code") != 0:
-                logger.debug("ReviewFetcher Bybit appraiseList error: %s", data.get("ret_msg"))
-                return []
+            # Оскільки Bybit сховав публічну статистику (pos/neg count), ми віддаємо знайдені тексти.
+            # RiskEngine відправить їх в LLM, і LLM сама заблокує скамера за фактом цих текстів.
+            # Ставимо pos=100 (фейковий траст), щоб не спрацьовувало примітивне блокування 100% bad_pct.
+            neg = len(bad_texts)
+            return 100, neg, 0, bad_texts
 
         except Exception as e:
-            logger.debug("ReviewFetcher Bybit appraiseList exception: %s", e)
-            return []
-
-        texts = []
-        # Bybit зазвичай повертає список у result -> items
-        items = data.get("result", {}).get("items", [])
-
-        for item in items:
-            # У новому API текст може бути в полі 'content' або 'evaluateContent'
-            text = (item.get("content") or item.get("feedback") or "").strip()
-
-            if text and _has_bad_keywords(text):
-                # Обмежуємо довжину, щоб не роздувати промпт для LLM
-                texts.append(text[:200])
-
-        return texts
+            raise RuntimeError(f"Bybit API Error: {e}") from e
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        profile_url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
-        params = {"userId": merchant_id, "language": "uk_UA"}
+        """OKX: автентифікований запит якщо є ключі, інакше публічний."""
+        client = self._okx
+        if not client:
+            raise RuntimeError("OkxClient не підключений до ReviewFetcher")
 
-        async with self._session.get(profile_url, params=params) as resp:
-            if resp.status != 200:
-                logger.warning("ReviewFetcher OKX profile status=%s for %s", resp.status, merchant_id)
-                raise RuntimeError(f"OKX API HTTP {resp.status}") # <--- Замінили return 0,0,0,[]
-            data = await resp.json()
+        # Публічний endpoint для базових лічильників
+        url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
+        try:
+            data = await client._get(url, params={"userId": merchant_id, "language": "uk_UA"})
+        except Exception as e:
+            raise RuntimeError(f"OKX API error: {e}") from e
 
         info = data.get("data") or {}
-        pos = int(info.get("positiveFeedbackCount") or 0)
-        neg = int(info.get("negativeFeedbackCount") or 0)
-        neutral = int(info.get("neutralFeedbackCount") or 0)
+        if not info:
+            raise RuntimeError(f"OKX API HTTP 404")
 
-        return max(pos, 0), max(neg, 0), max(neutral, 0), []
+        pos     = max(int(info.get("positiveFeedbackCount") or 0), 0)
+        neg     = max(int(info.get("negativeFeedbackCount") or 0), 0)
+        neutral = max(int(info.get("neutralFeedbackCount") or 0), 0)
+
+        # Тексти відгуків — тільки якщо є API ключ
+        bad_texts: list[str] = []
+        if getattr(client, "is_authenticated", False):
+            raw = await client.fetch_merchant_feedback(merchant_id)
+            bad_texts = [
+                str(item.get("content") or item.get("feedback") or "")[:200]
+                for item in raw
+                if _has_bad_keywords(str(item.get("content") or item.get("feedback") or ""))
+            ]
+        return pos, neg, neutral, bad_texts
 
 
 def _has_bad_keywords(text: str) -> bool:
@@ -4133,6 +4639,83 @@ class CrossMatchingEngine:
 
         best_opportunities.sort(key=lambda x: x["net_spread_pct"], reverse=True)
         return best_opportunities
+
+    # ─── Grouping ─────────────────────────────────────────────────────────────
+
+    def group(
+        self,
+        opportunities: list[dict],
+        bank_names: dict[str, str],
+    ) -> list[dict]:
+        """
+        Групує сирі можливості за унікальним маршрутом (мерчант+ціна).
+        Збирає всі варіанти банківських пар в один алерт.
+        bank_names: {internal_code: human_name}
+
+        Перенесено з scanner.py._group_opportunities()
+        """
+        grouped: dict[str, dict] = {}
+
+        for opp in opportunities:
+            key = self._merge_key(opp)
+            item = grouped.setdefault(key, {"base": opp.copy(), "route_pairs": set()})
+            item["route_pairs"].add((opp["buy_bank"], opp["sell_bank"]))
+            if float(opp["net_profit"]) > float(item["base"]["net_profit"]):
+                item["base"] = opp.copy()
+
+        merged: list[dict] = []
+        for item in grouped.values():
+            base = item["base"]
+            buy_o = base["buy_order"]
+            sell_o = base["sell_order"]
+
+            buy_all = self._banks_sorted(getattr(buy_o, "bank_codes", []), bank_names)
+            sell_all = self._banks_sorted(getattr(sell_o, "bank_codes", []), bank_names)
+
+            base["buy_banks_all"]  = buy_all
+            base["sell_banks_all"] = sell_all
+            base["buy_banks_fit"]  = [b for b in buy_all if b in bank_names]
+            base["sell_banks_fit"] = [b for b in sell_all if b in bank_names]
+            base["route_variants"] = [
+                f"{bank_names.get(b, b)} → {bank_names.get(s, s)}"
+                for b, s in sorted(
+                    item["route_pairs"],
+                    key=lambda p: (bank_names.get(p[0], p[0]), bank_names.get(p[1], p[1])),
+                )
+            ]
+            merged.append(base)
+
+        merged.sort(
+            key=lambda x: (float(x["net_profit"]), float(x["net_spread_pct"])),
+            reverse=True,
+        )
+        return merged
+
+    # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _merge_key(opp: dict) -> str:
+        b = opp["buy_order"]
+        s = opp["sell_order"]
+        return (
+            f"{opp.get('route_type','UNKNOWN')}|"
+            f"{b.exchange}|{b.merchant_id}|{b.price}|{b.min_limit}|{b.max_limit}|{b.link}|"
+            f"{s.exchange}|{s.merchant_id}|{s.price}|{s.min_limit}|{s.max_limit}|{s.link}|"
+            f"{round(float(opp['actual_entry_uah']), 2)}"
+        )
+
+    @staticmethod
+    def _banks_sorted(codes: list[str] | None, bank_names: dict[str, str]) -> list[str]:
+        uniq = {c for c in (codes or []) if c}
+        return sorted(uniq, key=lambda c: bank_names.get(c, c))
+
+    @staticmethod
+    def order_fingerprint(order, bank_code: str) -> str:
+        """Унікальний відбиток ордера для дедуплікації."""
+        return (
+            f"{order.exchange}|{order.merchant_id}|{bank_code}|"
+            f"{order.price}|{order.min_limit}|{order.max_limit}|{order.link}"
+        )
 
 ============================================================
 FILE: core/engine/stability.py
@@ -4258,6 +4841,10 @@ class CircuitBreaker:
         self._state = State.CLOSED
         self._opened_at = None
 
+    def record_failure(self, reason: str = "") -> None:
+        """Публічний метод для ручної реєстрації помилки (напр. TimeoutError з зовні)."""
+        self._record_failure(Exception(reason or "manual failure"))
+
     def _record_failure(self, error: Exception):
         """Рахує помилки і переходить в OPEN тільки після threshold."""
         self._failures += 1
@@ -4269,50 +4856,254 @@ class CircuitBreaker:
             logger.error("🔴 Circuit OPEN: Пауза запитів на %.0fs", self._recovery_timeout)
 
 ============================================================
-FILE: core/utils/dedup_cache.py
+FILE: core/utils/cache.py
 ============================================================
+
+# core/utils/cache.py
+"""
+Єдиний TTL-кеш для всього проекту.
+Замінює три окремі реалізації:
+  - TTLCache в dedup_cache.py       (seen/mark для дедуплікації спредів)
+  - _BoundedTTLCache в risk_engine  (get/set для behavioral/identity кешу)
+  - dict в stability.py             (hits-counter — залишається окремим)
+
+Інтерфейс:
+  seen(key)         → bool          # чи є ключ і чи не протух
+  mark(key)         → None          # додати ключ без значення
+  get(key)          → value | None  # отримати значення (None якщо протухло)
+  set(key, value)   → None          # зберегти значення
+
+Всі методи потокобезпечні в рамках asyncio (GIL достатньо).
+"""
+from __future__ import annotations
 
 import time
 from collections import OrderedDict
-
-from config import settings
+from typing import Any, Hashable, Optional
 
 
 class TTLCache:
-    """Легкий TTL-кеш для запобігання повторним алертам."""
+    """
+    Уніфікований TTL-кеш з обмеженим розміром і LRU-евікцією.
 
-    # Дефолтні значення передаємо явно, без імпорту settings
-    def __init__(self, ttl_seconds: float = 600.0, max_size: int = 1000):
+    Параметри:
+        ttl_seconds  — час життя запису (секунди)
+        max_size     — максимальна кількість записів
+        evict_ratio  — частка записів що видаляється при переповненні (0.0–1.0)
+    """
+    __slots__ = ("_ttl", "_max", "_evict_n", "_store")
+
+    def __init__(
+        self,
+        ttl_seconds: float = 60.0,
+        max_size: int = 1000,
+        evict_ratio: float = 0.1,
+    ):
         self._ttl = ttl_seconds
-        self._max_size = max_size
-        self._store: OrderedDict[str, float] = OrderedDict()
+        self._max = max_size
+        # Кількість записів для евікції при переповненні (мін. 1)
+        self._evict_n = max(1, int(max_size * evict_ratio))
+        # OrderedDict: key → (timestamp, value)
+        # value=_SENTINEL означає "тільки мітка", без значення (seen/mark)
+        self._store: OrderedDict[Hashable, tuple[float, Any]] = OrderedDict()
 
-    def seen(self, key: str) -> bool:
-        """Перевіряє, чи ми вже бачили цей ключ і чи він актуальний."""
-        self._evict_expired()
-        return key in self._store
+    # ─── Базовий інтерфейс (seen/mark) ───────────────────────────────────────
 
-    def mark(self, key: str):
-        """Додає або оновлює мітку часу для ключа."""
+    def seen(self, key: Hashable) -> bool:
+        """Перевіряє чи є ключ і чи він не протух. Не оновлює TTL."""
+        entry = self._store.get(key)
+        if entry is None:
+            return False
+        ts, _ = entry
+        if time.monotonic() - ts > self._ttl:
+            del self._store[key]
+            return False
+        return True
+
+    def mark(self, key: Hashable) -> None:
+        """Додає ключ (без значення). Оновлює TTL якщо вже є."""
+        self._put(key, None)
+
+    # ─── Розширений інтерфейс (get/set з value) ───────────────────────────────
+
+    def get(self, key: Hashable) -> Optional[Any]:
+        """
+        Повертає збережене значення або None якщо ключ відсутній/протух.
+        Не оновлює TTL при читанні.
+        """
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        ts, val = entry
+        if time.monotonic() - ts > self._ttl:
+            del self._store[key]
+            return None
+        return val
+
+    def set(self, key: Hashable, value: Any) -> None:
+        """Зберігає значення. Оновлює TTL якщо ключ вже є."""
+        self._put(key, value)
+
+    # ─── Утиліти ──────────────────────────────────────────────────────────────
+
+    def delete(self, key: Hashable) -> None:
+        self._store.pop(key, None)
+
+    def clear(self) -> None:
+        self._store.clear()
+
+    def __len__(self) -> int:
+        return len(self._store)
+
+    def purge_expired(self) -> int:
+        """Явне очищення протухлих записів. Повертає кількість видалених."""
+        now = time.monotonic()
+        expired = [k for k, (ts, _) in self._store.items() if now - ts > self._ttl]
+        for k in expired:
+            del self._store[k]
+        return len(expired)
+
+    # ─── Внутрішня логіка ─────────────────────────────────────────────────────
+
+    def _put(self, key: Hashable, value: Any) -> None:
+        now = time.monotonic()
+
+        # Якщо ключ вже є — переміщуємо в кінець (LRU) і оновлюємо
         if key in self._store:
             del self._store[key]
+        elif len(self._store) >= self._max:
+            self._evict(now)
 
-        if len(self._store) >= self._max_size:
+        self._store[key] = (now, value)
+
+    def _evict(self, now: float) -> None:
+        """
+        Двохетапна евікція:
+        1. Видаляємо протухлі записи
+        2. Якщо все ще переповнено — видаляємо найстаріші (LRU з початку OrderedDict)
+        """
+        # Крок 1: протухлі
+        expired = [k for k, (ts, _) in self._store.items() if now - ts > self._ttl]
+        for k in expired:
+            del self._store[k]
+
+        # Крок 2: LRU якщо все ще >= max
+        while len(self._store) >= self._max:
             self._store.popitem(last=False)
 
-        self._store[key] = time.monotonic()
+============================================================
+FILE: core/utils/crypto.py
+============================================================
 
-    def _evict_expired(self):
-        """Видаляє записи, термін дії яких вичерпався."""
-        now = time.monotonic()
-        while self._store:
-            key, timestamp = next(iter(self._store.items()))
-            if now - timestamp > self._ttl:
-                self._store.popitem(last=False)
-            else:
-                break
+# core/utils/crypto.py
+"""
+Шифрування API ключів через Fernet (AES-128-CBC + HMAC-SHA256).
+Master key береться з .env → ENCRYPTION_KEY.
 
-# Додаємо імпорт налаштувань (виправдано для допоміжної функції)
+Якщо ENCRYPTION_KEY не встановлений — генерує і логує один раз.
+Зберігай згенерований ключ в .env, інакше після перезапуску
+всі збережені credentials стануть нечитабельними.
+
+Використання:
+    from core.utils.crypto import encrypt, decrypt
+    encrypted = encrypt("my_secret_api_key")
+    original  = decrypt(encrypted)
+"""
+from __future__ import annotations
+
+import base64
+import logging
+import os
+
+logger = logging.getLogger("Crypto")
+
+_fernet = None
+
+
+def _get_fernet():
+    global _fernet
+    if _fernet is not None:
+        return _fernet
+
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        raise RuntimeError(
+            "Потрібен пакет cryptography: pip install cryptography"
+        )
+
+    key_str = os.environ.get("ENCRYPTION_KEY", "")
+
+    if not key_str:
+        # Генеруємо новий ключ і логуємо — користувач має зберегти його в .env
+        new_key = Fernet.generate_key().decode()
+        logger.warning(
+            "⚠️  ENCRYPTION_KEY не знайдено в .env!\n"
+            "    Додай рядок у .env файл:\n"
+            "    ENCRYPTION_KEY=%s\n"
+            "    Без цього credentials будуть втрачені після перезапуску!",
+            new_key,
+        )
+        key_str = new_key
+
+    # Fernet вимагає 32-байтовий URL-safe base64 ключ
+    try:
+        _fernet = Fernet(key_str.encode())
+    except Exception:
+        # Можливо ключ у старому форматі — конвертуємо
+        padded = key_str + "=" * (4 - len(key_str) % 4)
+        raw = base64.urlsafe_b64decode(padded)[:32]
+        _fernet = Fernet(base64.urlsafe_b64encode(raw.ljust(32, b"\x00")))
+
+    return _fernet
+
+
+def encrypt(plaintext: str) -> str:
+    """Шифрує рядок. Повертає base64-encoded зашифрований рядок."""
+    if not plaintext:
+        return ""
+    f = _get_fernet()
+    return f.encrypt(plaintext.encode("utf-8")).decode("utf-8")
+
+
+def decrypt(ciphertext: str) -> str:
+    """Розшифровує рядок. Повертає оригінальний plaintext."""
+    if not ciphertext:
+        return ""
+    try:
+        f = _get_fernet()
+        return f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except Exception as e:
+        logger.error("Crypto decrypt failed: %s", e)
+        return ""
+
+
+def is_encrypted(value: str) -> bool:
+    """Перевіряє чи виглядає рядок як Fernet-зашифрований."""
+    if not value or len(value) < 50:
+        return False
+    try:
+        decoded = base64.urlsafe_b64decode(value + "==")
+        return decoded[:1] == b"\x80"  # Fernet magic byte
+    except Exception:
+        return False
+
+============================================================
+FILE: core/utils/dedup_cache.py
+============================================================
+
+# core/utils/dedup_cache.py
+"""
+Дедуплікація спредів — тонка обгортка над TTLCache.
+Логіка seen/mark залишилась незмінною, реалізація — в core/utils/cache.py.
+"""
+from config import settings
+from core.utils.cache import TTLCache
+
+# Re-export для зворотної сумісності — весь код що робить
+# `from core.utils.dedup_cache import TTLCache` продовжує працювати
+__all__ = ["TTLCache", "build_dedup_key"]
+
 
 def build_dedup_key(side: str, order_id: str, price: str, available_amount: str = "") -> str:
     """Будує ключ дедуплікації відповідно до налаштувань."""
@@ -4474,6 +5265,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import settings
+from bot import commands as bot_commands
 from exchanges.base import Order
 from core.storage.merchant_db import MerchantDB
 
@@ -4775,6 +5567,7 @@ class TelegramNotifier:
         self._dp = Dispatcher()
         self._router = Router()
         self._dp.include_router(self._router)
+        self._dp.include_router(bot_commands.router)
         self._db: MerchantDB | None = None
         self._setup_handlers()
 
@@ -4789,6 +5582,10 @@ class TelegramNotifier:
     def bind_db(self, db: MerchantDB):
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
+
+    def bind_commands(self, db, account_clients: dict) -> None:
+        """Ініціалізує command center з посиланнями на компоненти."""
+        bot_commands.setup(db, account_clients)
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -5107,8 +5904,9 @@ from __future__ import annotations
 RISK_BADGES = {
     # Поведінкові (Deep Research)
     "BEHAVIOR_BOTLIKE":      "🤖",
-    "EXACT_LIMITS":          "📏",
-    "STICKY_LIMITS":         "📏",
+    "EXACT_LIMITS":          "🎯",
+    "API_REPLENISH":         "🤖",   # бот-авто-поповнення
+    "STATIC_DROP":           "📏",   # статичний дроп min=max
     "VELOCITY_SPIKE":        "⚡",
     "CROSS_EXCHANGE_BOT":    "👥",
     "FLICKER_RELIST":        "🔄",
@@ -5176,37 +5974,509 @@ def format_behavioral_summary(risk_flag: str) -> str:
     """
     if not risk_flag:
         return ""
-    behavioral_keys = {
-        "BEHAVIOR_BOTLIKE", "EXACT_LIMITS", "STICKY_LIMITS",
-        "VELOCITY_SPIKE", "CROSS_EXCHANGE_BOT", "FLICKER_RELIST",
+
+    import re
+
+    # Флаги що мають значення після двокрапки (напр. API_REPLENISH:42)
+    VALUE_FLAGS = {
+        "API_REPLENISH":    ("🤖", "АВТО-БОТ"),
+        "STATIC_DROP":      ("📏", "СТАТИК-ДРОП"),
+        "VELOCITY_SPIKE":   ("⚡", "VELOCITY"),
+        "FLICKER_RELIST":   ("🔄", "РІЛІСТИНГ"),
+        "CROSS_EXCHANGE_BOT": ("👥", "КЛОН"),
+        "BEHAVIOR_BOTLIKE": ("🤖", "BOTLIKE"),
     }
+    # Флаги без значення
+    SIMPLE_FLAGS = {
+        "EXACT_LIMITS": ("🎯", "ФІКС.ЛІМІТ"),
+    }
+
     found = []
-    for key in behavioral_keys:
+
+    for key, (badge, label) in VALUE_FLAGS.items():
+        m = re.search(rf"{key}:([\w./]+)", risk_flag, re.IGNORECASE)
+        if m:
+            found.append(f"{badge} {label}:{m.group(1)}")
+        elif key in risk_flag.upper():
+            found.append(f"{badge} {label}")
+
+    for key, (badge, label) in SIMPLE_FLAGS.items():
         if key in risk_flag.upper():
-            badge = RISK_BADGES.get(key, "⚠️")
-            # Витягуємо значення після ключа якщо є (напр. STICKY_LIMITS:42)
-            pattern = key + "[:\\w./]*"
-            import re
-            m = re.search(pattern, risk_flag, re.IGNORECASE)
-            found.append(f"{badge} {m.group(0) if m else key}")
+            found.append(f"{badge} {label}")
+
     return " | ".join(found)
 
 ============================================================
 FILE: bot/commands.py
 ============================================================
 
+# bot/commands.py
 """
-bot/commands.py — Telegram команди (заготовка для UI бота).
-Буде заповнено в апдейті Telegram Command Center.
+Telegram Command Center — команди бота.
+
+Команди:
+  /start      — привітання
+  /status     — стан сканера (цикл, черги, боти)
+  /connect    — підключення API ключів біржі
+  /disconnect — видалення API ключів
+  /keys       — список підключених бірж
+  /balance    — баланс на всіх підключених біржах
+  /settings   — перегляд і зміна налаштувань
+  /ban        — ручний бан мерчанта
+  /help       — список команд
+
+Архітектура: команди реєструються в TelegramNotifier через setup_commands().
+Стан зберігається в _conversation_state для multi-step флоу (/connect).
 """
 from __future__ import annotations
-# TODO: Реалізувати команди:
-#   /start     — привітання і статус
-#   /status    — поточний стан сканера (цикл, мерчанти, LLM queue)
-#   /settings  — перегляд і зміна налаштувань через RuntimeConfig
-#   /ban       — ручний бан мерчанта
-#   /whitelist — додати мерчанта у whitelist
-#   /stats     — статистика за 24h (спреди, заблоковані, боти)
+
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Optional
+
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from config import settings
+from config.runtime import runtime_config, ALLOWED_KEYS
+
+if TYPE_CHECKING:
+    from core.storage.merchant_db import MerchantDB
+    from infrastructure.api.bybit_account import BybitAccountClient
+    from infrastructure.api.binance_account import BinanceAccountClient
+    from infrastructure.api.okx_account import OKXAccountClient
+    from infrastructure.api.mexc_account import MEXCAccountClient
+
+logger = logging.getLogger("Commands")
+
+router = Router()
+
+# ── FSM стани для /connect ─────────────────────────────────────────────────
+class ConnectStates(StatesGroup):
+    waiting_exchange  = State()
+    waiting_api_key   = State()
+    waiting_api_secret = State()
+    waiting_passphrase = State()  # тільки для OKX
+
+# ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
+_db: Optional["MerchantDB"] = None
+_account_clients: dict = {}   # {"Bybit": BybitAccountClient, ...}
+_scanner_stats: dict = {
+    "cycles": 0,
+    "last_cycle_ms": 0,
+    "bots_detected_today": 0,
+    "spreads_found_today": 0,
+}
+
+
+def setup(db, account_clients: dict) -> None:
+    """
+    Ініціалізація команд.
+    Викликається з scanner.py після старту всіх компонентів.
+    
+    db: MerchantDB instance
+    account_clients: {"Bybit": BybitAccountClient, "Binance": BinanceAccountClient, ...}
+    """
+    global _db, _account_clients
+    _db = db
+    _account_clients = account_clients
+    logger.info("Commands: initialized with %d account clients", len(account_clients))
+
+
+def update_stats(**kwargs) -> None:
+    """Оновлює статистику сканера. Викликається з scanner.py."""
+    _scanner_stats.update(kwargs)
+
+
+# ── /start ─────────────────────────────────────────────────────────────────
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    text = (
+        "👋 <b>ARBIX QUANTUM</b>\n\n"
+        "P2P арбітражний сканер з антифрод захистом.\n\n"
+        "📋 <b>Команди:</b>\n"
+        "/status — стан сканера\n"
+        "/balance — баланси на біржах\n"
+        "/connect — підключити API ключі біржі\n"
+        "/disconnect — відключити біржу\n"
+        "/keys — підключені біржі\n"
+        "/settings — налаштування\n"
+        "/ban — заблокувати мерчанта\n"
+        "/help — детальна допомога\n"
+    )
+    await message.answer(text)
+
+
+# ── /help ──────────────────────────────────────────────────────────────────
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    text = (
+        "📖 <b>Детальна допомога</b>\n\n"
+        "<b>/connect [біржа]</b>\n"
+        "Підключити API ключі для біржі.\n"
+        "Підтримувані: Binance, Bybit, OKX, MEXC\n"
+        "Ключі зберігаються зашифровано.\n\n"
+        "<b>/balance</b>\n"
+        "Показує баланс USDT/UAH на всіх підключених біржах.\n\n"
+        "<b>/settings [ключ] [значення]</b>\n"
+        "Змінити налаштування без перезапуску.\n"
+        f"Доступні ключі: {', '.join(sorted(ALLOWED_KEYS))}\n\n"
+        "<b>/ban [exchange] [merchant_id]</b>\n"
+        "Ручний бан мерчанта в чорний список.\n\n"
+        "<b>/status</b>\n"
+        "Поточний стан сканера, черги LLM, кількість знайдених ботів."
+    )
+    await message.answer(text)
+
+
+# ── /status ────────────────────────────────────────────────────────────────
+@router.message(Command("status"))
+async def cmd_status(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ База даних не ініціалізована")
+
+    # Підключені біржі
+    connected = []
+    for exchange, client in _account_clients.items():
+        if getattr(client, "is_authenticated", False):
+            connected.append(f"✅ {exchange}")
+        else:
+            connected.append(f"❌ {exchange}")
+
+    # Runtime settings
+    capital = runtime_config.get("working_capital_uah", settings.working_capital_uah)
+    spread  = runtime_config.get("min_spread_pct", settings.min_spread_pct)
+    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+
+    text = (
+        "📊 <b>Стан сканера</b>\n\n"
+        f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
+        f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
+        f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
+        f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
+        f"💼 Капітал: <code>{capital} ₴</code>\n"
+        f"📉 Поріг спреду: <code>{spread}%</code>\n"
+        f"🛡 Режим ризику: <code>{risk}</code>\n\n"
+        "🔌 <b>Біржі:</b>\n" + "\n".join(connected)
+    )
+    await message.answer(text)
+
+
+# ── /keys ──────────────────────────────────────────────────────────────────
+@router.message(Command("keys"))
+async def cmd_keys(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ База даних не ініціалізована")
+
+    all_creds = await _db.get_all_credentials()
+    if not all_creds:
+        return await message.answer(
+            "🔑 Жодних API ключів не підключено.\n"
+            "Використай /connect щоб додати."
+        )
+
+    lines = ["🔑 <b>Підключені API ключі:</b>\n"]
+    for exchange, creds in all_creds.items():
+        key_preview = creds["api_key"][:8] + "..." if creds["api_key"] else "?"
+        label = f" ({creds['label']})" if creds.get("label") else ""
+        lines.append(f"✅ <b>{exchange}</b>{label}: <code>{key_preview}</code>")
+
+    await message.answer("\n".join(lines))
+
+
+# ── /connect ───────────────────────────────────────────────────────────────
+SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC"]
+
+@router.message(Command("connect"))
+async def cmd_connect(message: Message, state: FSMContext) -> None:
+    parts = message.text.split(maxsplit=1)
+    
+    if len(parts) > 1:
+        exchange = parts[1].strip().capitalize()
+        if exchange not in SUPPORTED_EXCHANGES:
+            return await message.answer(
+                f"❌ Невідома біржа: {exchange}\n"
+                f"Підтримувані: {', '.join(SUPPORTED_EXCHANGES)}"
+            )
+        await state.update_data(exchange=exchange)
+        await state.set_state(ConnectStates.waiting_api_key)
+        return await message.answer(
+            f"🔑 <b>Підключення {exchange}</b>\n\n"
+            f"Введи API Key:"
+        )
+
+    # Показуємо кнопки вибору біржі
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=ex, callback_data=f"connect:{ex}")]
+        for ex in SUPPORTED_EXCHANGES
+    ])
+    await message.answer("🔌 Виберіть біржу для підключення:", reply_markup=kb)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("connect:"))
+async def on_connect_exchange(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[1]
+    await state.update_data(exchange=exchange)
+    await state.set_state(ConnectStates.waiting_api_key)
+    await call.message.edit_text(
+        f"🔑 <b>Підключення {exchange}</b>\n\n"
+        f"Введи API Key:\n"
+        f"<i>(повідомлення буде видалено після збереження)</i>"
+    )
+    await call.answer()
+
+
+@router.message(ConnectStates.waiting_api_key)
+async def on_api_key(message: Message, state: FSMContext) -> None:
+    api_key = message.text.strip()
+    # Видаляємо повідомлення з ключем одразу
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if len(api_key) < 10:
+        return await message.answer("❌ API Key занадто короткий. Спробуй ще раз:")
+
+    await state.update_data(api_key=api_key)
+    await state.set_state(ConnectStates.waiting_api_secret)
+    await message.answer(
+        "✅ API Key отримано.\n\n"
+        "Тепер введи <b>Secret Key</b>:\n"
+        "<i>(повідомлення буде видалено після збереження)</i>"
+    )
+
+
+@router.message(ConnectStates.waiting_api_secret)
+async def on_api_secret(message: Message, state: FSMContext) -> None:
+    api_secret = message.text.strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if len(api_secret) < 10:
+        return await message.answer("❌ Secret Key занадто короткий. Спробуй ще раз:")
+
+    data = await state.get_data()
+    exchange = data["exchange"]
+
+    # OKX вимагає passphrase
+    if exchange == "OKX":
+        await state.update_data(api_secret=api_secret)
+        await state.set_state(ConnectStates.waiting_passphrase)
+        return await message.answer(
+            "✅ Secret Key отримано.\n\n"
+            "OKX вимагає <b>Passphrase</b>\n"
+            "(той що ти задав при створенні ключа):"
+        )
+
+    # Зберігаємо credentials
+    await _save_credentials(message, state, exchange, data["api_key"], api_secret)
+
+
+@router.message(ConnectStates.waiting_passphrase)
+async def on_passphrase(message: Message, state: FSMContext) -> None:
+    passphrase = message.text.strip()
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    data = await state.get_data()
+    await _save_credentials(
+        message, state, data["exchange"],
+        data["api_key"], data["api_secret"], passphrase
+    )
+
+
+async def _save_credentials(
+    message: Message,
+    state: FSMContext,
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str = "",
+) -> None:
+    """Зберігає credentials і оновлює account client."""
+    await state.clear()
+
+    if not _db:
+        return await message.answer("❌ База даних недоступна")
+
+    ok = await _db.save_credentials(
+        exchange=exchange,
+        api_key=api_key,
+        api_secret=api_secret,
+        passphrase=passphrase,
+        label="bot_connected",
+    )
+
+    if not ok:
+        return await message.answer(f"❌ Помилка збереження credentials для {exchange}")
+
+    # Оновлюємо account client
+    client = _account_clients.get(exchange)
+    if client:
+        if exchange == "OKX":
+            client.set_credentials(api_key, api_secret, passphrase)
+        else:
+            client.set_credentials(api_key, api_secret)
+        logger.info("Commands: %s credentials updated in account client", exchange)
+
+    await message.answer(
+        f"✅ <b>{exchange}</b> успішно підключено!\n\n"
+        f"Ключ: <code>{api_key[:8]}...</code>\n\n"
+        f"Використай /balance щоб перевірити підключення."
+    )
+
+
+# ── /disconnect ────────────────────────────────────────────────────────────
+@router.message(Command("disconnect"))
+async def cmd_disconnect(message: Message) -> None:
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        # Показуємо кнопки
+        if not _db:
+            return await message.answer("❌ База даних не ініціалізована")
+        all_creds = await _db.get_all_credentials()
+        if not all_creds:
+            return await message.answer("Немає підключених бірж.")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"❌ {ex}", callback_data=f"disconnect:{ex}")]
+            for ex in all_creds
+        ])
+        return await message.answer("Виберіть біржу для відключення:", reply_markup=kb)
+
+    exchange = parts[1].strip().capitalize()
+    await _do_disconnect(message, exchange)
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("disconnect:"))
+async def on_disconnect(call: CallbackQuery) -> None:
+    exchange = call.data.split(":")[1]
+    await call.message.edit_reply_markup(reply_markup=None)
+    await _do_disconnect(call.message, exchange)
+    await call.answer()
+
+
+async def _do_disconnect(message: Message, exchange: str) -> None:
+    if not _db:
+        return await message.answer("❌ База даних недоступна")
+    ok = await _db.delete_credentials(exchange)
+    if ok:
+        # Скидаємо credentials в account client
+        client = _account_clients.get(exchange)
+        if client:
+            client.set_credentials("", "")
+        await message.answer(f"✅ {exchange} відключено.")
+    else:
+        await message.answer(f"❌ Не вдалося відключити {exchange}.")
+
+
+# ── /balance ───────────────────────────────────────────────────────────────
+@router.message(Command("balance"))
+async def cmd_balance(message: Message) -> None:
+    if not _account_clients:
+        return await message.answer("❌ Account clients не ініціалізовані")
+
+    msg = await message.answer("⏳ Отримую баланси...")
+    lines = ["💰 <b>Баланси на біржах</b>\n"]
+    found_any = False
+
+    for exchange, client in _account_clients.items():
+        if not getattr(client, "is_authenticated", False):
+            lines.append(f"⚪ <b>{exchange}</b>: не підключено")
+            continue
+
+        try:
+            balances = await client.get_balance()
+            if not balances:
+                lines.append(f"📭 <b>{exchange}</b>: порожньо або помилка")
+                continue
+
+            found_any = True
+            lines.append(f"\n🏦 <b>{exchange}</b>:")
+            for b in balances:
+                coin  = b.get("coin", "?")
+                free  = float(b.get("free", 0))
+                total = float(b.get("total", free))
+                locked = total - free
+                if total > 0:
+                    if locked > 0:
+                        lines.append(f"  {coin}: <code>{free:.2f}</code> (заблок: <code>{locked:.2f}</code>)")
+                    else:
+                        lines.append(f"  {coin}: <code>{free:.2f}</code>")
+        except Exception as e:
+            lines.append(f"❌ <b>{exchange}</b>: {e}")
+
+    if not found_any:
+        lines.append("\n<i>Підключи API ключі через /connect</i>")
+
+    await msg.edit_text("\n".join(lines))
+
+
+# ── /settings ──────────────────────────────────────────────────────────────
+@router.message(Command("settings"))
+async def cmd_settings(message: Message) -> None:
+    parts = message.text.split(maxsplit=2)
+
+    # /settings без аргументів — показати поточні
+    if len(parts) == 1:
+        lines = ["⚙️ <b>Поточні налаштування</b>\n"]
+        for key in sorted(ALLOWED_KEYS):
+            val = runtime_config.get(key, getattr(settings, key, "—"))
+            lines.append(f"<code>{key}</code>: <b>{val}</b>")
+        lines.append(f"\n<i>Змінити: /settings [ключ] [значення]</i>")
+        return await message.answer("\n".join(lines))
+
+    if len(parts) < 3:
+        return await message.answer(
+            "❌ Формат: <code>/settings [ключ] [значення]</code>\n"
+            f"Доступні ключі: {', '.join(sorted(ALLOWED_KEYS))}"
+        )
+
+    key, value = parts[1].strip(), parts[2].strip()
+    if key not in ALLOWED_KEYS:
+        return await message.answer(
+            f"❌ Ключ <code>{key}</code> недоступний.\n"
+            f"Доступні: {', '.join(sorted(ALLOWED_KEYS))}"
+        )
+
+    ok = await runtime_config.set(key, value)
+    if ok:
+        await message.answer(f"✅ <code>{key}</code> = <b>{value}</b>")
+    else:
+        await message.answer(f"❌ Не вдалося зберегти налаштування.")
+
+
+# ── /ban ───────────────────────────────────────────────────────────────────
+@router.message(Command("ban"))
+async def cmd_ban(message: Message) -> None:
+    parts = message.text.split(maxsplit=3)
+    if len(parts) < 3:
+        return await message.answer(
+            "❌ Формат: <code>/ban [exchange] [merchant_id]</code>\n"
+            "Приклад: <code>/ban Binance s42ee507f2dc</code>"
+        )
+
+    exchange    = parts[1].strip()
+    merchant_id = parts[2].strip()
+    reason      = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
+
+    if not _db:
+        return await message.answer("❌ База даних не ініціалізована")
+
+    await _db.add_to_blacklist(exchange, merchant_id, "Unknown", reason, "manual_cmd")
+    await message.answer(
+        f"⛔ <b>Заблоковано</b>\n"
+        f"Біржа: <code>{exchange}</code>\n"
+        f"ID: <code>{merchant_id}</code>\n"
+        f"Причина: {reason}"
+    )
 
 ============================================================
 FILE: bot/keyboards.py
@@ -5287,20 +6557,9 @@ from typing import List, Tuple
 
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.binance_client import BinanceClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
-
-BANK_CODE_TO_BINANCE = {
-    "43": "Monobank",
-    "14": "PrivatBank",
-    "64": "PUMB",
-    "48": "A-Bank",
-    "99": "Oschadbank",
-    "380": "RaiffeisenBankUkraine",
-    "328": "SenseBank",
-}
-
-BINANCE_TO_CODE = {v: k for k, v in BANK_CODE_TO_BINANCE.items()}
 
 
 class BinanceExchange(BaseExchange):
@@ -5315,7 +6574,7 @@ class BinanceExchange(BaseExchange):
         bank_codes = []
         for m in trade_methods:
             identifier = m.get("identifier", "")
-            code = BINANCE_TO_CODE.get(identifier)
+            code = BankRegistry.from_api_code(identifier, "Binance")
             if code:
                 bank_codes.append(code)
 
@@ -5344,7 +6603,7 @@ class BinanceExchange(BaseExchange):
         sem = asyncio.Semaphore(2)
 
         async def fetch_one(bank_code: str) -> List[Order]:
-            binance_pay = BANK_CODE_TO_BINANCE.get(bank_code)
+            binance_pay = BankRegistry.get_exchange_code(bank_code, "Binance")
             if not binance_pay:
                 return []
 
@@ -5398,9 +6657,7 @@ class BinanceExchange(BaseExchange):
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         return await self._fetch_orders("SELL", banks)
 
-    async def fetch_both_multi(
-            self, amounts: List[float], banks: List[str]
-    ) -> Tuple[List[Order], List[Order]]:
+    async def fetch_both_multi(self, amounts: List[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         buy_orders, sell_orders = await asyncio.gather(
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
@@ -5520,6 +6777,7 @@ class BybitExchange(BaseExchange):
 FILE: exchanges/okx.py
 ============================================================
 
+# exchanges/okx.py
 import logging
 import asyncio
 import time
@@ -5527,43 +6785,28 @@ from typing import List, Tuple
 from decimal import Decimal
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.okx_client import OkxClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
-
-# Маппінг для уніфікації банків
-BANK_NAME_TO_CODE = {
-    "Monobank": "43",
-    "PrivatBank": "14",
-    "PUMB": "64",
-    "A-Bank": "48",
-    "Sense SuperApp": "61"
-}
-
-BANK_CODE_TO_NAME = {v: k for k, v in BANK_NAME_TO_CODE.items()}
 
 
 class OkxExchange(BaseExchange):
     def __init__(self, client: OkxClient):
         self.client = client
-        # ВИПРАВЛЕНО: Використовуємо робочий URL для публічних даних
         self.url = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdsPrelogin"
 
     def _parse_order(self, item: dict) -> Order:
         bank_codes = []
-        # OKX може присилати або список рядків, або список об'єктів
         raw_methods = item.get("paymentMethods", [])
 
         for method in raw_methods:
-            # Якщо це словник, беремо значення ключа 'bankName', інакше — сам метод як рядок
             name = method.get("bankName", "") if isinstance(method, dict) else str(method)
-
-            code = BANK_NAME_TO_CODE.get(name)
+            code = BankRegistry.from_api_code(name, "OKX")
             if code:
                 bank_codes.append(code)
 
-        # Додамо дебаг прямо сюди, щоб бачити, чи розпізнані банки
         if not bank_codes:
-            logger.debug(f"⚠️ Не вдалося розпізнати банки в ордері: {raw_methods}")
+            logger.debug("⚠️ Не вдалося розпізнати банки в ордері OKX: %s", raw_methods)
 
         return Order(
             id=str(item.get("id", "")),
@@ -5583,9 +6826,8 @@ class OkxExchange(BaseExchange):
         )
 
     async def _fetch_orders(self, amount: float, bank_code: str, side: str) -> List[Order]:
-        bank_name = BANK_CODE_TO_NAME.get(bank_code, "all")
+        bank_name = BankRegistry.get_exchange_code(bank_code, "OKX") or "all"
 
-        # ВИПРАВЛЕНО: Параметри для цього ендпоїнта
         params = {
             "fiatCurrency": "UAH",
             "cryptoCurrency": "USDT",
@@ -5601,10 +6843,7 @@ class OkxExchange(BaseExchange):
             data = await self.client.fetch(self.url, params, method="GET")
             if not isinstance(data, dict) or data.get("code") != 0:
                 return []
-
             items = data.get("data", {}).get(side, [])
-            # У файл exchanges/okx.py всередину методу _fetch_orders перед рядком 'return orders'
-            #logger.info(f"DEBUG OKX: Отримано {len(items)} сирих ордерів для {side} через {bank_name}")
             return [self._parse_order(item) for item in items]
         except Exception as e:
             logger.error("❌ OKX Fetch Error: %s", e)
@@ -5621,7 +6860,6 @@ class OkxExchange(BaseExchange):
         return self._dedup_by_id([o for res in results for o in res])
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
-        # Беремо найбільшу суму для запиту, щоб бачити мерчантів із високим порогом
         max_amount = max(amounts) if amounts else 1000.0
         buys = await self.get_buy_orders(max_amount, banks)
         sells = await self.get_sell_orders(max_amount, banks)
@@ -5631,7 +6869,7 @@ class OkxExchange(BaseExchange):
         seen, res = set(), []
         for o in orders:
             if o.id not in seen:
-                seen.add(o.id);
+                seen.add(o.id)
                 res.append(o)
         return res
 
@@ -5646,24 +6884,23 @@ from typing import List, Tuple
 from decimal import Decimal
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.wallet_client import WalletClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
+
 
 class WalletExchange(BaseExchange):
     def __init__(self, client: WalletClient):
         self.client = client
-        # НОВИЙ ОФІЦІЙНИЙ URL
         self.url = "https://p2p.walletbot.me/p2p/integration-api/v1/item/online"
 
     def _parse_order(self, item: dict) -> Order:
-        # Додаємо словник перекладу
-        bank_map = {"monobank": "43", "privatbank": "14", "pumb": "64", "abank": "48"}
-
         raw_banks = item.get("payments", [])
         bank_codes = []
         for b in raw_banks:
-            if b.lower() in bank_map:
-                bank_codes.append(bank_map[b.lower()])
+            code = BankRegistry.from_api_code(b.lower(), "Wallet")
+            if code:
+                bank_codes.append(code)
 
         finish_rate = float(item.get("executeRate", "0")) * 100
 
@@ -5709,7 +6946,6 @@ class WalletExchange(BaseExchange):
             for item in items:
                 try:
                     order = self._parse_order(item)
-                    # Фільтруємо банки
                     if not banks or any(b.lower() in [pb.lower() for pb in order.bank_codes] for b in banks):
                         orders.append(order)
                 except Exception as e:
@@ -5721,11 +6957,9 @@ class WalletExchange(BaseExchange):
             return []
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        # "SELL" = мерчант продає USDT (а ми купуємо)
         return await self._fetch_orders("SELL", banks)
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        # "BUY" = мерчант купує USDT (а ми йому продаємо)
         return await self._fetch_orders("BUY", banks)
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
@@ -5755,24 +6989,9 @@ from typing import List, Tuple
 
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.mexc_client import MexcClient
+from config.banks import BankRegistry
 
 logger = logging.getLogger(__name__)
-
-# ⚠️ УВАГА: Нові цифрові ID банків для MEXC.
-# Я прописав орієнтовні (з твоєї відповіді), але тобі ТРЕБА ЇХ ПЕРЕВІРИТИ (інструкція нижче)
-BANK_CODE_TO_MEXC = {
-    "43": "128",  # Умовно Monobank (Треба перевірити!)
-    "14": "131",  # Умовно PrivatBank (Треба перевірити!)
-    "64": "133",  # Умовно PUMB (Треба перевірити!)
-    "48": "134",  # A-Bank
-    "99": "130",  # Oschadbank
-    "380": "132",  # Raiffeisen Bank
-    "328": "135",  # Sense Bank
-    "319": "140",  # OTP Bank
-    "553": "142",  # izibank
-}
-
-MEXC_TO_CODE = {v: k for k, v in BANK_CODE_TO_MEXC.items()}
 
 
 class MexcExchange(BaseExchange):
@@ -5780,9 +6999,7 @@ class MexcExchange(BaseExchange):
         self.client = client
 
     def _build_payload(self, side: int, payment_method: str, page: int = 1) -> dict:
-        # side: 1 = BUY (ми купуємо), 2 = SELL (ми продаємо)
         trade_str = "SELL" if side == 1 else "BUY"
-
         return {
             "adsType": "1",
             "allowTrade": "false",
@@ -5795,7 +7012,7 @@ class MexcExchange(BaseExchange):
             "follow": "false",
             "haveTrade": "false",
             "page": str(page),
-            "payMethod": payment_method,  # Передаємо цифровий ID банку
+            "payMethod": payment_method,
             "tradeType": trade_str
         }
 
@@ -5810,10 +7027,8 @@ class MexcExchange(BaseExchange):
         max_limit = Decimal(str(item.get("maxTradeLimit", "0")))
         nickname = str(merchant.get("nickName", "Unknown"))
         user_id = str(merchant.get("memberId", ""))
-
         order_count = int(stats.get("doneLastMonthCount", 0))
 
-        # Парсимо відсоток (наприклад, "0.9942" -> 99.4%)
         raw_rate = stats.get("lastMonthCompleteRate", "0")
         try:
             finish_rate = float(raw_rate) * 100
@@ -5841,7 +7056,7 @@ class MexcExchange(BaseExchange):
         tasks = []
         valid_banks = []
         for bank_code in banks:
-            mexc_pay = BANK_CODE_TO_MEXC.get(bank_code)
+            mexc_pay = BankRegistry.get_exchange_code(bank_code, "MEXC")
             if not mexc_pay:
                 continue
             tasks.append(self.client.fetch(self._build_payload(side, mexc_pay)))
@@ -5877,9 +7092,7 @@ class MexcExchange(BaseExchange):
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         return await self._fetch_orders(2, "sell", banks)
 
-    async def fetch_both_multi(
-            self, amounts: List[float], banks: List[str]
-    ) -> Tuple[List[Order], List[Order]]:
+    async def fetch_both_multi(self, amounts: List[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         buy_orders, sell_orders = await asyncio.gather(
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
@@ -5922,18 +7135,17 @@ logger = logging.getLogger("CryptoBotUserbot")
 
 CRYPTOBOT_USERNAME = "CryptoBot"
 
+from config.banks import BankRegistry as _BankRegistry
+
+# Автоматично будується з BankRegistry — не редагувати вручну
 BANK_CALLBACK_TO_CODE = {
-    "choose-method-monobank":           "43",
-    "choose-method-privatbank":         "14",
-    "choose-method-pumb":               "64",
-    "choose-method-abank":              "48",
-    "choose-method-oschadbank":         "99",
-    "choose-method-raiffeisenua":       "380",
-    "choose-method-alfabankua":         "328",
-    "choose-method-otpbank":            "319",
-    "choose-method-izibank":            "553",
-    "choose-method-globalbanktransfer": "transfer",
+    cb: code
+    for code, bank in [(b.internal_code, b) for b in _BankRegistry._by_code.values()]
+    for cb in [bank.get_code("CryptoBot")]
+    if cb and cb.startswith("choose-method-")
 }
+# Додаємо спеціальний запис що не в BankRegistry
+BANK_CALLBACK_TO_CODE["choose-method-globalbanktransfer"] = "transfer"
 
 NAV_CALLBACKS = {
     "market-trade-open-filters",
@@ -6298,7 +7510,8 @@ class CryptoBotUserbot:
     # ─── Utils ────────────────────────────────────────────────────────────
 
     def _code_to_callback(self, code: str) -> Optional[str]:
-        return {v: k for k, v in BANK_CALLBACK_TO_CODE.items()}.get(code)
+        """internal_code → CryptoBot callback data."""
+        return _BankRegistry.get_exchange_code(code, "CryptoBot")
 
     def _dedup(self, orders: list[Order]) -> list[Order]:
         seen, result = set(), []
@@ -6312,54 +7525,57 @@ class CryptoBotUserbot:
 FILE: infrastructure/http/base_client.py
 ============================================================
 
-"""
-infrastructure/http/base_client.py — Спільна логіка HTTP-клієнтів.
-Всі клієнти успадковують або використовують цей клас.
-"""
+# infrastructure/http/base_client.py
 from __future__ import annotations
 import asyncio
 import logging
+import random
 from typing import Any, Optional
-import aiohttp
+from curl_cffi.requests import AsyncSession, errors
 
 logger = logging.getLogger("BaseHttpClient")
 
-DEFAULT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-}
-
-DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=10.0, connect=5.0, sock_read=8.0)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
 
 
 class BaseHttpClient:
     """
-    Базовий клас для всіх P2P HTTP-клієнтів.
-    Надає: retry з backoff, спільні заголовки, централізоване логування.
+    Базовий клієнт на основі curl_cffi.
+    Імітує Chrome 124 для обходу Cloudflare, має вбудовані ретраї.
     """
     MAX_RETRIES = 3
     RETRY_BACKOFF = [1.0, 2.0, 4.0]
 
     def __init__(
-        self,
-        base_url: str = "",
-        extra_headers: Optional[dict] = None,
-        timeout: Optional[aiohttp.ClientTimeout] = None,
+            self,
+            proxy: Optional[str] = None,
+            extra_headers: Optional[dict] = None,
+            timeout: float = 10.0,
     ):
-        self._base_url = base_url
-        self._headers = {**DEFAULT_HEADERS, **(extra_headers or {})}
-        self._timeout = timeout or DEFAULT_TIMEOUT
-        self._session: Optional[aiohttp.ClientSession] = None
+        self.proxy = proxy
+        self._timeout = timeout
+        self._extra_headers = extra_headers or {}
+        self._session: Optional[AsyncSession] = None
 
     async def __aenter__(self) -> "BaseHttpClient":
-        self._session = aiohttp.ClientSession(
-            headers=self._headers,
-            timeout=self._timeout,
+        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
+
+        self._session = AsyncSession(
+            impersonate="chrome124",
+            proxies=proxies,
+            timeout=self._timeout
         )
+
+        self._session.headers.update({
+            "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
+            "User-Agent": random.choice(USER_AGENTS),
+        })
+        self._session.headers.update(self._extra_headers)
+
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -6374,151 +7590,216 @@ class BaseHttpClient:
         return await self._request("POST", url, **kwargs)
 
     async def _request(self, method: str, url: str, **kwargs) -> Any:
+        # Авто-ініціалізація сесії якщо клієнт використовується без async with
+        # (наприклад account clients що живуть весь час, не як context manager)
+        if self._session is None:
+            await self.__aenter__()
+
         last_exc: Optional[Exception] = None
+
         for attempt, backoff in enumerate(self.RETRY_BACKOFF, 1):
             try:
-                async with self._session.request(method, url, **kwargs) as resp:
-                    if resp.status == 429:
-                        logger.warning(
-                            "%s 429 RateLimit on %s (attempt %d)",
-                            self.__class__.__name__, url, attempt,
-                        )
-                        await asyncio.sleep(backoff * 3)
-                        continue
-                    resp.raise_for_status()
-                    return await resp.json(content_type=None)
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                response = await self._session.request(method, url, **kwargs)
+
+                if response.status_code == 429:
+                    logger.warning("%s 429 RateLimit on %s (attempt %d)", self.__class__.__name__, url, attempt)
+                    await asyncio.sleep(backoff * 3)
+                    continue
+
+                if response.status_code in (403, 502, 503, 504):
+                    logger.warning("%s HTTP %d on %s (attempt %d)", self.__class__.__name__, response.status_code, url,
+                                   attempt)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                if response.status_code != 200:
+                    # 🚀 ХОТФІКС: Викидаємо помилку замість return {}
+                    raise RuntimeError(f"Unexpected Status {response.status_code}: {response.text}")
+
+                return response.json()
+
+            except errors.RequestsError as e:
                 last_exc = e
-                logger.debug(
-                    "%s request error (attempt %d/%d): %s",
-                    self.__class__.__name__, attempt, self.MAX_RETRIES, e,
-                )
+                logger.debug("%s request error (attempt %d/%d): %s", self.__class__.__name__, attempt, self.MAX_RETRIES,
+                             e)
                 if attempt < self.MAX_RETRIES:
                     await asyncio.sleep(backoff)
-        raise RuntimeError(
-            f"{self.__class__.__name__} failed after {self.MAX_RETRIES} retries: {last_exc}"
-        )
+        # 🚀 ХОТФІКС: Викидаємо помилку, коли вичерпано ретраї
+        raise RuntimeError(f"{self.__class__.__name__} failed after {self.MAX_RETRIES} retries: {last_exc}")
 
 ============================================================
 FILE: infrastructure/http/binance_client.py
 ============================================================
 
 # infrastructure/http/binance_client.py
+"""
+BinanceClient — P2P сканування (анонімний) + автентифіковані запити.
+
+Анонімний режим: сканування ринку (вже працює).
+Автентифікований режим: повні профілі мерчантів, реальні відгуки.
+
+Автентифікація Binance P2P (bapi/c2c/):
+  - Header: X-MBX-APIKEY = api_key
+  - Param:  signature = HMAC-SHA256(query_string, api_secret)
+  - Param:  timestamp = unix ms
+
+Примітка: /bapi/c2c/ endpoints використовують той самий HMAC що і
+основний REST API, але окремий домен p2p.binance.com.
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
 import logging
-import random
-from typing import Optional, Any
-from curl_cffi.requests import AsyncSession
+import os
+import time
+from typing import Any, Optional
+
+from .base_client import BaseHttpClient
 
 logger = logging.getLogger(__name__)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
 
-
-class BinanceClient:
+class BinanceClient(BaseHttpClient):
     def __init__(self, proxy: Optional[str] = None):
-        self.proxy = proxy
-        self.session: Optional[AsyncSession] = None
-
-    async def __aenter__(self):
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        self.session = AsyncSession(impersonate="chrome124", proxies=proxies, timeout=10.0)
-        self.session.headers.update({
+        extra_headers = {
             "accept": "*/*",
-            "accept-language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
             "content-type": "application/json",
             "origin": "https://p2p.binance.com",
             "referer": "https://p2p.binance.com/",
-            "user-agent": random.choice(USER_AGENTS),
-            "x-trace-id": __import__("os").urandom(16).hex(),
-        })
-        return self
+            "x-trace-id": os.urandom(16).hex(),
+        }
+        super().__init__(proxy=proxy, extra_headers=extra_headers)
+        self._api_key: str = ""
+        self._api_secret: str = ""
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        """Встановлює API ключі для автентифікованих запитів."""
+        self._api_key = api_key
+        self._api_secret = api_secret
+        if api_key and self._session:
+            self._session.headers.update({"X-MBX-APIKEY": api_key})
+        logger.debug("BinanceClient: credentials set (auth=%s)", bool(api_key))
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign(self, params: dict) -> dict:
+        """Додає timestamp і HMAC-SHA256 підпис до params."""
+        params["timestamp"] = int(time.time() * 1000)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        signature = hmac.new(
+            self._api_secret.encode("utf-8"),
+            query.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        params["signature"] = signature
+        return params
 
     async def fetch(self, payload: dict) -> Any:
-        if not self.session:
-            raise RuntimeError("Session not initialized")
+        """Сканування P2P ринку (анонімний)."""
         url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-        try:
-            response = await self.session.post(url, json=payload)
-            if response.status_code != 200:
-                logger.error("Binance P2P status %d", response.status_code)
-                return {}
-            return response.json()
-        except Exception as e:
-            logger.error("Binance P2P помилка: %s", e)
+        return await self._post(url, json=payload)
+
+    async def fetch_merchant_profile(self, merchant_id: str) -> dict:
+        """
+        Повний профіль мерчанта з відгуками.
+        Потребує API ключів — без них повертає порожній dict.
+        """
+        if not self.is_authenticated:
             return {}
+
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
+        payload = {"advertiserNo": merchant_id, "page": 1, "rows": 1}
+
+        try:
+            data = await self._post(url, json=payload)
+            return data.get("data", {}) or {}
+        except Exception as e:
+            logger.debug("fetch_merchant_profile [%s]: %s", merchant_id, e)
+            return {}
+
+    async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10) -> list[dict]:
+        """
+        Реальні тексти негативних відгуків.
+        Потребує API ключів — без них повертає [].
+        """
+        if not self.is_authenticated:
+            return []
+
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
+        payload = {
+            "advertiserNo": merchant_id,
+            "type": 2,  # 2 = negative
+            "page": 1,
+            "rows": rows,
+        }
+
+        try:
+            data = await self._post(url, json=payload)
+            return data.get("data", []) or []
+        except Exception as e:
+            logger.debug("fetch_negative_reviews [%s]: %s", merchant_id, e)
+            return []
+
+    async def fetch_account_balance(self) -> list[dict]:
+        """
+        Баланс акаунта (USDT, UAH та ін.).
+        Використовує офіційний підписаний endpoint.
+        """
+        if not self.is_authenticated:
+            return []
+
+        url = "https://api.binance.com/sapi/v1/capital/config/getall"
+        params = self._sign({})
+        try:
+            data = await self._get(url, params=params)
+            if isinstance(data, list):
+                return [
+                    {"coin": item["coin"], "free": item["free"], "locked": item["locked"]}
+                    for item in data
+                    if item.get("coin") in ("USDT", "UAH", "BNB")
+                ]
+            return []
+        except Exception as e:
+            logger.debug("fetch_account_balance: %s", e)
+            return []
 
 ============================================================
 FILE: infrastructure/http/bybit_p2p_client.py
 ============================================================
 
-import asyncio
+# infrastructure/http/bybit_p2p_client.py
+"""
+BybitP2PClient — P2P сканування (анонімний) + автентифіковані запити.
+
+Автентифікація Bybit V5:
+  - X-BAPI-API-KEY: api_key
+  - X-BAPI-TIMESTAMP: unix ms
+  - X-BAPI-SIGN: HMAC-SHA256(timestamp + api_key + recv_window + queryString)
+  - X-BAPI-RECV-WINDOW: 5000
+"""
+from __future__ import annotations
+
+import hashlib
+import hmac
 import logging
 import os
-import random
 import time
-from collections import deque
-from typing import Dict, Any
+from typing import Any, Optional
 
-from curl_cffi.requests import AsyncSession
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-from core.utils.circuit_breaker import CircuitBreaker
+from .base_client import BaseHttpClient
 
 logger = logging.getLogger(__name__)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
 
+class BybitP2PClient(BaseHttpClient):
+    RECV_WINDOW = "5000"
 
-class Http403Error(Exception): pass
-
-
-class Http429Error(Exception): pass
-
-
-class BybitApiError(Exception): pass
-
-
-class BybitP2PClient:
-    def __init__(self, proxy: str | None = None):
-        self.proxy = proxy
-        self._cb = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
-        self._consecutive_403 = 0
-        self._consecutive_429 = 0
-        self._server_times = deque(maxlen=3)
-        self.session: AsyncSession | None = None
-
-    async def __aenter__(self):
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        # Імітація Chrome 124 для обходу Cloudflare
-        self.session = AsyncSession(impersonate="chrome124", proxies=proxies, timeout=5.0)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()  # <-- Додали await
-
-
-    def _build_headers(self) -> Dict[str, str]:
-        """Генерація заголовків з правильним порядком та W3C traceparent."""
-        trace_id = os.urandom(16).hex()
-        span_id = os.urandom(8).hex()
-
-        return {
+    def __init__(self, proxy: Optional[str] = None):
+        extra_headers = {
             "accept": "application/json",
-            "accept-language": "en-US,en;q=0.9",
-            "content-type": "application/json",
             "origin": "https://www.bybit.com",
             "referer": "https://www.bybit.com/fiat/trade/otc/",
             "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
@@ -6527,116 +7808,258 @@ class BybitP2PClient:
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "same-site",
-            "user-agent": random.choice(USER_AGENTS),
-            "x-trace-id": trace_id,
-            "traceparent": f"00-{trace_id}-{span_id}-01"
+        }
+        super().__init__(proxy=proxy, extra_headers=extra_headers)
+        self._api_key: str = ""
+        self._api_secret: str = ""
+
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        """Встановлює API ключі для автентифікованих запитів."""
+        self._api_key = api_key
+        self._api_secret = api_secret
+        logger.debug("BybitP2PClient: credentials set")
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign_headers(self, query_string: str = "") -> dict:
+        """Генерує заголовки автентифікації для Bybit V5."""
+        ts = str(int(time.time() * 1000))
+        sign_str = ts + self._api_key + self.RECV_WINDOW + (query_string or "")
+        signature = hmac.new(
+            self._api_secret.encode("utf-8"),
+            sign_str.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "X-BAPI-API-KEY":     self._api_key,
+            "X-BAPI-TIMESTAMP":   ts,
+            "X-BAPI-SIGN":        signature,
+            "X-BAPI-RECV-WINDOW": self.RECV_WINDOW,
         }
 
-    @retry(
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError))
-    )
-    async def _post_with_retry(self, url: str, payload: dict) -> Any:
-        response = await self.session.post(url, json=payload, headers=self._build_headers())
-
-        if response.status_code == 403:
-            self._consecutive_403 += 1
-            sleep_time = random.uniform(30.0, 60.0)
-            logger.warning(f"⚠️ 403 Forbidden. Охолодження {sleep_time:.0f}s...")
-            await asyncio.sleep(sleep_time)
-            raise Http403Error("Отримано 403 від Bybit")
-
-        if response.status_code == 429:
-            self._consecutive_429 += 1
-            sleep_time = random.uniform(12.0, 18.0)
-            logger.warning(f"⚠️ 429 Too Many Requests. Охолодження {sleep_time:.0f}s...")
-            await asyncio.sleep(sleep_time)
-            raise Http429Error("Отримано 429 від Bybit")
-
-        self._consecutive_403 = 0
-        self._consecutive_429 = 0
-
-        if response.status_code in (502, 504):
-            raise ConnectionError(f"Bad Gateway/Timeout: {response.status_code}")
-
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("ret_code", -1) != 0:
-            raise BybitApiError(f"Помилка API Bybit: {data.get('ret_msg')}")
-
-        self._check_cache(data)
-        return data
-
-    def _check_cache(self, data: dict):
-        server_time = data.get("time")
-        if server_time:
-            self._server_times.append(server_time)
-            if len(self._server_times) == 3 and len(set(self._server_times)) == 1:
-                logger.warning("🟡 УВАГА: Bybit віддає закешовані дані (timestamp не змінюється)")
+    def _build_dynamic_headers(self) -> dict:
+        """Генерація унікальних W3C traceparent для анонімних запитів."""
+        trace_id = os.urandom(16).hex()
+        span_id = os.urandom(8).hex()
+        return {
+            "x-trace-id": trace_id,
+            "traceparent": f"00-{trace_id}-{span_id}-01",
+        }
 
     async def fetch(self, url: str, payload: dict) -> Any:
-        """Публічний метод. Завжди проходить через Circuit Breaker."""
-        return await self._cb.call(self._post_with_retry(url, payload))
+        """Сканування P2P ринку (анонімний)."""
+        headers = self._build_dynamic_headers()
+        data = await self._post(url, json=payload, headers=headers)
+
+        if not data:
+            return {}
+        if data.get("ret_code", -1) != 0:
+            logger.error("Помилка API Bybit: %s", data.get("ret_msg"))
+            return {}
+        return data
+
+    async def fetch_merchant_profile(self, merchant_id: str) -> dict:
+        """
+        Повний профіль P2P мерчанта через Bybit V5 API.
+        Потребує API ключів.
+        """
+        if not self.is_authenticated:
+            return {}
+
+        url = "https://api.bybit.com/v5/user/query-api"
+        query = f"userId={merchant_id}"
+        headers = self._sign_headers(query)
+
+        try:
+            data = await self._get(
+                f"https://api2.bybit.com/fiat/otc/user/public/profile?userId={merchant_id}",
+                headers=headers,
+            )
+            return data.get("result", {}) or {}
+        except Exception as e:
+            logger.debug("Bybit fetch_merchant_profile [%s]: %s", merchant_id, e)
+            return {}
+
+    async def fetch_merchant_feedback(self, merchant_id: str) -> list[dict]:
+        """Негативні відгуки про мерчанта."""
+        if not self.is_authenticated:
+            return []
+
+        url = "https://api2.bybit.com/fiat/otc/user/feedback/list"
+        payload = {
+            "userId": merchant_id,
+            "evaluateType": "bad",
+            "page": 1,
+            "size": 10,
+        }
+        query = "&".join(f"{k}={v}" for k, v in payload.items())
+        headers = {**self._sign_headers(query), **self._build_dynamic_headers()}
+
+        try:
+            data = await self._post(url, json=payload, headers=headers)
+            return data.get("result", {}).get("items", []) or []
+        except Exception as e:
+            logger.debug("Bybit fetch_merchant_feedback [%s]: %s", merchant_id, e)
+            return []
+
+    async def fetch_account_balance(self) -> list[dict]:
+        """Баланс Bybit unified account."""
+        if not self.is_authenticated:
+            return []
+
+        query = "accountType=UNIFIED"
+        url = f"https://api.bybit.com/v5/account/wallet-balance?{query}"
+        headers = self._sign_headers(query)
+
+        try:
+            data = await self._get(url, headers=headers)
+            coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
+            return [
+                {"coin": c["coin"], "free": c["availableToWithdraw"], "locked": c["locked"]}
+                for c in coins
+                if c.get("coin") in ("USDT", "UAH")
+            ]
+        except Exception as e:
+            logger.debug("Bybit fetch_account_balance: %s", e)
+            return []
 
 ============================================================
 FILE: infrastructure/http/okx_client.py
 ============================================================
 
-import asyncio
+# infrastructure/http/okx_client.py
+"""
+OkxClient — P2P сканування (анонімний) + автентифіковані запити.
+
+Автентифікація OKX:
+  - OK-ACCESS-KEY: api_key
+  - OK-ACCESS-SIGN: Base64(HMAC-SHA256(timestamp+method+path+body, secret))
+  - OK-ACCESS-TIMESTAMP: ISO 8601
+  - OK-ACCESS-PASSPHRASE: passphrase (обов'язковий для OKX)
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
 import logging
-import random
-from typing import Optional, Any
-from curl_cffi.requests import AsyncSession
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from .base_client import BaseHttpClient
 
 logger = logging.getLogger(__name__)
 
-class OkxClient:
+
+class OkxClient(BaseHttpClient):
     def __init__(self, proxy: Optional[str] = None):
-        self.proxy = proxy
-        self.session: Optional[AsyncSession] = None
-        self.headers = {
+        extra_headers = {
             "accept": "application/json",
-            "accept-language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7", # Додано UA локу
             "content-type": "application/json",
             "origin": "https://www.okx.com",
-            "referer": "https://www.okx.com/p2p-markets/uah/buy-usdt", # Більш точний реферер
+            "referer": "https://www.okx.com/p2p-markets/uah/buy-usdt",
             "x-p2p-client": "web",
             "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
             "sec-ch-ua-platform": '"Windows"',
         }
+        super().__init__(proxy=proxy, extra_headers=extra_headers)
+        self._api_key: str = ""
+        self._api_secret: str = ""
+        self._passphrase: str = ""
 
-    async def __aenter__(self):
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        # Імітація Chrome 124, як у Bybit клієнті
-        self.session = AsyncSession(impersonate="chrome124", proxies=proxies, timeout=10.0)
-        self.session.headers.update(self.headers)
-        return self
+    def set_credentials(self, api_key: str, api_secret: str, passphrase: str = "") -> None:
+        """Встановлює API ключі для автентифікованих запитів."""
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._passphrase = passphrase
+        logger.debug("OkxClient: credentials set")
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret and self._passphrase)
+
+    def _sign_headers(self, method: str, path: str, body: str = "") -> dict:
+        """Генерує заголовки автентифікації для OKX API."""
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        message = timestamp + method.upper() + path + (body or "")
+        signature = base64.b64encode(
+            hmac.new(
+                self._api_secret.encode("utf-8"),
+                message.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode()
+        return {
+            "OK-ACCESS-KEY":        self._api_key,
+            "OK-ACCESS-SIGN":       signature,
+            "OK-ACCESS-TIMESTAMP":  timestamp,
+            "OK-ACCESS-PASSPHRASE": self._passphrase,
+        }
 
     async def fetch(self, url: str, payload: dict = None, method: str = "GET") -> Any:
-        if not self.session:
-            raise RuntimeError("Session is not initialized.")
+        """Сканування P2P ринку (анонімний)."""
+        if method.upper() == "GET":
+            return await self._get(url, params=payload)
+        return await self._post(url, json=payload)
+
+    async def fetch_merchant_profile(self, merchant_id: str) -> dict:
+        """
+        Повний профіль мерчанта через автентифікований endpoint.
+        Потребує API ключів + passphrase.
+        """
+        if not self.is_authenticated:
+            return {}
+
+        path = f"/api/v5/c2c/order/user-info?userId={merchant_id}"
+        url = f"https://www.okx.com{path}"
+        headers = self._sign_headers("GET", path)
 
         try:
-            if method.upper() == "GET":
-                # curl_cffi використовує params для додавання в URL
-                response = await self.session.get(url, params=payload)
-            else:
-                response = await self.session.post(url, json=payload)
-
-            if response.status_code != 200:
-                logger.error(f"🌐 OKX Status {response.status_code}")
-                return {}
-
-            return response.json()
+            data = await self._get(url, headers=headers)
+            return data.get("data", {}) or {}
         except Exception as e:
-            logger.error("🌐 Помилка запиту OKX: %s", e)
+            logger.debug("OKX fetch_merchant_profile [%s]: %s", merchant_id, e)
             return {}
+
+    async def fetch_merchant_feedback(self, merchant_id: str) -> list[dict]:
+        """
+        Відгуки про мерчанта через автентифікований endpoint.
+        """
+        if not self.is_authenticated:
+            return []
+
+        path = f"/api/v5/c2c/order/user-feedback?userId={merchant_id}&type=2&limit=10"
+        url = f"https://www.okx.com{path}"
+        headers = self._sign_headers("GET", path)
+
+        try:
+            data = await self._get(url, headers=headers)
+            return data.get("data", []) or []
+        except Exception as e:
+            logger.debug("OKX fetch_merchant_feedback [%s]: %s", merchant_id, e)
+            return []
+
+    async def fetch_account_balance(self) -> list[dict]:
+        """Баланс акаунта."""
+        if not self.is_authenticated:
+            return []
+
+        path = "/api/v5/account/balance?ccy=USDT,UAH"
+        url = f"https://www.okx.com{path}"
+        headers = self._sign_headers("GET", path)
+
+        try:
+            data = await self._get(url, headers=headers)
+            details = data.get("data", [{}])[0].get("details", [])
+            return [
+                {"coin": d["ccy"], "free": d["availBal"], "locked": d["frozenBal"]}
+                for d in details
+            ]
+        except Exception as e:
+            logger.debug("OKX fetch_account_balance: %s", e)
+            return []
 
 ============================================================
 FILE: infrastructure/http/mexc_client.py
@@ -6644,54 +8067,24 @@ FILE: infrastructure/http/mexc_client.py
 
 # infrastructure/http/mexc_client.py
 import logging
-import random
 from typing import Optional, Any
-from curl_cffi.requests import AsyncSession
+from .base_client import BaseHttpClient
 
 logger = logging.getLogger(__name__)
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-]
+BASE_URL = "https://www.mexc.com/api/platform/p2p/api/market"
 
-class MexcClient:
-    # НОВА АДРЕСА API
-    BASE_URL = "https://www.mexc.com/api/platform/p2p/api/market"
 
+class MexcClient(BaseHttpClient):
     def __init__(self, proxy: Optional[str] = None):
-        self.proxy = proxy
-        self.session: Optional[AsyncSession] = None
-
-    async def __aenter__(self):
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        self.session = AsyncSession(impersonate="chrome124", proxies=proxies, timeout=10.0)
-        self.session.headers.update({
+        extra_headers = {
             "accept": "application/json, text/plain, */*",
-            "accept-language": "uk-UA,uk;q=0.9,en-US;q=0.8",
             "referer": "https://www.mexc.com/p2p",
-            "user-agent": random.choice(USER_AGENTS),
-        })
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+        }
+        super().__init__(proxy=proxy, extra_headers=extra_headers, timeout=8.0)
 
     async def fetch(self, payload: dict) -> Any:
-        if not self.session:
-            raise RuntimeError("Session not initialized")
-        try:
-            # ТЕПЕР GET ЗАПИТ (params замість json)
-            response = await self.session.get(self.BASE_URL, params=payload)
-            if response.status_code != 200:
-                logger.error("MEXC status %d", response.status_code)
-                return {}
-            return response.json()
-        except Exception as e:
-            logger.error("MEXC помилка: %s", e)
-            return {}
+        return await self._get(BASE_URL, params=payload)
 
 ============================================================
 FILE: infrastructure/http/wallet_client.py
@@ -6700,44 +8093,387 @@ FILE: infrastructure/http/wallet_client.py
 # infrastructure/http/wallet_client.py
 import logging
 from typing import Optional, Any
-from curl_cffi.requests import AsyncSession
 from config import settings
+from .base_client import BaseHttpClient
 
 logger = logging.getLogger(__name__)
 
-class WalletClient:
-    def __init__(self, proxy: Optional[str] = None):
-        self.proxy = proxy
-        self.session: Optional[AsyncSession] = None
+class WalletClient(BaseHttpClient):
+    # Wallet 429 при агресивному polling — не ретраємо, одразу здаємось.
+    # CircuitBreaker відключить Wallet після 3 провалів і відновить через 60s.
+    # Краще ніж блокувати цикл на 3+6s кожного разу.
+    MAX_RETRIES = 1
+    RETRY_BACKOFF = [0.0]
 
-        self.headers = {
+    def __init__(self, proxy: Optional[str] = None):
+        extra_headers = {
             "accept": "application/json",
             "content-type": "application/json",
-            "X-API-Key": settings.wallet_token,  # <--- Офіційний API ключ
+            "X-API-Key": settings.wallet_token,
         }
-
-    async def __aenter__(self):
-        proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        self.session = AsyncSession(impersonate="chrome124", proxies=proxies, timeout=10.0)
-        self.session.headers.update(self.headers)
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if self.session:
-            await self.session.close()
+        super().__init__(proxy=proxy, extra_headers=extra_headers, timeout=4.0)
 
     async def fetch(self, url: str, payload: dict) -> Any:
-        if not self.session:
-            raise RuntimeError("Session is not initialized.")
+        return await self._post(url, json=payload)
+
+============================================================
+FILE: infrastructure/api/mexc_account.py
+============================================================
+
+# infrastructure/api/mexc_account.py
+"""
+MEXC офіційний API — акаунт.
+Документація: https://mexcdevelop.github.io/apidocs/spot_v3_en/
+
+Відповідальність: баланс Spot акаунта.
+НЕ відповідає за: сканування P2P → infrastructure/http/mexc_client.py
+
+Примітка: MEXC P2P API окремо не задокументований публічно.
+Поки реалізуємо тільки баланс.
+"""
+from __future__ import annotations
+import hashlib, hmac, logging, time, urllib.parse
+from typing import Optional
+from infrastructure.http.base_client import BaseHttpClient
+
+logger = logging.getLogger("MEXCAccount")
+BASE_URL = "https://api.mexc.com"
+
+class MEXCAccountClient(BaseHttpClient):
+    def __init__(self, api_key: str = "", api_secret: str = "", proxy: Optional[str] = None):
+        super().__init__(proxy=proxy, extra_headers={
+            "content-type": "application/json",
+            "X-MEXC-APIKEY": api_key,
+        })
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._session.headers.update({"X-MEXC-APIKEY": api_key}) if self._session else None
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign(self, params: dict) -> dict:
+        params["timestamp"] = int(time.time() * 1000)
+        qs = urllib.parse.urlencode(sorted(params.items()))
+        params["signature"] = hmac.new(self._api_secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        return params
+
+    async def get_balance(self) -> list[dict]:
+        """Баланс Spot акаунта."""
+        if not self.is_authenticated: return []
+        headers = {"X-MEXC-APIKEY": self._api_key}
         try:
-            response = await self.session.post(url, json=payload)
-            if response.status_code != 200:
-                logger.error("Wallet Status %d: %s", response.status_code, response.text)
-                return {}
-            return response.json()
+            data = await self._get(
+                f"{BASE_URL}/api/v3/account",
+                params=self._sign({}),
+                headers=headers,
+            )
+            return [{"coin": b["asset"], "free": float(b["free"]),
+                     "locked": float(b["locked"]),
+                     "total": float(b["free"]) + float(b["locked"])}
+                    for b in data.get("balances", [])
+                    if float(b.get("free", 0)) + float(b.get("locked", 0)) > 0]
         except Exception as e:
-            logger.error("Помилка запиту Wallet: %s", e)
-            return {}
+            logger.warning("get_balance: %s", e); return []
+
+    async def get_account_info(self) -> dict:
+        """Базова інформація акаунта."""
+        if not self.is_authenticated: return {}
+        headers = {"X-MEXC-APIKEY": self._api_key}
+        try:
+            data = await self._get(f"{BASE_URL}/api/v3/account", params=self._sign({}), headers=headers)
+            return {"accountType": data.get("accountType"), "canTrade": data.get("canTrade")}
+        except Exception as e:
+            logger.warning("get_account_info: %s", e); return {}
+
+============================================================
+FILE: infrastructure/api/binance_account.py
+============================================================
+
+# infrastructure/api/binance_account.py
+"""
+Binance офіційний API — акаунт.
+Документація: https://binance-docs.github.io/apidocs/spot/en/
+
+Відповідальність: баланс, P2P угоди, статистика.
+НЕ відповідає за: сканування ринку → infrastructure/http/binance_client.py
+"""
+from __future__ import annotations
+import hashlib, hmac, logging, time, urllib.parse
+from typing import Optional
+from infrastructure.http.base_client import BaseHttpClient
+
+logger = logging.getLogger("BinanceAccount")
+BASE_URL = "https://api.binance.com"
+P2P_URL  = "https://p2p.binance.com"
+
+class BinanceAccountClient(BaseHttpClient):
+    def __init__(self, api_key: str = "", api_secret: str = "", proxy: Optional[str] = None):
+        super().__init__(proxy=proxy, extra_headers={
+            "content-type": "application/json",
+            "origin": "https://p2p.binance.com",
+        })
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._session.headers.update({"X-MBX-APIKEY": api_key}) if self._session else None
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign(self, params: dict) -> dict:
+        params["timestamp"] = int(time.time() * 1000)
+        qs = urllib.parse.urlencode(params)
+        params["signature"] = hmac.new(self._api_secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
+        return params
+
+    async def _signed_get(self, url: str, params: dict = None) -> dict:
+        headers = {"X-MBX-APIKEY": self._api_key}
+        return await self._get(url, params=self._sign(params or {}), headers=headers)
+
+    async def _signed_post(self, url: str, params: dict = None) -> dict:
+        headers = {"X-MBX-APIKEY": self._api_key, "content-type": "application/json"}
+        return await self._post(url, params=self._sign(params or {}), headers=headers)
+
+    async def get_balance(self) -> list[dict]:
+        """Баланс Spot акаунта."""
+        if not self.is_authenticated: return []
+        try:
+            data = await self._signed_get(f"{BASE_URL}/sapi/v1/capital/config/getall")
+            return [{"coin": d["coin"], "free": float(d["free"]), "locked": float(d["locked"]),
+                     "total": float(d["free"]) + float(d["locked"])}
+                    for d in (data if isinstance(data, list) else [])
+                    if float(d.get("free", 0)) + float(d.get("locked", 0)) > 0]
+        except Exception as e:
+            logger.warning("get_balance: %s", e); return []
+
+    async def get_my_p2p_orders(self, trade_type: str = "BUY", rows: int = 20) -> list[dict]:
+        """
+        Мої P2P угоди.
+        trade_type: BUY | SELL
+        """
+        if not self.is_authenticated: return []
+        payload = {"tradeType": trade_type, "page": 1, "rows": rows}
+        try:
+            data = await self._signed_post(f"{P2P_URL}/bapi/c2c/v2/private/c2c/order-match/listUserOrderHistory", params=payload)
+            return data.get("data", []) or []
+        except Exception as e:
+            logger.warning("get_my_p2p_orders: %s", e); return []
+
+    async def get_account_info(self) -> dict:
+        """Базова інформація акаунта."""
+        if not self.is_authenticated: return {}
+        try:
+            data = await self._signed_get(f"{BASE_URL}/api/v3/account")
+            return {"accountType": data.get("accountType"), "canTrade": data.get("canTrade"),
+                    "uid": data.get("uid")}
+        except Exception as e:
+            logger.warning("get_account_info: %s", e); return {}
+
+============================================================
+FILE: infrastructure/api/bybit_account.py
+============================================================
+
+# infrastructure/api/bybit_account.py
+"""
+Bybit V5 офіційний API — акаунт і торгівля.
+Документація: https://bybit-exchange.github.io/docs/v5/intro
+
+Відповідальність:
+  - Баланс (Unified + Funding)
+  - Свої активні P2P оголошення
+  - Історія P2P угод
+
+НЕ відповідає за: сканування ринку → infrastructure/http/bybit_p2p_client.py
+"""
+from __future__ import annotations
+import hashlib, hmac, logging, time
+from typing import Any, Optional
+from infrastructure.http.base_client import BaseHttpClient
+
+logger = logging.getLogger("BybitAccount")
+BASE_URL = "https://api.bybit.com"
+RECV_WINDOW = "5000"
+
+class BybitAccountClient(BaseHttpClient):
+    def __init__(self, api_key: str = "", api_secret: str = "", proxy: Optional[str] = None):
+        super().__init__(proxy=proxy, extra_headers={"content-type": "application/json"})
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    def set_credentials(self, api_key: str, api_secret: str) -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret)
+
+    def _sign_headers(self, query_string: str = "") -> dict:
+        ts = str(int(time.time() * 1000))
+        sign_str = ts + self._api_key + RECV_WINDOW + (query_string or "")
+        signature = hmac.new(self._api_secret.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+        return {
+            "X-BAPI-API-KEY": self._api_key,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+        }
+
+    async def get_balance(self, account_type: str = "UNIFIED") -> list[dict]:
+        """Баланс по монетах. account_type: UNIFIED | FUND | SPOT"""
+        if not self.is_authenticated: return []
+        query = f"accountType={account_type}"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/account/wallet-balance?{query}", headers=self._sign_headers(query))
+            coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
+            return [{"coin": c["coin"], "free": float(c.get("availableToWithdraw") or 0),
+                     "locked": float(c.get("locked") or 0), "total": float(c.get("walletBalance") or 0),
+                     "usd_value": float(c.get("usdValue") or 0)}
+                    for c in coins if float(c.get("walletBalance") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_balance: %s", e); return []
+
+    async def get_funding_balance(self) -> list[dict]:
+        """Баланс Funding акаунта (для P2P)."""
+        return await self.get_balance("FUND")
+
+    async def get_my_ads(self, status: str = "ONLINE") -> list[dict]:
+        """Мої активні P2P оголошення. status: ONLINE | OFFLINE | CANCELED"""
+        if not self.is_authenticated: return []
+        query = f"status={status}&tokenId=USDT&currencyId=UAH&limit=20"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/p2p/item/personal/list?{query}", headers=self._sign_headers(query))
+            return data.get("result", {}).get("items", []) or []
+        except Exception as e:
+            logger.warning("get_my_ads: %s", e); return []
+
+    async def get_my_orders(self, status: str = "TRADING", limit: int = 20) -> list[dict]:
+        """Мої P2P угоди. status: PENDING | TRADING | SOLD | FINISHED | CANCELLED"""
+        if not self.is_authenticated: return []
+        query = f"status={status}&tokenId=USDT&limit={limit}"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/p2p/order/simplifyList?{query}", headers=self._sign_headers(query))
+            return data.get("result", {}).get("items", []) or []
+        except Exception as e:
+            logger.warning("get_my_orders: %s", e); return []
+
+    async def get_account_info(self) -> dict:
+        """Базова інформація акаунта (UID, рівень, статус верифікації)."""
+        if not self.is_authenticated: return {}
+        try:
+            data = await self._get(f"{BASE_URL}/v5/user/query-api", headers=self._sign_headers())
+            return data.get("result", {}) or {}
+        except Exception as e:
+            logger.warning("get_account_info: %s", e); return {}
+
+============================================================
+FILE: infrastructure/api/okx_account.py
+============================================================
+
+# infrastructure/api/okx_account.py
+"""
+OKX офіційний API — акаунт.
+Документація: https://www.okx.com/docs-v5/en/
+
+Відповідальність: баланс, P2P угоди.
+НЕ відповідає за: сканування ринку → infrastructure/http/okx_client.py
+
+ВАЖЛИВО: OKX вимагає passphrase при створенні API ключа.
+"""
+from __future__ import annotations
+import base64, hashlib, hmac, json, logging
+from datetime import datetime, timezone
+from typing import Optional
+from infrastructure.http.base_client import BaseHttpClient
+
+logger = logging.getLogger("OKXAccount")
+BASE_URL = "https://www.okx.com"
+
+class OKXAccountClient(BaseHttpClient):
+    def __init__(self, api_key: str = "", api_secret: str = "", passphrase: str = "", proxy: Optional[str] = None):
+        super().__init__(proxy=proxy, extra_headers={"content-type": "application/json"})
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._passphrase = passphrase
+
+    def set_credentials(self, api_key: str, api_secret: str, passphrase: str = "") -> None:
+        self._api_key = api_key
+        self._api_secret = api_secret
+        self._passphrase = passphrase
+
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._api_key and self._api_secret and self._passphrase)
+
+    def _sign_headers(self, method: str, path: str, body: str = "") -> dict:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        msg = ts + method.upper() + path + (body or "")
+        sig = base64.b64encode(hmac.new(self._api_secret.encode(), msg.encode(), hashlib.sha256).digest()).decode()
+        return {
+            "OK-ACCESS-KEY": self._api_key, "OK-ACCESS-SIGN": sig,
+            "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": self._passphrase,
+        }
+
+    async def get_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
+        """Баланс Trading акаунта."""
+        if not self.is_authenticated: return []
+        path = f"/api/v5/account/balance?ccy={currencies}"
+        try:
+            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
+            details = data.get("data", [{}])[0].get("details", [])
+            return [{"coin": d["ccy"], "free": float(d.get("availBal") or 0),
+                     "locked": float(d.get("frozenBal") or 0),
+                     "total": float(d.get("bal") or 0)}
+                    for d in details if float(d.get("bal") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_balance: %s", e); return []
+
+    async def get_funding_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
+        """Баланс Funding акаунта (для P2P виводів)."""
+        if not self.is_authenticated: return []
+        path = f"/api/v5/asset/balances?ccy={currencies}"
+        try:
+            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
+            return [{"coin": d["ccy"], "free": float(d.get("availBal") or 0),
+                     "locked": float(d.get("frozenBal") or 0),
+                     "total": float(d.get("bal") or 0)}
+                    for d in data.get("data", []) if float(d.get("bal") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_funding_balance: %s", e); return []
+
+    async def get_my_p2p_orders(self, state: str = "ongoing", limit: int = 20) -> list[dict]:
+        """
+        Мої P2P угоди.
+        state: ongoing | end | all
+        """
+        if not self.is_authenticated: return []
+        path = f"/api/v5/c2c/order/list?state={state}&limit={limit}"
+        try:
+            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
+            return data.get("data", []) or []
+        except Exception as e:
+            logger.warning("get_my_p2p_orders: %s", e); return []
+
+    async def get_account_info(self) -> dict:
+        """Інформація акаунта (UID, рівень)."""
+        if not self.is_authenticated: return {}
+        path = "/api/v5/account/config"
+        try:
+            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
+            cfg = data.get("data", [{}])[0]
+            return {"uid": cfg.get("uid"), "acctLv": cfg.get("acctLv")}
+        except Exception as e:
+            logger.warning("get_account_info: %s", e); return {}
 
 ============================================================
 FILE: filters/merchant_filter.py
@@ -6856,19 +8592,26 @@ class BankFilter:
 FILE: filters/limit_filter.py
 ============================================================
 
+# filters/limit_filter.py
 from decimal import Decimal
 from exchanges.base import Order
 from config import settings
+from config.runtime import runtime_config
 
 
 class LimitFilter:
-    def __init__(self, capital: float = settings.working_capital_uah, min_usdt: float = settings.min_usdt_threshold):
-        self.capital = Decimal(str(capital))
+    def __init__(self, min_usdt: float = getattr(settings, "min_usdt_threshold", 50.0)):
+        # min_usdt зазвичай статичний, але можна винести теж
         self.min_usdt = Decimal(str(min_usdt))
 
     def passed(self, order: Order) -> bool:
+        # 🚀 ДИНАМІЧНИЙ КАПІТАЛ: беремо на льоту з runtime_config
+        current_capital = Decimal(
+            str(runtime_config.get("working_capital_uah", settings.working_capital_uah))
+        )
+
         # Відкидаємо ТІЛЬКИ якщо наш капітал менший за мінімальний поріг входу мерчанта
-        if self.capital < order.min_limit:
+        if current_capital < order.min_limit:
             return False
 
         # Відкидаємо, якщо в нього залишилися копійки (менше нашого мінімуму USDT)
@@ -6965,73 +8708,14 @@ FILE: config/__init__.py
 ============================================================
 
 # config/__init__.py
-# Re-export settings щоб `from config import settings` працював як раніше
-from config.settings import settings, Settings  # noqa: F401
+from config.settings import settings, Settings
 
 ============================================================
 FILE: config.py
 ============================================================
 
-"""
-config/settings.py — Єдине джерело конфігурації (перенесено з config.py).
-Імпортуй звідси: from config.settings import settings
-"""
-import logging
-from typing import Optional, Literal
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pathlib import Path
-
-# Корінь проекту — на два рівні вгору від config/settings.py
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-
-class Settings(BaseSettings):
-    # Telegram
-    telegram_bot_token: str
-    telegram_chat_id: int
-    wallet_token: str = ""
-    telegram_api_id: int
-    telegram_api_hash: str
-
-    # Bybit
-    bybit_base_url: str = "https://api2.bybit.com"
-    proxy_url: Optional[str] = None
-
-    # Сканування
-    min_spread_pct: float = 0.5
-    safety_buffer_pct: float = 0.3
-    scan_interval_seconds: float = 5.0
-    working_capital_uah: float = 5100.0
-    search_amount_uah: float = 1000.0
-    search_amounts_uah: list[float] = [1000.0, 2500.0, 5100.0]
-    min_usdt_threshold: float = 50.0
-
-    # Кеш і дедуплікація
-    dedup_ttl_seconds: float = 600.0
-    dedup_max_size: int = 1000
-    dedup_strict: bool = False
-
-    # Фільтр аномалій
-    anomaly_threshold_multiplier: float = 2.5
-    anomaly_method: Literal["mean", "median", "mad"] = "mean"
-
-    # Risk Engine
-    risk_mode: str = "WARNING"
-
-    # Логування
-    log_level: str = "INFO"
-
-    # Review fetcher
-    review_ttl_hours: float = 24.0
-
-    model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-
-settings = Settings()
+# config.py (shim)
+from config.settings import settings
 
 ============================================================
 FILE: core/analysis/__init__.py

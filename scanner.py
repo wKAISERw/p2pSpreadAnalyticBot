@@ -29,6 +29,10 @@ from core.engine.risk_engine import RiskEngine
 from core.storage.merchant_db import MerchantDB
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
+from infrastructure.api.bybit_account import BybitAccountClient
+from infrastructure.api.binance_account import BinanceAccountClient
+from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.api.mexc_account import MEXCAccountClient
 from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 
 logger = logging.getLogger("Scanner")
@@ -101,9 +105,41 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
     runtime_config._db = merchant_db
     await runtime_config.load()
 
+    # ── Завантажуємо API credentials з БД ────────────────────────────────
+    # Credentials зберігаються зашифровано через /connect команду бота (майбутнє)
+    # При старті читаємо і ініціалізуємо account клієнтів
+    all_creds = await merchant_db.get_all_credentials()
+
+    bybit_account   = BybitAccountClient()
+    binance_account = BinanceAccountClient()
+    okx_account     = OKXAccountClient()
+    mexc_account    = MEXCAccountClient()
+
+    if "Bybit" in all_creds:
+        bybit_account.set_credentials(all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"])
+        logger.info("✅ Bybit API credentials завантажено")
+    if "Binance" in all_creds:
+        binance_account.set_credentials(all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"])
+        logger.info("✅ Binance API credentials завантажено")
+    if "OKX" in all_creds:
+        okx_account.set_credentials(
+            all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
+            all_creds["OKX"].get("passphrase", ""),
+        )
+        logger.info("✅ OKX API credentials завантажено")
+    if "MEXC" in all_creds:
+        mexc_account.set_credentials(all_creds["MEXC"]["api_key"], all_creds["MEXC"]["api_secret"])
+        logger.info("✅ MEXC API credentials завантажено")
+
     maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     notifier.bind_db(merchant_db)
+    notifier.bind_commands(merchant_db, {
+        "Bybit":   bybit_account,
+        "Binance": binance_account,
+        "OKX":     okx_account,
+        "MEXC":    mexc_account,
+    })
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
 
@@ -112,6 +148,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
+    # Клієнти будуть прив'язані після їх ініціалізації в async with блоці нижче
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
 
@@ -141,6 +178,30 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
             wallet_ex = WalletExchange(w_client)
             binance_ex = BinanceExchange(bn_client)
             mexc_ex = MexcExchange(m_client)
+
+            # ── Прив'язуємо API credentials до HTTP клієнтів ─────────────
+            # HTTP клієнти використовують ті самі ключі для автентифікованих
+            # запитів до P2P профілів мерчантів (review_fetcher)
+            if "Bybit" in all_creds:
+                b_client.set_credentials(
+                    all_creds["Bybit"]["api_key"], all_creds["Bybit"]["api_secret"]
+                )
+            if "Binance" in all_creds:
+                bn_client.set_credentials(
+                    all_creds["Binance"]["api_key"], all_creds["Binance"]["api_secret"]
+                )
+            if "OKX" in all_creds:
+                o_client.set_credentials(
+                    all_creds["OKX"]["api_key"], all_creds["OKX"]["api_secret"],
+                    all_creds["OKX"].get("passphrase", ""),
+                )
+
+            # ── Підключаємо HTTP клієнти до ReviewFetcher ────────────────
+            review_fetcher.bind_clients(
+                binance=bn_client,
+                bybit=b_client,
+                okx=o_client,
+            )
 
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
@@ -183,6 +244,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         logger.warning("📉 Degraded Mode: %s тимчасово ВІДКЛЮЧЕНА (Запобіжник відкритий)", cfg["name"])
                     raise
             _runtime_last_load: float = 0.0  # timestamp останнього runtime_config.load()
+            _cycle_counter: int = 0
             while not stop_event.is_set():
                 try:
                     start_time = time.monotonic()
@@ -229,20 +291,19 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
-                        for o in b_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-                        for o in s_orders:
-                            if o.merchant_id:
-                                review_fetcher.schedule(o.exchange, o.merchant_id)
-
+                        # 🚀 ОПТИМІЗАЦІЯ: Перевіряємо відгуки ТІЛЬКИ для тих, хто пройшов наші фільтри!
                         for o in b_orders:
                             if merchant_filter.passed(o):
+                                if o.merchant_id:
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
+
                         for o in s_orders:
                             if merchant_filter.passed(o):
+                                if o.merchant_id:
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
@@ -257,6 +318,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
                     opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
+
+                    # Оновлюємо статистику для /status команди
+                    from bot.commands import update_stats
+                    _cycle_counter += 1
+                    update_stats(
+                        cycles=_cycle_counter,
+                        last_cycle_ms=latency * 1000,
+                    )
 
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",

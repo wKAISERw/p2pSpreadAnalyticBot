@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+from core.utils.crypto import encrypt, decrypt
 
 logger = logging.getLogger("MerchantDB")
 
@@ -275,6 +276,25 @@ class MerchantDB:
                                      /* 🚀 Для find_digital_twins — без цього індексу full table scan */
                                      CREATE INDEX IF NOT EXISTS idx_snap_name
                                          ON merchant_snapshots (merchant_name, exchange, recorded_at);
+
+                                     -- API credentials (зашифровані Fernet)
+                                     -- Одна строка на біржу, ключі зберігаються encrypted
+                                     CREATE TABLE IF NOT EXISTS user_credentials (
+                                         exchange    TEXT NOT NULL PRIMARY KEY,
+                                         api_key     TEXT NOT NULL,
+                                         api_secret  TEXT NOT NULL,
+                                         passphrase  TEXT DEFAULT '',
+                                         label       TEXT DEFAULT '',
+                                         created_at  REAL DEFAULT 0,
+                                         updated_at  REAL DEFAULT 0
+                                     );
+
+                                     -- Runtime overrides від UI бота
+                                     CREATE TABLE IF NOT EXISTS bot_settings (
+                                         key        TEXT NOT NULL PRIMARY KEY,
+                                         value      TEXT NOT NULL,
+                                         updated_at REAL DEFAULT 0
+                                     );
                                      """)
         await self._db.commit()
 
@@ -735,6 +755,130 @@ class MerchantDB:
             logger.debug("MerchantDB: pruned %d old snapshot(s)", deleted)
 
         return deleted
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # API Credentials (encrypted storage)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def save_credentials(
+        self,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        passphrase: str = "",
+        label: str = "",
+    ) -> bool:
+        """
+        Зберігає API ключі для біржі (зашифровано Fernet).
+        Викликається з bot/commands.py при /connect.
+        """
+        if not self._db:
+            return False
+        import time
+        try:
+            now = time.time()
+            await self._db.execute(
+                """INSERT INTO user_credentials
+                       (exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(exchange) DO UPDATE SET
+                       api_key    = excluded.api_key,
+                       api_secret = excluded.api_secret,
+                       passphrase = excluded.passphrase,
+                       label      = excluded.label,
+                       updated_at = excluded.updated_at""",
+                (
+                    exchange,
+                    encrypt(api_key),
+                    encrypt(api_secret),
+                    encrypt(passphrase) if passphrase else "",
+                    label,
+                    now, now,
+                ),
+            )
+            await self._db.commit()
+            logger.info("Credentials saved for %s", exchange)
+            return True
+        except Exception as e:
+            logger.error("save_credentials [%s]: %s", exchange, e)
+            return False
+
+    async def get_credentials(self, exchange: str) -> dict | None:
+        """
+        Повертає розшифровані credentials для біржі або None.
+        Повертає: {"api_key": str, "api_secret": str, "passphrase": str}
+        """
+        if not self._db:
+            return None
+        try:
+            async with self._db.execute(
+                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE exchange = ?",
+                (exchange,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            return {
+                "api_key":    decrypt(row["api_key"]),
+                "api_secret": decrypt(row["api_secret"]),
+                "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
+                "label":      row["label"] or "",
+            }
+        except Exception as e:
+            logger.error("get_credentials [%s]: %s", exchange, e)
+            return None
+
+    async def get_all_credentials(self) -> dict[str, dict]:
+        """
+        Повертає всі збережені credentials як {exchange: {api_key, api_secret, passphrase}}.
+        Для ініціалізації ReviewFetcher і account clients при старті.
+        """
+        if not self._db:
+            return {}
+        try:
+            async with self._db.execute(
+                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials"
+            ) as cur:
+                rows = await cur.fetchall()
+            return {
+                row["exchange"]: {
+                    "api_key":    decrypt(row["api_key"]),
+                    "api_secret": decrypt(row["api_secret"]),
+                    "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
+                    "label":      row["label"] or "",
+                }
+                for row in rows
+            }
+        except Exception as e:
+            logger.error("get_all_credentials: %s", e)
+            return {}
+
+    async def delete_credentials(self, exchange: str) -> bool:
+        """Видаляє credentials для біржі. Викликається з /disconnect."""
+        if not self._db:
+            return False
+        try:
+            await self._db.execute(
+                "DELETE FROM user_credentials WHERE exchange = ?", (exchange,)
+            )
+            await self._db.commit()
+            logger.info("Credentials deleted for %s", exchange)
+            return True
+        except Exception as e:
+            logger.error("delete_credentials [%s]: %s", exchange, e)
+            return False
+
+    async def has_credentials(self, exchange: str) -> bool:
+        """Швидка перевірка чи є ключі для біржі."""
+        if not self._db:
+            return False
+        try:
+            async with self._db.execute(
+                "SELECT 1 FROM user_credentials WHERE exchange = ? LIMIT 1", (exchange,)
+            ) as cur:
+                return await cur.fetchone() is not None
+        except Exception:
+            return False
 
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""

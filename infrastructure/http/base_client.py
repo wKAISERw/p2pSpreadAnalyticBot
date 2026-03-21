@@ -14,6 +14,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
+
 class BaseHttpClient:
     """
     Базовий клієнт на основі curl_cffi.
@@ -23,10 +24,10 @@ class BaseHttpClient:
     RETRY_BACKOFF = [1.0, 2.0, 4.0]
 
     def __init__(
-        self,
-        proxy: Optional[str] = None,
-        extra_headers: Optional[dict] = None,
-        timeout: float = 10.0,
+            self,
+            proxy: Optional[str] = None,
+            extra_headers: Optional[dict] = None,
+            timeout: float = 10.0,
     ):
         self.proxy = proxy
         self._timeout = timeout
@@ -35,19 +36,19 @@ class BaseHttpClient:
 
     async def __aenter__(self) -> "BaseHttpClient":
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
-        
+
         self._session = AsyncSession(
-            impersonate="chrome124", 
-            proxies=proxies, 
+            impersonate="chrome124",
+            proxies=proxies,
             timeout=self._timeout
         )
-        
+
         self._session.headers.update({
             "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
             "User-Agent": random.choice(USER_AGENTS),
         })
         self._session.headers.update(self._extra_headers)
-        
+
         return self
 
     async def __aexit__(self, *_) -> None:
@@ -62,12 +63,17 @@ class BaseHttpClient:
         return await self._request("POST", url, **kwargs)
 
     async def _request(self, method: str, url: str, **kwargs) -> Any:
+        # Авто-ініціалізація сесії якщо клієнт використовується без async with
+        # (наприклад account clients що живуть весь час, не як context manager)
+        if self._session is None:
+            await self.__aenter__()
+
         last_exc: Optional[Exception] = None
-        
+
         for attempt, backoff in enumerate(self.RETRY_BACKOFF, 1):
             try:
                 response = await self._session.request(method, url, **kwargs)
-                
+
                 if response.status_code == 429:
                     logger.warning("%s 429 RateLimit on %s (attempt %d)", self.__class__.__name__, url, attempt)
                     await asyncio.sleep(backoff * 3)
