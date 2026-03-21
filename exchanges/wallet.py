@@ -88,12 +88,6 @@ class WalletExchange(BaseExchange):
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
         )
-        return self._dedup_by_id(buy_orders), self._dedup_by_id(sell_orders)
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen, result = set(), []
-        for order in orders:
-            if order.id not in seen:
-                seen.add(order.id)
-                result.append(order)
         return result

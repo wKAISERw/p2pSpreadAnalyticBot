@@ -72,6 +72,8 @@ class MerchantDB:
         # LLMWorkerPool (2 воркери) + ReviewFetcher пишуть одночасно —
         # без WAL можливі помилки при конкурентному доступі.
         await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA cache_size=-65536")   # 64MB RAM кеш
+        await self._db.execute("PRAGMA synchronous=NORMAL")  # швидше без втрати надійності
         await self._db.execute("PRAGMA synchronous=NORMAL")  # безпечно + швидше
         await self._db.execute("PRAGMA cache_size=-32000")  # 32 MB кеш
         await self._db.execute("PRAGMA foreign_keys=ON")
@@ -278,22 +280,38 @@ class MerchantDB:
                                          ON merchant_snapshots (merchant_name, exchange, recorded_at);
 
                                      -- API credentials (зашифровані Fernet)
-                                     -- Одна строка на біржу, ключі зберігаються encrypted
+                                     -- user_id: Telegram user_id (0 = legacy/single-user)
                                      CREATE TABLE IF NOT EXISTS user_credentials (
-                                         exchange    TEXT NOT NULL PRIMARY KEY,
+                                         user_id     INTEGER NOT NULL DEFAULT 0,
+                                         exchange    TEXT NOT NULL,
                                          api_key     TEXT NOT NULL,
                                          api_secret  TEXT NOT NULL,
                                          passphrase  TEXT DEFAULT '',
                                          label       TEXT DEFAULT '',
                                          created_at  REAL DEFAULT 0,
-                                         updated_at  REAL DEFAULT 0
+                                         updated_at  REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, exchange)
                                      );
 
                                      -- Runtime overrides від UI бота
+                                     -- user_id: 0 = глобальні (single-user), >0 = персональні
                                      CREATE TABLE IF NOT EXISTS bot_settings (
-                                         key        TEXT NOT NULL PRIMARY KEY,
+                                         user_id    INTEGER NOT NULL DEFAULT 0,
+                                         key        TEXT NOT NULL,
                                          value      TEXT NOT NULL,
-                                         updated_at REAL DEFAULT 0
+                                         updated_at REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, key)
+                                     );
+
+                                     -- Підписники сканера (multi-user)
+                                     CREATE TABLE IF NOT EXISTS scanner_users (
+                                         user_id          INTEGER NOT NULL PRIMARY KEY,
+                                         telegram_chat_id INTEGER NOT NULL,
+                                         working_capital  REAL DEFAULT 5100.0,
+                                         min_spread_pct   REAL DEFAULT 0.5,
+                                         bank_codes       TEXT DEFAULT '43,14,64',
+                                         is_active        INTEGER DEFAULT 1,
+                                         created_at       REAL DEFAULT 0
                                      );
                                      """)
         await self._db.commit()
@@ -767,10 +785,12 @@ class MerchantDB:
         api_secret: str,
         passphrase: str = "",
         label: str = "",
+        user_id: int = 0,
     ) -> bool:
         """
         Зберігає API ключі для біржі (зашифровано Fernet).
-        Викликається з bot/commands.py при /connect.
+        user_id=0 → single-user режим (зворотна сумісність).
+        user_id>0 → multi-user: ключі прив'язані до конкретного Telegram user.
         """
         if not self._db:
             return False
@@ -779,15 +799,16 @@ class MerchantDB:
             now = time.time()
             await self._db.execute(
                 """INSERT INTO user_credentials
-                       (exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(exchange) DO UPDATE SET
+                       (user_id, exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, exchange) DO UPDATE SET
                        api_key    = excluded.api_key,
                        api_secret = excluded.api_secret,
                        passphrase = excluded.passphrase,
                        label      = excluded.label,
                        updated_at = excluded.updated_at""",
                 (
+                    user_id,
                     exchange,
                     encrypt(api_key),
                     encrypt(api_secret),
@@ -797,23 +818,23 @@ class MerchantDB:
                 ),
             )
             await self._db.commit()
-            logger.info("Credentials saved for %s", exchange)
+            logger.info("Credentials saved for %s (user_id=%d)", exchange, user_id)
             return True
         except Exception as e:
             logger.error("save_credentials [%s]: %s", exchange, e)
             return False
 
-    async def get_credentials(self, exchange: str) -> dict | None:
+    async def get_credentials(self, exchange: str, user_id: int = 0) -> dict | None:
         """
         Повертає розшифровані credentials для біржі або None.
-        Повертає: {"api_key": str, "api_secret": str, "passphrase": str}
+        user_id=0 → single-user (зворотна сумісність).
         """
         if not self._db:
             return None
         try:
             async with self._db.execute(
-                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE exchange = ?",
-                (exchange,),
+                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=? AND exchange = ?",
+                (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
             if not row:
@@ -828,16 +849,17 @@ class MerchantDB:
             logger.error("get_credentials [%s]: %s", exchange, e)
             return None
 
-    async def get_all_credentials(self) -> dict[str, dict]:
+    async def get_all_credentials(self, user_id: int = 0) -> dict[str, dict]:
         """
-        Повертає всі збережені credentials як {exchange: {api_key, api_secret, passphrase}}.
-        Для ініціалізації ReviewFetcher і account clients при старті.
+        Повертає всі credentials як {exchange: {...}}.
+        user_id=0 → single-user режим (зворотна сумісність).
         """
         if not self._db:
             return {}
         try:
             async with self._db.execute(
-                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials"
+                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=?",
+                (user_id,),
             ) as cur:
                 rows = await cur.fetchall()
             return {
@@ -853,13 +875,13 @@ class MerchantDB:
             logger.error("get_all_credentials: %s", e)
             return {}
 
-    async def delete_credentials(self, exchange: str) -> bool:
-        """Видаляє credentials для біржі. Викликається з /disconnect."""
+    async def delete_credentials(self, exchange: str, user_id: int = 0) -> bool:
+        """Видаляє credentials для біржі."""
         if not self._db:
             return False
         try:
             await self._db.execute(
-                "DELETE FROM user_credentials WHERE exchange = ?", (exchange,)
+                "DELETE FROM user_credentials WHERE user_id=? AND exchange = ?", (user_id, exchange,)
             )
             await self._db.commit()
             logger.info("Credentials deleted for %s", exchange)
@@ -868,17 +890,73 @@ class MerchantDB:
             logger.error("delete_credentials [%s]: %s", exchange, e)
             return False
 
-    async def has_credentials(self, exchange: str) -> bool:
+    async def has_credentials(self, exchange: str, user_id: int = 0) -> bool:
         """Швидка перевірка чи є ключі для біржі."""
         if not self._db:
             return False
         try:
             async with self._db.execute(
-                "SELECT 1 FROM user_credentials WHERE exchange = ? LIMIT 1", (exchange,)
+                "SELECT 1 FROM user_credentials WHERE user_id=? AND exchange = ? LIMIT 1", (user_id, exchange,)
             ) as cur:
                 return await cur.fetchone() is not None
         except Exception:
             return False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Scanner Users (multi-user)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def register_user(
+        self,
+        user_id: int,
+        chat_id: int,
+        working_capital: float = 5100.0,
+        min_spread_pct: float = 0.5,
+        bank_codes: list[str] | None = None,
+    ) -> bool:
+        """Реєструє нового підписника сканера."""
+        if not self._db:
+            return False
+        import time
+        try:
+            banks_str = ",".join(bank_codes or ["43", "14", "64"])
+            await self._db.execute(
+                """INSERT INTO scanner_users
+                       (user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes, is_active, created_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       telegram_chat_id = excluded.telegram_chat_id,
+                       is_active = 1""",
+                (user_id, chat_id, working_capital, min_spread_pct, banks_str, time.time()),
+            )
+            await self._db.commit()
+            return True
+        except Exception as e:
+            logger.error("register_user [%d]: %s", user_id, e)
+            return False
+
+    async def get_active_users(self) -> list[dict]:
+        """Повертає всіх активних підписників для розсилки алертів."""
+        if not self._db:
+            return []
+        try:
+            async with self._db.execute(
+                "SELECT user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes FROM scanner_users WHERE is_active=1"
+            ) as cur:
+                rows = await cur.fetchall()
+            return [
+                {
+                    "user_id":       row["user_id"],
+                    "chat_id":       row["telegram_chat_id"],
+                    "capital":       float(row["working_capital"]),
+                    "min_spread":    float(row["min_spread_pct"]),
+                    "bank_codes":    row["bank_codes"].split(","),
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error("get_active_users: %s", e)
+            return []
 
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""

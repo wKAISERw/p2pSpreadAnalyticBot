@@ -114,12 +114,6 @@ class MexcExchange(BaseExchange):
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
         )
-        return self._dedup(buy_orders), self._dedup(sell_orders)
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-    def _dedup(self, orders: List[Order]) -> List[Order]:
-        seen, result = set(), []
-        for o in orders:
-            if o.id not in seen:
-                seen.add(o.id)
-                result.append(o)
         return result

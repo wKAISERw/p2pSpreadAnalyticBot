@@ -73,12 +73,12 @@ class OkxExchange(BaseExchange):
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
         tasks = [self._fetch_orders(amount, b, "sell") for b in banks]
         results = await asyncio.gather(*tasks)
-        return self._dedup_by_id([o for res in results for o in res])
+        return self.dedup([o for res in results for o in res])
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         tasks = [self._fetch_orders(amount, b, "buy") for b in banks]
         results = await asyncio.gather(*tasks)
-        return self._dedup_by_id([o for res in results for o in res])
+        return self.dedup([o for res in results for o in res])
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
         max_amount = max(amounts) if amounts else 1000.0
@@ -86,10 +86,4 @@ class OkxExchange(BaseExchange):
         sells = await self.get_sell_orders(max_amount, banks)
         return buys, sells
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen, res = set(), []
-        for o in orders:
-            if o.id not in seen:
-                seen.add(o.id)
-                res.append(o)
         return res

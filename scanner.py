@@ -404,7 +404,36 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             route_type=opp.get("route_type", "UNKNOWN"),
                         )
 
-                        await notifier.push(alert)
+                        # ── Multi-user dispatch ───────────────────────────
+                        # Отримуємо активних підписників і фільтруємо
+                        # спред під їхні персональні параметри.
+                        # Якщо юзерів немає (перший запуск) — шлемо в default chat.
+                        active_users = await merchant_db.get_active_users()
+
+                        if active_users:
+                            for user in active_users:
+                                # Перевіряємо чи спред підходить під капітал юзера
+                                user_capital = float(user["capital"])
+                                user_spread  = float(user["min_spread"])
+                                user_banks   = set(user["bank_codes"])
+
+                                if float(opp["net_spread_pct"]) < user_spread:
+                                    continue
+
+                                # Перевіряємо чи банки перетинаються
+                                opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
+                                opp_sell_banks = set(opp.get("sell_banks_fit") or [])
+                                if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
+                                    continue
+
+                                # Перевіряємо чи угода влізає в капітал юзера
+                                if float(opp["actual_entry_uah"]) > user_capital:
+                                    continue
+
+                                await notifier.send_to_user(user["chat_id"], alert)
+                        else:
+                            # Fallback: single-user режим (перший запуск або немає /start)
+                            await notifier.push(alert)
 
                     cycle_elapsed = time.monotonic() - start_time
                     # Використовуємо динамічні таймінги з settings

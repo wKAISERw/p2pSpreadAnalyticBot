@@ -1,6 +1,6 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-21 15:14
-# Files: 73
+# Generated: 2026-03-21 17:51
+# Files: 74
 #
 # STRUCTURE:
 #   config\settings.py
@@ -49,6 +49,7 @@
 #   filters\bank_filter.py
 #   filters\limit_filter.py
 #   filters\anomaly_filter.py
+#   tools\migrate_multiuser.py
 #   bot\__init__.py
 #   config\__init__.py
 #   config.py
@@ -980,7 +981,36 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event):
                             route_type=opp.get("route_type", "UNKNOWN"),
                         )
 
-                        await notifier.push(alert)
+                        # ── Multi-user dispatch ───────────────────────────
+                        # Отримуємо активних підписників і фільтруємо
+                        # спред під їхні персональні параметри.
+                        # Якщо юзерів немає (перший запуск) — шлемо в default chat.
+                        active_users = await merchant_db.get_active_users()
+
+                        if active_users:
+                            for user in active_users:
+                                # Перевіряємо чи спред підходить під капітал юзера
+                                user_capital = float(user["capital"])
+                                user_spread  = float(user["min_spread"])
+                                user_banks   = set(user["bank_codes"])
+
+                                if float(opp["net_spread_pct"]) < user_spread:
+                                    continue
+
+                                # Перевіряємо чи банки перетинаються
+                                opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
+                                opp_sell_banks = set(opp.get("sell_banks_fit") or [])
+                                if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
+                                    continue
+
+                                # Перевіряємо чи угода влізає в капітал юзера
+                                if float(opp["actual_entry_uah"]) > user_capital:
+                                    continue
+
+                                await notifier.send_to_user(user["chat_id"], alert)
+                        else:
+                            # Fallback: single-user режим (перший запуск або немає /start)
+                            await notifier.push(alert)
 
                     cycle_elapsed = time.monotonic() - start_time
                     # Використовуємо динамічні таймінги з settings
@@ -1903,22 +1933,38 @@ class MerchantDB:
                                          ON merchant_snapshots (merchant_name, exchange, recorded_at);
 
                                      -- API credentials (зашифровані Fernet)
-                                     -- Одна строка на біржу, ключі зберігаються encrypted
+                                     -- user_id: Telegram user_id (0 = legacy/single-user)
                                      CREATE TABLE IF NOT EXISTS user_credentials (
-                                         exchange    TEXT NOT NULL PRIMARY KEY,
+                                         user_id     INTEGER NOT NULL DEFAULT 0,
+                                         exchange    TEXT NOT NULL,
                                          api_key     TEXT NOT NULL,
                                          api_secret  TEXT NOT NULL,
                                          passphrase  TEXT DEFAULT '',
                                          label       TEXT DEFAULT '',
                                          created_at  REAL DEFAULT 0,
-                                         updated_at  REAL DEFAULT 0
+                                         updated_at  REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, exchange)
                                      );
 
                                      -- Runtime overrides від UI бота
+                                     -- user_id: 0 = глобальні (single-user), >0 = персональні
                                      CREATE TABLE IF NOT EXISTS bot_settings (
-                                         key        TEXT NOT NULL PRIMARY KEY,
+                                         user_id    INTEGER NOT NULL DEFAULT 0,
+                                         key        TEXT NOT NULL,
                                          value      TEXT NOT NULL,
-                                         updated_at REAL DEFAULT 0
+                                         updated_at REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, key)
+                                     );
+
+                                     -- Підписники сканера (multi-user)
+                                     CREATE TABLE IF NOT EXISTS scanner_users (
+                                         user_id          INTEGER NOT NULL PRIMARY KEY,
+                                         telegram_chat_id INTEGER NOT NULL,
+                                         working_capital  REAL DEFAULT 5100.0,
+                                         min_spread_pct   REAL DEFAULT 0.5,
+                                         bank_codes       TEXT DEFAULT '43,14,64',
+                                         is_active        INTEGER DEFAULT 1,
+                                         created_at       REAL DEFAULT 0
                                      );
                                      """)
         await self._db.commit()
@@ -2392,10 +2438,12 @@ class MerchantDB:
         api_secret: str,
         passphrase: str = "",
         label: str = "",
+        user_id: int = 0,
     ) -> bool:
         """
         Зберігає API ключі для біржі (зашифровано Fernet).
-        Викликається з bot/commands.py при /connect.
+        user_id=0 → single-user режим (зворотна сумісність).
+        user_id>0 → multi-user: ключі прив'язані до конкретного Telegram user.
         """
         if not self._db:
             return False
@@ -2404,15 +2452,16 @@ class MerchantDB:
             now = time.time()
             await self._db.execute(
                 """INSERT INTO user_credentials
-                       (exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(exchange) DO UPDATE SET
+                       (user_id, exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, exchange) DO UPDATE SET
                        api_key    = excluded.api_key,
                        api_secret = excluded.api_secret,
                        passphrase = excluded.passphrase,
                        label      = excluded.label,
                        updated_at = excluded.updated_at""",
                 (
+                    user_id,
                     exchange,
                     encrypt(api_key),
                     encrypt(api_secret),
@@ -2422,23 +2471,23 @@ class MerchantDB:
                 ),
             )
             await self._db.commit()
-            logger.info("Credentials saved for %s", exchange)
+            logger.info("Credentials saved for %s (user_id=%d)", exchange, user_id)
             return True
         except Exception as e:
             logger.error("save_credentials [%s]: %s", exchange, e)
             return False
 
-    async def get_credentials(self, exchange: str) -> dict | None:
+    async def get_credentials(self, exchange: str, user_id: int = 0) -> dict | None:
         """
         Повертає розшифровані credentials для біржі або None.
-        Повертає: {"api_key": str, "api_secret": str, "passphrase": str}
+        user_id=0 → single-user (зворотна сумісність).
         """
         if not self._db:
             return None
         try:
             async with self._db.execute(
-                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE exchange = ?",
-                (exchange,),
+                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=? AND exchange = ?",
+                (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
             if not row:
@@ -2453,16 +2502,17 @@ class MerchantDB:
             logger.error("get_credentials [%s]: %s", exchange, e)
             return None
 
-    async def get_all_credentials(self) -> dict[str, dict]:
+    async def get_all_credentials(self, user_id: int = 0) -> dict[str, dict]:
         """
-        Повертає всі збережені credentials як {exchange: {api_key, api_secret, passphrase}}.
-        Для ініціалізації ReviewFetcher і account clients при старті.
+        Повертає всі credentials як {exchange: {...}}.
+        user_id=0 → single-user режим (зворотна сумісність).
         """
         if not self._db:
             return {}
         try:
             async with self._db.execute(
-                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials"
+                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=?",
+                (user_id,),
             ) as cur:
                 rows = await cur.fetchall()
             return {
@@ -2478,13 +2528,13 @@ class MerchantDB:
             logger.error("get_all_credentials: %s", e)
             return {}
 
-    async def delete_credentials(self, exchange: str) -> bool:
-        """Видаляє credentials для біржі. Викликається з /disconnect."""
+    async def delete_credentials(self, exchange: str, user_id: int = 0) -> bool:
+        """Видаляє credentials для біржі."""
         if not self._db:
             return False
         try:
             await self._db.execute(
-                "DELETE FROM user_credentials WHERE exchange = ?", (exchange,)
+                "DELETE FROM user_credentials WHERE user_id=? AND exchange = ?", (user_id, exchange,)
             )
             await self._db.commit()
             logger.info("Credentials deleted for %s", exchange)
@@ -2493,17 +2543,73 @@ class MerchantDB:
             logger.error("delete_credentials [%s]: %s", exchange, e)
             return False
 
-    async def has_credentials(self, exchange: str) -> bool:
+    async def has_credentials(self, exchange: str, user_id: int = 0) -> bool:
         """Швидка перевірка чи є ключі для біржі."""
         if not self._db:
             return False
         try:
             async with self._db.execute(
-                "SELECT 1 FROM user_credentials WHERE exchange = ? LIMIT 1", (exchange,)
+                "SELECT 1 FROM user_credentials WHERE user_id=? AND exchange = ? LIMIT 1", (user_id, exchange,)
             ) as cur:
                 return await cur.fetchone() is not None
         except Exception:
             return False
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Scanner Users (multi-user)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def register_user(
+        self,
+        user_id: int,
+        chat_id: int,
+        working_capital: float = 5100.0,
+        min_spread_pct: float = 0.5,
+        bank_codes: list[str] | None = None,
+    ) -> bool:
+        """Реєструє нового підписника сканера."""
+        if not self._db:
+            return False
+        import time
+        try:
+            banks_str = ",".join(bank_codes or ["43", "14", "64"])
+            await self._db.execute(
+                """INSERT INTO scanner_users
+                       (user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes, is_active, created_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       telegram_chat_id = excluded.telegram_chat_id,
+                       is_active = 1""",
+                (user_id, chat_id, working_capital, min_spread_pct, banks_str, time.time()),
+            )
+            await self._db.commit()
+            return True
+        except Exception as e:
+            logger.error("register_user [%d]: %s", user_id, e)
+            return False
+
+    async def get_active_users(self) -> list[dict]:
+        """Повертає всіх активних підписників для розсилки алертів."""
+        if not self._db:
+            return []
+        try:
+            async with self._db.execute(
+                "SELECT user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes FROM scanner_users WHERE is_active=1"
+            ) as cur:
+                rows = await cur.fetchall()
+            return [
+                {
+                    "user_id":       row["user_id"],
+                    "chat_id":       row["telegram_chat_id"],
+                    "capital":       float(row["working_capital"]),
+                    "min_spread":    float(row["min_spread_pct"]),
+                    "bank_codes":    row["bank_codes"].split(","),
+                }
+                for row in rows
+            ]
+        except Exception as e:
+            logger.error("get_active_users: %s", e)
+            return []
 
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""
@@ -4048,12 +4154,15 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     neg_pct = (neg / total * 100.0) if total > 0 else 0.0
     bad_texts = review_summary.get("bad_texts", []) or []
 
+    # Математика зірваних угод
+    failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
+
     lines = [
         f"Біржа: {task.exchange}",
         f"Мерчант: {task.merchant_name} (ID: {task.merchant_id})",
         f"СТАТИСТИКА:",
         f"- Угод за місяць: {task.month_order_count}",
-        f"- Успішність: {task.finish_rate}%",
+        f"- Успішність: {task.finish_rate}% (~{failed_orders} зірваних/проблемних угод)",
         f"- Верифікація: {'ТАК' if task.is_verified else 'НІ'}",
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
         # ── Behavioral block ──────────────────────────────────────────────
@@ -4066,6 +4175,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"Умови: {norm_text}",
         "",
         "ПЕРЕВІР КОНТЕКСТ:",
+        "- Зважай на статистику (зірвані угоди). Якщо умов немає (Regex мовчить), але є сотні зірваних угод + хоч один поганий відгук = це BLOCK.",
         "- Зважай на рейтинг мерчанта. Трастовим мерчантам дозволено жорсткіше формулювати безпекові вимоги.",
         "- Якщо написано 'без третіх осіб' або 'не пишіть у Telegram' — це безпечний контекст.",
         "",
@@ -4090,7 +4200,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так (враховуй зірвані угоди)"}'
     )
     return "\n".join(lines)
 
@@ -4184,6 +4294,7 @@ from contextlib import suppress
 from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
+from core.analysis.rules import ALL_RULES
 
 if TYPE_CHECKING:
     from infrastructure.api.binance_account import BinanceAccountClient
@@ -4200,11 +4311,13 @@ RATE_LIMITS = {
 
 BAD_REVIEW_THRESHOLD_PCT = 15.0
 
-BAD_KEYWORDS = [
-    "scam", "шахрай", "шахрайство", "обман", "не платить", "не платив",
-    "кинув", "freeze", "blocked", "заморозив", "обманув", "fraud",
-    "fake", "фейк", "розводить", "розвів",
+# Базові слова для швидкого фільтру (без regex)
+_BASIC_BAD = [
+    "scam", "шахрай", "кидало", "кинув", "розвів", "fraud", "fake", "не платить",
 ]
+
+# Категорії з rules.py що свідчать про схеми
+_TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
 
 class ReviewFetcher:
@@ -4400,131 +4513,58 @@ class ReviewFetcher:
 
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """
-        Отримує профіль і відгуки Binance мерчанта.
-        Якщо є API ключ → автентифікований запит → повні дані.
-        Якщо немає → анонімний → можливі 404.
-        """
+        """Binance: тільки через API ключ. Без ключа — пропускаємо."""
         client = self._binance
-        if client and getattr(client, "is_authenticated", False):
-            return await self._fetch_binance_authenticated(merchant_id, client)
-        return await self._fetch_binance_anonymous(merchant_id)
-
-    async def _fetch_binance_authenticated(self, merchant_id: str, client) -> tuple[int, int, int, list[str]]:
-        """Автентифікований запит через BinanceAccountClient."""
-        try:
-            profile = await client.fetch_merchant_profile(merchant_id)
-            advertiser = profile.get("advertiser", {})
-            if not advertiser:
-                return 0, 0, 0, []
-
-            total    = int(advertiser.get("monthOrderCount") or 0)
-            pos_rate = float(advertiser.get("positiveRate") or 0)
-            neg_rate = float(advertiser.get("negativeRate") or 0)
-            pos     = max(int(total * pos_rate), 0)
-            neg     = max(int(total * neg_rate), 0)
-            neutral = max(total - pos - neg, 0)
-
-            raw_reviews = await client.fetch_negative_reviews(merchant_id)
-            bad_texts = [
-                item.get("message", "")[:200]
-                for item in raw_reviews
-                if _has_bad_keywords(item.get("message", ""))
-            ]
-            logger.debug(
-                "ReviewFetcher Binance [auth] %s: pos=%d neg=%d bad_texts=%d",
-                merchant_id, pos, neg, len(bad_texts),
-            )
-            return pos, neg, neutral, bad_texts
-        except Exception as e:
-            logger.warning("ReviewFetcher Binance [auth] error %s: %s", merchant_id, e)
-            return await self._fetch_binance_anonymous(merchant_id)
-
-    async def _fetch_binance_anonymous(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Анонімний fallback через BinanceAccountClient (може давати 404)."""
-        if not self._binance:
+        if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
         try:
-            profile = await self._binance.fetch_merchant_profile(merchant_id)
-            advertiser = profile.get("advertiser", {})
-            if not advertiser:
-                logger.warning("ReviewFetcher Binance profile status=404 for %s", merchant_id)
-                return 0, 0, 0, []
-
-            total    = int(advertiser.get("monthOrderCount") or 0)
-            pos_rate = float(advertiser.get("positiveRate") or 0)
-            neg_rate = float(advertiser.get("negativeRate") or 0)
-            pos     = max(int(total * pos_rate), 0)
-            neg     = max(int(total * neg_rate), 0)
-            neutral = max(total - pos - neg, 0)
-            return pos, neg, neutral, []
+            raw = await client.fetch_negative_reviews(merchant_id, rows=10)
+            bad_texts = [
+                str(item.get("message") or item.get("content") or "")[:200]
+                for item in raw
+                if _has_bad_keywords(str(item.get("message") or item.get("content") or ""))
+            ]
+            logger.debug("Binance [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
         except Exception as e:
-            raise RuntimeError(f"Binance anon error: {e}") from e
+            logger.debug("Binance fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Bybit: обходимо 404 помилку. Беремо відгуки напряму через автентифіковане API."""
+        """Bybit: тільки через API ключ."""
         client = self._bybit
-        if not client:
+        if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
-
-        # Якщо ключі не підключені, краще повернути нулі, щоб не ловити 404
-        if not getattr(client, "is_authenticated", False):
-            return 0, 0, 0, []
-
         try:
-            # Отримуємо сирі негативні відгуки через BybitP2PClient
-            raw_bad_reviews = await client.fetch_merchant_feedback(merchant_id)
+            raw = await client.fetch_merchant_feedback(merchant_id)
             bad_texts = [
                 str(item.get("content") or "")[:200]
-                for item in raw_bad_reviews
+                for item in raw
                 if _has_bad_keywords(str(item.get("content") or ""))
             ]
-
-            # Оскільки Bybit сховав публічну статистику (pos/neg count), ми віддаємо знайдені тексти.
-            # RiskEngine відправить їх в LLM, і LLM сама заблокує скамера за фактом цих текстів.
-            # Ставимо pos=100 (фейковий траст), щоб не спрацьовувало примітивне блокування 100% bad_pct.
-            neg = len(bad_texts)
-            return 100, neg, 0, bad_texts
-
+            logger.debug("Bybit [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
         except Exception as e:
-            raise RuntimeError(f"Bybit API Error: {e}") from e
+            logger.debug("Bybit fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """OKX: автентифікований запит якщо є ключі, інакше публічний."""
+        """OKX: тільки через API ключ + passphrase."""
         client = self._okx
-        if not client:
-            raise RuntimeError("OkxClient не підключений до ReviewFetcher")
-
-        # Публічний endpoint для базових лічильників
-        url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
+        if not client or not getattr(client, "is_authenticated", False):
+            return 0, 0, 0, []
         try:
-            data = await client._get(url, params={"userId": merchant_id, "language": "uk_UA"})
-        except Exception as e:
-            raise RuntimeError(f"OKX API error: {e}") from e
-
-        info = data.get("data") or {}
-        if not info:
-            raise RuntimeError(f"OKX API HTTP 404")
-
-        pos     = max(int(info.get("positiveFeedbackCount") or 0), 0)
-        neg     = max(int(info.get("negativeFeedbackCount") or 0), 0)
-        neutral = max(int(info.get("neutralFeedbackCount") or 0), 0)
-
-        # Тексти відгуків — тільки якщо є API ключ
-        bad_texts: list[str] = []
-        if getattr(client, "is_authenticated", False):
             raw = await client.fetch_merchant_feedback(merchant_id)
             bad_texts = [
                 str(item.get("content") or item.get("feedback") or "")[:200]
                 for item in raw
                 if _has_bad_keywords(str(item.get("content") or item.get("feedback") or ""))
             ]
-        return pos, neg, neutral, bad_texts
-
-
-def _has_bad_keywords(text: str) -> bool:
-    t = text.lower()
-    return any(kw in t for kw in BAD_KEYWORDS)
+            logger.debug("OKX [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
+        except Exception as e:
+            logger.debug("OKX fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
 ============================================================
 FILE: core/engine/cross_matcher.py
@@ -5571,6 +5611,8 @@ class TelegramNotifier:
         self._db: MerchantDB | None = None
         self._setup_handlers()
 
+        # Single-user: глобальний chat_id з settings
+        # Multi-user: _send_with_retry отримує chat_id явно
         self._chat_id = settings.telegram_chat_id
         self._send_interval = send_interval
         self._group_window = group_window
@@ -5586,6 +5628,21 @@ class TelegramNotifier:
     def bind_commands(self, db, account_clients: dict) -> None:
         """Ініціалізує command center з посиланнями на компоненти."""
         bot_commands.setup(db, account_clients)
+
+    async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
+        """
+        Multi-user: відправляє алерт в конкретний chat_id.
+        Тимчасово підміняємо _chat_id, викликаємо _send_single, відновлюємо.
+        Thread-safe в asyncio бо немає yield між підміною і відновленням.
+        """
+        original_chat_id = self._chat_id
+        try:
+            self._chat_id = chat_id
+            await self._send_single(alert)
+        except Exception as e:
+            logger.error("send_to_user [%d]: %s", chat_id, e)
+        finally:
+            self._chat_id = original_chat_id
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -5855,11 +5912,13 @@ class TelegramNotifier:
             keyboard: InlineKeyboardMarkup | None = None,
             max_attempts: int = 3,
             disable_notification: bool = False,
+            chat_id: int | None = None,
     ) -> None:
+        target_chat = chat_id or self._chat_id
         for attempt in range(max_attempts):
             try:
                 await self._bot.send_message(
-                    chat_id=self._chat_id,
+                    chat_id=target_chat,
                     text=text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
@@ -6054,16 +6113,18 @@ logger = logging.getLogger("Commands")
 
 router = Router()
 
+
 # ── FSM стани для /connect ─────────────────────────────────────────────────
 class ConnectStates(StatesGroup):
-    waiting_exchange  = State()
-    waiting_api_key   = State()
+    waiting_exchange = State()
+    waiting_api_key = State()
     waiting_api_secret = State()
     waiting_passphrase = State()  # тільки для OKX
 
+
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
 _db: Optional["MerchantDB"] = None
-_account_clients: dict = {}   # {"Bybit": BybitAccountClient, ...}
+_account_clients: dict = {}  # {"Bybit": BybitAccountClient, ...}
 _scanner_stats: dict = {
     "cycles": 0,
     "last_cycle_ms": 0,
@@ -6076,7 +6137,7 @@ def setup(db, account_clients: dict) -> None:
     """
     Ініціалізація команд.
     Викликається з scanner.py після старту всіх компонентів.
-    
+
     db: MerchantDB instance
     account_clients: {"Bybit": BybitAccountClient, "Binance": BinanceAccountClient, ...}
     """
@@ -6094,6 +6155,13 @@ def update_stats(**kwargs) -> None:
 # ── /start ─────────────────────────────────────────────────────────────────
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
+    # Реєструємо юзера при першому старті
+    if _db:
+        await _db.register_user(
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+        )
+
     text = (
         "👋 <b>ARBIX QUANTUM</b>\n\n"
         "P2P арбітражний сканер з антифрод захистом.\n\n"
@@ -6148,19 +6216,19 @@ async def cmd_status(message: Message) -> None:
 
     # Runtime settings
     capital = runtime_config.get("working_capital_uah", settings.working_capital_uah)
-    spread  = runtime_config.get("min_spread_pct", settings.min_spread_pct)
-    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+    spread = runtime_config.get("min_spread_pct", settings.min_spread_pct)
+    risk = runtime_config.get("risk_mode", settings.risk_mode)
 
     text = (
-        "📊 <b>Стан сканера</b>\n\n"
-        f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
-        f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
-        f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
-        f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
-        f"💼 Капітал: <code>{capital} ₴</code>\n"
-        f"📉 Поріг спреду: <code>{spread}%</code>\n"
-        f"🛡 Режим ризику: <code>{risk}</code>\n\n"
-        "🔌 <b>Біржі:</b>\n" + "\n".join(connected)
+            "📊 <b>Стан сканера</b>\n\n"
+            f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
+            f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
+            f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
+            f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
+            f"💼 Капітал: <code>{capital} ₴</code>\n"
+            f"📉 Поріг спреду: <code>{spread}%</code>\n"
+            f"🛡 Режим ризику: <code>{risk}</code>\n\n"
+            "🔌 <b>Біржі:</b>\n" + "\n".join(connected)
     )
     await message.answer(text)
 
@@ -6190,10 +6258,11 @@ async def cmd_keys(message: Message) -> None:
 # ── /connect ───────────────────────────────────────────────────────────────
 SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC"]
 
+
 @router.message(Command("connect"))
 async def cmd_connect(message: Message, state: FSMContext) -> None:
     parts = message.text.split(maxsplit=1)
-    
+
     if len(parts) > 1:
         exchange = parts[1].strip().capitalize()
         if exchange not in SUPPORTED_EXCHANGES:
@@ -6294,12 +6363,12 @@ async def on_passphrase(message: Message, state: FSMContext) -> None:
 
 
 async def _save_credentials(
-    message: Message,
-    state: FSMContext,
-    exchange: str,
-    api_key: str,
-    api_secret: str,
-    passphrase: str = "",
+        message: Message,
+        state: FSMContext,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        passphrase: str = "",
 ) -> None:
     """Зберігає credentials і оновлює account client."""
     await state.clear()
@@ -6307,12 +6376,14 @@ async def _save_credentials(
     if not _db:
         return await message.answer("❌ База даних недоступна")
 
+    # 🚀 ХОТФІКС: Зберігаємо ключі під ID=0, щоб сканер міг їх знайти як системні!
     ok = await _db.save_credentials(
         exchange=exchange,
         api_key=api_key,
         api_secret=api_secret,
         passphrase=passphrase,
-        label="bot_connected",
+        label="system_keys",
+        user_id=0,
     )
 
     if not ok:
@@ -6328,7 +6399,7 @@ async def _save_credentials(
         logger.info("Commands: %s credentials updated in account client", exchange)
 
     await message.answer(
-        f"✅ <b>{exchange}</b> успішно підключено!\n\n"
+        f"✅ <b>{exchange}</b> успішно підключено (Системні ключі)!\n\n"
         f"Ключ: <code>{api_key[:8]}...</code>\n\n"
         f"Використай /balance щоб перевірити підключення."
     )
@@ -6401,8 +6472,8 @@ async def cmd_balance(message: Message) -> None:
             found_any = True
             lines.append(f"\n🏦 <b>{exchange}</b>:")
             for b in balances:
-                coin  = b.get("coin", "?")
-                free  = float(b.get("free", 0))
+                coin = b.get("coin", "?")
+                free = float(b.get("free", 0))
                 total = float(b.get("total", free))
                 locked = total - free
                 if total > 0:
@@ -6463,9 +6534,9 @@ async def cmd_ban(message: Message) -> None:
             "Приклад: <code>/ban Binance s42ee507f2dc</code>"
         )
 
-    exchange    = parts[1].strip()
+    exchange = parts[1].strip()
     merchant_id = parts[2].strip()
-    reason      = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
+    reason = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
 
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
@@ -6544,6 +6615,20 @@ class BaseExchange(ABC):
     async def fetch_both_multi(self, amounts: list[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         """Паралельний мульти-запит для максимальної швидкості."""
         pass
+
+    @staticmethod
+    def dedup(orders: "List[Order]") -> "List[Order]":
+        """
+        Дедуплікація ордерів по id.
+        Замінює _dedup/_dedup_by_id у всіх exchange файлах.
+        """
+        seen: set = set()
+        result = []
+        for order in orders:
+            if order.id not in seen:
+                seen.add(order.id)
+                result.append(order)
+        return result
 
 ============================================================
 FILE: exchanges/binance.py
@@ -6662,14 +6747,8 @@ class BinanceExchange(BaseExchange):
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
         )
-        return self._dedup(buy_orders), self._dedup(sell_orders)
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-    def _dedup(self, orders: List[Order]) -> List[Order]:
-        seen, result = set(), []
-        for o in orders:
-            if o.id not in seen:
-                seen.add(o.id)
-                result.append(o)
         return result
 
 ============================================================
@@ -6759,18 +6838,11 @@ class BybitExchange(BaseExchange):
             raw_buys.extend(results[i])
             raw_sells.extend(results[i + 1])
 
-        buy_orders = self._dedup_by_id(raw_buys)
-        sell_orders = self._dedup_by_id(raw_sells)
+        buy_orders = self.dedup(raw_buys)
+        sell_orders = self.dedup(raw_sells)
 
         return buy_orders, sell_orders
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen = set()
-        result = []
-        for order in orders:
-            if order.id not in seen:
-                seen.add(order.id)
-                result.append(order)
         return result
 
 ============================================================
@@ -6852,12 +6924,12 @@ class OkxExchange(BaseExchange):
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
         tasks = [self._fetch_orders(amount, b, "sell") for b in banks]
         results = await asyncio.gather(*tasks)
-        return self._dedup_by_id([o for res in results for o in res])
+        return self.dedup([o for res in results for o in res])
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
         tasks = [self._fetch_orders(amount, b, "buy") for b in banks]
         results = await asyncio.gather(*tasks)
-        return self._dedup_by_id([o for res in results for o in res])
+        return self.dedup([o for res in results for o in res])
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
         max_amount = max(amounts) if amounts else 1000.0
@@ -6865,12 +6937,6 @@ class OkxExchange(BaseExchange):
         sells = await self.get_sell_orders(max_amount, banks)
         return buys, sells
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen, res = set(), []
-        for o in orders:
-            if o.id not in seen:
-                seen.add(o.id)
-                res.append(o)
         return res
 
 ============================================================
@@ -6967,14 +7033,8 @@ class WalletExchange(BaseExchange):
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
         )
-        return self._dedup_by_id(buy_orders), self._dedup_by_id(sell_orders)
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen, result = set(), []
-        for order in orders:
-            if order.id not in seen:
-                seen.add(order.id)
-                result.append(order)
         return result
 
 ============================================================
@@ -7097,14 +7157,8 @@ class MexcExchange(BaseExchange):
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
         )
-        return self._dedup(buy_orders), self._dedup(sell_orders)
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-    def _dedup(self, orders: List[Order]) -> List[Order]:
-        seen, result = set(), []
-        for o in orders:
-            if o.id not in seen:
-                seen.add(o.id)
-                result.append(o)
         return result
 
 ============================================================
@@ -8696,6 +8750,99 @@ class AnomalyFilter:
                 logger.debug("🗑 Відкинуто аномалію (Mean): %s ₴ (Мерчант: %s)", order.price, order.merchant_name)
 
         return valid_orders
+
+============================================================
+FILE: tools/migrate_multiuser.py
+============================================================
+
+# tools/migrate_multiuser.py
+"""
+Міграція БД до multi-user схеми.
+Запустити ОДИН раз перед деплоєм нової версії:
+  python tools/migrate_multiuser.py
+
+Безпечно: використовує ALTER TABLE ADD COLUMN IF NOT EXISTS
+і не видаляє існуючих даних.
+"""
+import asyncio
+import aiosqlite
+from pathlib import Path
+
+DB_PATH = Path("data/merchants.db")
+
+
+async def migrate():
+    print(f"Міграція: {DB_PATH}")
+    async with aiosqlite.connect(DB_PATH) as db:
+
+        # 1. user_credentials — видаляємо стару таблицю і створюємо нову
+        # (безпечно бо credentials будуть перезаписані через /connect)
+        await db.execute("DROP TABLE IF EXISTS user_credentials_old")
+        await db.execute("ALTER TABLE user_credentials RENAME TO user_credentials_old")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_credentials (
+                user_id     INTEGER NOT NULL DEFAULT 0,
+                exchange    TEXT NOT NULL,
+                api_key     TEXT NOT NULL,
+                api_secret  TEXT NOT NULL,
+                passphrase  TEXT DEFAULT '',
+                label       TEXT DEFAULT '',
+                created_at  REAL DEFAULT 0,
+                updated_at  REAL DEFAULT 0,
+                PRIMARY KEY (user_id, exchange)
+            )
+        """)
+        # Мігруємо старі дані з user_id=0
+        await db.execute("""
+            INSERT OR IGNORE INTO user_credentials
+                (user_id, exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+            SELECT 0, exchange, api_key, api_secret, passphrase, label, created_at, updated_at
+            FROM user_credentials_old
+        """)
+        await db.execute("DROP TABLE user_credentials_old")
+        print("  ✅ user_credentials мігровано (user_id=0 для існуючих)")
+
+        # 2. bot_settings — додаємо user_id
+        await db.execute("DROP TABLE IF EXISTS bot_settings_old")
+        await db.execute("ALTER TABLE bot_settings RENAME TO bot_settings_old")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                user_id    INTEGER NOT NULL DEFAULT 0,
+                key        TEXT NOT NULL,
+                value      TEXT NOT NULL,
+                updated_at REAL DEFAULT 0,
+                PRIMARY KEY (user_id, key)
+            )
+        """)
+        await db.execute("""
+            INSERT OR IGNORE INTO bot_settings (user_id, key, value, updated_at)
+            SELECT 0, key, value, updated_at FROM bot_settings_old
+        """)
+        await db.execute("DROP TABLE bot_settings_old")
+        print("  ✅ bot_settings мігровано (user_id=0 для існуючих)")
+
+        # 3. scanner_users — нова таблиця
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS scanner_users (
+                user_id          INTEGER NOT NULL PRIMARY KEY,
+                telegram_chat_id INTEGER NOT NULL,
+                working_capital  REAL DEFAULT 5100.0,
+                min_spread_pct   REAL DEFAULT 0.5,
+                bank_codes       TEXT DEFAULT '43,14,64',
+                is_active        INTEGER DEFAULT 1,
+                created_at       REAL DEFAULT 0
+            )
+        """)
+        print("  ✅ scanner_users створено")
+
+        await db.commit()
+        print("\n✅ Міграція завершена успішно!")
+        print("   Перезапусти сканер і введи /start в боті.")
+        print("   Потім заново введи API ключі через /connect (шифрування оновлено).")
+
+
+if __name__ == "__main__":
+    asyncio.run(migrate())
 
 ============================================================
 FILE: bot/__init__.py

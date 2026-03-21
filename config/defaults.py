@@ -51,7 +51,7 @@ RATE_LIMITS: dict[str, float] = {
 # ── LLM Worker ────────────────────────────────────────────────────────
 LLM_TIMEOUT: float = 20.0
 LLM_MAX_QUEUE: int = 100
-LLM_WORKERS: int = 2
+LLM_WORKERS: int = 3
 
 # ── Identity аналіз ────────────────────────────────────────────────────
 LIMIT_EPSILON: float = 0.01

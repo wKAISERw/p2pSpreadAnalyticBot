@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
+from core.analysis.rules import ALL_RULES
 
 if TYPE_CHECKING:
     from infrastructure.api.binance_account import BinanceAccountClient
@@ -24,11 +25,13 @@ RATE_LIMITS = {
 
 BAD_REVIEW_THRESHOLD_PCT = 15.0
 
-BAD_KEYWORDS = [
-    "scam", "шахрай", "шахрайство", "обман", "не платить", "не платив",
-    "кинув", "freeze", "blocked", "заморозив", "обманув", "fraud",
-    "fake", "фейк", "розводить", "розвів",
+# Базові слова для швидкого фільтру (без regex)
+_BASIC_BAD = [
+    "scam", "шахрай", "кидало", "кинув", "розвів", "fraud", "fake", "не платить",
 ]
+
+# Категорії з rules.py що свідчать про схеми
+_TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
 
 class ReviewFetcher:
@@ -224,128 +227,55 @@ class ReviewFetcher:
 
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """
-        Отримує профіль і відгуки Binance мерчанта.
-        Якщо є API ключ → автентифікований запит → повні дані.
-        Якщо немає → анонімний → можливі 404.
-        """
+        """Binance: тільки через API ключ. Без ключа — пропускаємо."""
         client = self._binance
-        if client and getattr(client, "is_authenticated", False):
-            return await self._fetch_binance_authenticated(merchant_id, client)
-        return await self._fetch_binance_anonymous(merchant_id)
-
-    async def _fetch_binance_authenticated(self, merchant_id: str, client) -> tuple[int, int, int, list[str]]:
-        """Автентифікований запит через BinanceAccountClient."""
-        try:
-            profile = await client.fetch_merchant_profile(merchant_id)
-            advertiser = profile.get("advertiser", {})
-            if not advertiser:
-                return 0, 0, 0, []
-
-            total    = int(advertiser.get("monthOrderCount") or 0)
-            pos_rate = float(advertiser.get("positiveRate") or 0)
-            neg_rate = float(advertiser.get("negativeRate") or 0)
-            pos     = max(int(total * pos_rate), 0)
-            neg     = max(int(total * neg_rate), 0)
-            neutral = max(total - pos - neg, 0)
-
-            raw_reviews = await client.fetch_negative_reviews(merchant_id)
-            bad_texts = [
-                item.get("message", "")[:200]
-                for item in raw_reviews
-                if _has_bad_keywords(item.get("message", ""))
-            ]
-            logger.debug(
-                "ReviewFetcher Binance [auth] %s: pos=%d neg=%d bad_texts=%d",
-                merchant_id, pos, neg, len(bad_texts),
-            )
-            return pos, neg, neutral, bad_texts
-        except Exception as e:
-            logger.warning("ReviewFetcher Binance [auth] error %s: %s", merchant_id, e)
-            return await self._fetch_binance_anonymous(merchant_id)
-
-    async def _fetch_binance_anonymous(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Анонімний fallback через BinanceAccountClient (може давати 404)."""
-        if not self._binance:
+        if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
         try:
-            profile = await self._binance.fetch_merchant_profile(merchant_id)
-            advertiser = profile.get("advertiser", {})
-            if not advertiser:
-                logger.warning("ReviewFetcher Binance profile status=404 for %s", merchant_id)
-                return 0, 0, 0, []
-
-            total    = int(advertiser.get("monthOrderCount") or 0)
-            pos_rate = float(advertiser.get("positiveRate") or 0)
-            neg_rate = float(advertiser.get("negativeRate") or 0)
-            pos     = max(int(total * pos_rate), 0)
-            neg     = max(int(total * neg_rate), 0)
-            neutral = max(total - pos - neg, 0)
-            return pos, neg, neutral, []
+            raw = await client.fetch_negative_reviews(merchant_id, rows=10)
+            bad_texts = [
+                str(item.get("message") or item.get("content") or "")[:200]
+                for item in raw
+                if _has_bad_keywords(str(item.get("message") or item.get("content") or ""))
+            ]
+            logger.debug("Binance [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
         except Exception as e:
-            raise RuntimeError(f"Binance anon error: {e}") from e
+            logger.debug("Binance fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Bybit: обходимо 404 помилку. Беремо відгуки напряму через автентифіковане API."""
+        """Bybit: тільки через API ключ."""
         client = self._bybit
-        if not client:
+        if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
-
-        # Якщо ключі не підключені, краще повернути нулі, щоб не ловити 404
-        if not getattr(client, "is_authenticated", False):
-            return 0, 0, 0, []
-
         try:
-            # Отримуємо сирі негативні відгуки через BybitP2PClient
-            raw_bad_reviews = await client.fetch_merchant_feedback(merchant_id)
+            raw = await client.fetch_merchant_feedback(merchant_id)
             bad_texts = [
                 str(item.get("content") or "")[:200]
-                for item in raw_bad_reviews
+                for item in raw
                 if _has_bad_keywords(str(item.get("content") or ""))
             ]
-
-            # Оскільки Bybit сховав публічну статистику (pos/neg count), ми віддаємо знайдені тексти.
-            # RiskEngine відправить їх в LLM, і LLM сама заблокує скамера за фактом цих текстів.
-            # Ставимо pos=100 (фейковий траст), щоб не спрацьовувало примітивне блокування 100% bad_pct.
-            neg = len(bad_texts)
-            return 100, neg, 0, bad_texts
-
+            logger.debug("Bybit [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
         except Exception as e:
-            raise RuntimeError(f"Bybit API Error: {e}") from e
+            logger.debug("Bybit fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """OKX: автентифікований запит якщо є ключі, інакше публічний."""
+        """OKX: тільки через API ключ + passphrase."""
         client = self._okx
-        if not client:
-            raise RuntimeError("OkxClient не підключений до ReviewFetcher")
-
-        # Публічний endpoint для базових лічильників
-        url = "https://www.okx.com/priapi/v1/otc/tradingOrders/ads-merchant-info"
+        if not client or not getattr(client, "is_authenticated", False):
+            return 0, 0, 0, []
         try:
-            data = await client._get(url, params={"userId": merchant_id, "language": "uk_UA"})
-        except Exception as e:
-            raise RuntimeError(f"OKX API error: {e}") from e
-
-        info = data.get("data") or {}
-        if not info:
-            raise RuntimeError(f"OKX API HTTP 404")
-
-        pos     = max(int(info.get("positiveFeedbackCount") or 0), 0)
-        neg     = max(int(info.get("negativeFeedbackCount") or 0), 0)
-        neutral = max(int(info.get("neutralFeedbackCount") or 0), 0)
-
-        # Тексти відгуків — тільки якщо є API ключ
-        bad_texts: list[str] = []
-        if getattr(client, "is_authenticated", False):
             raw = await client.fetch_merchant_feedback(merchant_id)
             bad_texts = [
                 str(item.get("content") or item.get("feedback") or "")[:200]
                 for item in raw
                 if _has_bad_keywords(str(item.get("content") or item.get("feedback") or ""))
             ]
-        return pos, neg, neutral, bad_texts
-
-
-def _has_bad_keywords(text: str) -> bool:
-    t = text.lower()
-    return any(kw in t for kw in BAD_KEYWORDS)
+            logger.debug("OKX [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
+            return 0, 0, 0, bad_texts
+        except Exception as e:
+            logger.debug("OKX fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []

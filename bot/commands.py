@@ -42,16 +42,18 @@ logger = logging.getLogger("Commands")
 
 router = Router()
 
+
 # ── FSM стани для /connect ─────────────────────────────────────────────────
 class ConnectStates(StatesGroup):
-    waiting_exchange  = State()
-    waiting_api_key   = State()
+    waiting_exchange = State()
+    waiting_api_key = State()
     waiting_api_secret = State()
     waiting_passphrase = State()  # тільки для OKX
 
+
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
 _db: Optional["MerchantDB"] = None
-_account_clients: dict = {}   # {"Bybit": BybitAccountClient, ...}
+_account_clients: dict = {}  # {"Bybit": BybitAccountClient, ...}
 _scanner_stats: dict = {
     "cycles": 0,
     "last_cycle_ms": 0,
@@ -64,7 +66,7 @@ def setup(db, account_clients: dict) -> None:
     """
     Ініціалізація команд.
     Викликається з scanner.py після старту всіх компонентів.
-    
+
     db: MerchantDB instance
     account_clients: {"Bybit": BybitAccountClient, "Binance": BinanceAccountClient, ...}
     """
@@ -82,6 +84,13 @@ def update_stats(**kwargs) -> None:
 # ── /start ─────────────────────────────────────────────────────────────────
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
+    # Реєструємо юзера при першому старті
+    if _db:
+        await _db.register_user(
+            user_id=message.from_user.id,
+            chat_id=message.chat.id,
+        )
+
     text = (
         "👋 <b>ARBIX QUANTUM</b>\n\n"
         "P2P арбітражний сканер з антифрод захистом.\n\n"
@@ -136,19 +145,19 @@ async def cmd_status(message: Message) -> None:
 
     # Runtime settings
     capital = runtime_config.get("working_capital_uah", settings.working_capital_uah)
-    spread  = runtime_config.get("min_spread_pct", settings.min_spread_pct)
-    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+    spread = runtime_config.get("min_spread_pct", settings.min_spread_pct)
+    risk = runtime_config.get("risk_mode", settings.risk_mode)
 
     text = (
-        "📊 <b>Стан сканера</b>\n\n"
-        f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
-        f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
-        f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
-        f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
-        f"💼 Капітал: <code>{capital} ₴</code>\n"
-        f"📉 Поріг спреду: <code>{spread}%</code>\n"
-        f"🛡 Режим ризику: <code>{risk}</code>\n\n"
-        "🔌 <b>Біржі:</b>\n" + "\n".join(connected)
+            "📊 <b>Стан сканера</b>\n\n"
+            f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
+            f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
+            f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
+            f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
+            f"💼 Капітал: <code>{capital} ₴</code>\n"
+            f"📉 Поріг спреду: <code>{spread}%</code>\n"
+            f"🛡 Режим ризику: <code>{risk}</code>\n\n"
+            "🔌 <b>Біржі:</b>\n" + "\n".join(connected)
     )
     await message.answer(text)
 
@@ -178,10 +187,11 @@ async def cmd_keys(message: Message) -> None:
 # ── /connect ───────────────────────────────────────────────────────────────
 SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC"]
 
+
 @router.message(Command("connect"))
 async def cmd_connect(message: Message, state: FSMContext) -> None:
     parts = message.text.split(maxsplit=1)
-    
+
     if len(parts) > 1:
         exchange = parts[1].strip().capitalize()
         if exchange not in SUPPORTED_EXCHANGES:
@@ -282,12 +292,12 @@ async def on_passphrase(message: Message, state: FSMContext) -> None:
 
 
 async def _save_credentials(
-    message: Message,
-    state: FSMContext,
-    exchange: str,
-    api_key: str,
-    api_secret: str,
-    passphrase: str = "",
+        message: Message,
+        state: FSMContext,
+        exchange: str,
+        api_key: str,
+        api_secret: str,
+        passphrase: str = "",
 ) -> None:
     """Зберігає credentials і оновлює account client."""
     await state.clear()
@@ -295,12 +305,14 @@ async def _save_credentials(
     if not _db:
         return await message.answer("❌ База даних недоступна")
 
+    # 🚀 ХОТФІКС: Зберігаємо ключі під ID=0, щоб сканер міг їх знайти як системні!
     ok = await _db.save_credentials(
         exchange=exchange,
         api_key=api_key,
         api_secret=api_secret,
         passphrase=passphrase,
-        label="bot_connected",
+        label="system_keys",
+        user_id=0,
     )
 
     if not ok:
@@ -316,7 +328,7 @@ async def _save_credentials(
         logger.info("Commands: %s credentials updated in account client", exchange)
 
     await message.answer(
-        f"✅ <b>{exchange}</b> успішно підключено!\n\n"
+        f"✅ <b>{exchange}</b> успішно підключено (Системні ключі)!\n\n"
         f"Ключ: <code>{api_key[:8]}...</code>\n\n"
         f"Використай /balance щоб перевірити підключення."
     )
@@ -389,8 +401,8 @@ async def cmd_balance(message: Message) -> None:
             found_any = True
             lines.append(f"\n🏦 <b>{exchange}</b>:")
             for b in balances:
-                coin  = b.get("coin", "?")
-                free  = float(b.get("free", 0))
+                coin = b.get("coin", "?")
+                free = float(b.get("free", 0))
                 total = float(b.get("total", free))
                 locked = total - free
                 if total > 0:
@@ -451,9 +463,9 @@ async def cmd_ban(message: Message) -> None:
             "Приклад: <code>/ban Binance s42ee507f2dc</code>"
         )
 
-    exchange    = parts[1].strip()
+    exchange = parts[1].strip()
     merchant_id = parts[2].strip()
-    reason      = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
+    reason = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
 
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")

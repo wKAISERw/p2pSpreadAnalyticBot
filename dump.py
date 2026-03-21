@@ -82,6 +82,7 @@ PRIORITY_FILES = [
     "filters/bank_filter.py",
     "filters/limit_filter.py",
     "filters/anomaly_filter.py",
+    "tools/migrate_multiuser.py",
 ]
 
 

@@ -318,6 +318,8 @@ class TelegramNotifier:
         self._db: MerchantDB | None = None
         self._setup_handlers()
 
+        # Single-user: глобальний chat_id з settings
+        # Multi-user: _send_with_retry отримує chat_id явно
         self._chat_id = settings.telegram_chat_id
         self._send_interval = send_interval
         self._group_window = group_window
@@ -333,6 +335,21 @@ class TelegramNotifier:
     def bind_commands(self, db, account_clients: dict) -> None:
         """Ініціалізує command center з посиланнями на компоненти."""
         bot_commands.setup(db, account_clients)
+
+    async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
+        """
+        Multi-user: відправляє алерт в конкретний chat_id.
+        Тимчасово підміняємо _chat_id, викликаємо _send_single, відновлюємо.
+        Thread-safe в asyncio бо немає yield між підміною і відновленням.
+        """
+        original_chat_id = self._chat_id
+        try:
+            self._chat_id = chat_id
+            await self._send_single(alert)
+        except Exception as e:
+            logger.error("send_to_user [%d]: %s", chat_id, e)
+        finally:
+            self._chat_id = original_chat_id
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -602,11 +619,13 @@ class TelegramNotifier:
             keyboard: InlineKeyboardMarkup | None = None,
             max_attempts: int = 3,
             disable_notification: bool = False,
+            chat_id: int | None = None,
     ) -> None:
+        target_chat = chat_id or self._chat_id
         for attempt in range(max_attempts):
             try:
                 await self._bot.send_message(
-                    chat_id=self._chat_id,
+                    chat_id=target_chat,
                     text=text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,

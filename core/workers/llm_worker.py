@@ -494,12 +494,15 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     neg_pct = (neg / total * 100.0) if total > 0 else 0.0
     bad_texts = review_summary.get("bad_texts", []) or []
 
+    # Математика зірваних угод
+    failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
+
     lines = [
         f"Біржа: {task.exchange}",
         f"Мерчант: {task.merchant_name} (ID: {task.merchant_id})",
         f"СТАТИСТИКА:",
         f"- Угод за місяць: {task.month_order_count}",
-        f"- Успішність: {task.finish_rate}%",
+        f"- Успішність: {task.finish_rate}% (~{failed_orders} зірваних/проблемних угод)",
         f"- Верифікація: {'ТАК' if task.is_verified else 'НІ'}",
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
         # ── Behavioral block ──────────────────────────────────────────────
@@ -512,6 +515,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"Умови: {norm_text}",
         "",
         "ПЕРЕВІР КОНТЕКСТ:",
+        "- Зважай на статистику (зірвані угоди). Якщо умов немає (Regex мовчить), але є сотні зірваних угод + хоч один поганий відгук = це BLOCK.",
         "- Зважай на рейтинг мерчанта. Трастовим мерчантам дозволено жорсткіше формулювати безпекові вимоги.",
         "- Якщо написано 'без третіх осіб' або 'не пишіть у Telegram' — це безпечний контекст.",
         "",
@@ -536,7 +540,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так (враховуй зірвані угоди)"}'
     )
     return "\n".join(lines)
 

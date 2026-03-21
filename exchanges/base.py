@@ -47,3 +47,17 @@ class BaseExchange(ABC):
     async def fetch_both_multi(self, amounts: list[float], banks: List[str]) -> Tuple[List[Order], List[Order]]:
         """Паралельний мульти-запит для максимальної швидкості."""
         pass
+
+    @staticmethod
+    def dedup(orders: "List[Order]") -> "List[Order]":
+        """
+        Дедуплікація ордерів по id.
+        Замінює _dedup/_dedup_by_id у всіх exchange файлах.
+        """
+        seen: set = set()
+        result = []
+        for order in orders:
+            if order.id not in seen:
+                seen.add(order.id)
+                result.append(order)
+        return result

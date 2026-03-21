@@ -81,16 +81,9 @@ class BybitExchange(BaseExchange):
             raw_buys.extend(results[i])
             raw_sells.extend(results[i + 1])
 
-        buy_orders = self._dedup_by_id(raw_buys)
-        sell_orders = self._dedup_by_id(raw_sells)
+        buy_orders = self.dedup(raw_buys)
+        sell_orders = self.dedup(raw_sells)
 
         return buy_orders, sell_orders
 
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen = set()
-        result = []
-        for order in orders:
-            if order.id not in seen:
-                seen.add(order.id)
-                result.append(order)
         return result
