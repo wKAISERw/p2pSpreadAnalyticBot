@@ -42,6 +42,7 @@ PRIORITY_FILES = [
     "config/banks.py",
     "scanner.py",
     "main.py",
+    "state.py"
     "core/engine/risk_engine.py",
     "core/storage/merchant_db.py",
     "core/analysis/regex_analyzer.py",

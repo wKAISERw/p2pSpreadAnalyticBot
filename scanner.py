@@ -3,7 +3,7 @@
 # БОЙОВА ВЕРСІЯ v2.0 (Рефакторинг: AlertDispatcher + ProviderFactory)
 # =============================================================================
 from __future__ import annotations
-
+from state import state
 import asyncio
 import logging
 import time
@@ -93,8 +93,8 @@ class AlertDispatcher:
             return False
 
         # 3. Банки
-        user_banks     = set(user["bank_codes"])
-        opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
+        user_banks = set(user["bank_codes"])
+        opp_buy_banks = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
         if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
             return False
@@ -103,14 +103,14 @@ class AlertDispatcher:
         mf = user.get("merchant_filters") or {}
         if mf:
             min_orders = float(mf.get("min_orders", 0))
-            min_rate   = float(mf.get("min_rate", 0.0))
-            buy_o  = opp["buy_order"]
+            min_rate = float(mf.get("min_rate", 0.0))
+            buy_o = opp["buy_order"]
             sell_o = opp["sell_order"]
             if min_orders > 0:
-                if buy_o.month_order_count  < min_orders: return False
+                if buy_o.month_order_count < min_orders: return False
                 if sell_o.month_order_count < min_orders: return False
             if min_rate > 0:
-                if buy_o.finish_rate_pct  < min_rate: return False
+                if buy_o.finish_rate_pct < min_rate: return False
                 if sell_o.finish_rate_pct < min_rate: return False
 
         return True
@@ -137,10 +137,10 @@ class AlertDispatcher:
 
 @dataclass
 class AccountClients:
-    bybit:   BybitAccountClient
+    bybit: BybitAccountClient
     binance: BinanceAccountClient
-    okx:     OKXAccountClient
-    mexc:    MEXCAccountClient
+    okx: OKXAccountClient
+    mexc: MEXCAccountClient
 
     def as_dict(self) -> dict:
         return {
@@ -156,10 +156,10 @@ async def _load_credentials(db: MerchantDB) -> AccountClients:
     """
     creds = await db.get_all_credentials()
 
-    bybit_acc   = BybitAccountClient()
+    bybit_acc = BybitAccountClient()
     binance_acc = BinanceAccountClient()
-    okx_acc     = OKXAccountClient()
-    mexc_acc    = MEXCAccountClient()
+    okx_acc = OKXAccountClient()
+    mexc_acc = MEXCAccountClient()
 
     if "Bybit" in creds:
         bybit_acc.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
@@ -181,10 +181,10 @@ async def _load_credentials(db: MerchantDB) -> AccountClients:
 
 
 def _bind_http_credentials(
-    creds: dict,
-    b_client: BybitP2PClient,
-    bn_client: BinanceClient,
-    o_client: OkxClient,
+        creds: dict,
+        b_client: BybitP2PClient,
+        bn_client: BinanceClient,
+        o_client: OkxClient,
 ) -> None:
     """Прив'язує ті самі credentials до HTTP клієнтів (для ReviewFetcher)."""
     if "Bybit" in creds:
@@ -203,8 +203,8 @@ def _bind_http_credentials(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _watchdog(
-    last_cycle_time: list[float],
-    interval: float = getattr(settings, "watchdog_interval", 30.0),
+        last_cycle_time: list[float],
+        interval: float = getattr(settings, "watchdog_interval", 30.0),
 ) -> None:
     while True:
         await asyncio.sleep(interval)
@@ -214,8 +214,8 @@ async def _watchdog(
 
 
 async def _db_maintenance_loop(
-    db: MerchantDB,
-    interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
+        db: MerchantDB,
+        interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
 ) -> None:
     max_age = getattr(settings, "db_snapshot_max_age_h", 168)
     while True:
@@ -235,7 +235,6 @@ async def _db_maintenance_loop(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> None:
-
     # ── Ініціалізація ──────────────────────────────────────────────────────
     merchant_db = MerchantDB()
     await merchant_db.start()
@@ -245,7 +244,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
     await runtime_config.load()
 
     # Завантажуємо credentials один раз через ProviderFactory
-    all_creds    = await merchant_db.get_all_credentials()
+    all_creds = await merchant_db.get_all_credentials()
     account_clients = await _load_credentials(merchant_db)
 
     notifier.bind_db(merchant_db)
@@ -260,8 +259,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
     )
     await review_fetcher.start()
 
-    risk_engine      = RiskEngine(db=merchant_db, llm_pool=llm_pool)
-    merchant_filter  = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
+    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
+    merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
         ttl_seconds=getattr(settings, "stability_ttl", 15.0),
@@ -277,17 +276,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
-    dispatcher   = AlertDispatcher(merchant_db, notifier)
+    dispatcher = AlertDispatcher(merchant_db, notifier)
 
     # Таймінги
-    cb_fails       = getattr(settings, "cb_failure_threshold", 3)
-    cb_timeout     = getattr(settings, "cb_recovery_timeout", 60.0)
-    cycle_min_sleep  = getattr(settings, "cycle_min_sleep", 0.5)
-    cycle_max_sleep  = getattr(settings, "cycle_max_sleep", 3.0)
+    cb_fails = getattr(settings, "cb_failure_threshold", 3)
+    cb_timeout = getattr(settings, "cb_recovery_timeout", 60.0)
+    cycle_min_sleep = getattr(settings, "cycle_min_sleep", 0.5)
+    cycle_max_sleep = getattr(settings, "cycle_max_sleep", 3.0)
     cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
 
-    last_cycle_time  = [time.monotonic()]
-    watchdog_task    = asyncio.create_task(_watchdog(last_cycle_time))
+    last_cycle_time = [time.monotonic()]
+    watchdog_task = asyncio.create_task(_watchdog(last_cycle_time))
     maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
@@ -299,28 +298,28 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
     try:
         async with (
-            BybitP2PClient()  as b_client,
-            OkxClient()       as o_client,
-            WalletClient()    as w_client,
-            BinanceClient()   as bn_client,
-            MexcClient()      as m_client,
+            BybitP2PClient() as b_client,
+            OkxClient() as o_client,
+            WalletClient() as w_client,
+            BinanceClient() as bn_client,
+            MexcClient() as m_client,
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client)
             review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client)
 
-            cb_bybit   = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_okx     = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_wallet  = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_mexc    = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
             ex_configs = [
-                {"name": "Bybit",   "instance": BybitExchange(b_client),   "cb": cb_bybit},
-                {"name": "OKX",     "instance": OkxExchange(o_client),     "cb": cb_okx},
-                {"name": "Wallet",  "instance": WalletExchange(w_client),  "cb": cb_wallet},
-                {"name": "Binance", "instance": BinanceExchange(bn_client),"cb": cb_binance},
-                {"name": "MEXC",    "instance": MexcExchange(m_client),    "cb": cb_mexc},
+                {"name": "Bybit", "instance": BybitExchange(b_client), "cb": cb_bybit},
+                {"name": "OKX", "instance": OkxExchange(o_client), "cb": cb_okx},
+                {"name": "Wallet", "instance": WalletExchange(w_client), "cb": cb_wallet},
+                {"name": "Binance", "instance": BinanceExchange(bn_client), "cb": cb_binance},
+                {"name": "MEXC", "instance": MexcExchange(m_client), "cb": cb_mexc},
             ]
 
             cb_userbot = CryptoBotUserbot(
@@ -364,8 +363,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     # 🚀 ФІКС: Перевірка чи сканер на паузі
                     is_active = runtime_config.get("is_scanner_active", "false") == "true"
                     if not is_active:
-                        last_cycle_time[0] = time.monotonic()  # <--- ДОДАЙ ЦЕЙ РЯДОК ДЛЯ WATCHDOG
-                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
+                        last_cycle_time[0] = time.monotonic()
+                        await asyncio.sleep(3.0)
                         continue
 
                     current_max_alerts = int(
@@ -373,37 +372,27 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     active_users = await merchant_db.get_active_users()
                     if active_users:
-                        # Матчер шукає широко (макс. капітал, мін. спред серед юзерів)
-                        # AlertDispatcher фільтрує окремо для кожного юзера
                         current_capital = max(float(u["capital"]) for u in active_users)
-                        current_spread  = min(float(u["min_spread"]) for u in active_users)
-                        logger.debug(
-                            "📐 Сітка: %d юзерів | капітал до %.0f ₴ | спред від %.2f%%",
-                            len(active_users), current_capital, current_spread,
-                        )
+                        current_spread = min(float(u["min_spread"]) for u in active_users)
                     else:
-                        # Fallback: поки ніхто не написав /start — беремо з .env
                         current_capital = settings.working_capital_uah
-                        current_spread  = settings.min_spread_pct
-                        logger.debug("📐 Fallback: no active users, using .env defaults")
+                        current_spread = settings.min_spread_pct
 
                     matcher.max_capital_uah = current_capital
-                    matcher.min_spread_pct  = current_spread
-                    set_max_capital(current_capital)  # LimitFilter використовує для pre-filter
+                    matcher.min_spread_pct = current_spread
+                    set_max_capital(current_capital)
 
-                    # Динамічна сітка — покриває діапазони всіх активних юзерів
-                    _grid: set[float] = {1000.0, 2500.0}   # базові точки адміна
+                    _grid: set[float] = {1000.0, 2500.0}
                     for u in active_users:
                         cap = float(u["capital"])
-                        mn  = float(u.get("min_amount", 0.0)) or 1000.0
-                        _grid.add(mn)                           # нижня межа юзера
-                        _grid.add(cap)                          # верхня межа юзера
-                        _grid.add(round((mn + cap) / 2, -2))   # середина (округл. до 100)
+                        mn = float(u.get("min_amount", 0.0)) or 1000.0
+                        _grid.add(mn)
+                        _grid.add(cap)
+                        _grid.add(round((mn + cap) / 2, -2))
                     if not active_users:
                         _grid.update(getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]))
                     search_amounts = sorted(_grid)
 
-                    # Паралельний збір ордерів з усіх бірж
                     results = await asyncio.gather(
                         *(safe_fetch(cfg, search_amounts, list(target_banks.keys())) for cfg in ex_configs),
                         return_exceptions=True,
@@ -413,7 +402,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
-                    # Групування ордерів по банках
                     all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
@@ -446,7 +434,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     last_cycle_time[0] = time.monotonic()
 
-                    # Матчинг і групування спредів
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
                     opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
@@ -463,6 +450,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         },
                     )
 
+                    # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
+                    state.stats["totalScanned"] += len(all_cycle_orders)
+                    state.stats["opportunitiesFound"] += len(opportunities)
+                    state.stats["avgSpread"] = round(
+                        sum(float(o["net_spread_pct"]) for o in opportunities) / len(opportunities)
+                        if opportunities else 0.0,
+                        2
+                    )
+                    # ----------------------------
+
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
                         latency, len(ex_configs),
@@ -470,7 +467,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         len(raw_opportunities), len(opportunities),
                     )
 
-                    # ── Обробка можливостей ────────────────────────────────
                     sent_count = 0
                     for opp in opportunities:
                         if sent_count >= current_max_alerts:
@@ -479,7 +475,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        # Risk аналіз (один раз на ордер)
                         if not getattr(buy_o, "_risk_analyzed", False):
                             risk_engine.analyze(buy_o);
                             buy_o._risk_analyzed = True
@@ -530,7 +525,94 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             route_type=opp.get("route_type", "UNKNOWN"),
                         )
 
-                        # Не шлемо якщо юзер поставив паузу
+                        # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
+                        def safe_float(val):
+                            try:
+                                return float(val)
+                            except:
+                                return 0.0
+
+                        frontend_opp = {
+                            "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
+                            "timestamp": int(time.time() * 1000),  # Важливо для date-fns!
+
+                            "buyOrder": {
+                                "id": getattr(buy_o, "id", "b1"),
+                                "price": safe_float(getattr(buy_o, "price", 0)),
+                                "availableAmount": safe_float(getattr(buy_o, "available_amount", getattr(buy_o, "qty",
+                                                                                                         getattr(buy_o,
+                                                                                                                 "amount",
+                                                                                                                 0)))),
+                                "minLimit": safe_float(getattr(buy_o, "min_limit", getattr(buy_o, "min_amount",
+                                                                                           getattr(buy_o,
+                                                                                                   "min_order_amount",
+                                                                                                   0)))),
+                                "maxLimit": safe_float(getattr(buy_o, "max_limit", getattr(buy_o, "max_amount",
+                                                                                           getattr(buy_o,
+                                                                                                   "max_order_amount",
+                                                                                                   0)))),
+                                "merchantId": getattr(buy_o, "merchant_id", ""),
+                                "merchantName": getattr(buy_o, "merchant_name", "Unknown"),
+                                "orderCount": int(
+                                    safe_float(getattr(buy_o, "order_count", getattr(buy_o, "month_order_count", 0)))),
+                                "finishRate": safe_float(getattr(buy_o, "finish_rate", getattr(buy_o, "finish_rate_pct",
+                                                                                               getattr(buy_o,
+                                                                                                       "month_finish_rate",
+                                                                                                       0)))),
+                                "exchange": getattr(buy_o, "exchange", "Unknown"),
+                                "link": getattr(buy_o, "link", "#"),
+                                "bankCodes": getattr(buy_o, "bank_codes", []),
+                                "riskScore": getattr(buy_o, "risk_score", 0),
+                                "riskFlag": getattr(buy_o, "risk_flag", "OK"),
+                                "isVerified": getattr(buy_o, "is_verified", False)
+                            },
+
+                            "sellOrder": {
+                                "id": getattr(sell_o, "id", "s1"),
+                                "price": safe_float(getattr(sell_o, "price", 0)),
+                                "availableAmount": safe_float(getattr(sell_o, "available_amount", getattr(sell_o, "qty",
+                                                                                                          getattr(
+                                                                                                              sell_o,
+                                                                                                              "amount",
+                                                                                                              0)))),
+                                "minLimit": safe_float(getattr(sell_o, "min_limit", getattr(sell_o, "min_amount",
+                                                                                            getattr(sell_o,
+                                                                                                    "min_order_amount",
+                                                                                                    0)))),
+                                "maxLimit": safe_float(getattr(sell_o, "max_limit", getattr(sell_o, "max_amount",
+                                                                                            getattr(sell_o,
+                                                                                                    "max_order_amount",
+                                                                                                    0)))),
+                                "merchantId": getattr(sell_o, "merchant_id", ""),
+                                "merchantName": getattr(sell_o, "merchant_name", "Unknown"),
+                                "orderCount": int(safe_float(
+                                    getattr(sell_o, "order_count", getattr(sell_o, "month_order_count", 0)))),
+                                "finishRate": safe_float(getattr(sell_o, "finish_rate",
+                                                                 getattr(sell_o, "finish_rate_pct",
+                                                                         getattr(sell_o, "month_finish_rate", 0)))),
+                                "exchange": getattr(sell_o, "exchange", "Unknown"),
+                                "link": getattr(sell_o, "link", "#"),
+                                "bankCodes": getattr(sell_o, "bank_codes", []),
+                                "riskScore": getattr(sell_o, "risk_score", 0),
+                                "riskFlag": getattr(sell_o, "risk_flag", "OK"),
+                                "isVerified": getattr(sell_o, "is_verified", False)
+                            },
+
+                            "netSpread": safe_float(opp.get("net_spread_pct", 0)),
+                            "dealAmount": safe_float(
+                                opp.get("actual_entry_uah", opp.get("deal_amount", opp.get("volume", 0)))),
+                            "netProfit": safe_float(opp.get("net_profit", 0)),
+                            "buyBank": opp.get("buy_bank", ""),
+                            "sellBank": opp.get("sell_bank", ""),
+                            "routeType": opp.get("route_type", "UNKNOWN")
+                        }
+
+                        # Додаємо нову зв'язку на початок списку (зберігаємо останні 50)
+                        state.opportunities.insert(0, frontend_opp)
+                        if len(state.opportunities) > 50:
+                            state.opportunities.pop()
+                        # ----------------------------
+
                         if not is_muted():
                             await dispatcher.dispatch(alert, opp)
 
