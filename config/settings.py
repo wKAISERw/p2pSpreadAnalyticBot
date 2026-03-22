@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     wallet_token: str = ""
     telegram_api_id: int
     telegram_api_hash: str
+    admin_id: int = 0
 
     # ── LLM ───────────────────────────────────────────────────────────────
     groq_api_key: str = ""

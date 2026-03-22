@@ -27,6 +27,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from config import settings
+
+# ── Admin helper ───────────────────────────────────────────────────────────
+def _is_admin(user_id: int) -> bool:
+    """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
+    admin_id = getattr(settings, "admin_id", 0)
+    # Fallback: якщо ADMIN_ID не встановлено — вважаємо адміном TELEGRAM_CHAT_ID
+    if not admin_id:
+        admin_id = getattr(settings, "telegram_chat_id", 0)
+    return user_id == admin_id
 from config.runtime import runtime_config, ALLOWED_KEYS
 from bot.keyboards import (
     main_menu_kb, settings_menu_kb, keys_menu_kb,
@@ -58,12 +67,18 @@ class ConnectStates(StatesGroup):
 
 
 class SettingStates(StatesGroup):
-    waiting_capital = State()
-    waiting_spread = State()
+    waiting_capital    = State()
+    waiting_min_amount = State()
+    waiting_spread     = State()
 
 
 class GlobalSettingStates(StatesGroup):
     waiting_value = State()
+
+
+class MerchantFilterStates(StatesGroup):
+    waiting_min_orders = State()
+    waiting_min_rate   = State()
 
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
@@ -119,15 +134,20 @@ def update_stats(**kwargs) -> None:
 
 
 # ── /start (ГОЛОВНИЙ ДАШБОРД) ──────────────────────────────────────────────
+# ── /start (ЗАПУСК ПЕРСОНАЛЬНОГО СКАНЕРА ТА ДАШБОРД) ──────────────────────
+# ── /start (ЗАПУСК ПЕРСОНАЛЬНОГО СКАНЕРА ТА ДАШБОРД) ──────────────────────
 async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
-    user_capital = "5100.0"
-    user_spread = "0.50"
+    user_capital    = str(settings.working_capital_uah)
+    user_min_amount = "без обмежень"
+    user_spread     = "0.50"
     if _db:
         active_users = await _db.get_active_users()
         for u in active_users:
             if u["user_id"] == user_id:
                 user_capital = f"{u['capital']:.1f}"
-                user_spread = f"{u['min_spread']:.2f}"
+                user_spread  = f"{u['min_spread']:.2f}"
+                _min_amt = float(u.get("min_amount") or 0.0)
+                user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
                 break
 
     is_active = runtime_config.get("is_scanner_active", "false") == "true"
@@ -137,8 +157,9 @@ async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
         "👋 <b>ARBIX QUANTUM | Особистий кабінет</b>\n\n"
         f"Статус ядра: {status_text}\n\n"
         "🛠 <b>Твої персональні фільтри:</b>\n"
-        f"├ Робочий капітал: <b>{user_capital} ₴</b>\n"
-        f"└ Мінімальний спред: <b>{user_spread}%</b>\n\n"
+        f"├ Капітал: <b>{user_capital} ₴</b>\n"
+        f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
+        f"└ Мін. спред: <b>{user_spread}%</b>\n\n"
         "<i>👇 Використовуй меню нижче для управління:</i>"
     )
     return text, is_active
@@ -150,8 +171,37 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     if _db:
         await _db.register_user(user_id=message.from_user.id, chat_id=message.chat.id)
 
+        # 🚀 Гарантовано вмикаємо персональний сканер юзера при /start
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 1 WHERE user_id = ?",
+            (message.from_user.id,)
+        )
+        await conn.commit()
+
     text, is_active = await _generate_dashboard_text(message.from_user.id)
-    await message.answer(text, reply_markup=main_menu_kb(is_active, is_muted()))
+    await message.answer(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(message.from_user.id)))
+
+
+# ── /stop (ЗУПИНКА ПЕРСОНАЛЬНОГО СКАНЕРА) ──────────────────────────────────
+@router.message(Command("stop"))
+async def cmd_stop(message: Message) -> None:
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        # Вимикаємо юзера з активної сітки сканування
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 0 WHERE user_id = ?",
+            (message.from_user.id,)
+        )
+        await conn.commit()
+
+    text, is_active = await _generate_dashboard_text(message.from_user.id)
+    await message.answer(
+        "🛑 <b>Твій персональний сканер зупинено!</b>\n"
+        "Система більше не витрачає ресурси на пошук твоїх лімітів, алерти не надходитимуть.\n\n"
+        "▶️ Щоб запустити знову, напиши /start",
+        reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(message.from_user.id))
+    )
 
 
 # ── /help ──────────────────────────────────────────────────────────────────
@@ -174,16 +224,32 @@ async def cmd_status(message: Message) -> None:
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
 
+    # 🚀 ФІКС: Перевіряємо ОСОБИСТІ ключі юзера з БД
+    my_creds = await _db.get_all_credentials(user_id=message.from_user.id)
     connected = []
-    for exchange, client in _account_clients.items():
-        if getattr(client, "is_authenticated", False):
-            connected.append(f"✅ {exchange}")
+    for ex in ["Binance", "Bybit", "OKX", "MEXC"]:
+        if ex in my_creds:
+            connected.append(f"✅ {ex}")
         else:
-            connected.append(f"❌ {exchange}")
+            connected.append(f"❌ {ex} (відсутні)")
 
-    capital = runtime_config.get("working_capital_uah", settings.working_capital_uah)
-    spread = runtime_config.get("min_spread_pct", settings.min_spread_pct)
-    risk = runtime_config.get("risk_mode", settings.risk_mode)
+    # Персональні параметри з scanner_users
+    _my_capital    = settings.working_capital_uah
+    _my_spread     = settings.min_spread_pct
+    _my_min_amount = 0.0
+    active_users = await _db.get_active_users()
+    for u in active_users:
+        if u["user_id"] == message.from_user.id:
+            _my_capital    = float(u["capital"])
+            _my_spread     = float(u["min_spread"])
+            _my_min_amount = float(u.get("min_amount", 0.0))
+            break
+
+    # Глобальні системні параметри
+    capital = _my_capital
+    spread  = _my_spread
+    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+    min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
 
     llm_q = _scanner_stats.get("llm_queue", 0)
     rev_q = _scanner_stats.get("review_queue", 0)
@@ -203,12 +269,57 @@ async def cmd_status(message: Message) -> None:
             f"{mute_line}\n\n"
             f"💼 Капітал: <code>{capital} ₴</code>\n"
             f"📉 Спред: <code>{spread}%</code>\n"
+            f"{min_amount_line}"
             f"🛡 Ризик: <code>{risk}</code>\n\n"
             "🔌 <b>API:</b>\n" + "\n".join(connected) +
             ("\n\n⚡ <b>Circuit Breakers:</b>\n" + "\n".join(cb_lines) if cb_lines else "")
     )
     await message.answer(text)
 
+
+# ── /users (ТІЛЬКИ АДМІН) ──────────────────────────────────────────────────
+@router.message(Command("users"))
+async def cmd_users(message: Message) -> None:
+    # Захист: пускаємо тільки адміна
+    if not _is_admin(message.from_user.id):
+        return await message.answer("⛔ Ця команда доступна лише адміністратору.")
+
+    if not _db:
+        return await message.answer("❌ База даних недоступна.")
+
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    if not conn:
+        return await message.answer("❌ З'єднання з БД відсутнє.")
+
+    # Дістаємо всіх юзерів з таблиці
+    async with conn.execute(
+            "SELECT user_id, telegram_chat_id, working_capital, is_alerts_active FROM scanner_users"
+    ) as cur:
+        rows = await cur.fetchall()
+
+    if not rows:
+        return await message.answer("👥 У базі ще немає зареєстрованих користувачів.")
+
+    lines = ["👥 <b>Користувачі сканера:</b>\n"]
+    active_count = 0
+
+    for row in rows:
+        uid = row[0]
+        cap = float(row[2])
+        is_active = bool(row[3])
+
+        if is_active:
+            status = "🟢 Активний"
+            active_count += 1
+        else:
+            status = "🔴 Пауза"
+
+        admin_mark = " 👑 (Адмін)" if _is_admin(uid) else ""
+        lines.append(f"👤 <code>{uid}</code>{admin_mark}\n ├ Статус: {status}\n └ Капітал: {cap:.0f} ₴\n")
+
+    lines.append(f"📊 Всього: <b>{len(rows)}</b> | З увімкненими алертами: <b>{active_count}</b>")
+
+    await message.answer("\n".join(lines))
 
 # ── /keys ──────────────────────────────────────────────────────────────────
 @router.message(Command("keys"))
@@ -381,11 +492,16 @@ def _generate_settings_text() -> str:
 @router.message(Command("settings"))
 async def cmd_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
+    if not _is_admin(message.from_user.id):
+        return await message.answer("⛔ Глобальні налаштування доступні тільки адміну.")
     await message.answer(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
 
 
 @router.callback_query(F.data == "menu:global_settings")
 async def on_global_settings_menu(call: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін", show_alert=True)
+        return
     await state.clear()
     with suppress(TelegramBadRequest):
         await call.message.edit_text(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
@@ -394,6 +510,9 @@ async def on_global_settings_menu(call: CallbackQuery, state: FSMContext) -> Non
 
 @router.callback_query(F.data.startswith("gset:"))
 async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін", show_alert=True)
+        return
     key = call.data.split(":", 1)[1]
     if key not in SETTING_DESCRIPTIONS:
         await call.answer("❌ Невідомий параметр", show_alert=True)
@@ -481,7 +600,53 @@ async def on_capital_input(message: Message, state: FSMContext) -> None:
             await conn.commit()
         await message.answer(f"✅ Персональний капітал оновлено: <b>{val:.1f} ₴</b>", reply_markup=back_to_main_kb())
     except ValueError:
-        await message.answer("❌ Формат невірний. Введи число (наприклад: 5100.0 або просто 5100)")
+        await message.answer("❌ Формат невірний. Введи число (наприклад: 6000.0 або просто 6000)")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "set:min_amount")
+async def on_set_min_amount(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingStates.waiting_min_amount)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📦 <b>Мінімальна сума угоди (₴)</b>\n\n"
+            "Алерти з сумою <b>менше</b> цього порогу не прийдуть.\n"
+            "Введи <code>0</code> щоб вимкнути нижній фільтр.\n\n"
+            "<i>Приклад: 10000 — не показувати угоди менше 10 000 ₴</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(SettingStates.waiting_min_amount)
+async def on_min_amount_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError("Значення не може бути від'ємним")
+        if _db:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            # ALTER TABLE на випадок якщо стара БД без колонки
+            try:
+                await conn.execute(
+                    "ALTER TABLE scanner_users ADD COLUMN min_amount_uah REAL DEFAULT 0.0"
+                )
+                await conn.commit()
+            except Exception:
+                pass
+            await conn.execute(
+                "UPDATE scanner_users SET min_amount_uah = ? WHERE user_id = ?",
+                (val, message.from_user.id),
+            )
+            await conn.commit()
+        label = f"{val:.0f} ₴" if val > 0 else "вимкнено (всі угоди)"
+        await message.answer(
+            f"✅ Мін. сума оновлена: <b>{label}</b>",
+            reply_markup=back_to_main_kb(),
+        )
+    except ValueError as e:
+        await message.answer(f"❌ Помилка: {e}\nВведи число (напр. 10000 або 0)")
     finally:
         await state.clear()
 
@@ -521,19 +686,57 @@ async def on_main_menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted()))
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     await call.answer()
 
 
 @router.callback_query(F.data.in_(["scanner:start", "scanner:stop"]))
 async def on_scanner_toggle(call: CallbackQuery) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін може керувати ядром сканера", show_alert=True)
+        return
     new_state = "true" if call.data == "scanner:start" else "false"
     await runtime_config.set("is_scanner_active", new_state)
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted()))
+        # 🚀 ВИПРАВЛЕНО: Додано _is_admin(call.from_user.id)
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     action = "ЗАПУЩЕНО! Парсинг почався" if is_active else "ЗУПИНЕНО! Парсинг на паузі"
     await call.answer(f"✅ Сканер {action}!", show_alert=True)
+
+
+# ── Локальна пауза алертів юзера (не глобальна зупинка ядра) ───────────────
+
+@router.callback_query(F.data == "user:alerts:off")
+async def on_user_alerts_off(call: CallbackQuery) -> None:
+    """Юзер вимикає свої алерти — ядро сканера продовжує для інших."""
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 0 WHERE user_id = ?",
+            (call.from_user.id,)
+        )
+        await conn.commit()
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer("🔕 Мої алерти вимкнено", show_alert=True)
+
+
+@router.callback_query(F.data == "user:alerts:on")
+async def on_user_alerts_on(call: CallbackQuery) -> None:
+    """Юзер вмикає свої алерти знову."""
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 1 WHERE user_id = ?",
+            (call.from_user.id,)
+        )
+        await conn.commit()
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer("🔔 Мої алерти увімкнено!", show_alert=True)
 
 
 @router.callback_query(F.data == "menu:settings")
@@ -736,31 +939,127 @@ async def on_mute(call: CallbackQuery) -> None:
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
             f"🔕 <b>Алерти вимкнено на {hours:.0f} год</b>\n\n"
-            f"Щоб увімкнути — натисни /start або кнопку нижче.",
-            reply_markup=back_to_main_kb(),
-        )
-    await call.answer(f"🔕 Пауза на {hours:.0f} год")
-
-# ── Пауза алертів ─────────────────────────────────────────────────────────
-
-@router.callback_query(F.data.startswith("mute:"))
-async def on_mute(call: CallbackQuery) -> None:
-    global _mute_until
-    import time
-    action = call.data.split(":")[1]
-    if action == "off":
-        _mute_until = 0.0
-        text, is_active = await _generate_dashboard_text(call.from_user.id)
-        with suppress(TelegramBadRequest):
-            await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, False))
-        await call.answer("🔔 Алерти увімкнено!")
-        return
-    hours = float(action)
-    _mute_until = time.monotonic() + hours * 3600
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(
-            f"🔕 <b>Алерти вимкнено на {hours:.0f} год</b>\n\n"
             "Щоб увімкнути — натисни /start або кнопку нижче.",
             reply_markup=back_to_main_kb(),
         )
     await call.answer(f"🔕 Пауза на {hours:.0f} год")
+
+# ── Фільтри мерчантів ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set:merchant_filters")
+async def on_set_merchant_filters(call: CallbackQuery) -> None:
+    """Показує поточні фільтри мерчанта і пропонує змінити."""
+    mf = {}
+    if _db:
+        users = await _db.get_active_users()
+        # get_active_users тільки для is_alerts_active=1, тому запитуємо напряму
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        async with conn.execute(
+            "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?",
+            (call.from_user.id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row and row[0]:
+            import json
+            mf = json.loads(row[0]) or {}
+
+    min_orders = mf.get("min_orders", 0)
+    min_rate   = mf.get("min_rate", 0.0)
+
+    orders_label = f"{min_orders:.0f}" if min_orders else "без обмежень"
+    rate_label   = f"{min_rate:.0f}%" if min_rate else "без обмежень"
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📊 Мін. угод: {orders_label}", callback_data="mf:orders")
+    builder.button(text=f"⭐ Мін. рейтинг: {rate_label}", callback_data="mf:rate")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📊 <b>Фільтри мерчанта</b>\n\n"
+            "Алерт прийде ТІЛЬКИ якщо обидва мерчанти (buy і sell) відповідають цим критеріям.\n\n"
+            f"├ Мін. угод: <b>{orders_label}</b>\n"
+            f"└ Мін. рейтинг: <b>{rate_label}</b>",
+            reply_markup=builder.as_markup(),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "mf:orders")
+async def on_mf_orders(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_orders)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📊 <b>Мінімальна кількість угод мерчанта</b>\n\n"
+            "Введи число. <code>0</code> — вимкнути фільтр.\n"
+            "<i>Приклад: 100 — показувати тільки мерчантів з ≥100 угодами</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_orders)
+async def on_mf_orders_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        await _save_merchant_filter(message.from_user.id, "min_orders", val)
+        label = f"{val}" if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. угод: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "mf:rate")
+async def on_mf_rate(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_rate)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "⭐ <b>Мінімальний рейтинг мерчанта (%)</b>\n\n"
+            "Введи число від 0 до 100. <code>0</code> — вимкнути.\n"
+            "<i>Приклад: 95 — тільки мерчанти з рейтингом ≥95%</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_rate)
+async def on_mf_rate_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if not 0 <= val <= 100:
+            raise ValueError("Має бути від 0 до 100")
+        await _save_merchant_filter(message.from_user.id, "min_rate", val)
+        label = f"{val:.0f}%" if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. рейтинг: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+async def _save_merchant_filter(user_id: int, key: str, value) -> None:
+    """Зберігає один ключ в merchant_filters_json без перезапису інших."""
+    if not _db:
+        return
+    import json
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    mf = json.loads((row[0] if row else None) or "{}")
+    if value == 0 or value == 0.0:
+        mf.pop(key, None)  # 0 = вимкнути фільтр
+    else:
+        mf[key] = value
+    await conn.execute(
+        "UPDATE scanner_users SET merchant_filters_json = ? WHERE user_id = ?",
+        (json.dumps(mf), user_id),
+    )
+    await conn.commit()

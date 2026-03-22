@@ -1,6 +1,6 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-21 20:13
-# Files: 74
+# Generated: 2026-03-22 15:52
+# Files: 75
 #
 # STRUCTURE:
 #   config\settings.py
@@ -50,6 +50,7 @@
 #   filters\limit_filter.py
 #   filters\anomaly_filter.py
 #   tools\migrate_multiuser.py
+#   tools\cleanup_settings.py
 #   bot\__init__.py
 #   config\__init__.py
 #   config.py
@@ -101,6 +102,7 @@ class Settings(BaseSettings):
     wallet_token: str = ""
     telegram_api_id: int
     telegram_api_hash: str
+    admin_id: int = 0
 
     # ── LLM ───────────────────────────────────────────────────────────────
     groq_api_key: str = ""
@@ -254,15 +256,15 @@ from typing import Any, Optional
 logger = logging.getLogger("RuntimeConfig")
 
 # Ключі що дозволено змінювати через UI
+# Тільки системні параметри — персональні (capital/spread/banks) в scanner_users
 ALLOWED_KEYS = frozenset({
-    "min_spread_pct",
-    "working_capital_uah",
     "risk_mode",
     "behavior_alert_score",
     "velocity_spike_per_hour",
     "sticky_min_chain",
     "review_ttl_hours",
     "max_alerts_per_cycle",
+    "is_scanner_active",
 })
 
 
@@ -285,16 +287,28 @@ class RuntimeConfig:
             if conn:
                 await conn.execute(
                     """CREATE TABLE IF NOT EXISTS bot_settings
+                    (
+                        user_id
+                        INTEGER
+                        NOT
+                        NULL
+                        DEFAULT
+                        0,
+                        key
+                        TEXT
+                        NOT
+                        NULL,
+                        value
+                        TEXT,
+                        updated_at
+                        REAL,
+                        PRIMARY
+                        KEY
                        (
-                           key
-                           TEXT
-                           PRIMARY
-                           KEY,
-                           value
-                           TEXT,
-                           updated_at
-                           REAL
-                       )"""
+                        user_id,
+                        key
+                       )
+                        )"""
                 )
                 await conn.commit()
         except Exception as e:
@@ -305,23 +319,19 @@ class RuntimeConfig:
         if not self._db:
             return
         try:
-            # 🚀 1. Перевіряємо/Створюємо таблицю
             await self.init_table()
-
-            # 🚀 2. Шукаємо реальний об'єкт aiosqlite з'єднання
             conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
-            async with conn.execute("SELECT key, value FROM bot_settings") as cur:
+
+            # 🚀 ФІКС: Завантажуємо тільки глобальні налаштування (user_id = 0)
+            async with conn.execute("SELECT key, value FROM bot_settings WHERE user_id = 0") as cur:
                 rows = await cur.fetchall()
 
-            # 🚀 3. Безпечно дістаємо дані (працює і для aiosqlite.Row, і для звичайних tuple)
             self._cache = {r[0]: r[1] for r in rows} if rows and isinstance(rows[0], tuple) else {r["key"]: r["value"]
                                                                                                   for r in rows}
-
             logger.debug("RuntimeConfig: loaded %d overrides", len(self._cache))
         except Exception as e:
             logger.warning("RuntimeConfig load error: %s", e)
 
-    # 🚀 ОТОЙ САМИЙ ЗАГУБЛЕНИЙ МЕТОД:
     def get(self, key: str, default: Any = None) -> Any:
         return self._cache.get(key, default)
 
@@ -334,11 +344,13 @@ class RuntimeConfig:
         import time
         try:
             conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+
+            # 🚀 ФІКС: Правильний ON CONFLICT(user_id, key)
             await conn.execute(
-                """INSERT INTO bot_settings (key, value, updated_at)
-                   VALUES (?, ?, ?) ON CONFLICT(key) DO
-                UPDATE SET value =excluded.value,
-                    updated_at=excluded.updated_at""",
+                """INSERT INTO bot_settings (user_id, key, value, updated_at)
+                   VALUES (0, ?, ?, ?) ON CONFLICT(user_id, key) DO
+                UPDATE SET value = excluded.value,
+                    updated_at = excluded.updated_at""",
                 (key, str(value), time.time()),
             )
             await conn.commit()
@@ -590,7 +602,7 @@ from typing import Optional
 from config import settings
 from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 from config.runtime import runtime_config
-from bot.commands import update_stats
+from bot.commands import update_stats, is_muted
 from bot.notifier import TelegramNotifier, SpreadAlert
 from core.engine.cross_matcher import CrossMatchingEngine
 from core.engine.risk_engine import RiskEngine
@@ -607,6 +619,7 @@ from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
 from filters.merchant_filter import MerchantFilter
+from filters.limit_filter import set_max_capital
 from infrastructure.api.binance_account import BinanceAccountClient
 from infrastructure.api.bybit_account import BybitAccountClient
 from infrastructure.api.mexc_account import MEXCAccountClient
@@ -648,16 +661,47 @@ class AlertDispatcher:
         return self._users_cache
 
     def _user_wants(self, user: dict, opp: dict) -> bool:
-        """Чи підходить спред під параметри юзера."""
+        """
+        Персональний фільтр юзера:
+          1. Коридор сум: min_amount ≤ entry ≤ capital
+          2. Мінімальний спред
+          3. Банки перетинаються
+          4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json)
+        """
+        entry = float(opp["actual_entry_uah"])
+
+        # 1. Капітальний коридор
+        if entry > float(user["capital"]):
+            return False
+        min_amount = float(user.get("min_amount", 0.0))
+        if min_amount > 0 and entry < min_amount:
+            return False
+
+        # 2. Мінімальний спред
         if float(opp["net_spread_pct"]) < float(user["min_spread"]):
             return False
-        if float(opp["actual_entry_uah"]) > float(user["capital"]):
-            return False
+
+        # 3. Банки
         user_banks     = set(user["bank_codes"])
         opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
         if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
             return False
+
+        # 4. Персональні фільтри мерчанта
+        mf = user.get("merchant_filters") or {}
+        if mf:
+            min_orders = float(mf.get("min_orders", 0))
+            min_rate   = float(mf.get("min_rate", 0.0))
+            buy_o  = opp["buy_order"]
+            sell_o = opp["sell_order"]
+            if min_orders > 0:
+                if buy_o.month_order_count  < min_orders: return False
+                if sell_o.month_order_count < min_orders: return False
+            if min_rate > 0:
+                if buy_o.finish_rate_pct  < min_rate: return False
+                if sell_o.finish_rate_pct < min_rate: return False
+
         return True
 
     async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
@@ -837,10 +881,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
-        "💼 Капітал: %s ₴ | Поріг: %s%% (+%s%% буфер)",
+        "💼 Дефолт капітал: %s ₴ | Поріг: %s%% | (Персональні налаштування завантажуються з БД)",
         settings.working_capital_uah,
         settings.min_spread_pct,
-        getattr(settings, "safety_buffer_pct", 0.0),
     )
 
     try:
@@ -907,14 +950,47 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         await runtime_config.load()
                         _runtime_last_load = time.monotonic()
 
-                    current_capital    = float(runtime_config.get("working_capital_uah", settings.working_capital_uah))
-                    current_spread     = float(runtime_config.get("min_spread_pct", settings.min_spread_pct))
-                    current_max_alerts = int(runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
+                    # 🚀 ФІКС: Перевірка чи сканер на паузі
+                    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+                    if not is_active:
+                        last_cycle_time[0] = time.monotonic()  # <--- ДОДАЙ ЦЕЙ РЯДОК ДЛЯ WATCHDOG
+                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
+                        continue
+
+                    current_max_alerts = int(
+                        runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
+
+                    active_users = await merchant_db.get_active_users()
+                    if active_users:
+                        # Матчер шукає широко (макс. капітал, мін. спред серед юзерів)
+                        # AlertDispatcher фільтрує окремо для кожного юзера
+                        current_capital = max(float(u["capital"]) for u in active_users)
+                        current_spread  = min(float(u["min_spread"]) for u in active_users)
+                        logger.debug(
+                            "📐 Сітка: %d юзерів | капітал до %.0f ₴ | спред від %.2f%%",
+                            len(active_users), current_capital, current_spread,
+                        )
+                    else:
+                        # Fallback: поки ніхто не написав /start — беремо з .env
+                        current_capital = settings.working_capital_uah
+                        current_spread  = settings.min_spread_pct
+                        logger.debug("📐 Fallback: no active users, using .env defaults")
 
                     matcher.max_capital_uah = current_capital
                     matcher.min_spread_pct  = current_spread
+                    set_max_capital(current_capital)  # LimitFilter використовує для pre-filter
 
-                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
+                    # Динамічна сітка — покриває діапазони всіх активних юзерів
+                    _grid: set[float] = {1000.0, 2500.0}   # базові точки адміна
+                    for u in active_users:
+                        cap = float(u["capital"])
+                        mn  = float(u.get("min_amount", 0.0)) or 1000.0
+                        _grid.add(mn)                           # нижня межа юзера
+                        _grid.add(cap)                          # верхня межа юзера
+                        _grid.add(round((mn + cap) / 2, -2))   # середина (округл. до 100)
+                    if not active_users:
+                        _grid.update(getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]))
+                    search_amounts = sorted(_grid)
 
                     # Паралельний збір ордерів з усіх бірж
                     results = await asyncio.gather(
@@ -928,7 +1004,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     # Групування ордерів по банках
                     all_cycle_orders = []
-                    buy_grouped  = {b: [] for b in target_banks}
+                    buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
 
                     for res in results:
@@ -961,11 +1037,20 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     # Матчинг і групування спредів
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
-                    opportunities     = matcher.group(raw_opportunities, BANK_NAMES)
-                    latency           = time.monotonic() - start_time
+                    opportunities = matcher.group(raw_opportunities, BANK_NAMES)
+                    latency = time.monotonic() - start_time
 
                     _cycle_counter += 1
-                    update_stats(cycles=_cycle_counter, last_cycle_ms=latency * 1000)
+                    update_stats(
+                        cycles=_cycle_counter,
+                        last_cycle_ms=latency * 1000,
+                        llm_queue=llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0,
+                        review_queue=review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0,
+                        cb_status={
+                            cfg["name"]: cfg["cb"].state.value
+                            for cfg in ex_configs
+                        },
+                    )
 
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
@@ -980,14 +1065,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         if sent_count >= current_max_alerts:
                             break
 
-                        buy_o  = opp["buy_order"]
+                        buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
                         # Risk аналіз (один раз на ордер)
-                        if not getattr(buy_o,  "_risk_analyzed", False):
-                            risk_engine.analyze(buy_o);  buy_o._risk_analyzed  = True
+                        if not getattr(buy_o, "_risk_analyzed", False):
+                            risk_engine.analyze(buy_o);
+                            buy_o._risk_analyzed = True
                         if not getattr(sell_o, "_risk_analyzed", False):
-                            risk_engine.analyze(sell_o); sell_o._risk_analyzed = True
+                            risk_engine.analyze(sell_o);
+                            sell_o._risk_analyzed = True
 
                         if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
                             continue
@@ -999,9 +1086,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             continue
 
                         if not stability_filter.check(
-                            buy_o.exchange, sell_o.exchange,
-                            str(buy_o.price), str(sell_o.price),
-                            buy_o.merchant_name, sell_o.merchant_name,
+                                buy_o.exchange, sell_o.exchange,
+                                str(buy_o.price), str(sell_o.price),
+                                buy_o.merchant_name, sell_o.merchant_name,
                         ):
                             continue
 
@@ -1032,9 +1119,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             route_type=opp.get("route_type", "UNKNOWN"),
                         )
 
-                        await dispatcher.dispatch(alert, opp)
+                        # Не шлемо якщо юзер поставив паузу
+                        if not is_muted():
+                            await dispatcher.dispatch(alert, opp)
 
-                    cycle_elapsed  = time.monotonic() - start_time
+                    cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
 
@@ -1517,10 +1606,8 @@ class RiskEngine:
         flags = []
         exchange = order.exchange
 
-        # Базова перевірка статс
-        if order.month_order_count < MIN_ORDERS.get(exchange, 30) or \
-                order.finish_rate_pct < MIN_COMPLETION.get(exchange, 90.0):
-            flags.append("LOW_STATS")
+        # LOW_STATS більше не є глобальним блоком — перенесено в AlertDispatcher._user_wants()
+        # де кожен юзер має свої персональні пороги (merchant_filters_json)
 
         # 🚀 ФІКС 3: ЗНЯТТЯ ІМУНІТЕТУ ДЛЯ ФІКСОВАНИХ СУМ
         if order.min_limit > 0 and order.max_limit > 0:
@@ -1987,8 +2074,11 @@ class MerchantDB:
         await self._db.commit()
 
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
-        # 🚀 ДОДАЄМО СТАТУС ВІДГУКІВ
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
+        # Міграція колонок scanner_users
+        await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
+        await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -2611,16 +2701,24 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                "SELECT user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes FROM scanner_users WHERE is_active=1"
+                """SELECT user_id, telegram_chat_id, working_capital,
+                          COALESCE(min_amount_uah, 0.0) as min_amount_uah,
+                          min_spread_pct, bank_codes,
+                          COALESCE(merchant_filters_json, '{}') as merchant_filters_json,
+                          COALESCE(is_alerts_active, 1) as is_alerts_active
+                   FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
             ) as cur:
                 rows = await cur.fetchall()
+            import json as _json
             return [
                 {
-                    "user_id":       row["user_id"],
-                    "chat_id":       row["telegram_chat_id"],
-                    "capital":       float(row["working_capital"]),
-                    "min_spread":    float(row["min_spread_pct"]),
-                    "bank_codes":    row["bank_codes"].split(","),
+                    "user_id":          row["user_id"],
+                    "chat_id":          row["telegram_chat_id"],
+                    "capital":          float(row["working_capital"]),
+                    "min_amount":       float(row["min_amount_uah"]),
+                    "min_spread":       float(row["min_spread_pct"]),
+                    "bank_codes":       row["bank_codes"].split(","),
+                    "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                 }
                 for row in rows
             ]
@@ -4337,6 +4435,26 @@ _BASIC_BAD = [
 _TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
 
+
+def _has_bad_keywords(text: str) -> bool:
+    """
+    Фільтрує відгуки по двох рівнях:
+    1. Швидкий фільтр по базових словах
+    2. Regex по цільових категоріях з rules.py
+    """
+    if not text:
+        return False
+    t = text.lower()
+    if any(w in t for w in _BASIC_BAD):
+        return True
+    for rule in ALL_RULES:
+        if rule.category in _TARGET_CATEGORIES:
+            if rule.pattern.search(t):
+                return True
+    return False
+
+
+
 class ReviewFetcher:
     def __init__(
         self,
@@ -4522,8 +4640,14 @@ class ReviewFetcher:
             # 🚀 НАКОПИЧУЄМО ПОМИЛКИ І ВМИКАЄМО DEGRADED MODE
             self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
             if self._exchange_fails[exchange] >= 3:
-                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + 7200.0  # 2 години
-                logger.error("🚨 %s API впало 3 рази підряд! Вмикаємо Degraded Mode на 2 години.", exchange)
+                # Таймаут залежить від типу біржі:
+                # Bybit/OKX можуть впасти на хвилини, Binance — рідко
+                cooldown_sec = {"Binance": 300.0, "OKX": 600.0}.get(exchange, 7200.0)
+                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
+                logger.error(
+                    "🚨 %s API впало 3 рази підряд! Degraded Mode на %.0f хв.",
+                    exchange, cooldown_sec / 60,
+                )
 
             await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
             logger.warning("Помилка відгуків %s [%s]: %s", merchant_id, exchange, e)
@@ -4608,6 +4732,24 @@ class CrossMatchingEngine:
         self.min_trade = Decimal(str(min_trade_uah))
         self.min_spread = Decimal(str(min_spread_pct))
         self.safety_buffer = Decimal(str(safety_buffer_pct))
+
+    @property
+    def max_capital_uah(self) -> float:
+        return float(self.max_capital)
+
+    @max_capital_uah.setter
+    def max_capital_uah(self, value: float) -> None:
+        """scanner.py оновлює через цей setter на кожному циклі."""
+        self.max_capital = Decimal(str(value))
+
+    @property
+    def min_spread_pct(self) -> float:
+        return float(self.min_spread)
+
+    @min_spread_pct.setter
+    def min_spread_pct(self, value: float) -> None:
+        """scanner.py оновлює через цей setter на кожному циклі."""
+        self.min_spread = Decimal(str(value))
 
     def match(
         self,
@@ -4788,41 +4930,42 @@ class SpreadStabilityFilter:
     """
     Фільтр стабільності. Пропускає спред тільки якщо він протримався
     в стакані N сканувань підряд (захист від фантомів і скамерів-маніпуляторів).
+
+    ВАЖЛИВО: first_seen НЕ оновлюється при кожному хіті — тільки при першому.
+    Якщо спред оновлюється частіше ніж TTL, він проходить як тільки набирає hits.
+    last_seen оновлюється — це час до якого запис живе.
     """
 
     def __init__(self, required_hits: int = 2, ttl_seconds: float = 15.0):
         self.required_hits = required_hits
         self.ttl = ttl_seconds
-        self.cache = {}
+        self.cache: dict[str, dict] = {}
 
-    def check(self, buy_ex: str, sell_ex: str, buy_price: str, sell_price: str,
-              buy_merchant: str, sell_merchant: str) -> bool:
-
+    def check(
+        self,
+        buy_ex: str, sell_ex: str,
+        buy_price: str, sell_price: str,
+        buy_merchant: str, sell_merchant: str,
+    ) -> bool:
         now = time.monotonic()
-
-        # Робимо ключ по ціні та мерчанту (надійніше ніж Order ID)
         key = f"{buy_ex}:{buy_merchant}:{buy_price}::{sell_ex}:{sell_merchant}:{sell_price}"
 
-        # Очистка старих записів
         self._cleanup(now)
 
         if key not in self.cache:
-            # Бачимо вперше
-            self.cache[key] = {"hits": 1, "first_seen": now}
+            self.cache[key] = {"hits": 1, "first_seen": now, "last_seen": now}
             return False
 
         data = self.cache[key]
         data["hits"] += 1
-        data["first_seen"] = now  # Оновлюємо час життя
+        data["last_seen"] = now  # ← оновлюємо ТІЛЬКИ last_seen, не first_seen
 
-        if data["hits"] >= self.required_hits:
-            return True
+        return data["hits"] >= self.required_hits
 
-        return False
-
-    def _cleanup(self, now: float):
-        keys_to_delete = [k for k, v in self.cache.items() if now - v["first_seen"] > self.ttl]
-        for k in keys_to_delete:
+    def _cleanup(self, now: float) -> None:
+        # Видаляємо по last_seen — якщо спред зник зі стакану
+        expired = [k for k, v in self.cache.items() if now - v["last_seen"] > self.ttl]
+        for k in expired:
             del self.cache[k]
 
 ============================================================
@@ -5314,7 +5457,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from html import escape
-
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -5704,14 +5847,26 @@ class TelegramNotifier:
                 await call.answer("Помилка БД при блокуванні", show_alert=True)
 
     async def start(self) -> None:
+        # 🚀 СТВОРЮЄМО СИСТЕМНЕ МЕНЮ КНОПКОЮ (Повний список)
+        commands = [
+            BotCommand(command="start", description="🏠 Головне меню (Дашборд)"),
+            BotCommand(command="balance", description="💰 Перевірити баланси"),
+            BotCommand(command="keys", description="🔑 Підключені API Ключі"),
+            BotCommand(command="connect", description="🔌 Підключити біржу"),
+            BotCommand(command="disconnect", description="❌ Відключити біржу"),
+            BotCommand(command="status", description="📊 Системний статус сканера"),
+            BotCommand(command="settings", description="⚙️ Глобальні налаштування"),
+            BotCommand(command="help", description="📖 Довідка"),
+        ]
+        await self._bot.set_my_commands(commands)
+
         self._worker_task = asyncio.create_task(
             self._worker_loop(), name="tg-notifier-worker"
         )
-        # 🚀 ЗАПУСКАЄМО СЛУХАЧА КНОПОК
         self._polling_task = asyncio.create_task(
             self._dp.start_polling(self._bot), name="tg-polling"
         )
-        logger.info("TelegramNotifier запущено (з інтерактивними кнопками)")
+        logger.info("TelegramNotifier запущено (з інтерактивними кнопками та Меню)")
 
     async def stop(self) -> None:
         if self._polling_task:
@@ -6088,10 +6243,10 @@ FILE: bot/commands.py
 
 # bot/commands.py
 """
-Telegram Command Center — команди бота (Multi-user версія).
+Telegram Command Center — команди бота (Multi-user + UI/UX версія).
 
 Команди:
-  /start      — привітання та реєстрація юзера в БД
+  /start      — привітання та Дашборд з кнопками
   /status     — стан системного сканера (цикл, черги, боти)
   /connect    — підключення персональних API ключів біржі
   /disconnect — видалення персональних API ключів
@@ -6100,24 +6255,37 @@ Telegram Command Center — команди бота (Multi-user версія).
   /settings   — перегляд і зміна глобальних налаштувань
   /ban        — ручний бан мерчанта
   /help       — список команд
-
-Архітектура: команди реєструються в TelegramNotifier через setup_commands().
-Стан зберігається в _conversation_state для multi-step флоу (/connect).
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import TYPE_CHECKING, Optional
-
-from aiogram import Router
+from contextlib import suppress
+from aiogram.exceptions import TelegramBadRequest
+from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from config import settings
+
+# ── Admin helper ───────────────────────────────────────────────────────────
+def _is_admin(user_id: int) -> bool:
+    """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
+    admin_id = getattr(settings, "admin_id", 0)
+    # Fallback: якщо ADMIN_ID не встановлено — вважаємо адміном TELEGRAM_CHAT_ID
+    if not admin_id:
+        admin_id = getattr(settings, "telegram_chat_id", 0)
+    return user_id == admin_id
 from config.runtime import runtime_config, ALLOWED_KEYS
+from bot.keyboards import (
+    main_menu_kb, settings_menu_kb, keys_menu_kb,
+    back_to_main_kb, global_settings_kb, back_to_settings_kb,
+    banks_selection_kb, back_to_keys_kb, exchange_connect_kb,
+)
+from config.banks import BANK_NAMES, DEFAULT_BANK_CODES
 
 # Імпортуємо клієнти для динамічної перевірки балансів
 from infrastructure.api.binance_account import BinanceAccountClient
@@ -6133,65 +6301,119 @@ logger = logging.getLogger("Commands")
 router = Router()
 
 
-# ── FSM стани для /connect ─────────────────────────────────────────────────
+# ── FSM стани ──────────────────────────────────────────────────────────────
 class ConnectStates(StatesGroup):
     waiting_exchange = State()
     waiting_api_key = State()
     waiting_api_secret = State()
-    waiting_passphrase = State()  # тільки для OKX
+    waiting_passphrase = State()
 
+
+class SettingStates(StatesGroup):
+    waiting_capital    = State()
+    waiting_min_amount = State()
+    waiting_spread     = State()
+
+
+class GlobalSettingStates(StatesGroup):
+    waiting_value = State()
+
+
+class MerchantFilterStates(StatesGroup):
+    waiting_min_orders = State()
+    waiting_min_rate   = State()
+
+
+# ── Словник описів для UI ──────────────────────────────────────────────────
+# Тільки системні параметри (персональні - в scanner_users через меню)
+SETTING_DESCRIPTIONS = {
+    "risk_mode":              "🛡 Рівень антифроду",
+    "behavior_alert_score":   "🤖 Поріг балів ботів",
+    "velocity_spike_per_hour":"⚡ Аномальна швидкість (угод/год)",
+    "sticky_min_chain":       "📌 Липкі ліміти (циклів)",
+    "review_ttl_hours":       "💬 Кеш відгуків (годин)",
+    "max_alerts_per_cycle":   "🔔 Макс. алертів за цикл",
+}
+
+# Відповідність ключ → опис для кнопок
+_KEY_LABELS = {
+    "risk_mode":               "🛡 Антифрод",
+    "behavior_alert_score":    "🤖 Поріг ботів",
+    "velocity_spike_per_hour": "⚡ Швидкість",
+    "sticky_min_chain":        "📌 Липкі ліміти",
+    "review_ttl_hours":        "💬 Кеш відгуків",
+    "max_alerts_per_cycle":    "🔔 Макс. алертів",
+}
 
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
 _db: Optional["MerchantDB"] = None
-_account_clients: dict = {}  # Системні клієнти сканера
+_account_clients: dict = {}
 _scanner_stats: dict = {
     "cycles": 0,
     "last_cycle_ms": 0,
     "bots_detected_today": 0,
     "spreads_found_today": 0,
+    "llm_queue": 0,
+    "review_queue": 0,
+    "cb_status": {},
 }
+_mute_until: float = 0.0
+
+
+def is_muted() -> bool:
+    """Перевіряє чи бот на паузі."""
+    import time
+    return time.monotonic() < _mute_until
 
 
 def setup(db, account_clients: dict) -> None:
-    """
-    Ініціалізація команд.
-    Викликається з scanner.py після старту всіх компонентів.
-    """
     global _db, _account_clients
     _db = db
     _account_clients = account_clients
-    logger.info("Commands: initialized with %d system account clients", len(account_clients))
 
 
 def update_stats(**kwargs) -> None:
-    """Оновлює статистику сканера. Викликається з scanner.py."""
     _scanner_stats.update(kwargs)
 
 
-# ── /start ─────────────────────────────────────────────────────────────────
-@router.message(Command("start"))
-async def cmd_start(message: Message) -> None:
-    # Реєструємо юзера при першому старті (Multi-user)
+# ── /start (ГОЛОВНИЙ ДАШБОРД) ──────────────────────────────────────────────
+async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
+    user_capital    = str(settings.working_capital_uah)
+    user_min_amount = "без обмежень"
+    user_spread     = "0.50"
     if _db:
-        await _db.register_user(
-            user_id=message.from_user.id,
-            chat_id=message.chat.id,
-        )
+        active_users = await _db.get_active_users()
+        for u in active_users:
+            if u["user_id"] == user_id:
+                user_capital = f"{u['capital']:.1f}"
+                user_spread  = f"{u['min_spread']:.2f}"
+                _min_amt = float(u.get("min_amount") or 0.0)
+                user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
+                break
+
+    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+    status_text = "🟢 <b>АКТИВНИЙ (Парсинг іде)</b>" if is_active else "🔴 <b>ЗУПИНЕНИЙ (Пауза)</b>"
 
     text = (
-        "👋 <b>ARBIX QUANTUM</b>\n\n"
-        "P2P арбітражний сканер з антифрод захистом.\n\n"
-        "📋 <b>Команди:</b>\n"
-        "/status — стан сканера\n"
-        "/balance — баланси на біржах\n"
-        "/connect — підключити API ключі біржі\n"
-        "/disconnect — відключити біржу\n"
-        "/keys — підключені біржі\n"
-        "/settings — налаштування\n"
-        "/ban — заблокувати мерчанта\n"
-        "/help — детальна допомога\n"
+        "👋 <b>ARBIX QUANTUM | Особистий кабінет</b>\n\n"
+        f"Статус ядра: {status_text}\n\n"
+        "🛠 <b>Твої персональні фільтри:</b>\n"
+        f"├ Капітал: <b>{user_capital} ₴</b>\n"
+        f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
+        f"└ Мін. спред: <b>{user_spread}%</b>\n\n"
+        "<i>👇 Використовуй меню нижче для управління:</i>"
     )
-    await message.answer(text)
+    return text, is_active
+
+
+@router.message(Command("start"))
+async def cmd_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if _db:
+        await _db.register_user(user_id=message.from_user.id, chat_id=message.chat.id)
+
+    text, is_active = await _generate_dashboard_text(message.from_user.id)
+    await message.answer(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(message.from_user.id)))
 
 
 # ── /help ──────────────────────────────────────────────────────────────────
@@ -6199,19 +6421,11 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     text = (
         "📖 <b>Детальна допомога</b>\n\n"
-        "<b>/connect [біржа]</b>\n"
-        "Підключити персональні API ключі для біржі.\n"
-        "Підтримувані: Binance, Bybit, OKX, MEXC\n"
-        "Ключі зберігаються зашифровано.\n\n"
-        "<b>/balance</b>\n"
-        "Показує баланс USDT/UAH на твоїх підключених біржах.\n\n"
-        "<b>/settings [ключ] [значення]</b>\n"
-        "Змінити глобальні налаштування сканера.\n"
-        f"Доступні ключі: {', '.join(sorted(ALLOWED_KEYS))}\n\n"
-        "<b>/ban [exchange] [merchant_id]</b>\n"
-        "Ручний бан мерчанта в чорний список.\n\n"
-        "<b>/status</b>\n"
-        "Поточний стан сканера, черги LLM, кількість знайдених ботів."
+        "<b>/connect [біржа]</b>\nПідключити персональні API ключі.\n\n"
+        "<b>/balance</b>\nПоказує баланс на твоїх біржах.\n\n"
+        "<b>/settings</b>\nЗмінити глобальні налаштування сканера.\n\n"
+        "<b>/ban [exchange] [merchant_id]</b>\nРучний бан мерчанта.\n\n"
+        "<b>/status</b>\nПоточний стан сканера."
     )
     await message.answer(text)
 
@@ -6222,7 +6436,6 @@ async def cmd_status(message: Message) -> None:
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
 
-    # Підключені біржі (СИСТЕМНІ, бо це статус всього сканера)
     connected = []
     for exchange, client in _account_clients.items():
         if getattr(client, "is_authenticated", False):
@@ -6230,21 +6443,46 @@ async def cmd_status(message: Message) -> None:
         else:
             connected.append(f"❌ {exchange}")
 
-    # Runtime settings
-    capital = runtime_config.get("working_capital_uah", settings.working_capital_uah)
-    spread = runtime_config.get("min_spread_pct", settings.min_spread_pct)
-    risk = runtime_config.get("risk_mode", settings.risk_mode)
+    # Персональні параметри з scanner_users
+    _my_capital    = settings.working_capital_uah
+    _my_spread     = settings.min_spread_pct
+    _my_min_amount = 0.0
+    active_users = await _db.get_active_users()
+    for u in active_users:
+        if u["user_id"] == message.from_user.id:
+            _my_capital    = float(u["capital"])
+            _my_spread     = float(u["min_spread"])
+            _my_min_amount = float(u.get("min_amount", 0.0))
+            break
+
+    # Глобальні системні параметри
+    capital = _my_capital
+    spread  = _my_spread
+    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+    min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
+
+    llm_q = _scanner_stats.get("llm_queue", 0)
+    rev_q = _scanner_stats.get("review_queue", 0)
+    cb_st = _scanner_stats.get("cb_status", {})
+    cb_lines = [f"  {'🟢' if v == 'CLOSED' else '🔴'} {k}: {v}" for k, v in cb_st.items()]
+    import time as _t
+    mute_left = max(0, _mute_until - _t.monotonic())
+    mute_line = f"\n🔕 Пауза: <b>{mute_left/3600:.1f} год</b>" if mute_left > 0 else ""
 
     text = (
             "📊 <b>Стан системного сканера</b>\n\n"
             f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
             f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
             f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
-            f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n\n"
-            f"💼 Системний капітал: <code>{capital} ₴</code>\n"
-            f"📉 Системний поріг: <code>{spread}%</code>\n"
-            f"🛡 Режим ризику: <code>{risk}</code>\n\n"
-            "🔌 <b>Системні API (Парсинг):</b>\n" + "\n".join(connected)
+            f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n"
+            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
+            f"{mute_line}\n\n"
+            f"💼 Капітал: <code>{capital} ₴</code>\n"
+            f"📉 Спред: <code>{spread}%</code>\n"
+            f"{min_amount_line}"
+            f"🛡 Ризик: <code>{risk}</code>\n\n"
+            "🔌 <b>API:</b>\n" + "\n".join(connected) +
+            ("\n\n⚡ <b>Circuit Breakers:</b>\n" + "\n".join(cb_lines) if cb_lines else "")
     )
     await message.answer(text)
 
@@ -6255,49 +6493,26 @@ async def cmd_keys(message: Message) -> None:
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
 
-    user_id = message.from_user.id
-    all_creds = await _db.get_all_credentials(user_id=user_id)
+    all_creds = await _db.get_all_credentials(user_id=message.from_user.id)
     if not all_creds:
-        return await message.answer(
-            "🔑 Жодних API ключів не підключено.\n"
-            "Використай /connect щоб додати свої ключі."
-        )
+        return await message.answer("🔑 Жодних API ключів не підключено.\nВикористай /connect")
 
     lines = ["🔑 <b>Твої підключені API ключі:</b>\n"]
     for exchange, creds in all_creds.items():
         key_preview = creds["api_key"][:8] + "..." if creds["api_key"] else "?"
-        label = f" ({creds['label']})" if creds.get("label") else ""
-        lines.append(f"✅ <b>{exchange}</b>{label}: <code>{key_preview}</code>")
+        lines.append(f"✅ <b>{exchange}</b>: <code>{key_preview}</code>")
 
     await message.answer("\n".join(lines))
 
 
-# ── /connect ───────────────────────────────────────────────────────────────
+# ── /connect & /disconnect ─────────────────────────────────────────────────
 SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC"]
 
 
 @router.message(Command("connect"))
 async def cmd_connect(message: Message, state: FSMContext) -> None:
-    parts = message.text.split(maxsplit=1)
-
-    if len(parts) > 1:
-        exchange = parts[1].strip().capitalize()
-        if exchange not in SUPPORTED_EXCHANGES:
-            return await message.answer(
-                f"❌ Невідома біржа: {exchange}\n"
-                f"Підтримувані: {', '.join(SUPPORTED_EXCHANGES)}"
-            )
-        await state.update_data(exchange=exchange)
-        await state.set_state(ConnectStates.waiting_api_key)
-        return await message.answer(
-            f"🔑 <b>Підключення {exchange}</b>\n\n"
-            f"Введи API Key:"
-        )
-
-    # Показуємо кнопки вибору біржі
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=ex, callback_data=f"connect:{ex}")]
-        for ex in SUPPORTED_EXCHANGES
+        [InlineKeyboardButton(text=ex, callback_data=f"connect:{ex}")] for ex in SUPPORTED_EXCHANGES
     ])
     await message.answer("🔌 Виберіть біржу для підключення своїх ключів:", reply_markup=kb)
 
@@ -6307,242 +6522,543 @@ async def on_connect_exchange(call: CallbackQuery, state: FSMContext) -> None:
     exchange = call.data.split(":")[1]
     await state.update_data(exchange=exchange)
     await state.set_state(ConnectStates.waiting_api_key)
-    await call.message.edit_text(
-        f"🔑 <b>Підключення {exchange}</b>\n\n"
-        f"Введи API Key:\n"
-        f"<i>(повідомлення буде видалено після збереження)</i>"
-    )
+    await call.message.edit_text(f"🔑 <b>Підключення {exchange}</b>\n\nВведи API Key:")
     await call.answer()
 
 
 @router.message(ConnectStates.waiting_api_key)
 async def on_api_key(message: Message, state: FSMContext) -> None:
     api_key = message.text.strip()
-    # Видаляємо повідомлення з ключем одразу
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
+    with suppress(Exception): await message.delete()
     if len(api_key) < 10:
         return await message.answer("❌ API Key занадто короткий. Спробуй ще раз:")
-
     await state.update_data(api_key=api_key)
     await state.set_state(ConnectStates.waiting_api_secret)
-    await message.answer(
-        "✅ API Key отримано.\n\n"
-        "Тепер введи <b>Secret Key</b>:\n"
-        "<i>(повідомлення буде видалено після збереження)</i>"
-    )
+    await message.answer("✅ API Key отримано.\n\nТепер введи <b>Secret Key</b>:")
 
 
 @router.message(ConnectStates.waiting_api_secret)
 async def on_api_secret(message: Message, state: FSMContext) -> None:
     api_secret = message.text.strip()
-    try:
+    with suppress(Exception):
         await message.delete()
-    except Exception:
-        pass
-
     if len(api_secret) < 10:
         return await message.answer("❌ Secret Key занадто короткий. Спробуй ще раз:")
 
     data = await state.get_data()
     exchange = data["exchange"]
 
-    # OKX вимагає passphrase
     if exchange == "OKX":
         await state.update_data(api_secret=api_secret)
         await state.set_state(ConnectStates.waiting_passphrase)
-        return await message.answer(
-            "✅ Secret Key отримано.\n\n"
-            "OKX вимагає <b>Passphrase</b>\n"
-            "(той що ти задав при створенні ключа):"
-        )
+        return await message.answer("✅ Secret Key отримано.\n\nOKX вимагає <b>Passphrase</b>:")
 
-    # Зберігаємо персональні credentials
     await _save_credentials(message, state, exchange, data["api_key"], api_secret)
 
 
 @router.message(ConnectStates.waiting_passphrase)
 async def on_passphrase(message: Message, state: FSMContext) -> None:
     passphrase = message.text.strip()
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
+    with suppress(Exception): await message.delete()
     data = await state.get_data()
-    await _save_credentials(
-        message, state, data["exchange"],
-        data["api_key"], data["api_secret"], passphrase
-    )
+    await _save_credentials(message, state, data["exchange"], data["api_key"], data["api_secret"], passphrase)
 
 
-async def _save_credentials(
-        message: Message,
-        state: FSMContext,
-        exchange: str,
-        api_key: str,
-        api_secret: str,
-        passphrase: str = "",
-) -> None:
-    """Зберігає credentials для конкретного юзера (Multi-user безпечно)."""
+async def _save_credentials(message: Message, state: FSMContext, exchange: str, api_key: str, api_secret: str,
+                            passphrase: str = "") -> None:
     await state.clear()
-
-    if not _db:
-        return await message.answer("❌ База даних недоступна")
-
-    user_id = message.from_user.id
-
-    ok = await _db.save_credentials(
-        exchange=exchange,
-        api_key=api_key,
-        api_secret=api_secret,
-        passphrase=passphrase,
-        label="user_keys",
-        user_id=user_id,
-    )
-
-    if not ok:
-        return await message.answer(f"❌ Помилка збереження credentials для {exchange}")
-
-    await message.answer(
-        f"✅ <b>{exchange}</b> успішно підключено!\n\n"
-        f"Ключ: <code>{api_key[:8]}...</code>\n\n"
-        f"Використай /balance щоб перевірити свої кошти."
-    )
+    if not _db: return await message.answer("❌ База даних недоступна")
+    ok = await _db.save_credentials(exchange=exchange, api_key=api_key, api_secret=api_secret, passphrase=passphrase,
+                                    label="user_keys", user_id=message.from_user.id)
+    if ok:
+        await message.answer(f"✅ <b>{exchange}</b> успішно підключено!\nВикористай /balance щоб перевірити свої кошти.")
+    else:
+        await message.answer(f"❌ Помилка збереження credentials для {exchange}")
 
 
-# ── /disconnect ────────────────────────────────────────────────────────────
 @router.message(Command("disconnect"))
 async def cmd_disconnect(message: Message) -> None:
-    parts = message.text.split(maxsplit=1)
-    user_id = message.from_user.id
+    if not _db: return await message.answer("❌ База даних не ініціалізована")
+    all_creds = await _db.get_all_credentials(user_id=message.from_user.id)
+    if not all_creds:
+        return await message.answer("У тебе немає підключених бірж.")
 
-    if len(parts) < 2:
-        if not _db:
-            return await message.answer("❌ База даних не ініціалізована")
-
-        all_creds = await _db.get_all_credentials(user_id=user_id)
-        if not all_creds:
-            return await message.answer("У тебе немає підключених бірж.")
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"❌ {ex}", callback_data=f"disconnect:{ex}")]
-            for ex in all_creds
-        ])
-        return await message.answer("Виберіть біржу для відключення:", reply_markup=kb)
-
-    exchange = parts[1].strip().capitalize()
-    await _do_disconnect(message, exchange, user_id)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=f"❌ {ex}", callback_data=f"disconnect:{ex}")] for ex in all_creds])
+    await message.answer("Виберіть біржу для відключення:", reply_markup=kb)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("disconnect:"))
 async def on_disconnect(call: CallbackQuery) -> None:
     exchange = call.data.split(":")[1]
-    user_id = call.from_user.id
     await call.message.edit_reply_markup(reply_markup=None)
-    await _do_disconnect(call.message, exchange, user_id)
+    if _db and await _db.delete_credentials(exchange, user_id=call.from_user.id):
+        await call.message.answer(f"✅ {exchange} відключено.")
     await call.answer()
 
 
-async def _do_disconnect(message: Message, exchange: str, user_id: int) -> None:
-    if not _db:
-        return await message.answer("❌ База даних недоступна")
+# ── ЛОГІКА БАЛАНСУ ─────────────────────────────────────────────────────────
+async def _generate_balance_text(user_id: int) -> str:
+    """
+    Баланс з акаунт-клієнтів що вже підключені в scanner.py.
+    Не створює нових клієнтів — використовує існуючі сесії.
+    """
+    if not _account_clients:
+        return "❌ Акаунт клієнти не ініціалізовані"
 
-    ok = await _db.delete_credentials(exchange, user_id=user_id)
-    if ok:
-        await message.answer(f"✅ {exchange} відключено від твого профілю.")
-    else:
-        await message.answer(f"❌ Не вдалося відключити {exchange}.")
+    lines = ["💰 <b>Баланси на біржах</b>\n"]
+    found_any = False
 
-
-# ── /balance ───────────────────────────────────────────────────────────────
-@router.message(Command("balance"))
-async def cmd_balance(message: Message) -> None:
-    if not _db: return
-
-    user_id = message.from_user.id
-    creds = await _db.get_all_credentials(user_id=user_id)
-
-    if not creds:
-        return await message.answer("📭 У тебе немає підключених API ключів. Використай /connect")
-
-    msg = await message.answer("⏳ Отримую твої баланси...")
-    lines = ["💰 <b>Твої баланси на біржах</b>\n"]
-
-    for exchange, c in creds.items():
+    for exchange, client in _account_clients.items():
+        if not getattr(client, "is_authenticated", False):
+            lines.append(f"⚪ <b>{exchange}</b>: не підключено (<code>/connect {exchange}</code>)")
+            continue
         try:
-            # Створюємо тимчасовий клієнт суто для цього юзера
-            if exchange == "Binance":
-                client = BinanceAccountClient(c["api_key"], c["api_secret"])
-            elif exchange == "Bybit":
-                client = BybitAccountClient(c["api_key"], c["api_secret"])
-            elif exchange == "OKX":
-                client = OKXAccountClient(c["api_key"], c["api_secret"], c.get("passphrase", ""))
-            elif exchange == "MEXC":
-                client = MEXCAccountClient(c["api_key"], c["api_secret"])
-            else:
-                continue
-
-            # async with гарантує закриття сесії після запиту!
-            async with client:
-                balances = await client.get_balance()
-
+            balances = await client.get_balance()
             if not balances:
-                lines.append(f"📭 <b>{exchange}</b>: порожньо")
+                lines.append(f"📭 <b>{exchange}</b>: порожньо або 0")
                 continue
-
+            found_any = True
             lines.append(f"\n🏦 <b>{exchange}</b>:")
             for b in balances:
-                coin = b.get("coin", "?")
-                free = float(b.get("free", 0))
-                total = float(b.get("total", free))
+                coin   = b.get("coin", "?")
+                free   = float(b.get("free", 0))
+                total  = float(b.get("total", free))
                 locked = total - free
-                if total > 0:
-                    if locked > 0:
-                        lines.append(f"  {coin}: <code>{free:.2f}</code> (заблок: <code>{locked:.2f}</code>)")
-                    else:
-                        lines.append(f"  {coin}: <code>{free:.2f}</code>")
+                if locked > 0:
+                    lines.append(f"  {coin}: <code>{free:.2f}</code> (заблок: <code>{locked:.2f}</code>)")
+                else:
+                    lines.append(f"  {coin}: <code>{free:.2f}</code>")
         except Exception as e:
-            lines.append(f"❌ <b>{exchange}</b>: помилка з'єднання")
+            lines.append(f"❌ <b>{exchange}</b>: {type(e).__name__}")
 
-    await msg.edit_text("\n".join(lines))
+    if not found_any:
+        lines.append("\n<i>Підключи API ключі через /connect</i>")
+    return "\n".join(lines)
 
 
-# ── /settings ──────────────────────────────────────────────────────────────
+@router.message(Command("balance"))
+async def cmd_balance(message: Message) -> None:
+    msg = await message.answer("⏳ Завантажую баланси...")
+    text = await _generate_balance_text(message.from_user.id)
+    await msg.edit_text(text)
+
+
+# ── /settings (ГЛОБАЛЬНІ НАЛАШТУВАННЯ З ВАЛІДАЦІЄЮ) ────────────────────────
+def _generate_settings_text() -> str:
+    lines = ["⚙️ <b>Системні налаштування</b>\n"]
+    lines.append("<i>Впливають на поведінку всього сканера. Особисті фільтри (капітал/спред/банки) — в головному меню.</i>\n")
+    for key, desc in SETTING_DESCRIPTIONS.items():
+        val = runtime_config.get(key, getattr(settings, key, "—"))
+        lines.append(f"▫️ <b>{desc}</b>\n  └ <code>{key}</code>: <b>{val}</b>\n")
+    lines.append("👇 <i>Обери параметр для зміни:</i>")
+    return "\n".join(lines)
+
+
 @router.message(Command("settings"))
-async def cmd_settings(message: Message) -> None:
-    parts = message.text.split(maxsplit=2)
+async def cmd_settings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    if not _is_admin(message.from_user.id):
+        return await message.answer("⛔ Глобальні налаштування доступні тільки адміну.")
+    await message.answer(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
 
-    # /settings без аргументів — показати поточні
-    if len(parts) == 1:
-        lines = ["⚙️ <b>Поточні глобальні налаштування</b>\n"]
-        for key in sorted(ALLOWED_KEYS):
-            val = runtime_config.get(key, getattr(settings, key, "—"))
-            lines.append(f"<code>{key}</code>: <b>{val}</b>")
-        lines.append(f"\n<i>Змінити: /settings [ключ] [значення]</i>")
-        return await message.answer("\n".join(lines))
 
-    if len(parts) < 3:
+@router.callback_query(F.data == "menu:global_settings")
+async def on_global_settings_menu(call: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін", show_alert=True)
+        return
+    await state.clear()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("gset:"))
+async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін", show_alert=True)
+        return
+    key = call.data.split(":", 1)[1]
+    if key not in SETTING_DESCRIPTIONS:
+        await call.answer("❌ Невідомий параметр", show_alert=True)
+        return
+
+    await state.update_data(setting_key=key)
+    await state.set_state(GlobalSettingStates.waiting_value)
+
+    val  = runtime_config.get(key, getattr(settings, key, "—"))
+    desc = SETTING_DESCRIPTIONS.get(key, key)
+
+    _HINTS = {
+        "velocity_spike_per_hour": "<i>Число з крапкою (напр. 20.0)</i>",
+        "review_ttl_hours":        "<i>Число з крапкою (напр. 24.0)</i>",
+        "behavior_alert_score":    "<i>Ціле число (напр. 60)</i>",
+        "sticky_min_chain":        "<i>Ціле число (напр. 3)</i>",
+        "max_alerts_per_cycle":    "<i>Ціле число (напр. 5)</i>",
+        "risk_mode":               "<i>STRICT, WARNING або RELAXED</i>",
+    }
+    hint = _HINTS.get(key, "<i>Введи нове значення</i>")
+    text = f"✏️ <b>{desc}</b>\n<code>{key}</code>\n\nПоточне: <b>{val}</b>\n\n{hint}"
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_settings_kb())
+    await call.answer()
+
+
+@router.message(GlobalSettingStates.waiting_value)
+async def on_gset_value_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    key = data.get("setting_key")
+    if not key: return await state.clear()
+
+    # 🚀 МАГІЯ: Автоматично міняємо кому на крапку і чистимо пробіли
+    raw_value = message.text.strip().replace(",", ".")
+    formatted_value = raw_value
+
+    try:
+        if key in ("velocity_spike_per_hour", "review_ttl_hours"):
+            formatted_value = str(round(float(raw_value), 1))
+        elif key in ("behavior_alert_score", "sticky_min_chain", "max_alerts_per_cycle"):
+            formatted_value = str(int(float(raw_value)))
+        elif key == "risk_mode":
+            formatted_value = raw_value.upper()
+            if formatted_value not in ("STRICT", "WARNING", "RELAXED"):
+                raise ValueError("Допустимі тільки STRICT, WARNING, RELAXED")
+        elif key not in SETTING_DESCRIPTIONS:
+            raise ValueError(f"Параметр {key!r} не є глобальним налаштуванням")
+    except ValueError as e:
         return await message.answer(
-            "❌ Формат: <code>/settings [ключ] [значення]</code>\n"
-            f"Доступні ключі: {', '.join(sorted(ALLOWED_KEYS))}"
+            f"❌ <b>Помилка!</b> {e}\n\nСпробуй ще раз:",
+            reply_markup=back_to_settings_kb(),
         )
 
-    key, value = parts[1].strip(), parts[2].strip()
-    if key not in ALLOWED_KEYS:
-        return await message.answer(
-            f"❌ Ключ <code>{key}</code> недоступний.\n"
-            f"Доступні: {', '.join(sorted(ALLOWED_KEYS))}"
-        )
-
-    ok = await runtime_config.set(key, value)
+    ok = await runtime_config.set(key, formatted_value)
     if ok:
-        await message.answer(f"✅ <code>{key}</code> = <b>{value}</b>")
+        await message.answer(f"✅ Параметр <code>{key}</code> успішно змінено на <b>{formatted_value}</b>!",
+                             reply_markup=back_to_settings_kb())
     else:
-        await message.answer(f"❌ Не вдалося зберегти налаштування.")
+        await message.answer(f"❌ Помилка БД при збереженні <code>{key}</code>.", reply_markup=back_to_settings_kb())
+    await state.clear()
+
+
+# ── ЗМІНА ПЕРСОНАЛЬНОГО КАПІТАЛУ ТА СПРЕДУ ────────────────────────────────
+@router.callback_query(F.data == "set:capital")
+async def on_set_capital(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingStates.waiting_capital)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "💵 <b>Введи твій персональний робочий капітал</b>\n\n"
+            "<i>Автоматично конвертується у формат з крапкою (напр. 15000 -> 15000.0)</i>",
+            reply_markup=back_to_main_kb()
+        )
+    await call.answer()
+
+
+@router.message(SettingStates.waiting_capital)
+async def on_capital_input(message: Message, state: FSMContext) -> None:
+    try:
+        # Автоматично прибираємо коми і конвертуємо
+        val = float(message.text.strip().replace(",", "."))
+        if _db:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            await conn.execute("UPDATE scanner_users SET working_capital = ? WHERE user_id = ?",
+                               (val, message.from_user.id))
+            await conn.commit()
+        await message.answer(f"✅ Персональний капітал оновлено: <b>{val:.1f} ₴</b>", reply_markup=back_to_main_kb())
+    except ValueError:
+        await message.answer("❌ Формат невірний. Введи число (наприклад: 6000.0 або просто 6000)")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "set:min_amount")
+async def on_set_min_amount(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingStates.waiting_min_amount)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📦 <b>Мінімальна сума угоди (₴)</b>\n\n"
+            "Алерти з сумою <b>менше</b> цього порогу не прийдуть.\n"
+            "Введи <code>0</code> щоб вимкнути нижній фільтр.\n\n"
+            "<i>Приклад: 10000 — не показувати угоди менше 10 000 ₴</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(SettingStates.waiting_min_amount)
+async def on_min_amount_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError("Значення не може бути від'ємним")
+        if _db:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            # ALTER TABLE на випадок якщо стара БД без колонки
+            try:
+                await conn.execute(
+                    "ALTER TABLE scanner_users ADD COLUMN min_amount_uah REAL DEFAULT 0.0"
+                )
+                await conn.commit()
+            except Exception:
+                pass
+            await conn.execute(
+                "UPDATE scanner_users SET min_amount_uah = ? WHERE user_id = ?",
+                (val, message.from_user.id),
+            )
+            await conn.commit()
+        label = f"{val:.0f} ₴" if val > 0 else "вимкнено (всі угоди)"
+        await message.answer(
+            f"✅ Мін. сума оновлена: <b>{label}</b>",
+            reply_markup=back_to_main_kb(),
+        )
+    except ValueError as e:
+        await message.answer(f"❌ Помилка: {e}\nВведи число (напр. 10000 або 0)")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "set:spread")
+async def on_set_spread(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(SettingStates.waiting_spread)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📉 <b>Введи мінімальний персональний спред (%)</b>\n\n"
+            "<i>Можеш писати з комою або з крапкою (напр. 0,5 або 0.5)</i>",
+            reply_markup=back_to_main_kb()
+        )
+    await call.answer()
+
+
+@router.message(SettingStates.waiting_spread)
+async def on_spread_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if _db:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            await conn.execute("UPDATE scanner_users SET min_spread_pct = ? WHERE user_id = ?",
+                               (val, message.from_user.id))
+            await conn.commit()
+        await message.answer(f"✅ Персональний мін. спред оновлено: <b>{val:.2f}%</b>", reply_markup=back_to_main_kb())
+    except ValueError:
+        await message.answer("❌ Формат невірний. Введи число (наприклад: 0.5 або 1.2)")
+    finally:
+        await state.clear()
+
+
+# ── ОБРОБНИКИ ГОЛОВНИХ КНОПОК ─────────────────────────────────────────────
+@router.callback_query(F.data == "menu:main")
+@router.callback_query(F.data == "menu:dashboard")
+async def on_main_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer()
+
+
+@router.callback_query(F.data.in_(["scanner:start", "scanner:stop"]))
+async def on_scanner_toggle(call: CallbackQuery) -> None:
+    if not _is_admin(call.from_user.id):
+        await call.answer("⛔ Тільки адмін може керувати ядром сканера", show_alert=True)
+        return
+    new_state = "true" if call.data == "scanner:start" else "false"
+    await runtime_config.set("is_scanner_active", new_state)
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted()))
+    action = "ЗАПУЩЕНО! Парсинг почався" if is_active else "ЗУПИНЕНО! Парсинг на паузі"
+    await call.answer(f"✅ Сканер {action}!", show_alert=True)
+
+
+# ── Локальна пауза алертів юзера (не глобальна зупинка ядра) ───────────────
+
+@router.callback_query(F.data == "user:alerts:off")
+async def on_user_alerts_off(call: CallbackQuery) -> None:
+    """Юзер вимикає свої алерти — ядро сканера продовжує для інших."""
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 0 WHERE user_id = ?",
+            (call.from_user.id,)
+        )
+        await conn.commit()
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer("🔕 Мої алерти вимкнено", show_alert=True)
+
+
+@router.callback_query(F.data == "user:alerts:on")
+async def on_user_alerts_on(call: CallbackQuery) -> None:
+    """Юзер вмикає свої алерти знову."""
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET is_alerts_active = 1 WHERE user_id = ?",
+            (call.from_user.id,)
+        )
+        await conn.commit()
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer("🔔 Мої алерти увімкнено!", show_alert=True)
+
+
+@router.callback_query(F.data == "menu:settings")
+async def on_settings_menu(call: CallbackQuery) -> None:
+    text = "⚙️ <b>Налаштування персональних фільтрів</b>\n\nТут ти можеш змінити свої особисті обмеження. Бот надішле тобі угоду ТІЛЬКИ якщо вона проходить під ці фільтри."
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=settings_menu_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:keys")
+async def on_keys_menu(call: CallbackQuery) -> None:
+    has_keys = False
+    if _db:
+        creds = await _db.get_all_credentials(user_id=call.from_user.id)
+        has_keys = len(creds) > 0
+    text = "🔑 <b>Управління API Ключами</b>\n\nПідключи ключі, щоб дивитись актуальний баланс."
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=keys_menu_kb(has_keys))
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:help")
+async def on_help_menu(call: CallbackQuery) -> None:
+    text = "📖 <b>Довідка</b>\n\nСканер шукає P2P спреди 24/7 і фільтрує шахраїв через ШІ."
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:balance")
+async def on_balance_button(call: CallbackQuery) -> None:
+    await call.message.edit_text("⏳ Завантажую баланси...", reply_markup=None)
+    text = await _generate_balance_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "keys:connect")
+async def on_keys_connect_button(call: CallbackQuery) -> None:
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🔌 <b>Підключення біржі</b>\n\n"
+            "Обери біржу для підключення API ключів:",
+            reply_markup=exchange_connect_kb(SUPPORTED_EXCHANGES),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "keys:disconnect")
+async def on_keys_disconnect_button(call: CallbackQuery) -> None:
+    if not _db: return await call.answer("БД недоступна", show_alert=True)
+    all_creds = await _db.get_all_credentials(user_id=call.from_user.id)
+    if not all_creds:
+        with suppress(TelegramBadRequest): await call.message.edit_text("У тебе немає підключених бірж.",
+                                                                        reply_markup=back_to_main_kb())
+        return await call.answer()
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=f"❌ {ex}", callback_data=f"disconnect:{ex}")] for ex in
+                         all_creds] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="menu:keys")]])
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("Виберіть біржу для відключення:", reply_markup=kb)
+    await call.answer()
+
+# ── ВИБІР БАНКІВ (галочки) ─────────────────────────────────────────────────
+def _get_user_banks_from_db_cache(user_id: int) -> list[str]:
+    """Повертає поточні банки юзера з кешу active_users або defaults."""
+    return list(BANK_NAMES.keys())  # fallback — всі банки
+
+
+@router.callback_query(F.data == "set:banks")
+async def on_set_banks(call: CallbackQuery) -> None:
+    """Показує меню вибору банків з галочками."""
+    current_banks: list[str] = []
+    if _db:
+        users = await _db.get_active_users()
+        for u in users:
+            if u["user_id"] == call.from_user.id:
+                current_banks = u["bank_codes"]
+                break
+    if not current_banks:
+        current_banks = DEFAULT_BANK_CODES
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🏦 <b>Вибір банків</b>\n\n"
+            "Обери банки для яких шукати спреди.\n"
+            "<i>Натискай для вмикання/вимикання:</i>",
+            reply_markup=banks_selection_kb(BANK_NAMES, current_banks),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("bank:toggle:"))
+async def on_bank_toggle(call: CallbackQuery, state: FSMContext) -> None:
+    """Перемикає банк і оновлює повідомлення з галочками."""
+    code = call.data.split(":", 2)[2]
+
+    # Читаємо поточний стан зі стейту (або БД якщо нема)
+    data = await state.get_data()
+    selected = data.get("selected_banks")
+
+    if selected is None:
+        # Перше натискання — читаємо з БД
+        selected = DEFAULT_BANK_CODES[:]
+        if _db:
+            users = await _db.get_active_users()
+            for u in users:
+                if u["user_id"] == call.from_user.id:
+                    selected = u["bank_codes"][:]
+                    break
+
+    selected_set = set(selected)
+    if code in selected_set:
+        if len(selected_set) > 1:  # Не дозволяємо вимкнути всі
+            selected_set.discard(code)
+        else:
+            await call.answer("❗ Потрібен хоча б один банк", show_alert=True)
+            return
+    else:
+        selected_set.add(code)
+
+    selected = sorted(selected_set, key=lambda c: list(BANK_NAMES.keys()).index(c) if c in BANK_NAMES else 99)
+    await state.update_data(selected_banks=selected)
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_reply_markup(
+            reply_markup=banks_selection_kb(BANK_NAMES, selected)
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "bank:save")
+async def on_bank_save(call: CallbackQuery, state: FSMContext) -> None:
+    """Зберігає вибрані банки в БД."""
+    data = await state.get_data()
+    selected = data.get("selected_banks", DEFAULT_BANK_CODES)
+    await state.clear()
+
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET bank_codes = ? WHERE user_id = ?",
+            (",".join(selected), call.from_user.id),
+        )
+        await conn.commit()
+
+    bank_names = [BANK_NAMES.get(c, c) for c in selected]
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"✅ <b>Банки збережено!</b>\n\n"
+            f"Активні: {', '.join(bank_names)}\n\n"
+            "<i>Сканер враховуватиме нові налаштування з наступного циклу.</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer("✅ Збережено!")
 
 
 # ── /ban ───────────────────────────────────────────────────────────────────
@@ -6551,13 +7067,12 @@ async def cmd_ban(message: Message) -> None:
     parts = message.text.split(maxsplit=3)
     if len(parts) < 3:
         return await message.answer(
-            "❌ Формат: <code>/ban [exchange] [merchant_id]</code>\n"
-            "Приклад: <code>/ban Binance s42ee507f2dc</code>"
+            "❌ Формат: <code>/ban [exchange] [merchant_id] [причина]</code>\n"
+            "Приклад: <code>/ban Binance s42ee507f2dc скам</code>"
         )
-
-    exchange = parts[1].strip()
+    exchange    = parts[1].strip()
     merchant_id = parts[2].strip()
-    reason = parts[3].strip() if len(parts) > 3 else "Ручний бан через бота"
+    reason      = parts[3].strip() if len(parts) > 3 else "Ручний бан"
 
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
@@ -6570,18 +7085,304 @@ async def cmd_ban(message: Message) -> None:
         f"Причина: {reason}"
     )
 
+# ── Пауза алертів ─────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("mute:"))
+async def on_mute(call: CallbackQuery) -> None:
+    global _mute_until
+    import time
+    action = call.data.split(":")[1]
+    if action == "off":
+        _mute_until = 0.0
+        text, is_active = await _generate_dashboard_text(call.from_user.id)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, False))
+        await call.answer("🔔 Алерти увімкнено!")
+        return
+    hours = float(action)
+    _mute_until = time.monotonic() + hours * 3600
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"🔕 <b>Алерти вимкнено на {hours:.0f} год</b>\n\n"
+            "Щоб увімкнути — натисни /start або кнопку нижче.",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer(f"🔕 Пауза на {hours:.0f} год")
+
+# ── Фільтри мерчантів ─────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set:merchant_filters")
+async def on_set_merchant_filters(call: CallbackQuery) -> None:
+    """Показує поточні фільтри мерчанта і пропонує змінити."""
+    mf = {}
+    if _db:
+        users = await _db.get_active_users()
+        # get_active_users тільки для is_alerts_active=1, тому запитуємо напряму
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        async with conn.execute(
+            "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?",
+            (call.from_user.id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row and row[0]:
+            import json
+            mf = json.loads(row[0]) or {}
+
+    min_orders = mf.get("min_orders", 0)
+    min_rate   = mf.get("min_rate", 0.0)
+
+    orders_label = f"{min_orders:.0f}" if min_orders else "без обмежень"
+    rate_label   = f"{min_rate:.0f}%" if min_rate else "без обмежень"
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📊 Мін. угод: {orders_label}", callback_data="mf:orders")
+    builder.button(text=f"⭐ Мін. рейтинг: {rate_label}", callback_data="mf:rate")
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📊 <b>Фільтри мерчанта</b>\n\n"
+            "Алерт прийде ТІЛЬКИ якщо обидва мерчанти (buy і sell) відповідають цим критеріям.\n\n"
+            f"├ Мін. угод: <b>{orders_label}</b>\n"
+            f"└ Мін. рейтинг: <b>{rate_label}</b>",
+            reply_markup=builder.as_markup(),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "mf:orders")
+async def on_mf_orders(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_orders)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📊 <b>Мінімальна кількість угод мерчанта</b>\n\n"
+            "Введи число. <code>0</code> — вимкнути фільтр.\n"
+            "<i>Приклад: 100 — показувати тільки мерчантів з ≥100 угодами</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_orders)
+async def on_mf_orders_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        await _save_merchant_filter(message.from_user.id, "min_orders", val)
+        label = f"{val}" if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. угод: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "mf:rate")
+async def on_mf_rate(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_rate)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "⭐ <b>Мінімальний рейтинг мерчанта (%)</b>\n\n"
+            "Введи число від 0 до 100. <code>0</code> — вимкнути.\n"
+            "<i>Приклад: 95 — тільки мерчанти з рейтингом ≥95%</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_rate)
+async def on_mf_rate_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if not 0 <= val <= 100:
+            raise ValueError("Має бути від 0 до 100")
+        await _save_merchant_filter(message.from_user.id, "min_rate", val)
+        label = f"{val:.0f}%" if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. рейтинг: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+async def _save_merchant_filter(user_id: int, key: str, value) -> None:
+    """Зберігає один ключ в merchant_filters_json без перезапису інших."""
+    if not _db:
+        return
+    import json
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    mf = json.loads((row[0] if row else None) or "{}")
+    if value == 0 or value == 0.0:
+        mf.pop(key, None)  # 0 = вимкнути фільтр
+    else:
+        mf[key] = value
+    await conn.execute(
+        "UPDATE scanner_users SET merchant_filters_json = ? WHERE user_id = ?",
+        (json.dumps(mf), user_id),
+    )
+    await conn.commit()
+
 ============================================================
 FILE: bot/keyboards.py
 ============================================================
 
 """
-bot/keyboards.py — Inline клавіатури (заготовка для UI бота).
+bot/keyboards.py — Inline клавіатури для UI/UX бота.
 """
 from __future__ import annotations
-# TODO: Реалізувати keyboards:
-#   settings_menu()     — головне меню налаштувань
-#   confirm_ban()       — підтвердження ручного бану
-#   confirm_whitelist() — підтвердження whitelist
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+def main_menu_kb(
+    is_scanner_active: bool = False,
+    is_muted: bool = False,
+    is_admin: bool = False,
+) -> InlineKeyboardMarkup:
+    """
+    Головне меню.
+    Адмін бачить кнопку управління ядром сканера.
+    Звичайний юзер — кнопку вимкнення своїх алертів.
+    """
+    builder = InlineKeyboardBuilder()
+
+    # Адмін: керує ядром сканера
+    if is_admin:
+        if is_scanner_active:
+            builder.row(InlineKeyboardButton(text="⏸ Зупинити ядро", callback_data="scanner:stop"))
+        else:
+            builder.row(InlineKeyboardButton(text="▶️ Запустити ядро", callback_data="scanner:start"))
+
+    builder.row(
+        InlineKeyboardButton(text="📊 Статус", callback_data="menu:dashboard"),
+        InlineKeyboardButton(text="💰 Баланси", callback_data="menu:balance"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="⚙️ Налаштування", callback_data="menu:settings"),
+        InlineKeyboardButton(text="🔑 API Ключі", callback_data="menu:keys"),
+    )
+    # Пауза алертів (тимчасова через mute або постійна через is_alerts_active)
+    if is_muted:
+        builder.row(InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="mute:off"))
+    else:
+        builder.row(
+            InlineKeyboardButton(text="🔕 Пауза 1г", callback_data="mute:1"),
+            InlineKeyboardButton(text="🔕 Пауза 4г", callback_data="mute:4"),
+            InlineKeyboardButton(text="🔕 Вимк. назавжди", callback_data="user:alerts:off"),
+        )
+    builder.row(InlineKeyboardButton(text="ℹ️ Допомога", callback_data="menu:help"))
+    return builder.as_markup()
+
+def settings_menu_kb() -> InlineKeyboardMarkup:
+    """Особисті налаштування юзера."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💰 Макс. капітал", callback_data="set:capital"),
+        InlineKeyboardButton(text="📦 Мін. сума угоди", callback_data="set:min_amount"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📉 Мін. спред", callback_data="set:spread"),
+        InlineKeyboardButton(text="🏦 Банки", callback_data="set:banks"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📊 Фільтри мерчантів", callback_data="set:merchant_filters"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="user:alerts:on"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main")
+    )
+    return builder.as_markup()
+
+def keys_menu_kb(has_keys: bool = False) -> InlineKeyboardMarkup:
+    """Меню управління ключами."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔌 Підключити біржу", callback_data="keys:connect")
+    )
+    if has_keys:
+        builder.row(
+            InlineKeyboardButton(text="❌ Відключити біржу", callback_data="keys:disconnect")
+        )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main")
+    )
+    return builder.as_markup()
+
+def back_to_main_kb() -> InlineKeyboardMarkup:
+    """Універсальна кнопка 'Назад'."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Назад в меню", callback_data="menu:main")
+    return builder.as_markup()
+
+
+def global_settings_kb(key_labels: dict[str, str] | list[str]) -> InlineKeyboardMarkup:
+    """
+    Меню глобальних налаштувань.
+    key_labels: {key: human_label}  або  [key, key, ...]  (legacy)
+    """
+    builder = InlineKeyboardBuilder()
+
+    if isinstance(key_labels, dict):
+        items = list(key_labels.items())  # [(key, label), ...]
+    else:
+        items = [(k, k) for k in key_labels]
+
+    for key, label in items:
+        builder.button(text=label, callback_data=f"gset:{key}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Закрити", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def back_to_settings_kb() -> InlineKeyboardMarkup:
+    """Кнопка повернення до списку налаштувань."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 До налаштувань", callback_data="menu:global_settings")
+    return builder.as_markup()
+
+def banks_selection_kb(all_banks: dict[str, str], selected: list[str]) -> InlineKeyboardMarkup:
+    """
+    Галочки банків — один клік вмикає/вимикає.
+    all_banks: {internal_code: human_name}  напр. {"43": "Monobank", "14": "PrivatBank"}
+    selected:  список internal_code що активні у юзера
+    """
+    builder = InlineKeyboardBuilder()
+    selected_set = set(selected)
+    for code, name in all_banks.items():
+        icon = "✅" if code in selected_set else "☐"
+        builder.button(text=f"{icon} {name}", callback_data=f"bank:toggle:{code}")
+    builder.adjust(2)  # 2 кнопки в ряд
+    builder.row(InlineKeyboardButton(text="💾 Зберегти", callback_data="bank:save"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+    return builder.as_markup()
+
+
+def back_to_keys_kb() -> InlineKeyboardMarkup:
+    """Кнопка повернення до API ключів."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 До ключів", callback_data="menu:keys")
+    return builder.as_markup()
+
+
+def exchange_connect_kb(supported: list[str]) -> InlineKeyboardMarkup:
+    """Кнопки вибору біржі для підключення."""
+    builder = InlineKeyboardBuilder()
+    icons = {"Binance": "🟡", "Bybit": "🟠", "OKX": "⚫", "MEXC": "🔵"}
+    for ex in supported:
+        builder.button(text=f"{icons.get(ex, '🔌')} {ex}", callback_data=f"connect:{ex}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:keys"))
+    return builder.as_markup()
 
 ============================================================
 FILE: exchanges/base.py
@@ -8668,28 +9469,39 @@ FILE: filters/limit_filter.py
 ============================================================
 
 # filters/limit_filter.py
+"""
+LimitFilter — відсіює ордери де:
+  1. Мін. ліміт мерчанта перевищує будь-який активний капітал
+  2. Залишок USDT занадто малий
+
+НЕ фільтрує по конкретному капіталу юзера — це робить AlertDispatcher.
+Тут ми тільки прибираємо явно непридатні ордери (напр. мерчант хоче від 100к).
+"""
 from decimal import Decimal
 from exchanges.base import Order
 from config import settings
-from config.runtime import runtime_config
+
+# Глобальний кеш максимального капіталу серед активних юзерів
+# Оновлюється scanner.py на кожному циклі через set_max_capital()
+_max_capital: Decimal = Decimal(str(getattr(settings, "working_capital_uah", 5100.0)))
+
+
+def set_max_capital(capital_uah: float) -> None:
+    """Встановлює максимальний капітал серед активних юзерів. Викликається з scanner.py."""
+    global _max_capital
+    _max_capital = Decimal(str(capital_uah))
 
 
 class LimitFilter:
     def __init__(self, min_usdt: float = getattr(settings, "min_usdt_threshold", 50.0)):
-        # min_usdt зазвичай статичний, але можна винести теж
         self.min_usdt = Decimal(str(min_usdt))
 
     def passed(self, order: Order) -> bool:
-        # 🚀 ДИНАМІЧНИЙ КАПІТАЛ: беремо на льоту з runtime_config
-        current_capital = Decimal(
-            str(runtime_config.get("working_capital_uah", settings.working_capital_uah))
-        )
-
-        # Відкидаємо ТІЛЬКИ якщо наш капітал менший за мінімальний поріг входу мерчанта
-        if current_capital < order.min_limit:
+        # Відкидаємо тільки якщо навіть найбагатший юзер не може зайти
+        if _max_capital < order.min_limit:
             return False
 
-        # Відкидаємо, якщо в нього залишилися копійки (менше нашого мінімуму USDT)
+        # Відкидаємо якщо залишилися копійки USDT
         if order.available_amount < self.min_usdt:
             return False
 
@@ -8864,6 +9676,35 @@ async def migrate():
 
 if __name__ == "__main__":
     asyncio.run(migrate())
+
+============================================================
+FILE: tools/cleanup_settings.py
+============================================================
+
+import sqlite3
+import os
+
+# Автоматично знаходимо корінь проекту (на рівень вище від папки tools)
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+db_path = os.path.join(base_dir, 'data', 'merchants.db')
+
+print(f"Підключаюсь до БД: {db_path}")
+
+# Підключаємось по абсолютному шляху
+conn = sqlite3.connect(db_path)
+
+# Видаляємо старі глобальні ключі
+conn.execute("DELETE FROM bot_settings WHERE key IN ('working_capital_uah', 'min_spread_pct')")
+conn.commit()
+
+# Перевіряємо, що залишилося
+rows = conn.execute("SELECT key, value FROM bot_settings").fetchall()
+print("Залишилось в bot_settings:")
+for r in rows:
+    print(f"  {r[0]} = {r[1]}")
+
+conn.close()
+print("Done")
 
 ============================================================
 FILE: bot/__init__.py

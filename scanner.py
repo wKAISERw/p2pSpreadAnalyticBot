@@ -30,6 +30,7 @@ from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
 from filters.merchant_filter import MerchantFilter
+from filters.limit_filter import set_max_capital
 from infrastructure.api.binance_account import BinanceAccountClient
 from infrastructure.api.bybit_account import BybitAccountClient
 from infrastructure.api.mexc_account import MEXCAccountClient
@@ -71,16 +72,47 @@ class AlertDispatcher:
         return self._users_cache
 
     def _user_wants(self, user: dict, opp: dict) -> bool:
-        """Чи підходить спред під параметри юзера."""
+        """
+        Персональний фільтр юзера:
+          1. Коридор сум: min_amount ≤ entry ≤ capital
+          2. Мінімальний спред
+          3. Банки перетинаються
+          4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json)
+        """
+        entry = float(opp["actual_entry_uah"])
+
+        # 1. Капітальний коридор
+        if entry > float(user["capital"]):
+            return False
+        min_amount = float(user.get("min_amount", 0.0))
+        if min_amount > 0 and entry < min_amount:
+            return False
+
+        # 2. Мінімальний спред
         if float(opp["net_spread_pct"]) < float(user["min_spread"]):
             return False
-        if float(opp["actual_entry_uah"]) > float(user["capital"]):
-            return False
+
+        # 3. Банки
         user_banks     = set(user["bank_codes"])
         opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
         if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
             return False
+
+        # 4. Персональні фільтри мерчанта
+        mf = user.get("merchant_filters") or {}
+        if mf:
+            min_orders = float(mf.get("min_orders", 0))
+            min_rate   = float(mf.get("min_rate", 0.0))
+            buy_o  = opp["buy_order"]
+            sell_o = opp["sell_order"]
+            if min_orders > 0:
+                if buy_o.month_order_count  < min_orders: return False
+                if sell_o.month_order_count < min_orders: return False
+            if min_rate > 0:
+                if buy_o.finish_rate_pct  < min_rate: return False
+                if sell_o.finish_rate_pct < min_rate: return False
+
         return True
 
     async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
@@ -260,10 +292,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
-        "💼 Капітал: %s ₴ | Поріг: %s%% (+%s%% буфер)",
+        "💼 Дефолт капітал: %s ₴ | Поріг: %s%% | (Персональні налаштування завантажуються з БД)",
         settings.working_capital_uah,
         settings.min_spread_pct,
-        getattr(settings, "safety_buffer_pct", 0.0),
     )
 
     try:
@@ -337,12 +368,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
                         continue
 
-                        # 🚀 ФІКС: Перевірка чи сканер на паузі
-                    is_active = runtime_config.get("is_scanner_active", "false") == "true"
-                    if not is_active:
-                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
-                        continue
-
                     current_max_alerts = int(
                         runtime_config.get("max_alerts_per_cycle", getattr(settings, "max_alerts_per_cycle", 4)))
 
@@ -352,15 +377,31 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         # AlertDispatcher фільтрує окремо для кожного юзера
                         current_capital = max(float(u["capital"]) for u in active_users)
                         current_spread  = min(float(u["min_spread"]) for u in active_users)
+                        logger.debug(
+                            "📐 Сітка: %d юзерів | капітал до %.0f ₴ | спред від %.2f%%",
+                            len(active_users), current_capital, current_spread,
+                        )
                     else:
                         # Fallback: поки ніхто не написав /start — беремо з .env
                         current_capital = settings.working_capital_uah
                         current_spread  = settings.min_spread_pct
+                        logger.debug("📐 Fallback: no active users, using .env defaults")
 
                     matcher.max_capital_uah = current_capital
                     matcher.min_spread_pct  = current_spread
+                    set_max_capital(current_capital)  # LimitFilter використовує для pre-filter
 
-                    search_amounts = getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
+                    # Динамічна сітка — покриває діапазони всіх активних юзерів
+                    _grid: set[float] = {1000.0, 2500.0}   # базові точки адміна
+                    for u in active_users:
+                        cap = float(u["capital"])
+                        mn  = float(u.get("min_amount", 0.0)) or 1000.0
+                        _grid.add(mn)                           # нижня межа юзера
+                        _grid.add(cap)                          # верхня межа юзера
+                        _grid.add(round((mn + cap) / 2, -2))   # середина (округл. до 100)
+                    if not active_users:
+                        _grid.update(getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]))
+                    search_amounts = sorted(_grid)
 
                     # Паралельний збір ордерів з усіх бірж
                     results = await asyncio.gather(
@@ -496,10 +537,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
-
-                except Exception as e:
-                    logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)
-                    await asyncio.sleep(cycle_error_sleep)
 
                 except Exception as e:
                     logger.error("❌ Помилка в циклі сканування: %s", e, exc_info=True)

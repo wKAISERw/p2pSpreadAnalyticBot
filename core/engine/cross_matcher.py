@@ -20,6 +20,24 @@ class CrossMatchingEngine:
         self.min_spread = Decimal(str(min_spread_pct))
         self.safety_buffer = Decimal(str(safety_buffer_pct))
 
+    @property
+    def max_capital_uah(self) -> float:
+        return float(self.max_capital)
+
+    @max_capital_uah.setter
+    def max_capital_uah(self, value: float) -> None:
+        """scanner.py оновлює через цей setter на кожному циклі."""
+        self.max_capital = Decimal(str(value))
+
+    @property
+    def min_spread_pct(self) -> float:
+        return float(self.min_spread)
+
+    @min_spread_pct.setter
+    def min_spread_pct(self, value: float) -> None:
+        """scanner.py оновлює через цей setter на кожному циклі."""
+        self.min_spread = Decimal(str(value))
+
     def match(
         self,
         buy_grouped: dict[str, list[Order]],

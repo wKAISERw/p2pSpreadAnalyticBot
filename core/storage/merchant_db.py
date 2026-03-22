@@ -315,8 +315,11 @@ class MerchantDB:
         await self._db.commit()
 
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
-        # 🚀 ДОДАЄМО СТАТУС ВІДГУКІВ
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
+        # Міграція колонок scanner_users
+        await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
+        await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -939,16 +942,24 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                "SELECT user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes FROM scanner_users WHERE is_active=1"
+                """SELECT user_id, telegram_chat_id, working_capital,
+                          COALESCE(min_amount_uah, 0.0) as min_amount_uah,
+                          min_spread_pct, bank_codes,
+                          COALESCE(merchant_filters_json, '{}') as merchant_filters_json,
+                          COALESCE(is_alerts_active, 1) as is_alerts_active
+                   FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
             ) as cur:
                 rows = await cur.fetchall()
+            import json as _json
             return [
                 {
-                    "user_id":       row["user_id"],
-                    "chat_id":       row["telegram_chat_id"],
-                    "capital":       float(row["working_capital"]),
-                    "min_spread":    float(row["min_spread_pct"]),
-                    "bank_codes":    row["bank_codes"].split(","),
+                    "user_id":          row["user_id"],
+                    "chat_id":          row["telegram_chat_id"],
+                    "capital":          float(row["working_capital"]),
+                    "min_amount":       float(row["min_amount_uah"]),
+                    "min_spread":       float(row["min_spread_pct"]),
+                    "bank_codes":       row["bank_codes"].split(","),
+                    "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                 }
                 for row in rows
             ]

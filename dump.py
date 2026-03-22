@@ -83,6 +83,7 @@ PRIORITY_FILES = [
     "filters/limit_filter.py",
     "filters/anomaly_filter.py",
     "tools/migrate_multiuser.py",
+    "tools/cleanup_settings.py",
 ]
 
 

@@ -395,8 +395,9 @@ class TelegramNotifier:
 
     async def start(self) -> None:
         # 🚀 СТВОРЮЄМО СИСТЕМНЕ МЕНЮ КНОПКОЮ (Повний список)
-        commands = [
-            BotCommand(command="start", description="🏠 Головне меню (Дашборд)"),
+        commands =[
+            BotCommand(command="start", description="▶️ Запустити мій сканер (Дашборд)"),
+            BotCommand(command="stop", description="🛑 Зупинити мій сканер"),
             BotCommand(command="balance", description="💰 Перевірити баланси"),
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),

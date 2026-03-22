@@ -340,10 +340,8 @@ class RiskEngine:
         flags = []
         exchange = order.exchange
 
-        # Базова перевірка статс
-        if order.month_order_count < MIN_ORDERS.get(exchange, 30) or \
-                order.finish_rate_pct < MIN_COMPLETION.get(exchange, 90.0):
-            flags.append("LOW_STATS")
+        # LOW_STATS більше не є глобальним блоком — перенесено в AlertDispatcher._user_wants()
+        # де кожен юзер має свої персональні пороги (merchant_filters_json)
 
         # 🚀 ФІКС 3: ЗНЯТТЯ ІМУНІТЕТУ ДЛЯ ФІКСОВАНИХ СУМ
         if order.min_limit > 0 and order.max_limit > 0:
