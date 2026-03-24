@@ -1,5 +1,5 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-22 23:07
+# Generated: 2026-03-24 23:38
 # Files: 76
 #
 # STRUCTURE:
@@ -683,8 +683,8 @@ class AlertDispatcher:
             return False
 
         # 3. Банки
-        user_banks     = set(user["bank_codes"])
-        opp_buy_banks  = set(opp.get("buy_banks_fit") or [])
+        user_banks = set(user["bank_codes"])
+        opp_buy_banks = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
         if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
             return False
@@ -693,14 +693,14 @@ class AlertDispatcher:
         mf = user.get("merchant_filters") or {}
         if mf:
             min_orders = float(mf.get("min_orders", 0))
-            min_rate   = float(mf.get("min_rate", 0.0))
-            buy_o  = opp["buy_order"]
+            min_rate = float(mf.get("min_rate", 0.0))
+            buy_o = opp["buy_order"]
             sell_o = opp["sell_order"]
             if min_orders > 0:
-                if buy_o.month_order_count  < min_orders: return False
+                if buy_o.month_order_count < min_orders: return False
                 if sell_o.month_order_count < min_orders: return False
             if min_rate > 0:
-                if buy_o.finish_rate_pct  < min_rate: return False
+                if buy_o.finish_rate_pct < min_rate: return False
                 if sell_o.finish_rate_pct < min_rate: return False
 
         return True
@@ -727,10 +727,10 @@ class AlertDispatcher:
 
 @dataclass
 class AccountClients:
-    bybit:   BybitAccountClient
+    bybit: BybitAccountClient
     binance: BinanceAccountClient
-    okx:     OKXAccountClient
-    mexc:    MEXCAccountClient
+    okx: OKXAccountClient
+    mexc: MEXCAccountClient
 
     def as_dict(self) -> dict:
         return {
@@ -746,10 +746,10 @@ async def _load_credentials(db: MerchantDB) -> AccountClients:
     """
     creds = await db.get_all_credentials()
 
-    bybit_acc   = BybitAccountClient()
+    bybit_acc = BybitAccountClient()
     binance_acc = BinanceAccountClient()
-    okx_acc     = OKXAccountClient()
-    mexc_acc    = MEXCAccountClient()
+    okx_acc = OKXAccountClient()
+    mexc_acc = MEXCAccountClient()
 
     if "Bybit" in creds:
         bybit_acc.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
@@ -771,10 +771,10 @@ async def _load_credentials(db: MerchantDB) -> AccountClients:
 
 
 def _bind_http_credentials(
-    creds: dict,
-    b_client: BybitP2PClient,
-    bn_client: BinanceClient,
-    o_client: OkxClient,
+        creds: dict,
+        b_client: BybitP2PClient,
+        bn_client: BinanceClient,
+        o_client: OkxClient,
 ) -> None:
     """Прив'язує ті самі credentials до HTTP клієнтів (для ReviewFetcher)."""
     if "Bybit" in creds:
@@ -793,8 +793,8 @@ def _bind_http_credentials(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _watchdog(
-    last_cycle_time: list[float],
-    interval: float = getattr(settings, "watchdog_interval", 30.0),
+        last_cycle_time: list[float],
+        interval: float = getattr(settings, "watchdog_interval", 30.0),
 ) -> None:
     while True:
         await asyncio.sleep(interval)
@@ -804,8 +804,8 @@ async def _watchdog(
 
 
 async def _db_maintenance_loop(
-    db: MerchantDB,
-    interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
+        db: MerchantDB,
+        interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
 ) -> None:
     max_age = getattr(settings, "db_snapshot_max_age_h", 168)
     while True:
@@ -825,7 +825,6 @@ async def _db_maintenance_loop(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> None:
-
     # ── Ініціалізація ──────────────────────────────────────────────────────
     merchant_db = MerchantDB()
     await merchant_db.start()
@@ -835,7 +834,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
     await runtime_config.load()
 
     # Завантажуємо credentials один раз через ProviderFactory
-    all_creds    = await merchant_db.get_all_credentials()
+    all_creds = await merchant_db.get_all_credentials()
     account_clients = await _load_credentials(merchant_db)
 
     notifier.bind_db(merchant_db)
@@ -850,8 +849,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
     )
     await review_fetcher.start()
 
-    risk_engine      = RiskEngine(db=merchant_db, llm_pool=llm_pool)
-    merchant_filter  = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
+    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
+    merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
         ttl_seconds=getattr(settings, "stability_ttl", 15.0),
@@ -867,17 +866,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
-    dispatcher   = AlertDispatcher(merchant_db, notifier)
+    dispatcher = AlertDispatcher(merchant_db, notifier)
 
     # Таймінги
-    cb_fails       = getattr(settings, "cb_failure_threshold", 3)
-    cb_timeout     = getattr(settings, "cb_recovery_timeout", 60.0)
-    cycle_min_sleep  = getattr(settings, "cycle_min_sleep", 0.5)
-    cycle_max_sleep  = getattr(settings, "cycle_max_sleep", 3.0)
+    cb_fails = getattr(settings, "cb_failure_threshold", 3)
+    cb_timeout = getattr(settings, "cb_recovery_timeout", 60.0)
+    cycle_min_sleep = getattr(settings, "cycle_min_sleep", 0.5)
+    cycle_max_sleep = getattr(settings, "cycle_max_sleep", 3.0)
     cycle_error_sleep = getattr(settings, "cycle_error_sleep", 10.0)
 
-    last_cycle_time  = [time.monotonic()]
-    watchdog_task    = asyncio.create_task(_watchdog(last_cycle_time))
+    last_cycle_time = [time.monotonic()]
+    watchdog_task = asyncio.create_task(_watchdog(last_cycle_time))
     maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
@@ -889,28 +888,28 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
     try:
         async with (
-            BybitP2PClient()  as b_client,
-            OkxClient()       as o_client,
-            WalletClient()    as w_client,
-            BinanceClient()   as bn_client,
-            MexcClient()      as m_client,
+            BybitP2PClient() as b_client,
+            OkxClient() as o_client,
+            WalletClient() as w_client,
+            BinanceClient() as bn_client,
+            MexcClient() as m_client,
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client)
             review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client)
 
-            cb_bybit   = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_okx     = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_wallet  = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
-            cb_mexc    = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
             ex_configs = [
-                {"name": "Bybit",   "instance": BybitExchange(b_client),   "cb": cb_bybit},
-                {"name": "OKX",     "instance": OkxExchange(o_client),     "cb": cb_okx},
-                {"name": "Wallet",  "instance": WalletExchange(w_client),  "cb": cb_wallet},
-                {"name": "Binance", "instance": BinanceExchange(bn_client),"cb": cb_binance},
-                {"name": "MEXC",    "instance": MexcExchange(m_client),    "cb": cb_mexc},
+                {"name": "Bybit", "instance": BybitExchange(b_client), "cb": cb_bybit},
+                {"name": "OKX", "instance": OkxExchange(o_client), "cb": cb_okx},
+                {"name": "Wallet", "instance": WalletExchange(w_client), "cb": cb_wallet},
+                {"name": "Binance", "instance": BinanceExchange(bn_client), "cb": cb_binance},
+                {"name": "MEXC", "instance": MexcExchange(m_client), "cb": cb_mexc},
             ]
 
             cb_userbot = CryptoBotUserbot(
@@ -954,8 +953,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     # 🚀 ФІКС: Перевірка чи сканер на паузі
                     is_active = runtime_config.get("is_scanner_active", "false") == "true"
                     if not is_active:
-                        last_cycle_time[0] = time.monotonic()  # <--- ДОДАЙ ЦЕЙ РЯДОК ДЛЯ WATCHDOG
-                        await asyncio.sleep(3.0)  # Спимо і не парсимо біржі
+                        last_cycle_time[0] = time.monotonic()
+                        await asyncio.sleep(3.0)
                         continue
 
                     current_max_alerts = int(
@@ -963,37 +962,27 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     active_users = await merchant_db.get_active_users()
                     if active_users:
-                        # Матчер шукає широко (макс. капітал, мін. спред серед юзерів)
-                        # AlertDispatcher фільтрує окремо для кожного юзера
                         current_capital = max(float(u["capital"]) for u in active_users)
-                        current_spread  = min(float(u["min_spread"]) for u in active_users)
-                        logger.debug(
-                            "📐 Сітка: %d юзерів | капітал до %.0f ₴ | спред від %.2f%%",
-                            len(active_users), current_capital, current_spread,
-                        )
+                        current_spread = min(float(u["min_spread"]) for u in active_users)
                     else:
-                        # Fallback: поки ніхто не написав /start — беремо з .env
                         current_capital = settings.working_capital_uah
-                        current_spread  = settings.min_spread_pct
-                        logger.debug("📐 Fallback: no active users, using .env defaults")
+                        current_spread = settings.min_spread_pct
 
                     matcher.max_capital_uah = current_capital
-                    matcher.min_spread_pct  = current_spread
-                    set_max_capital(current_capital)  # LimitFilter використовує для pre-filter
+                    matcher.min_spread_pct = current_spread
+                    set_max_capital(current_capital)
 
-                    # Динамічна сітка — покриває діапазони всіх активних юзерів
-                    _grid: set[float] = {1000.0, 2500.0}   # базові точки адміна
+                    _grid: set[float] = {1000.0, 2500.0}
                     for u in active_users:
                         cap = float(u["capital"])
-                        mn  = float(u.get("min_amount", 0.0)) or 1000.0
-                        _grid.add(mn)                           # нижня межа юзера
-                        _grid.add(cap)                          # верхня межа юзера
-                        _grid.add(round((mn + cap) / 2, -2))   # середина (округл. до 100)
+                        mn = float(u.get("min_amount", 0.0)) or 1000.0
+                        _grid.add(mn)
+                        _grid.add(cap)
+                        _grid.add(round((mn + cap) / 2, -2))
                     if not active_users:
                         _grid.update(getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]))
                     search_amounts = sorted(_grid)
 
-                    # Паралельний збір ордерів з усіх бірж
                     results = await asyncio.gather(
                         *(safe_fetch(cfg, search_amounts, list(target_banks.keys())) for cfg in ex_configs),
                         return_exceptions=True,
@@ -1003,7 +992,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     if cb_buy or cb_sell:
                         results.append((cb_buy, cb_sell))
 
-                    # Групування ордерів по банках
                     all_cycle_orders = []
                     buy_grouped = {b: [] for b in target_banks}
                     sell_grouped = {b: [] for b in target_banks}
@@ -1036,7 +1024,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     last_cycle_time[0] = time.monotonic()
 
-                    # Матчинг і групування спредів
                     raw_opportunities = matcher.match(buy_grouped, sell_grouped)
                     opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
@@ -1062,6 +1049,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         2
                     )
                     # ----------------------------
+
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
                         latency, len(ex_configs),
@@ -1069,7 +1057,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         len(raw_opportunities), len(opportunities),
                     )
 
-                    # ── Обробка можливостей ────────────────────────────────
                     sent_count = 0
                     for opp in opportunities:
                         if sent_count >= current_max_alerts:
@@ -1078,7 +1065,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        # Risk аналіз (один раз на ордер)
                         if not getattr(buy_o, "_risk_analyzed", False):
                             risk_engine.analyze(buy_o);
                             buy_o._risk_analyzed = True
@@ -1130,39 +1116,82 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         )
 
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
-                        # Форматуємо дані так, як очікує React-додаток
+                        def safe_float(val):
+                            try:
+                                return float(val)
+                            except:
+                                return 0.0
+
                         frontend_opp = {
-                            "id": f"opp-{time.time()}",
+                            "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
+                            "timestamp": int(time.time() * 1000),  # Важливо для date-fns!
+
                             "buyOrder": {
-                                "id": buy_o.id if hasattr(buy_o, 'id') else "b1",
-                                "merchantName": buy_o.merchant_name,
-                                "merchantId": buy_o.merchant_id,
-                                "price": float(buy_o.price),
-                                "minLimit": float(getattr(buy_o, 'min_amount', 0)),
-                                "maxLimit": float(getattr(buy_o, 'max_amount', 0)),
-                                "orderCount": int(getattr(buy_o, 'month_order_count', 0)),
-                                "finishRate": float(getattr(buy_o, 'finish_rate_pct', 0)),
-                                "link": getattr(buy_o, 'link', ''),
-                                "exchange": buy_o.exchange,
-                                "riskScore": getattr(buy_o, 'risk_score', 0),
-                                "riskFlag": getattr(buy_o, 'risk_flag', 'OK')
+                                "id": getattr(buy_o, "id", "b1"),
+                                "price": safe_float(getattr(buy_o, "price", 0)),
+                                "availableAmount": safe_float(getattr(buy_o, "available_amount", getattr(buy_o, "qty",
+                                                                                                         getattr(buy_o,
+                                                                                                                 "amount",
+                                                                                                                 0)))),
+                                "minLimit": safe_float(getattr(buy_o, "min_limit", getattr(buy_o, "min_amount",
+                                                                                           getattr(buy_o,
+                                                                                                   "min_order_amount",
+                                                                                                   0)))),
+                                "maxLimit": safe_float(getattr(buy_o, "max_limit", getattr(buy_o, "max_amount",
+                                                                                           getattr(buy_o,
+                                                                                                   "max_order_amount",
+                                                                                                   0)))),
+                                "merchantId": getattr(buy_o, "merchant_id", ""),
+                                "merchantName": getattr(buy_o, "merchant_name", "Unknown"),
+                                "orderCount": int(
+                                    safe_float(getattr(buy_o, "order_count", getattr(buy_o, "month_order_count", 0)))),
+                                "finishRate": safe_float(getattr(buy_o, "finish_rate", getattr(buy_o, "finish_rate_pct",
+                                                                                               getattr(buy_o,
+                                                                                                       "month_finish_rate",
+                                                                                                       0)))),
+                                "exchange": getattr(buy_o, "exchange", "Unknown"),
+                                "link": getattr(buy_o, "link", "#"),
+                                "bankCodes": getattr(buy_o, "bank_codes", []),
+                                "riskScore": getattr(buy_o, "risk_score", 0),
+                                "riskFlag": getattr(buy_o, "risk_flag", "OK"),
+                                "isVerified": getattr(buy_o, "is_verified", False)
                             },
+
                             "sellOrder": {
-                                "id": sell_o.id if hasattr(sell_o, 'id') else "s1",
-                                "merchantName": sell_o.merchant_name,
-                                "merchantId": sell_o.merchant_id,
-                                "price": float(sell_o.price),
-                                "minLimit": float(getattr(sell_o, 'min_amount', 0)),
-                                "maxLimit": float(getattr(sell_o, 'max_amount', 0)),
-                                "orderCount": int(getattr(sell_o, 'month_order_count', 0)),
-                                "finishRate": float(getattr(sell_o, 'finish_rate_pct', 0)),
-                                "link": getattr(sell_o, 'link', ''),
-                                "exchange": sell_o.exchange,
-                                "riskScore": getattr(sell_o, 'risk_score', 0),
-                                "riskFlag": getattr(sell_o, 'risk_flag', 'OK')
+                                "id": getattr(sell_o, "id", "s1"),
+                                "price": safe_float(getattr(sell_o, "price", 0)),
+                                "availableAmount": safe_float(getattr(sell_o, "available_amount", getattr(sell_o, "qty",
+                                                                                                          getattr(
+                                                                                                              sell_o,
+                                                                                                              "amount",
+                                                                                                              0)))),
+                                "minLimit": safe_float(getattr(sell_o, "min_limit", getattr(sell_o, "min_amount",
+                                                                                            getattr(sell_o,
+                                                                                                    "min_order_amount",
+                                                                                                    0)))),
+                                "maxLimit": safe_float(getattr(sell_o, "max_limit", getattr(sell_o, "max_amount",
+                                                                                            getattr(sell_o,
+                                                                                                    "max_order_amount",
+                                                                                                    0)))),
+                                "merchantId": getattr(sell_o, "merchant_id", ""),
+                                "merchantName": getattr(sell_o, "merchant_name", "Unknown"),
+                                "orderCount": int(safe_float(
+                                    getattr(sell_o, "order_count", getattr(sell_o, "month_order_count", 0)))),
+                                "finishRate": safe_float(getattr(sell_o, "finish_rate",
+                                                                 getattr(sell_o, "finish_rate_pct",
+                                                                         getattr(sell_o, "month_finish_rate", 0)))),
+                                "exchange": getattr(sell_o, "exchange", "Unknown"),
+                                "link": getattr(sell_o, "link", "#"),
+                                "bankCodes": getattr(sell_o, "bank_codes", []),
+                                "riskScore": getattr(sell_o, "risk_score", 0),
+                                "riskFlag": getattr(sell_o, "risk_flag", "OK"),
+                                "isVerified": getattr(sell_o, "is_verified", False)
                             },
-                            "netSpread": float(opp["net_spread_pct"]),
-                            "netProfit": float(opp["net_profit"]),
+
+                            "netSpread": safe_float(opp.get("net_spread_pct", 0)),
+                            "dealAmount": safe_float(
+                                opp.get("actual_entry_uah", opp.get("deal_amount", opp.get("volume", 0)))),
+                            "netProfit": safe_float(opp.get("net_profit", 0)),
                             "buyBank": opp.get("buy_bank", ""),
                             "sellBank": opp.get("sell_bank", ""),
                             "routeType": opp.get("route_type", "UNKNOWN")
@@ -1174,7 +1203,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             state.opportunities.pop()
                         # ----------------------------
 
-                        # Не шлемо якщо юзер поставив паузу
                         if not is_muted():
                             await dispatcher.dispatch(alert, opp)
 
@@ -1199,7 +1227,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 FILE: main.py
 ============================================================
 
-# main.py
+import re
 import asyncio
 import logging
 import sys
@@ -1209,12 +1237,43 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder  # <--- Додано для безпечної конвертації об'єктів
 import uvicorn
-
+from pydantic import BaseModel
+from core.storage.merchant_db import MerchantDB
+from bot.commands import _is_admin # Імпортуємо перевірку адміна
 # Імпортуємо компоненти нашої системи
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
 from state import state  # Імпортуємо наш глобальний стан
+
+db = MerchantDB()
+# --- КОНВЕРТЕРИ ДЛЯ GET (Snake -> Camel) ---
+def to_camel(snake_str: str) -> str:
+    components = snake_str.split('_')
+    return components[0] + ''.join(x.title() for x in components[1:])
+
+
+def dict_to_camel(obj):
+    if isinstance(obj, list):
+        return [dict_to_camel(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {to_camel(k): dict_to_camel(v) for k, v in obj.items()}
+    return obj
+
+
+# --- КОНВЕРТЕРИ ДЛЯ POST (Camel -> Snake) ---
+def to_snake(camel_str: str) -> str:
+    # Перетворює minCapital -> min_capital
+    return re.sub(r'(?<!^)(?=[A-Z])', '_', camel_str).lower()
+
+
+def dict_to_snake(obj):
+    if isinstance(obj, list):
+        return [dict_to_snake(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {to_snake(k): dict_to_snake(v) for k, v in obj.items()}
+    return obj
 
 
 def setup_logging():
@@ -1299,48 +1358,161 @@ app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
 # Дозволяємо React-фронтенду робити запити до нашого API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Для безпеки в продакшені вкажи тут URL фронтенду
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# --- ЕНДПОІНТИ ДЛЯ ФРОНТЕНДУ ---
+# --- GET ЕНДПОІНТИ (Віддаємо на фронтенд у camelCase) ---
+class ApiKeyPayload(BaseModel):
+    key: str
+    secret: str
+    passphrase: str = ""
+
 
 @app.get("/api/v1/stats")
 async def get_stats():
-    return state.stats
+    # jsonable_encoder перетворює об'єкти/класи у словники, а dict_to_camel робить ключі зручними для React
+    return dict_to_camel(jsonable_encoder(state.stats))
 
 
 @app.get("/api/v1/opportunities")
 async def get_opportunities():
-    return state.opportunities
+    # Беремо спреди зі state замість неіснуючої змінної
+    return dict_to_camel(jsonable_encoder(state.opportunities))
 
 
 @app.get("/api/v1/logs")
 async def get_logs():
-    return state.logs
+    return dict_to_camel(jsonable_encoder(state.logs))
 
 
-@app.get("/api/v1/blacklist")
-async def get_blacklist():
-    return state.blacklist
+@app.post("/api/v1/credentials/{exchange}")
+async def save_credentials(exchange: str, payload: ApiKeyPayload):
+    # Виклик функції збереження ключів у вашу SQLite базу (MerchantDB)
+    # db.save_credentials(exchange, payload.key, payload.secret, payload.passphrase)
+    return {"status": "success"}
+
+class BlacklistPayload(BaseModel):
+    exchange: str
+    merchantId: str
+    merchantName: str
+    reason: str
+    source: str
+
+@app.post("/api/v1/blacklist")
+async def add_to_blacklist(payload: BlacklistPayload):
+    # db.add_to_blacklist(payload.exchange, payload.merchantId, payload.merchantName, payload.reason, payload.source)
+    return {"status": "success"}
+
+@app.delete("/api/v1/blacklist/{exchange}/{merchant_id}")
+async def remove_from_blacklist(exchange: str, merchant_id: str):
+    # Реалізуйте видалення з БД
+    return {"status": "success"}
 
 
 @app.get("/api/v1/settings/global")
 async def get_global_settings():
-    return {"minSpread": 0.5, "minProfit": 100, "maxRiskScore": 50, "scanInterval": 5,
-            "activeExchanges": ["binance", "bybit"]}
+    if hasattr(state, "global_settings"):
+        return dict_to_camel(jsonable_encoder(state.global_settings))
+    return dict_to_camel({"min_spread": 0.5, "min_profit": 100, "max_risk_score": 50, "scan_interval": 5,
+                          "active_exchanges": ["binance", "bybit"]})
 
 
 @app.get("/api/v1/settings/user")
 async def get_user_settings():
-    return {"telegramNotifications": True, "telegramChatId": "", "soundAlerts": True, "autoTrade": None}
+    if hasattr(state, "user_settings"):
+        return dict_to_camel(jsonable_encoder(state.user_settings))
+    return dict_to_camel(
+        {"telegram_notifications": True, "telegram_chat_id": "", "sound_alerts": True, "auto_trade": None})
+
+
+# --- POST ЕНДПОІНТИ (Отримуємо з фронтенда, перетворюємо у snake_case і зберігаємо) ---
+
+@app.post("/api/v1/settings/global")
+async def update_global_settings(settings: dict):
+    # Фронт прислав camelCase, перекладаємо на python-стандарт
+    snake_settings = dict_to_snake(settings)
+
+    if hasattr(state, "global_settings"):
+        if isinstance(state.global_settings, dict):
+            state.global_settings.update(snake_settings)
+        else:
+            # Якщо це об'єкт класу
+            for key, value in snake_settings.items():
+                setattr(state.global_settings, key, value)
+
+    return {"status": "success", "updated_settings": snake_settings}
+
+
+@app.post("/api/v1/settings/user")
+async def update_user_settings(settings: dict):
+    snake_settings = dict_to_snake(settings)
+
+    if hasattr(state, "user_settings"):
+        if isinstance(state.user_settings, dict):
+            state.user_settings.update(snake_settings)
+        else:
+            for key, value in snake_settings.items():
+                setattr(state.user_settings, key, value)
+
+    return {"status": "success", "updated_settings": snake_settings}
+
+
+@app.get("/api/v1/telegram/sync/{telegram_id}")
+async def sync_telegram(telegram_id: int):
+    # 1. Отримуємо дані юзера з SQLite (таблиця scanner_users)
+    users = await db.get_active_users()
+    user_data = next((u for u in users if u["user_id"] == telegram_id), None)
+
+    if not user_data:
+        return {"error": "User not found in bot database"}
+
+    # 2. Отримуємо підключені біржі (таблиця user_credentials)
+    creds = await db.get_all_credentials(user_id=telegram_id)
+
+    # 3. Перевіряємо адмін-права
+    is_admin = _is_admin(telegram_id)
+
+    # Повертаємо реальні дані (конвертер dict_to_camel обробить ключі)
+    data = {
+        "settings": {
+            "minCapital": 1000,  # можна додати в БД пізніше
+            "maxCapital": user_data.get("capital", 0),
+            "minSpread": user_data.get("min_spread", 0),
+            "banks": user_data.get("bank_codes", "").split(",") if user_data.get("bank_codes") else []
+        },
+        "keys": [k.lower() for k in creds.keys()],
+        "isAdmin": is_admin
+    }
+    return dict_to_camel(data)
+
+
+@app.post("/api/v1/user/settings")
+async def update_user_settings(settings: dict):
+    # Цей метод має оновлювати БД, щоб бот теж бачив зміни
+    snake_settings = dict_to_snake(settings)
+    telegram_id = settings.get("telegramUserId")  # фронт має його надсилати
+
+    if telegram_id:
+        # Пряме оновлення в БД бота
+        async with db._db.execute(
+                "UPDATE scanner_users SET capital = ?, min_spread = ?, bank_codes = ? WHERE user_id = ?",
+                (snake_settings.get("max_capital"), snake_settings.get("min_spread"),
+                 ",".join(snake_settings.get("banks", [])), telegram_id)
+        ) as cursor:
+            await db._db.commit()
+
+    # Оновлюємо глобальний state (для сканера)
+    if hasattr(state, "user_settings"):
+        state.user_settings.update(snake_settings)
+
+    return {"status": "success"}
 
 
 if __name__ == "__main__":
-    # Запускаємо сервер (він сам підхопить lifespan і запустить сканер)
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
 
 ============================================================
@@ -9928,23 +10100,64 @@ FILE: infrastructure/api/__init__.py
 FILE: state.py
 ============================================================
 
-# state.py
-from typing import List, Dict, Any
+from datetime import datetime
 
-# Глобальний стан нашого додатку
+
 class AppState:
     def __init__(self):
-        self.stats: Dict[str, Any] = {
+        self.stats = {
+            "cycles": 0,
+            "last_cycle_ms": 0,
+            "bots_detected_today": 0,
+            "spreads_found_today": 0,
+            "llm_queue": 0,
+            "review_queue": 0,
             "totalScanned": 0,
             "opportunitiesFound": 0,
-            "activeBots": 1,
-            "avgSpread": 0.0
+            "cb_status": {
+                "Bybit": "CLOSED",
+                "Binance": "CLOSED",
+                "OKX": "CLOSED",
+                "MEXC": "CLOSED",
+                "Wallet": "CLOSED"
+            },
+            "is_scanner_active": False
         }
-        self.opportunities: List[Dict[str, Any]] = []
-        self.logs: List[Dict[str, Any]] = []
-        self.blacklist: List[Dict[str, Any]] = []
 
-# Створюємо єдиний екземпляр стану
+        self.opportunities = []
+        self.logs = []
+        self.blacklist = []
+
+        # 🔥 Додаємо глобальні налаштування
+        self.global_settings = {
+            "risk_mode": "WARNING",
+            "behavior_alert_score": 60,
+            "velocity_spike_per_hour": 20.0,
+            "sticky_min_chain": 3,
+            "review_ttl_hours": 24.0,
+            "max_alerts_per_cycle": 5
+        }
+
+        # 🔥 Додаємо налаштування користувача
+        self.user_settings = {
+            "min_capital": 5000,
+            "max_capital": 15000,
+            "min_spread": 0.5,
+            "banks": ["43", "14"],  # 43 - Mono, 14 - Privat
+            "merchant_filters": {
+                "min_orders": 50,
+                "min_rate": 95.0
+            },
+            "auto_trade": {
+                "enabled": False,
+                "max_trade_amount": 5000,
+                "min_spread": 0.8,
+                "allowed_exchanges": ["Bybit", "OKX"],
+                "max_risk_score": 30
+            }
+        }
+
+
 state = AppState()
 
 ============================================================

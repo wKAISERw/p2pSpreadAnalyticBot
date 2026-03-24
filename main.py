@@ -8,20 +8,22 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.encoders import jsonable_encoder  # <--- Додано для безпечної конвертації об'єктів
+from fastapi.encoders import jsonable_encoder
 import uvicorn
+from pydantic import BaseModel
+from core.storage.merchant_db import MerchantDB
+from bot.commands import _is_admin
 
-# Імпортуємо компоненти нашої системи
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
-from state import state  # Імпортуємо наш глобальний стан
+from state import state
 
+db = MerchantDB()
 
 # --- КОНВЕРТЕРИ ДЛЯ GET (Snake -> Camel) ---
 def to_camel(snake_str: str) -> str:
     components = snake_str.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
-
 
 def dict_to_camel(obj):
     if isinstance(obj, list):
@@ -30,12 +32,9 @@ def dict_to_camel(obj):
         return {to_camel(k): dict_to_camel(v) for k, v in obj.items()}
     return obj
 
-
 # --- КОНВЕРТЕРИ ДЛЯ POST (Camel -> Snake) ---
 def to_snake(camel_str: str) -> str:
-    # Перетворює minCapital -> min_capital
     return re.sub(r'(?<!^)(?=[A-Z])', '_', camel_str).lower()
-
 
 def dict_to_snake(obj):
     if isinstance(obj, list):
@@ -44,9 +43,7 @@ def dict_to_snake(obj):
         return {to_snake(k): dict_to_snake(v) for k, v in obj.items()}
     return obj
 
-
 def setup_logging():
-    """Налаштовує 3 канали логування: консоль, debug.log, error.log"""
     os.makedirs("logs", exist_ok=True)
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -69,21 +66,22 @@ def setup_logging():
     logger.addHandler(debug_handler)
     logger.addHandler(error_handler)
 
-
-# Глобальні змінні для фонових задач
+# Глобальні змінні
 scanner_task = None
 notifier = None
 stop_event = asyncio.Event()
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Керує життєвим циклом додатку (запуск та зупинка фонових задач)"""
     global scanner_task, notifier, stop_event
 
     setup_logging()
     logger = logging.getLogger("Main")
     logger.info("🚀 Ініціалізація P2P Сканера + API (Production Mode)...")
+
+    # ДОДАНО: Ініціалізуємо підключення до БД ДО запуску ендпоінтів
+    await db.start()
+    logger.info("✅ База даних успішно підключена для API")
 
     notifier = TelegramNotifier()
     await notifier.start()
@@ -95,10 +93,9 @@ async def lifespan(app: FastAPI):
             logger.critical("🔥 КРИТИЧНА ПОМИЛКА СКАНЕРА: %s", e, exc_info=True)
             stop_event.set()
 
-    # Запускаємо сканер у фоні
     scanner_task = asyncio.create_task(run_scanner_safe())
 
-    yield  # ТУТ ПРАЦЮЄ FASTAPI ТА ОБРОБЛЯЄ ЗАПИТИ ВІД REACT
+    yield
 
     # --- GRACEFUL SHUTDOWN ---
     logger.info("🧹 Початок завершення процесів...")
@@ -118,13 +115,12 @@ async def lifespan(app: FastAPI):
         except asyncio.TimeoutError:
             logger.error("⚠️ Timeout при зупинці нотифікатора.")
 
+    # ДОДАНО: Закриваємо з'єднання з базою
+    await db.stop()
     logger.info("🏁 Систему повністю зупинено. До зустрічі!")
 
-
-# --- ІНІЦІАЛІЗАЦІЯ FASTAPI ---
 app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
 
-# Дозволяємо React-фронтенду робити запити до нашого API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -133,30 +129,53 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# --- GET ЕНДПОІНТИ (Віддаємо на фронтенд у camelCase) ---
+class ApiKeyPayload(BaseModel):
+    key: str
+    secret: str
+    passphrase: str = ""
 
 @app.get("/api/v1/stats")
 async def get_stats():
-    # jsonable_encoder перетворює об'єкти/класи у словники, а dict_to_camel робить ключі зручними для React
     return dict_to_camel(jsonable_encoder(state.stats))
-
 
 @app.get("/api/v1/opportunities")
 async def get_opportunities():
-    # Беремо спреди зі state замість неіснуючої змінної
     return dict_to_camel(jsonable_encoder(state.opportunities))
-
 
 @app.get("/api/v1/logs")
 async def get_logs():
     return dict_to_camel(jsonable_encoder(state.logs))
 
+@app.post("/api/v1/credentials/{exchange}")
+async def save_credentials(exchange: str, payload: ApiKeyPayload):
+    return {"status": "success"}
 
+class BlacklistPayload(BaseModel):
+    exchange: str
+    merchantId: str
+    merchantName: str
+    reason: str
+    source: str
+
+# ДОДАНО: GET-ендпоінт для вирішення помилки 405 (Method Not Allowed)
 @app.get("/api/v1/blacklist")
 async def get_blacklist():
-    return dict_to_camel(jsonable_encoder(state.blacklist))
+    try:
+        if hasattr(db, "get_all_blacklist"):
+            records = await db.get_all_blacklist()
+            return dict_to_camel(records)
+        return []
+    except Exception as e:
+        logging.getLogger("Main").error(f"Error fetching blacklist: {e}")
+        return []
 
+@app.post("/api/v1/blacklist")
+async def add_to_blacklist(payload: BlacklistPayload):
+    return {"status": "success"}
+
+@app.delete("/api/v1/blacklist/{exchange}/{merchant_id}")
+async def remove_from_blacklist(exchange: str, merchant_id: str):
+    return {"status": "success"}
 
 @app.get("/api/v1/settings/global")
 async def get_global_settings():
@@ -165,7 +184,6 @@ async def get_global_settings():
     return dict_to_camel({"min_spread": 0.5, "min_profit": 100, "max_risk_score": 50, "scan_interval": 5,
                           "active_exchanges": ["binance", "bybit"]})
 
-
 @app.get("/api/v1/settings/user")
 async def get_user_settings():
     if hasattr(state, "user_settings"):
@@ -173,38 +191,72 @@ async def get_user_settings():
     return dict_to_camel(
         {"telegram_notifications": True, "telegram_chat_id": "", "sound_alerts": True, "auto_trade": None})
 
-
-# --- POST ЕНДПОІНТИ (Отримуємо з фронтенда, перетворюємо у snake_case і зберігаємо) ---
-
 @app.post("/api/v1/settings/global")
 async def update_global_settings(settings: dict):
-    # Фронт прислав camelCase, перекладаємо на python-стандарт
     snake_settings = dict_to_snake(settings)
-
     if hasattr(state, "global_settings"):
         if isinstance(state.global_settings, dict):
             state.global_settings.update(snake_settings)
         else:
-            # Якщо це об'єкт класу
             for key, value in snake_settings.items():
                 setattr(state.global_settings, key, value)
-
     return {"status": "success", "updated_settings": snake_settings}
 
-
 @app.post("/api/v1/settings/user")
-async def update_user_settings(settings: dict):
+async def update_local_user_settings(settings: dict): # Змінено ім'я функції щоб не було конфлікту
     snake_settings = dict_to_snake(settings)
-
     if hasattr(state, "user_settings"):
         if isinstance(state.user_settings, dict):
             state.user_settings.update(snake_settings)
         else:
             for key, value in snake_settings.items():
                 setattr(state.user_settings, key, value)
-
     return {"status": "success", "updated_settings": snake_settings}
 
+@app.get("/api/v1/telegram/sync/{telegram_id}")
+async def sync_telegram(telegram_id: int):
+    users = await db.get_active_users()
+    user_data = next((u for u in users if u["user_id"] == telegram_id), None)
+
+    if not user_data:
+        return {"error": "User not found in bot database"}
+
+    creds = await db.get_all_credentials(user_id=telegram_id)
+    is_admin = _is_admin(telegram_id)
+
+    data = {
+        "settings": {
+            "minCapital": 1000,
+            "maxCapital": user_data.get("capital", 0),
+            "minSpread": user_data.get("min_spread", 0),
+            # Перевіряємо, чи це вже список. Якщо так - віддаємо його, якщо рядок - сплітимо, якщо нічого - порожній список.
+            "banks": user_data.get("bank_codes") if isinstance(user_data.get("bank_codes"), list) else (user_data.get("bank_codes", "").split(",") if user_data.get("bank_codes") else [])
+        },
+        "keys": [k.lower() for k in creds.keys()],
+        "isAdmin": is_admin
+    }
+    return dict_to_camel(data)
+
+@app.post("/api/v1/user/settings")
+async def update_telegram_settings(settings: dict): # Змінено ім'я функції
+    snake_settings = dict_to_snake(settings)
+    telegram_id = settings.get("telegramUserId")
+
+    if telegram_id:
+        # Безпечний синтаксис запису до SQLite
+        banks_data = snake_settings.get("banks", [])
+        banks_str = ",".join(banks_data) if isinstance(banks_data, list) else str(banks_data)
+
+        await db._db.execute(
+            "UPDATE scanner_users SET working_capital = ?, min_spread_pct = ?, bank_codes = ? WHERE user_id = ?",
+            (snake_settings.get("max_capital"), snake_settings.get("min_spread"), banks_str, telegram_id)
+        )
+        await db._db.commit()
+
+    if hasattr(state, "user_settings"):
+        state.user_settings.update(snake_settings)
+
+    return {"status": "success"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

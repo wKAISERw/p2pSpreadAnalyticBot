@@ -458,6 +458,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         if opportunities else 0.0,
                         2
                     )
+
+                    # 1. Створюємо новий пустий список для актуальних ордерів
+                    current_frontend_opps = []
                     # ----------------------------
 
                     logger.info(
@@ -469,9 +472,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     sent_count = 0
                     for opp in opportunities:
-                        if sent_count >= current_max_alerts:
-                            break
-
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
@@ -482,24 +482,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             risk_engine.analyze(sell_o);
                             sell_o._risk_analyzed = True
 
-                        if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
-                            continue
-                        if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
-                            continue
+                        # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
+                        # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
+                        def safe_float(val):
+                            try:
+                                return float(val)
+                            except:
+                                return 0.0
 
-                        dedup_key = f"spread:{matcher._merge_key(opp)}"
-                        if dedup_cache.seen(dedup_key):
-                            continue
 
-                        if not stability_filter.check(
-                                buy_o.exchange, sell_o.exchange,
-                                str(buy_o.price), str(sell_o.price),
-                                buy_o.merchant_name, sell_o.merchant_name,
-                        ):
-                            continue
-
-                        dedup_cache.mark(dedup_key)
-                        sent_count += 1
 
                         logger.warning(
                             "🚨 СПРЕД! %s | %s ➔ %s | %s | Net: %.2f%% | Профіт: %.2f ₴",
@@ -534,8 +525,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                         frontend_opp = {
                             "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
-                            "timestamp": int(time.time() * 1000),  # Важливо для date-fns!
-
+                            "timestamp": int(time.time() * 1000),
                             "buyOrder": {
                                 "id": getattr(buy_o, "id", "b1"),
                                 "price": safe_float(getattr(buy_o, "price", 0)),
@@ -566,7 +556,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                                 "riskFlag": getattr(buy_o, "risk_flag", "OK"),
                                 "isVerified": getattr(buy_o, "is_verified", False)
                             },
-
                             "sellOrder": {
                                 "id": getattr(sell_o, "id", "s1"),
                                 "price": safe_float(getattr(sell_o, "price", 0)),
@@ -597,7 +586,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                                 "riskFlag": getattr(sell_o, "risk_flag", "OK"),
                                 "isVerified": getattr(sell_o, "is_verified", False)
                             },
-
                             "netSpread": safe_float(opp.get("net_spread_pct", 0)),
                             "dealAmount": safe_float(
                                 opp.get("actual_entry_uah", opp.get("deal_amount", opp.get("volume", 0)))),
@@ -606,16 +594,32 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             "sellBank": opp.get("sell_bank", ""),
                             "routeType": opp.get("route_type", "UNKNOWN")
                         }
+                        current_frontend_opps.append(frontend_opp)
+                        if sent_count >= current_max_alerts:
+                            continue
 
-                        # Додаємо нову зв'язку на початок списку (зберігаємо останні 50)
-                        state.opportunities.insert(0, frontend_opp)
-                        if len(state.opportunities) > 50:
-                            state.opportunities.pop()
-                        # ----------------------------
+                        if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
+                            continue
+                        if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
+                            continue
+
+                        dedup_key = f"spread:{matcher._merge_key(opp)}"
+                        if dedup_cache.seen(dedup_key):
+                            continue
+
+                        if not stability_filter.check(
+                                buy_o.exchange, sell_o.exchange,
+                                str(buy_o.price), str(sell_o.price),
+                                buy_o.merchant_name, sell_o.merchant_name,
+                        ):
+                            continue
+
+                        dedup_cache.mark(dedup_key)
+                        sent_count += 1
 
                         if not is_muted():
                             await dispatcher.dispatch(alert, opp)
-
+                    state.opportunities = current_frontend_opps[:50]
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
