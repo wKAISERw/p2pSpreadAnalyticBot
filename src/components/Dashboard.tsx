@@ -16,13 +16,17 @@ interface DashboardProps {
 }
 
 export default function Dashboard({ stats, opportunities }: DashboardProps) {
+  // Використовуємо всі ордери, які прислав бекенд. 
+  // Бекенд сам має вирішувати, які ордери ще активні, а які вже викуплені.
+  const activeOpportunities = opportunities;
+
   return (
     <div className="space-y-8">
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <StatCard
           icon={<TrendingUp className="w-5 h-5 text-emerald-400" />}
           label="Active Spreads"
-          value={opportunities.length.toString()}
+          value={activeOpportunities.length.toString()}
           subValue="Real-time opportunities"
         />
         <StatCard
@@ -55,8 +59,8 @@ export default function Dashboard({ stats, opportunities }: DashboardProps) {
         </div>
 
         <AnimatePresence mode="popLayout">
-          {opportunities.length > 0 ? (
-            opportunities.map((opp, index) => (
+          {activeOpportunities.length > 0 ? (
+            activeOpportunities.map((opp, index) => (
                 <OpportunityCard key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`} opp={opp} />
             ))
           ) : (
@@ -90,7 +94,7 @@ function StatCard({ icon, label, value, subValue }: any) {
   );
 }
 
-function OpportunityCard({ opp }: { opp: ArbitrageOpportunity }) {
+const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity }> = ({ opp }) => {
   const isHighRisk = (opp.buyOrder.riskScore || 0) >= 50 || (opp.sellOrder.riskScore || 0) >= 50;
 
   return (

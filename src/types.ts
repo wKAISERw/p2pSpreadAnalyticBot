@@ -43,6 +43,7 @@ export interface AutoTradeConfig {
   minSpread: number;
   allowedExchanges: string[];
   maxRiskScore: number;
+  maxCapital?: number;
 }
 
 export interface MerchantFilters {
@@ -57,6 +58,10 @@ export interface UserSettings {
   banks: string[];
   merchantFilters?: MerchantFilters;
   autoTrade?: AutoTradeConfig;
+  apiKeys?: Record<string, ApiKeyConfig>;
+  telegramUserId?: string;
+  isTelegramAdmin?: boolean;
+  autoSyncTelegram?: boolean;
 }
 
 export interface BlacklistEntry {
@@ -105,17 +110,9 @@ export interface LogEntry {
   level: 'info' | 'warning' | 'error' | 'success';
   message: string;
   details?: any;
-  // Додаткові поля для AutoTradePanel
   buyExchange?: string;
   sellExchange?: string;
   amountUah?: number;
   expectedProfit?: number;
   status?: string;
-}
-
-export interface AutoTradeConfig {
-  enabled: boolean;
-  maxCapital: number;
-  minSpread: number;
-  allowedExchanges: string[];
 }

@@ -159,7 +159,8 @@ export const mockUserSettings: UserSettings = {
     allowedExchanges: ['Bybit', 'OKX'],
     maxRiskScore: 30,
     maxCapital: 15000
-  }
+  },
+  apiKeys: {}
 };
 
 export const mockBlacklist: BlacklistEntry[] = [

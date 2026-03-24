@@ -35,23 +35,33 @@ export default function ApiKeysPanel({ connectedExchanges, onSaveKey }: ApiKeysP
         <ApiKeyCard
           exchange="Binance"
           isConnected={connectedExchanges.includes('binance')}
-          onSave={(config) => onSaveKey('Binance', config)}
+          onSave={(config: any) => onSaveKey('Binance', config)}
         />
         <ApiKeyCard
           exchange="Bybit"
           isConnected={connectedExchanges.includes('bybit')}
-          onSave={(config) => onSaveKey('Bybit', config)}
+          onSave={(config: any) => onSaveKey('Bybit', config)}
         />
         <ApiKeyCard
           exchange="OKX"
           isConnected={connectedExchanges.includes('okx')}
           hasPassphrase
-          onSave={(config) => onSaveKey('OKX', config)}
+          onSave={(config: any) => onSaveKey('OKX', config)}
         />
         <ApiKeyCard
           exchange="MEXC"
           isConnected={connectedExchanges.includes('mexc')}
-          onSave={(config) => onSaveKey('MEXC', config)}
+          onSave={(config: any) => onSaveKey('MEXC', config)}
+        />
+        <ApiKeyCard
+          exchange="CryptoBot"
+          isConnected={connectedExchanges.includes('cryptobot')}
+          onSave={(config: any) => onSaveKey('CryptoBot', config)}
+        />
+        <ApiKeyCard
+          exchange="Telegram Wallet"
+          isConnected={connectedExchanges.includes('telegram wallet')}
+          onSave={(config: any) => onSaveKey('Telegram Wallet', config)}
         />
       </div>
     </div>
@@ -183,10 +193,12 @@ function ExchangeIcon({ name }: { name: string }) {
     'Bybit': 'bg-orange-500',
     'OKX': 'bg-white',
     'Binance': 'bg-yellow-400',
-    'MEXC': 'bg-blue-500'
+    'MEXC': 'bg-blue-500',
+    'CryptoBot': 'bg-indigo-500 text-white',
+    'Telegram Wallet': 'bg-sky-500 text-white'
   };
   return (
-    <div className={cn("w-10 h-10 rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-xs text-slate-950", colors[name] || 'bg-slate-700')}>
+    <div className={cn("w-10 h-10 rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-xs text-slate-950", colors[name] || 'bg-slate-700 text-white')}>
       {name[0]}
     </div>
   );

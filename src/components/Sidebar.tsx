@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, ShieldAlert, ChevronLeft, ChevronRight } from 'lucide-react';
+import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, LogIn, ShieldAlert, ChevronLeft, ChevronRight } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -15,9 +15,12 @@ interface SidebarProps {
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
   isConnected?: boolean | null;
+  user: any;
+  onLogin: () => void;
+  onLogout: () => void;
 }
 
-export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmin, isOpen, setIsOpen, isConnected }: SidebarProps) {
+export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmin, isOpen, setIsOpen, isConnected, user, onLogin, onLogout }: SidebarProps) {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'autotrade', label: 'Auto-Trade', icon: Activity },
@@ -75,43 +78,61 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
       </nav>
 
       <div className="p-4 border-t border-slate-800 space-y-2 overflow-x-hidden">
-        <button 
-          onClick={onToggleAdmin}
-          className={cn(
-            "w-full flex items-center rounded-xl transition-all font-bold text-sm border",
-            isOpen ? "justify-between px-4 py-3" : "justify-center p-3",
-            isAdmin 
-              ? "bg-orange-500/10 text-orange-400 border-orange-500/20" 
-              : "bg-slate-800 text-slate-400 border-transparent hover:bg-slate-700"
-          )}
-          title={!isOpen ? "Admin Mode" : undefined}
-        >
-          <div className={cn("flex items-center", isOpen ? "gap-3" : "")}>
-            <ShieldAlert className="w-5 h-5 shrink-0" />
-            {isOpen && <span className="whitespace-nowrap">Admin Mode</span>}
-          </div>
-          {isOpen && (
-            <div className={cn(
-              "w-8 h-4 rounded-full transition-colors relative shrink-0",
-              isAdmin ? "bg-orange-500" : "bg-slate-600"
-            )}>
-              <div className={cn(
-                "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
-                isAdmin ? "right-0.5" : "left-0.5"
-              )} />
+        {user && (
+          <button 
+            onClick={onToggleAdmin}
+            className={cn(
+              "w-full flex items-center rounded-xl transition-all font-bold text-sm border",
+              isOpen ? "justify-between px-4 py-3" : "justify-center p-3",
+              isAdmin 
+                ? "bg-orange-500/10 text-orange-400 border-orange-500/20" 
+                : "bg-slate-800 text-slate-400 border-transparent hover:bg-slate-700"
+            )}
+            title={!isOpen ? "Admin Mode" : undefined}
+          >
+            <div className={cn("flex items-center", isOpen ? "gap-3" : "")}>
+              <ShieldAlert className="w-5 h-5 shrink-0" />
+              {isOpen && <span className="whitespace-nowrap">Admin Mode</span>}
             </div>
-          )}
-        </button>
-
-        <button className={cn(
-          "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm",
-          isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
+            {isOpen && (
+              <div className={cn(
+                "w-8 h-4 rounded-full transition-colors relative shrink-0",
+                isAdmin ? "bg-orange-500" : "bg-slate-600"
+              )}>
+                <div className={cn(
+                  "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
+                  isAdmin ? "right-0.5" : "left-0.5"
+                )} />
+              </div>
+            )}
+          </button>
         )}
-        title={!isOpen ? "Logout" : undefined}
-        >
-          <LogOut className="w-5 h-5 shrink-0" />
-          {isOpen && <span className="whitespace-nowrap">Logout</span>}
-        </button>
+
+        {user ? (
+          <button 
+            onClick={onLogout}
+            className={cn(
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm",
+              isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
+            )}
+            title={!isOpen ? "Logout" : undefined}
+          >
+            <LogOut className="w-5 h-5 shrink-0" />
+            {isOpen && <span className="whitespace-nowrap">Logout</span>}
+          </button>
+        ) : (
+          <button 
+            onClick={onLogin}
+            className={cn(
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all font-bold text-sm",
+              isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
+            )}
+            title={!isOpen ? "Login" : undefined}
+          >
+            <LogIn className="w-5 h-5 shrink-0" />
+            {isOpen && <span className="whitespace-nowrap">Login</span>}
+          </button>
+        )}
 
         {/* Connection Status Indicator */}
         <div className={cn(
@@ -143,4 +164,3 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
     </aside>
   );
 }
-

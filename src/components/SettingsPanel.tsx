@@ -1,5 +1,5 @@
-import React from 'react';
-import { Settings, ShieldAlert, CheckCircle2, Filter, Shield, Bot, Zap, Pin, MessageSquare, Bell } from 'lucide-react';
+import React, { useState } from 'react';
+import { Settings, ShieldAlert, CheckCircle2, Filter, Shield, Bot, Zap, Pin, MessageSquare, Bell, Send, Download, Upload, RefreshCw } from 'lucide-react';
 import { GlobalSettings, UserSettings } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -14,9 +14,40 @@ interface SettingsPanelProps {
   onGlobalChange: (key: keyof GlobalSettings, value: any) => void;
   onUserChange: (key: keyof UserSettings, value: any) => void;
   isAdmin: boolean;
+  onConnectTelegram: (telegramId: string) => Promise<void>;
+  onDisconnectTelegram: () => Promise<void>;
+  onSyncFromBot: () => Promise<void>;
+  onSyncToBot: () => Promise<void>;
 }
 
-export default function SettingsPanel({ globalSettings, userSettings, onGlobalChange, onUserChange, isAdmin }: SettingsPanelProps) {
+export default function SettingsPanel({ globalSettings, userSettings, onGlobalChange, onUserChange, isAdmin, onConnectTelegram, onDisconnectTelegram, onSyncFromBot, onSyncToBot }: SettingsPanelProps) {
+  const [tgInput, setTgInput] = useState('');
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const handleConnect = async () => {
+    if (!tgInput) return;
+    setIsConnecting(true);
+    await onConnectTelegram(tgInput);
+    setIsConnecting(false);
+  };
+
+  const handleSyncFromBot = async () => {
+    setIsSyncing(true);
+    await onSyncFromBot();
+    setIsSyncing(false);
+  };
+
+  const handleSyncToBot = async () => {
+    setIsSyncing(true);
+    await onSyncToBot();
+    setIsSyncing(false);
+  };
+
+  const toggleAutoSync = () => {
+    onUserChange('autoSyncTelegram', !userSettings.autoSyncTelegram);
+  };
+
   const toggleBank = (code: string) => {
     const newBanks = userSettings.banks.includes(code)
       ? userSettings.banks.filter(b => b !== code)
@@ -33,6 +64,110 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
 
   return (
     <div className="space-y-8">
+      {/* Telegram Sync Section */}
+      <section className="bg-blue-500/10 border border-blue-500/20 rounded-3xl p-6">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-blue-500/20 rounded-xl">
+              <Send className="w-6 h-6 text-blue-400" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-blue-400">Telegram Bot Sync</h2>
+              <p className="text-sm text-blue-500/80">
+                {userSettings.telegramUserId
+                  ? `Connected to Telegram ID: ${userSettings.telegramUserId}`
+                  : "Connect your Telegram account to sync settings, API keys, and admin rights."}
+              </p>
+            </div>
+          </div>
+          
+          {!userSettings.telegramUserId ? (
+            <div className="flex w-full md:w-auto gap-2">
+              <input 
+                type="text" 
+                placeholder="Enter Telegram ID..." 
+                value={tgInput}
+                onChange={(e) => setTgInput(e.target.value)}
+                className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 outline-none w-full md:w-48"
+              />
+              <button 
+                onClick={handleConnect}
+                disabled={isConnecting || !tgInput}
+                className="px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap"
+              >
+                {isConnecting ? 'Connecting...' : 'Connect'}
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={onDisconnectTelegram}
+              className="px-4 py-2 bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 font-bold rounded-xl transition-all border border-transparent hover:border-red-500/30 whitespace-nowrap"
+            >
+              Disconnect
+            </button>
+          )}
+        </div>
+
+        {userSettings.telegramUserId && (
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-blue-500/20 pt-6">
+            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Download className="w-4 h-4 text-emerald-400" />
+                  <span className="text-sm font-bold text-white">Pull from Bot</span>
+                </div>
+                <p className="text-xs text-slate-400 mb-4">Overwrite site settings with bot data.</p>
+              </div>
+              <button 
+                onClick={handleSyncFromBot}
+                disabled={isSyncing}
+                className="w-full py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+              >
+                {isSyncing ? 'Syncing...' : 'PULL DATA'}
+              </button>
+            </div>
+
+            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <Upload className="w-4 h-4 text-orange-400" />
+                  <span className="text-sm font-bold text-white">Push to Bot</span>
+                </div>
+                <p className="text-xs text-slate-400 mb-4">Overwrite bot settings with site data.</p>
+              </div>
+              <button 
+                onClick={handleSyncToBot}
+                disabled={isSyncing}
+                className="w-full py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+              >
+                {isSyncing ? 'Syncing...' : 'PUSH DATA'}
+              </button>
+            </div>
+
+            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2 mb-2">
+                  <RefreshCw className="w-4 h-4 text-blue-400" />
+                  <span className="text-sm font-bold text-white">Auto-Sync</span>
+                </div>
+                <p className="text-xs text-slate-400 mb-4">Automatically push changes to bot.</p>
+              </div>
+              <button 
+                onClick={toggleAutoSync}
+                className={cn(
+                  "w-full py-2 border rounded-xl text-xs font-bold transition-all",
+                  userSettings.autoSyncTelegram 
+                    ? "bg-blue-500/20 border-blue-500/30 text-blue-400" 
+                    : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+                )}
+              >
+                {userSettings.autoSyncTelegram ? 'ENABLED' : 'DISABLED'}
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
       <section className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-2 bg-slate-800 rounded-xl">
@@ -298,4 +433,3 @@ function BankToggle({ label, active, onClick }: any) {
     </div>
   );
 }
-
