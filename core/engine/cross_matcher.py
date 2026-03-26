@@ -15,35 +15,35 @@ class CrossMatchingEngine:
         min_spread_pct: float,
         safety_buffer_pct: float = 0.0,
     ):
-        self.max_capital = Decimal(str(max_capital_uah))
-        self.min_trade = Decimal(str(min_trade_uah))
-        self.min_spread = Decimal(str(min_spread_pct))
-        self.safety_buffer = Decimal(str(safety_buffer_pct))
+        self.max_capital = float(max_capital_uah)
+        self.min_trade = float(min_trade_uah)
+        self.min_spread = float(min_spread_pct)
+        self.safety_buffer = float(safety_buffer_pct)
 
     @property
     def max_capital_uah(self) -> float:
-        return float(self.max_capital)
+        return self.max_capital
 
     @max_capital_uah.setter
     def max_capital_uah(self, value: float) -> None:
         """scanner.py оновлює через цей setter на кожному циклі."""
-        self.max_capital = Decimal(str(value))
+        self.max_capital = float(value)
 
     @property
     def min_spread_pct(self) -> float:
-        return float(self.min_spread)
+        return self.min_spread
 
     @min_spread_pct.setter
     def min_spread_pct(self, value: float) -> None:
         """scanner.py оновлює через цей setter на кожному циклі."""
-        self.min_spread = Decimal(str(value))
+        self.min_spread = float(value)
 
     def match(
         self,
         buy_grouped: dict[str, list[Order]],
         sell_grouped: dict[str, list[Order]],
     ) -> list[dict]:
-        best_opportunities = []
+        best_opportunities =[]
 
         for buy_bank, buy_orders in buy_grouped.items():
             for sell_bank, sell_orders in sell_grouped.items():
@@ -64,43 +64,39 @@ class CrossMatchingEngine:
 
                         max_buy_fiat = min(
                             self.max_capital,
-                            buy.max_limit,
-                            buy.available_amount * buy.price,
+                            float(buy.max_limit),
+                            float(buy.available_amount) * float(buy.price),
                         )
 
-                        if max_buy_fiat < self.min_trade or max_buy_fiat < buy.min_limit:
+                        if max_buy_fiat < self.min_trade or max_buy_fiat < float(buy.min_limit):
                             continue
 
-                        usdt_bought = max_buy_fiat / buy.price
+                        usdt_bought = max_buy_fiat / float(buy.price)
                         usdt_to_sell = min(
                             usdt_bought,
-                            sell.max_limit / sell.price,
-                            sell.available_amount,
+                            float(sell.max_limit) / float(sell.price),
+                            float(sell.available_amount),
                         )
 
-                        if usdt_to_sell <= Decimal("0"):
+                        if usdt_to_sell <= 0.0:
                             continue
 
-                        actual_buy_fiat = usdt_to_sell * buy.price
-                        actual_sell_fiat = usdt_to_sell * sell.price
+                        actual_buy_fiat = usdt_to_sell * float(buy.price)
+                        actual_sell_fiat = usdt_to_sell * float(sell.price)
 
-                        if actual_sell_fiat < sell.min_limit:
+                        if actual_sell_fiat < float(sell.min_limit):
                             continue
 
                         gross_profit = actual_sell_fiat - actual_buy_fiat
-                        gross_spread_pct = (
-                            gross_profit / actual_buy_fiat
-                        ) * Decimal("100.0")
+                        gross_spread_pct = (gross_profit / actual_buy_fiat) * 100.0
 
                         _, total_fee, fee_details = calculator.calculate_net(
                             actual_buy_fiat,
-                            usdt_price=buy.price,
+                            usdt_price=float(buy.price),
                         )
 
                         net_profit = gross_profit - total_fee
-                        net_spread_pct = (
-                            net_profit / actual_buy_fiat
-                        ) * Decimal("100.0")
+                        net_spread_pct = (net_profit / actual_buy_fiat) * 100.0
 
                         if net_spread_pct >= (self.min_spread + self.safety_buffer):
                             route_type = (

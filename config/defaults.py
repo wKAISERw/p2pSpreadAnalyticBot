@@ -58,7 +58,7 @@ LIMIT_EPSILON: float = 0.01
 IDENTITY_TWIN_MINUTES: int = 15
 
 # ── DB / Storage ──────────────────────────────────────────────────────
-SNAPSHOT_RETENTION_HOURS: int = 168
+SNAPSHOT_RETENTION_HOURS: int = 24
 SNAPSHOT_HEARTBEAT_MINUTES: int = 10
 
 # ── Scanner ────────────────────────────────────────────────────────────

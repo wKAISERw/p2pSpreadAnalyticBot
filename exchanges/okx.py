@@ -85,5 +85,3 @@ class OkxExchange(BaseExchange):
         buys = await self.get_buy_orders(max_amount, banks)
         sells = await self.get_sell_orders(max_amount, banks)
         return buys, sells
-
-        return res

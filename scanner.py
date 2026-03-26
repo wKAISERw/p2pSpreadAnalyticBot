@@ -45,6 +45,14 @@ from infrastructure.http.wallet_client import WalletClient
 logger = logging.getLogger("Scanner")
 
 
+def safe_float(val) -> float:
+    """Безпечне перетворення в float. Визначено на рівні модуля (не в циклі)."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AlertDispatcher — персоналізована розсилка алертів
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -217,7 +225,8 @@ async def _db_maintenance_loop(
         db: MerchantDB,
         interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
 ) -> None:
-    max_age = getattr(settings, "db_snapshot_max_age_h", 168)
+    # 24 години історії повністю достатньо для детекції ботів
+    max_age = getattr(settings, "db_snapshot_max_age_h", 24)
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
@@ -234,11 +243,14 @@ async def _db_maintenance_loop(
 # run_scanner — тільки оркестрація
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> None:
+async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, shared_db=None) -> None:
     # ── Ініціалізація ──────────────────────────────────────────────────────
-    merchant_db = MerchantDB()
-    await merchant_db.start()
-    await merchant_db.load_blacklist_from_file()
+    # Використовуємо shared_db з main.py якщо є — уникаємо дублювання екземплярів
+    _owns_db = shared_db is None
+    merchant_db = shared_db if shared_db is not None else MerchantDB()
+    if _owns_db:
+        await merchant_db.start()
+        await merchant_db.load_blacklist_from_file()
 
     runtime_config._db = merchant_db
     await runtime_config.load()
@@ -373,7 +385,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     active_users = await merchant_db.get_active_users()
                     if active_users:
                         current_capital = max(float(u["capital"]) for u in active_users)
-                        current_spread = min(float(u["min_spread"]) for u in active_users)
+                        current_spread  = min(float(u["min_spread"]) for u in active_users)
+                        # Динамічні банки — union всіх активних юзерів
+                        _all_banks: set[str] = set()
+                        for _u in active_users:
+                            _all_banks.update(_u["bank_codes"])
+                        target_banks = {c: BANK_NAMES[c] for c in _all_banks if c in BANK_NAMES}
+                        if not target_banks:  # fallback якщо банки порожні
+                            target_banks = {c: BANK_NAMES[c] for c in DEFAULT_BANK_CODES if c in BANK_NAMES}
                     else:
                         current_capital = settings.working_capital_uah
                         current_spread = settings.min_spread_pct
@@ -484,14 +503,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
-                        def safe_float(val):
-                            try:
-                                return float(val)
-                            except:
-                                return 0.0
-
-
-
                         logger.warning(
                             "🚨 СПРЕД! %s | %s ➔ %s | %s | Net: %.2f%% | Профіт: %.2f ₴",
                             opp.get("route_type", "?"),
@@ -517,12 +528,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         )
 
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
-                        def safe_float(val):
-                            try:
-                                return float(val)
-                            except:
-                                return 0.0
-
                         frontend_opp = {
                             "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
                             "timestamp": int(time.time() * 1000),
@@ -618,7 +623,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         sent_count += 1
 
                         if not is_muted():
-                            await dispatcher.dispatch(alert, opp)
+                            # Fire-and-forget: не блокуємо сканер чекаючи Telegram API
+                            asyncio.create_task(dispatcher.dispatch(alert, opp))
                     state.opportunities = current_frontend_opps[:50]
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
@@ -635,4 +641,5 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
             await cb_userbot.stop()
         await review_fetcher.stop()
         await llm_pool.stop()
-        await merchant_db.stop()
+        if _owns_db:
+            await merchant_db.stop()

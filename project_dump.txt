@@ -1,5 +1,5 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-24 23:38
+# Generated: 2026-03-26 19:06
 # Files: 76
 #
 # STRUCTURE:
@@ -635,6 +635,14 @@ from infrastructure.http.wallet_client import WalletClient
 logger = logging.getLogger("Scanner")
 
 
+def safe_float(val) -> float:
+    """Безпечне перетворення в float. Визначено на рівні модуля (не в циклі)."""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # AlertDispatcher — персоналізована розсилка алертів
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -824,11 +832,14 @@ async def _db_maintenance_loop(
 # run_scanner — тільки оркестрація
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> None:
+async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, shared_db=None) -> None:
     # ── Ініціалізація ──────────────────────────────────────────────────────
-    merchant_db = MerchantDB()
-    await merchant_db.start()
-    await merchant_db.load_blacklist_from_file()
+    # Використовуємо shared_db з main.py якщо є — уникаємо дублювання екземплярів
+    _owns_db = shared_db is None
+    merchant_db = shared_db if shared_db is not None else MerchantDB()
+    if _owns_db:
+        await merchant_db.start()
+        await merchant_db.load_blacklist_from_file()
 
     runtime_config._db = merchant_db
     await runtime_config.load()
@@ -963,7 +974,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                     active_users = await merchant_db.get_active_users()
                     if active_users:
                         current_capital = max(float(u["capital"]) for u in active_users)
-                        current_spread = min(float(u["min_spread"]) for u in active_users)
+                        current_spread  = min(float(u["min_spread"]) for u in active_users)
+                        # Динамічні банки — union всіх активних юзерів
+                        _all_banks: set[str] = set()
+                        for _u in active_users:
+                            _all_banks.update(_u["bank_codes"])
+                        target_banks = {c: BANK_NAMES[c] for c in _all_banks if c in BANK_NAMES}
+                        if not target_banks:  # fallback якщо банки порожні
+                            target_banks = {c: BANK_NAMES[c] for c in DEFAULT_BANK_CODES if c in BANK_NAMES}
                     else:
                         current_capital = settings.working_capital_uah
                         current_spread = settings.min_spread_pct
@@ -1048,6 +1066,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         if opportunities else 0.0,
                         2
                     )
+
+                    # 1. Створюємо новий пустий список для актуальних ордерів
+                    current_frontend_opps = []
                     # ----------------------------
 
                     logger.info(
@@ -1059,9 +1080,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
 
                     sent_count = 0
                     for opp in opportunities:
-                        if sent_count >= current_max_alerts:
-                            break
-
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
@@ -1072,25 +1090,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             risk_engine.analyze(sell_o);
                             sell_o._risk_analyzed = True
 
-                        if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
-                            continue
-                        if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
-                            continue
-
-                        dedup_key = f"spread:{matcher._merge_key(opp)}"
-                        if dedup_cache.seen(dedup_key):
-                            continue
-
-                        if not stability_filter.check(
-                                buy_o.exchange, sell_o.exchange,
-                                str(buy_o.price), str(sell_o.price),
-                                buy_o.merchant_name, sell_o.merchant_name,
-                        ):
-                            continue
-
-                        dedup_cache.mark(dedup_key)
-                        sent_count += 1
-
+                        # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
+                        # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
                         logger.warning(
                             "🚨 СПРЕД! %s | %s ➔ %s | %s | Net: %.2f%% | Профіт: %.2f ₴",
                             opp.get("route_type", "?"),
@@ -1116,16 +1117,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                         )
 
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
-                        def safe_float(val):
-                            try:
-                                return float(val)
-                            except:
-                                return 0.0
-
                         frontend_opp = {
                             "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
-                            "timestamp": int(time.time() * 1000),  # Важливо для date-fns!
-
+                            "timestamp": int(time.time() * 1000),
                             "buyOrder": {
                                 "id": getattr(buy_o, "id", "b1"),
                                 "price": safe_float(getattr(buy_o, "price", 0)),
@@ -1156,7 +1150,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                                 "riskFlag": getattr(buy_o, "risk_flag", "OK"),
                                 "isVerified": getattr(buy_o, "is_verified", False)
                             },
-
                             "sellOrder": {
                                 "id": getattr(sell_o, "id", "s1"),
                                 "price": safe_float(getattr(sell_o, "price", 0)),
@@ -1187,7 +1180,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                                 "riskFlag": getattr(sell_o, "risk_flag", "OK"),
                                 "isVerified": getattr(sell_o, "is_verified", False)
                             },
-
                             "netSpread": safe_float(opp.get("net_spread_pct", 0)),
                             "dealAmount": safe_float(
                                 opp.get("actual_entry_uah", opp.get("deal_amount", opp.get("volume", 0)))),
@@ -1196,16 +1188,32 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
                             "sellBank": opp.get("sell_bank", ""),
                             "routeType": opp.get("route_type", "UNKNOWN")
                         }
+                        current_frontend_opps.append(frontend_opp)
+                        if sent_count >= current_max_alerts:
+                            continue
 
-                        # Додаємо нову зв'язку на початок списку (зберігаємо останні 50)
-                        state.opportunities.insert(0, frontend_opp)
-                        if len(state.opportunities) > 50:
-                            state.opportunities.pop()
-                        # ----------------------------
+                        if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
+                            continue
+                        if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
+                            continue
+
+                        dedup_key = f"spread:{matcher._merge_key(opp)}"
+                        if dedup_cache.seen(dedup_key):
+                            continue
+
+                        if not stability_filter.check(
+                                buy_o.exchange, sell_o.exchange,
+                                str(buy_o.price), str(sell_o.price),
+                                buy_o.merchant_name, sell_o.merchant_name,
+                        ):
+                            continue
+
+                        dedup_cache.mark(dedup_key)
+                        sent_count += 1
 
                         if not is_muted():
                             await dispatcher.dispatch(alert, opp)
-
+                    state.opportunities = current_frontend_opps[:50]
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
@@ -1221,7 +1229,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event) -> 
             await cb_userbot.stop()
         await review_fetcher.stop()
         await llm_pool.stop()
-        await merchant_db.stop()
+        if _owns_db:
+            await merchant_db.stop()
 
 ============================================================
 FILE: main.py
@@ -1237,22 +1246,22 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.encoders import jsonable_encoder  # <--- Додано для безпечної конвертації об'єктів
+from fastapi.encoders import jsonable_encoder
 import uvicorn
 from pydantic import BaseModel
 from core.storage.merchant_db import MerchantDB
-from bot.commands import _is_admin # Імпортуємо перевірку адміна
-# Імпортуємо компоненти нашої системи
+from bot.commands import _is_admin
+
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
-from state import state  # Імпортуємо наш глобальний стан
+from state import state
 
 db = MerchantDB()
+
 # --- КОНВЕРТЕРИ ДЛЯ GET (Snake -> Camel) ---
 def to_camel(snake_str: str) -> str:
     components = snake_str.split('_')
     return components[0] + ''.join(x.title() for x in components[1:])
-
 
 def dict_to_camel(obj):
     if isinstance(obj, list):
@@ -1261,12 +1270,9 @@ def dict_to_camel(obj):
         return {to_camel(k): dict_to_camel(v) for k, v in obj.items()}
     return obj
 
-
 # --- КОНВЕРТЕРИ ДЛЯ POST (Camel -> Snake) ---
 def to_snake(camel_str: str) -> str:
-    # Перетворює minCapital -> min_capital
     return re.sub(r'(?<!^)(?=[A-Z])', '_', camel_str).lower()
-
 
 def dict_to_snake(obj):
     if isinstance(obj, list):
@@ -1275,9 +1281,7 @@ def dict_to_snake(obj):
         return {to_snake(k): dict_to_snake(v) for k, v in obj.items()}
     return obj
 
-
 def setup_logging():
-    """Налаштовує 3 канали логування: консоль, debug.log, error.log"""
     os.makedirs("logs", exist_ok=True)
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -1300,36 +1304,37 @@ def setup_logging():
     logger.addHandler(debug_handler)
     logger.addHandler(error_handler)
 
-
-# Глобальні змінні для фонових задач
+# Глобальні змінні
 scanner_task = None
 notifier = None
 stop_event = asyncio.Event()
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Керує життєвим циклом додатку (запуск та зупинка фонових задач)"""
     global scanner_task, notifier, stop_event
 
     setup_logging()
     logger = logging.getLogger("Main")
     logger.info("🚀 Ініціалізація P2P Сканера + API (Production Mode)...")
 
+    # ДОДАНО: Ініціалізуємо підключення до БД ДО запуску ендпоінтів
+    await db.start()
+    logger.info("✅ База даних успішно підключена для API")
+
     notifier = TelegramNotifier()
     await notifier.start()
 
     async def run_scanner_safe():
         try:
-            await run_scanner(notifier, stop_event)
+            # Передаємо єдиний екземпляр db — без дублювання MerchantDB
+            await run_scanner(notifier, stop_event, shared_db=db)
         except Exception as e:
             logger.critical("🔥 КРИТИЧНА ПОМИЛКА СКАНЕРА: %s", e, exc_info=True)
             stop_event.set()
 
-    # Запускаємо сканер у фоні
     scanner_task = asyncio.create_task(run_scanner_safe())
 
-    yield  # ТУТ ПРАЦЮЄ FASTAPI ТА ОБРОБЛЯЄ ЗАПИТИ ВІД REACT
+    yield
 
     # --- GRACEFUL SHUTDOWN ---
     logger.info("🧹 Початок завершення процесів...")
@@ -1349,51 +1354,53 @@ async def lifespan(app: FastAPI):
         except asyncio.TimeoutError:
             logger.error("⚠️ Timeout при зупинці нотифікатора.")
 
+    # ДОДАНО: Закриваємо з'єднання з базою
+    await db.stop()
     logger.info("🏁 Систему повністю зупинено. До зустрічі!")
 
-
-# --- ІНІЦІАЛІЗАЦІЯ FASTAPI ---
 app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
 
-# Дозволяємо React-фронтенду робити запити до нашого API
+# CORS: wildcard origin несумісний з allow_credentials=True
+# Використовуємо конкретні origins або вимикаємо credentials
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # True + wildcard = broken CORS spec
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# --- GET ЕНДПОІНТИ (Віддаємо на фронтенд у camelCase) ---
 class ApiKeyPayload(BaseModel):
     key: str
     secret: str
     passphrase: str = ""
 
-
 @app.get("/api/v1/stats")
 async def get_stats():
-    # jsonable_encoder перетворює об'єкти/класи у словники, а dict_to_camel робить ключі зручними для React
     return dict_to_camel(jsonable_encoder(state.stats))
-
 
 @app.get("/api/v1/opportunities")
 async def get_opportunities():
-    # Беремо спреди зі state замість неіснуючої змінної
     return dict_to_camel(jsonable_encoder(state.opportunities))
-
 
 @app.get("/api/v1/logs")
 async def get_logs():
     return dict_to_camel(jsonable_encoder(state.logs))
 
-
 @app.post("/api/v1/credentials/{exchange}")
-async def save_credentials(exchange: str, payload: ApiKeyPayload):
-    # Виклик функції збереження ключів у вашу SQLite базу (MerchantDB)
-    # db.save_credentials(exchange, payload.key, payload.secret, payload.passphrase)
-    return {"status": "success"}
+async def save_credentials(exchange: str, payload: ApiKeyPayload, telegram_id: int = 0):
+    try:
+        ok = await db.save_credentials(
+            exchange=exchange.capitalize(),
+            api_key=payload.key,
+            api_secret=payload.secret,
+            passphrase=payload.passphrase,
+            label="api",
+            user_id=telegram_id,
+        )
+        return {"status": "success" if ok else "error"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 class BlacklistPayload(BaseModel):
     exchange: str
@@ -1402,16 +1409,44 @@ class BlacklistPayload(BaseModel):
     reason: str
     source: str
 
+# ДОДАНО: GET-ендпоінт для вирішення помилки 405 (Method Not Allowed)
+@app.get("/api/v1/blacklist")
+async def get_blacklist():
+    try:
+        if hasattr(db, "get_all_blacklist"):
+            records = await db.get_all_blacklist()
+            return dict_to_camel(records)
+        return []
+    except Exception as e:
+        logging.getLogger("Main").error(f"Error fetching blacklist: {e}")
+        return []
+
 @app.post("/api/v1/blacklist")
 async def add_to_blacklist(payload: BlacklistPayload):
-    # db.add_to_blacklist(payload.exchange, payload.merchantId, payload.merchantName, payload.reason, payload.source)
-    return {"status": "success"}
+    try:
+        await db.add_to_blacklist(
+            payload.exchange,
+            payload.merchantId,
+            payload.merchantName,
+            payload.reason,
+            payload.source or "api",
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logging.getLogger("Main").error("add_to_blacklist: %s", e)
+        return {"status": "error", "detail": str(e)}
 
 @app.delete("/api/v1/blacklist/{exchange}/{merchant_id}")
 async def remove_from_blacklist(exchange: str, merchant_id: str):
-    # Реалізуйте видалення з БД
-    return {"status": "success"}
-
+    try:
+        await db._db.execute(
+            "DELETE FROM merchant_blacklist WHERE exchange=? AND merchant_id=?",
+            (exchange, merchant_id)
+        )
+        await db._db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/api/v1/settings/global")
 async def get_global_settings():
@@ -1420,7 +1455,6 @@ async def get_global_settings():
     return dict_to_camel({"min_spread": 0.5, "min_profit": 100, "max_risk_score": 50, "scan_interval": 5,
                           "active_exchanges": ["binance", "bybit"]})
 
-
 @app.get("/api/v1/settings/user")
 async def get_user_settings():
     if hasattr(state, "user_settings"):
@@ -1428,89 +1462,72 @@ async def get_user_settings():
     return dict_to_camel(
         {"telegram_notifications": True, "telegram_chat_id": "", "sound_alerts": True, "auto_trade": None})
 
-
-# --- POST ЕНДПОІНТИ (Отримуємо з фронтенда, перетворюємо у snake_case і зберігаємо) ---
-
 @app.post("/api/v1/settings/global")
 async def update_global_settings(settings: dict):
-    # Фронт прислав camelCase, перекладаємо на python-стандарт
     snake_settings = dict_to_snake(settings)
-
     if hasattr(state, "global_settings"):
         if isinstance(state.global_settings, dict):
             state.global_settings.update(snake_settings)
         else:
-            # Якщо це об'єкт класу
             for key, value in snake_settings.items():
                 setattr(state.global_settings, key, value)
-
     return {"status": "success", "updated_settings": snake_settings}
 
-
 @app.post("/api/v1/settings/user")
-async def update_user_settings(settings: dict):
+async def update_local_user_settings(settings: dict): # Змінено ім'я функції щоб не було конфлікту
     snake_settings = dict_to_snake(settings)
-
     if hasattr(state, "user_settings"):
         if isinstance(state.user_settings, dict):
             state.user_settings.update(snake_settings)
         else:
             for key, value in snake_settings.items():
                 setattr(state.user_settings, key, value)
-
     return {"status": "success", "updated_settings": snake_settings}
-
 
 @app.get("/api/v1/telegram/sync/{telegram_id}")
 async def sync_telegram(telegram_id: int):
-    # 1. Отримуємо дані юзера з SQLite (таблиця scanner_users)
     users = await db.get_active_users()
     user_data = next((u for u in users if u["user_id"] == telegram_id), None)
 
     if not user_data:
         return {"error": "User not found in bot database"}
 
-    # 2. Отримуємо підключені біржі (таблиця user_credentials)
     creds = await db.get_all_credentials(user_id=telegram_id)
-
-    # 3. Перевіряємо адмін-права
     is_admin = _is_admin(telegram_id)
 
-    # Повертаємо реальні дані (конвертер dict_to_camel обробить ключі)
     data = {
         "settings": {
-            "minCapital": 1000,  # можна додати в БД пізніше
+            "minCapital": 1000,
             "maxCapital": user_data.get("capital", 0),
             "minSpread": user_data.get("min_spread", 0),
-            "banks": user_data.get("bank_codes", "").split(",") if user_data.get("bank_codes") else []
+            # Перевіряємо, чи це вже список. Якщо так - віддаємо його, якщо рядок - сплітимо, якщо нічого - порожній список.
+            "banks": user_data.get("bank_codes") if isinstance(user_data.get("bank_codes"), list) else (user_data.get("bank_codes", "").split(",") if user_data.get("bank_codes") else [])
         },
         "keys": [k.lower() for k in creds.keys()],
         "isAdmin": is_admin
     }
     return dict_to_camel(data)
 
-
 @app.post("/api/v1/user/settings")
-async def update_user_settings(settings: dict):
-    # Цей метод має оновлювати БД, щоб бот теж бачив зміни
+async def update_telegram_settings(settings: dict): # Змінено ім'я функції
     snake_settings = dict_to_snake(settings)
-    telegram_id = settings.get("telegramUserId")  # фронт має його надсилати
+    telegram_id = settings.get("telegramUserId")
 
     if telegram_id:
-        # Пряме оновлення в БД бота
-        async with db._db.execute(
-                "UPDATE scanner_users SET capital = ?, min_spread = ?, bank_codes = ? WHERE user_id = ?",
-                (snake_settings.get("max_capital"), snake_settings.get("min_spread"),
-                 ",".join(snake_settings.get("banks", [])), telegram_id)
-        ) as cursor:
-            await db._db.commit()
+        # Безпечний синтаксис запису до SQLite
+        banks_data = snake_settings.get("banks", [])
+        banks_str = ",".join(banks_data) if isinstance(banks_data, list) else str(banks_data)
 
-    # Оновлюємо глобальний state (для сканера)
+        await db._db.execute(
+            "UPDATE scanner_users SET working_capital = ?, min_spread_pct = ?, bank_codes = ? WHERE user_id = ?",
+            (snake_settings.get("max_capital"), snake_settings.get("min_spread"), banks_str, telegram_id)
+        )
+        await db._db.commit()
+
     if hasattr(state, "user_settings"):
         state.user_settings.update(snake_settings)
 
     return {"status": "success"}
-
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
@@ -2507,6 +2524,7 @@ class MerchantDB:
             rows = await cur.fetchall()
 
         return [dict(r) for r in rows]
+
 
 ============================================================
 FILE: core/analysis/regex_analyzer.py
@@ -3567,6 +3585,8 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 
+from core.utils.cache import TTLCache
+
 load_dotenv()
 
 from core.storage.merchant_db import MerchantDB
@@ -3605,7 +3625,7 @@ class ProviderRateLimitError(RuntimeError):
 
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS = 1
+LLM_WORKERS = 3
 LLM_TIMEOUT = 7.0
 MAX_QUEUE = 200
 MAX_NORM_TERMS = 220
@@ -3664,7 +3684,7 @@ class LLMWorkerPool:
         self._session: Optional[aiohttp.ClientSession] = None
         self._stats = {"processed": 0, "blocks": 0, "timeouts": 0, "errors": 0}
         # 🚀 ШАР 2: Anti-requeue кеш (останній виклик LLM)
-        self._recent_calls: dict[tuple[str, str], float] = {}
+        self._recent_calls = TTLCache(ttl_seconds=600)
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
@@ -3701,8 +3721,9 @@ class LLMWorkerPool:
         max_limit: float = 0.0,
         behavior_flags: list[str] = None
     ) -> bool:
+        cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
-        if key in self._pending:
+        if key in self._pending or self._recent_calls.seen(cache_key):
             return False
             # 🚀 Забороняємо ставити в чергу частіше ніж раз на 10 хвилин (600 сек)
         now = time.time()
@@ -3803,13 +3824,8 @@ class LLMWorkerPool:
                 source, task.merchant_name, task.exchange, risk_type, reason
             )
 
-            # 🚀 Записуємо час останнього звернення, щоб не смикати LLM найближчі 10 хв
-        self._recent_calls[(task.exchange, task.merchant_id)] = time.time()
-
-        # Очищення словника від старих записів, щоб уникнути витоку пам'яті
-        if len(self._recent_calls) > 2000:
-            cutoff = time.time() - 600
-            self._recent_calls = {k: v for k, v in self._recent_calls.items() if v > cutoff}
+            # Фіксуємо звернення (TTLCache сам його видалить через 600 сек)
+        self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
     # Groq cooldown — class-level щоб всі воркери бачили той самий стан
     _groq_cooldown_until: float = 0.0
@@ -4004,8 +4020,6 @@ def _build_behavior_block(task: "LLMTask") -> list[str]:
         else:
             lines.append(f"  - {f}")
 
-    # Додаємо контекст лімітів для LLM
-    lines.append(f"  Поточні ліміти: {task.min_limit}–{task.max_limit} UAH")
 
     return lines
 
@@ -5554,17 +5568,13 @@ class TelegramNotifier:
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
         """
         Multi-user: відправляє алерт в конкретний chat_id.
-        Тимчасово підміняємо _chat_id, викликаємо _send_single, відновлюємо.
-        Thread-safe в asyncio бо немає yield між підміною і відновленням.
+        chat_id передається явним параметром — без мутації self._chat_id.
+        Повністю concurrency-safe: кожен виклик незалежний.
         """
-        original_chat_id = self._chat_id
         try:
-            self._chat_id = chat_id
-            await self._send_single(alert)
+            await self._send_single(alert, chat_id=chat_id)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
-        finally:
-            self._chat_id = original_chat_id
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -5699,7 +5709,7 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None) -> None:
         title, silent = _alert_grade(alert.spread_pct)
 
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
@@ -5800,6 +5810,7 @@ class TelegramNotifier:
             text,
             keyboard=keyboard,
             disable_notification=silent,
+            chat_id=chat_id,  # явно передаємо — без підміни self._chat_id
         )
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
@@ -7412,8 +7423,6 @@ class BinanceExchange(BaseExchange):
         )
         return self.dedup(buy_orders), self.dedup(sell_orders)
 
-        return result
-
 ============================================================
 FILE: exchanges/bybit.py
 ============================================================
@@ -7506,7 +7515,6 @@ class BybitExchange(BaseExchange):
 
         return buy_orders, sell_orders
 
-        return result
 
 ============================================================
 FILE: exchanges/okx.py
@@ -7600,7 +7608,6 @@ class OkxExchange(BaseExchange):
         sells = await self.get_sell_orders(max_amount, banks)
         return buys, sells
 
-        return res
 
 ============================================================
 FILE: exchanges/wallet.py
@@ -7697,8 +7704,6 @@ class WalletExchange(BaseExchange):
             self.get_sell_orders(0, banks),
         )
         return self.dedup(buy_orders), self.dedup(sell_orders)
-
-        return result
 
 ============================================================
 FILE: exchanges/mexc.py
@@ -7822,7 +7827,6 @@ class MexcExchange(BaseExchange):
         )
         return self.dedup(buy_orders), self.dedup(sell_orders)
 
-        return result
 
 ============================================================
 FILE: exchanges/cryptobot_userbot.py
@@ -9892,16 +9896,6 @@ class RiskEngine:
                     order.risk_flag = _join_flags(flags) or pending_flag
                     return
 
-                if scheduled:
-                    # 🚀 ФІКС: Правильний PENDING маркер для поведінкових тригерів
-                    if composite_risk or behavior_needs_llm:
-                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}"
-                    else:
-                        pending_flag = _build_pending_flag(regex_result)
-
-                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
-                    order.risk_flag = _join_flags(flags) or pending_flag
-                    return
                 else:
                     # 🚀 ЗАХИСТ ВІД СПАМУ: Якщо форсували LLM через бот-поведінку,
                     # але спрацював кулдаун (щоб не платити за API) або черга повна —

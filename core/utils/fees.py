@@ -5,32 +5,32 @@ from dataclasses import dataclass
 
 @dataclass
 class FeeResult:
-    amount: Decimal
+    amount: float
     description: str
 
 
 class BaseFee(ABC):
     @abstractmethod
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         pass
 
 
 class FixedFee(BaseFee):
     def __init__(self, fee_amount: str, description: str):
-        self._fee_amount = Decimal(fee_amount)
+        self._fee_amount = float(fee_amount)
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         actual_fee = min(self._fee_amount, current_amount)
         return FeeResult(actual_fee, self._description)
 
 
 class PercentFee(BaseFee):
     def __init__(self, rate_pct: str, description: str):
-        self._rate = Decimal(rate_pct) / Decimal("100.0")
+        self._rate = float(rate_pct) / 100.0
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         fee = current_amount * self._rate
         return FeeResult(fee, self._description)
 
@@ -38,11 +38,10 @@ class PercentFee(BaseFee):
 # === НОВИЙ КЛАС ДЛЯ ДИНАМІЧНОЇ КОМІСІЇ В USDT ===
 class NetworkFee(BaseFee):
     def __init__(self, usdt_amount: str, description: str):
-        self._usdt_amount = Decimal(usdt_amount)
+        self._usdt_amount = float(usdt_amount)
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
-        # Рахуємо вартість комісії в гривнях по ЖИВОМУ курсу
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         fee_in_uah = self._usdt_amount * usdt_price
         return FeeResult(fee_in_uah, self._description)
 
@@ -51,9 +50,9 @@ class FeeCalculator:
     def __init__(self, fees: list[BaseFee]):
         self._fees = fees
 
-    def calculate_net(self, initial_amount: Decimal, usdt_price: Decimal) -> tuple[Decimal, Decimal, list[FeeResult]]:
+    def calculate_net(self, initial_amount: float, usdt_price: float) -> tuple[float, float, list[FeeResult]]:
         current_amount = initial_amount
-        results = []
+        results =[]
         for fee in self._fees:
             fee_result = fee.calculate(current_amount, usdt_price)
             current_amount -= fee_result.amount

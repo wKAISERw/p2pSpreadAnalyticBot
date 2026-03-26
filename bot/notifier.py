@@ -339,17 +339,13 @@ class TelegramNotifier:
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
         """
         Multi-user: відправляє алерт в конкретний chat_id.
-        Тимчасово підміняємо _chat_id, викликаємо _send_single, відновлюємо.
-        Thread-safe в asyncio бо немає yield між підміною і відновленням.
+        chat_id передається явним параметром — без мутації self._chat_id.
+        Повністю concurrency-safe: кожен виклик незалежний.
         """
-        original_chat_id = self._chat_id
         try:
-            self._chat_id = chat_id
-            await self._send_single(alert)
+            await self._send_single(alert, chat_id=chat_id)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
-        finally:
-            self._chat_id = original_chat_id
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -484,7 +480,7 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None) -> None:
         title, silent = _alert_grade(alert.spread_pct)
 
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
@@ -585,6 +581,7 @@ class TelegramNotifier:
             text,
             keyboard=keyboard,
             disable_notification=silent,
+            chat_id=chat_id,  # явно передаємо — без підміни self._chat_id
         )
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:

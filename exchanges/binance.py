@@ -112,5 +112,3 @@ class BinanceExchange(BaseExchange):
             self.get_sell_orders(0, banks),
         )
         return self.dedup(buy_orders), self.dedup(sell_orders)
-
-        return result

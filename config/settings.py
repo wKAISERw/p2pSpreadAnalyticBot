@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     stability_ttl_seconds: float = 15.0
 
     # ── DB ────────────────────────────────────────────────────────────────
-    snapshot_retention_hours: int = 168
+    snapshot_retention_hours: int = 24
     snapshot_heartbeat_minutes: int = 10
     db_async_analyze_concurrency: int = 8
 

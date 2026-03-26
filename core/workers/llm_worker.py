@@ -30,6 +30,8 @@ from typing import Optional
 import aiohttp
 from dotenv import load_dotenv
 
+from core.utils.cache import TTLCache
+
 load_dotenv()
 
 from core.storage.merchant_db import MerchantDB
@@ -68,7 +70,7 @@ class ProviderRateLimitError(RuntimeError):
 
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS = 1
+LLM_WORKERS = 3
 LLM_TIMEOUT = 7.0
 MAX_QUEUE = 200
 MAX_NORM_TERMS = 220
@@ -127,7 +129,7 @@ class LLMWorkerPool:
         self._session: Optional[aiohttp.ClientSession] = None
         self._stats = {"processed": 0, "blocks": 0, "timeouts": 0, "errors": 0}
         # 🚀 ШАР 2: Anti-requeue кеш (останній виклик LLM)
-        self._recent_calls: dict[tuple[str, str], float] = {}
+        self._recent_calls = TTLCache(ttl_seconds=600)
 
     async def start(self) -> None:
         self._session = aiohttp.ClientSession(
@@ -164,12 +166,10 @@ class LLMWorkerPool:
         max_limit: float = 0.0,
         behavior_flags: list[str] = None
     ) -> bool:
+        cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
-        if key in self._pending:
-            return False
-            # 🚀 Забороняємо ставити в чергу частіше ніж раз на 10 хвилин (600 сек)
-        now = time.time()
-        if now - self._recent_calls.get(key, 0) < 600:
+        # 🚀 TTLCache.seen() вже перевіряє наявність і час життя (600 сек)
+        if key in self._pending or self._recent_calls.seen(cache_key):
             return False
         task = LLMTask(
             exchange=exchange,
@@ -266,13 +266,8 @@ class LLMWorkerPool:
                 source, task.merchant_name, task.exchange, risk_type, reason
             )
 
-            # 🚀 Записуємо час останнього звернення, щоб не смикати LLM найближчі 10 хв
-        self._recent_calls[(task.exchange, task.merchant_id)] = time.time()
-
-        # Очищення словника від старих записів, щоб уникнути витоку пам'яті
-        if len(self._recent_calls) > 2000:
-            cutoff = time.time() - 600
-            self._recent_calls = {k: v for k, v in self._recent_calls.items() if v > cutoff}
+            # Фіксуємо звернення (TTLCache сам його видалить через 600 сек)
+        self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
     # Groq cooldown — class-level щоб всі воркери бачили той самий стан
     _groq_cooldown_until: float = 0.0
@@ -467,8 +462,6 @@ def _build_behavior_block(task: "LLMTask") -> list[str]:
         else:
             lines.append(f"  - {f}")
 
-    # Додаємо контекст лімітів для LLM
-    lines.append(f"  Поточні ліміти: {task.min_limit}–{task.max_limit} UAH")
 
     return lines
 

@@ -54,8 +54,8 @@ class RiskEngine:
         self._llm = llm_pool
         self._analyzed = 0
         self._db_hits = 0
-        self._bot_alert_cache: dict[tuple[str, str], tuple[str, float]] = {}
-        self._b_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
+        self._bot_alert_cache = TTLCache(ttl_seconds=BOT_ALERT_COOLDOWN_SEC, max_size=5000)
+        self._b_cache = TTLCache(ttl_seconds=60.0, max_size=2000)
         self._id_cache = TTLCache(ttl_seconds=60.0, max_size=2000)
         self._db_sem = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
@@ -307,16 +307,6 @@ class RiskEngine:
                     order.risk_flag = _join_flags(flags) or pending_flag
                     return
 
-                if scheduled:
-                    # 🚀 ФІКС: Правильний PENDING маркер для поведінкових тригерів
-                    if composite_risk or behavior_needs_llm:
-                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}"
-                    else:
-                        pending_flag = _build_pending_flag(regex_result)
-
-                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
-                    order.risk_flag = _join_flags(flags) or pending_flag
-                    return
                 else:
                     # 🚀 ЗАХИСТ ВІД СПАМУ: Якщо форсували LLM через бот-поведінку,
                     # але спрацював кулдаун (щоб не платити за API) або черга повна —
@@ -461,18 +451,14 @@ def _behavior_signature(flags: list[str], score: int, reason: str = "") -> str:
     return f"{core}|S{score}"
 
 
-def _should_log_behavior_alert(cache: dict[tuple[str, str], tuple[str, float]], exchange: str, merchant_id: str,
+def _should_log_behavior_alert(cache: TTLCache, exchange: str, merchant_id: str,
                                signature: str, cooldown_sec: int = BOT_ALERT_COOLDOWN_SEC) -> bool:
-    import time
-    key = (exchange, merchant_id)
-    now = time.time()
-    prev = cache.get(key)
-    if prev is None:
-        cache[key] = (signature, now)
-        return True
-    prev_signature, prev_ts = prev
-    if signature != prev_signature or (now - prev_ts) >= cooldown_sec:
-        cache[key] = (signature, now)
+    key = f"{exchange}:{merchant_id}"
+    prev_signature = cache.get(key)
+
+    if prev_signature != signature:
+        # Кеш автоматично очистить запис після expiration (BOT_ALERT_COOLDOWN_SEC)
+        cache.set(key, signature)
         return True
     return False
 

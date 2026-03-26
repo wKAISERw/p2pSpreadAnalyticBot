@@ -49,7 +49,7 @@ class BybitExchange(BaseExchange):
             "side": side,
             "size": "50",
             "page": "1",
-            "amount": str(int(amount)),
+            "amount": str(int(amount)) if amount > 0 else "",
             "authMaker": False,
             "canTrade": False
         }
@@ -68,22 +68,10 @@ class BybitExchange(BaseExchange):
         return await self._fetch_orders(amount, banks, side="0")
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
-        tasks = []
-        for amount in amounts:
-            tasks.append(self.get_buy_orders(amount, banks))
-            tasks.append(self.get_sell_orders(amount, banks))
+        # Отримуємо топ-50 ордерів у стакані без фільтру суми (мінімізація API викликів)
+        buy_orders, sell_orders = await asyncio.gather(
+            self.get_buy_orders(0, banks),
+            self.get_sell_orders(0, banks)
+        )
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-        results = await asyncio.gather(*tasks)
-
-        raw_buys = []
-        raw_sells = []
-        for i in range(0, len(results), 2):
-            raw_buys.extend(results[i])
-            raw_sells.extend(results[i + 1])
-
-        buy_orders = self.dedup(raw_buys)
-        sell_orders = self.dedup(raw_sells)
-
-        return buy_orders, sell_orders
-
-        return result

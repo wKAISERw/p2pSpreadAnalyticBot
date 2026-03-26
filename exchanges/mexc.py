@@ -116,4 +116,3 @@ class MexcExchange(BaseExchange):
         )
         return self.dedup(buy_orders), self.dedup(sell_orders)
 
-        return result

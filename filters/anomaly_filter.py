@@ -26,9 +26,30 @@ class AnomalyFilter:
             return self._filter_by_mad(orders, prices)
         elif self.method == "mean":
             return self._filter_by_mean(orders, prices)
+        elif self.method == "median":
+            return self._filter_by_median(orders, prices)
         else:
             logger.warning("⚠️ Невідомий метод аномалій: %s. Фільтр вимкнено.", self.method)
             return orders
+
+
+    def _filter_by_median(self, orders: List[Order], prices: List[Decimal]) -> List[Order]:
+        float_prices = [float(p) for p in prices]
+        median_price = statistics.median(float_prices)
+
+        # median multiplier represents percentage allowed deviation from median.
+        # e.g., multiplier 2.5 = 2.5% variation max
+        threshold = median_price * (float(self.multiplier) * 0.01)
+
+        valid_orders = []
+        for order in orders:
+            if abs(float(order.price) - median_price) <= threshold:
+                valid_orders.append(order)
+            else:
+                logger.debug("🗑 Відкинуто аномалію (Median): %s ₴ (Мерчант: %s)", order.price, order.merchant_name)
+
+        return valid_orders
+
 
     def _filter_by_mad(self, orders: List[Order], prices: List[Decimal]) -> List[Order]:
         # Явний каст у float для безпечної роботи statistics (Python 3.11+)

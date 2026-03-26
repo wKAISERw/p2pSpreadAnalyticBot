@@ -986,3 +986,4 @@ class MerchantDB:
             rows = await cur.fetchall()
 
         return [dict(r) for r in rows]
+

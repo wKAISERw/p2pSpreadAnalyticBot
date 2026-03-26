@@ -88,7 +88,8 @@ async def lifespan(app: FastAPI):
 
     async def run_scanner_safe():
         try:
-            await run_scanner(notifier, stop_event)
+            # Передаємо єдиний екземпляр db — без дублювання MerchantDB
+            await run_scanner(notifier, stop_event, shared_db=db)
         except Exception as e:
             logger.critical("🔥 КРИТИЧНА ПОМИЛКА СКАНЕРА: %s", e, exc_info=True)
             stop_event.set()
@@ -121,10 +122,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
 
+# CORS: wildcard origin несумісний з allow_credentials=True
+# Використовуємо конкретні origins або вимикаємо credentials
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # True + wildcard = broken CORS spec
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -147,8 +150,19 @@ async def get_logs():
     return dict_to_camel(jsonable_encoder(state.logs))
 
 @app.post("/api/v1/credentials/{exchange}")
-async def save_credentials(exchange: str, payload: ApiKeyPayload):
-    return {"status": "success"}
+async def save_credentials(exchange: str, payload: ApiKeyPayload, telegram_id: int = 0):
+    try:
+        ok = await db.save_credentials(
+            exchange=exchange.capitalize(),
+            api_key=payload.key,
+            api_secret=payload.secret,
+            passphrase=payload.passphrase,
+            label="api",
+            user_id=telegram_id,
+        )
+        return {"status": "success" if ok else "error"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 class BlacklistPayload(BaseModel):
     exchange: str
@@ -171,11 +185,30 @@ async def get_blacklist():
 
 @app.post("/api/v1/blacklist")
 async def add_to_blacklist(payload: BlacklistPayload):
-    return {"status": "success"}
+    try:
+        await db.add_to_blacklist(
+            payload.exchange,
+            payload.merchantId,
+            payload.merchantName,
+            payload.reason,
+            payload.source or "api",
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logging.getLogger("Main").error("add_to_blacklist: %s", e)
+        return {"status": "error", "detail": str(e)}
 
 @app.delete("/api/v1/blacklist/{exchange}/{merchant_id}")
 async def remove_from_blacklist(exchange: str, merchant_id: str):
-    return {"status": "success"}
+    try:
+        await db._db.execute(
+            "DELETE FROM merchant_blacklist WHERE exchange=? AND merchant_id=?",
+            (exchange, merchant_id)
+        )
+        await db._db.commit()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/api/v1/settings/global")
 async def get_global_settings():
