@@ -1,5 +1,5 @@
 # PROJECT FRONTEND DUMP: Arbix Quantum
-# Generated: 2026-03-24 23:11
+# Generated: 2026-03-26 15:23
 # Files: 21
 #
 # STRUCTURE:
@@ -197,6 +197,7 @@ export interface UserSettings {
   telegramUserId?: string;
   isTelegramAdmin?: boolean;
   autoSyncTelegram?: boolean;
+  goalCapital?: number; // Added for Goal Progress
 }
 
 export interface BlacklistEntry {
@@ -256,7 +257,7 @@ export interface LogEntry {
 FILE: src/App.tsx
 ============================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import AutoTradePanel from './components/AutoTradePanel';
@@ -269,7 +270,7 @@ import { api } from './services/api';
 import { auth, db, loginWithGoogle, logout } from './firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-import { CheckCircle2, AlertTriangle, Info } from 'lucide-react';
+import { CheckCircle2, AlertTriangle, Info, Menu, X, Activity } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -281,6 +282,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isAdmin, setIsAdmin] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isFocusMode, setIsFocusMode] = useState(false);
 
   const [stats, setStats] = useState<SystemStats>(mockStats);
   const [opportunities, setOpportunities] = useState<ArbitrageOpportunity[]>(mockOpportunities);
@@ -295,10 +297,10 @@ export default function App() {
   // Toast Notification System
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
-  };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -371,6 +373,10 @@ export default function App() {
     if (user) {
       await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
     }
+    
+    // Sync to backend
+    await api.updateUserSettings(newSettings);
+
     if (newSettings.telegramUserId && newSettings.autoSyncTelegram) {
       try {
         await api.updateTelegramSettings(newSettings.telegramUserId, { [key]: value });
@@ -402,6 +408,10 @@ export default function App() {
     if (user) {
       await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
     }
+    
+    // Sync to backend
+    await api.saveCredentials(exchange, config);
+    showToast(`Keys for ${exchange} saved successfully`, 'success');
   };
 
   const handleConnectTelegram = async (telegramId: string) => {
@@ -409,7 +419,6 @@ export default function App() {
       const botData = await api.syncTelegram(telegramId);
       if (botData) {
         const newApiKeys = { ...(userSettings.apiKeys || {}) };
-        // Import keys from bot
         botData.keys.forEach((k: string) => {
           if (!newApiKeys[k]) {
             newApiKeys[k] = { key: 'imported_from_bot', secret: 'imported_from_bot' };
@@ -422,7 +431,7 @@ export default function App() {
           apiKeys: newApiKeys,
           telegramUserId: telegramId,
           isTelegramAdmin: botData.isAdmin,
-          autoSyncTelegram: true // Enable auto-sync by default
+          autoSyncTelegram: true
         };
 
         setUserSettings(newSettings);
@@ -475,7 +484,7 @@ export default function App() {
     delete newSettings.isTelegramAdmin;
     delete newSettings.autoSyncTelegram;
     setUserSettings(newSettings);
-    setIsAdmin(false); // Default back to false
+    setIsAdmin(false);
     if (user) {
       await setDoc(doc(db, 'users', user.uid), { telegramUserId: null, isTelegramAdmin: null, autoSyncTelegram: null }, { merge: true });
     }
@@ -493,14 +502,13 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-slate-950 text-slate-200 font-sans selection:bg-emerald-500/30 overflow-hidden relative">
-      {/* Toast Notification */}
       {toast && (
         <div className="absolute top-4 right-4 z-50 animate-in fade-in slide-in-from-top-4 duration-300">
           <div className={cn(
-            "flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border",
-            toast.type === 'success' ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" :
-            toast.type === 'error' ? "bg-red-500/10 border-red-500/20 text-red-400" :
-            "bg-blue-500/10 border-blue-500/20 text-blue-400"
+            "flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border bg-slate-900/80 backdrop-blur-md",
+            toast.type === 'success' ? "border-emerald-500/20 text-emerald-400" :
+            toast.type === 'error' ? "border-red-500/20 text-red-400" :
+            "border-blue-500/20 text-blue-400"
           )}>
             {toast.type === 'success' && <CheckCircle2 className="w-5 h-5" />}
             {toast.type === 'error' && <AlertTriangle className="w-5 h-5" />}
@@ -510,21 +518,41 @@ export default function App() {
         </div>
       )}
 
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        isAdmin={isAdmin}
-        onToggleAdmin={() => setIsAdmin(!isAdmin)}
-        isOpen={isSidebarOpen}
-        setIsOpen={setIsSidebarOpen}
-        isConnected={isConnected}
-        user={user}
-        onLogin={loginWithGoogle}
-        onLogout={logout}
-      />
+      {/* Mobile Header */}
+      {!isFocusMode && (
+        <div className="md:hidden absolute top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center px-4 z-30 gap-4">
+          <button 
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+            className="p-2 bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+          >
+            {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+          </button>
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
+              <Activity className="text-slate-950 w-5 h-5" />
+            </div>
+            <span className="font-bold text-white tracking-tight text-lg">ARBIX</span>
+          </div>
+        </div>
+      )}
 
-      <main className="flex-1 overflow-y-auto p-8 relative">
-        <div className="max-w-6xl mx-auto">
+      {!isFocusMode && (
+        <Sidebar
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          isAdmin={isAdmin}
+          onToggleAdmin={() => setIsAdmin(!isAdmin)}
+          isOpen={isSidebarOpen}
+          setIsOpen={setIsSidebarOpen}
+          isConnected={isConnected}
+          user={user}
+          onLogin={loginWithGoogle}
+          onLogout={logout}
+        />
+      )}
+
+      <main className={cn("flex-1 overflow-y-auto relative", isFocusMode ? "p-4" : "p-4 md:p-8 pt-20 md:pt-8")}>
+        <div className={cn("mx-auto", isFocusMode ? "max-w-full" : "max-w-6xl")}>
           {!user ? (
             <div className="flex flex-col items-center justify-center h-full mt-32">
               <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mb-6">
@@ -536,7 +564,7 @@ export default function App() {
               </p>
               <button
                 onClick={loginWithGoogle}
-                className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-2xl transition-all shadow-lg shadow-emerald-500/20"
+                className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-2xl transition-all shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 focus:border-transparent outline-none"
               >
                 Sign in with Google
               </button>
@@ -544,7 +572,15 @@ export default function App() {
           ) : (
             <>
               {activeTab === 'dashboard' && (
-                <Dashboard stats={stats} opportunities={opportunities} />
+                <Dashboard 
+                  stats={stats} 
+                  opportunities={opportunities} 
+                  userSettings={userSettings}
+                  onUserChange={handleUserChange}
+                  isFocusMode={isFocusMode}
+                  setIsFocusMode={setIsFocusMode}
+                  showToast={showToast}
+                />
               )}
 
               {activeTab === 'autotrade' && userSettings.autoTrade && (
@@ -635,6 +671,34 @@ export const api = {
   getGlobalSettings: () => fetchWithFallback<GlobalSettings>('/settings/global', mockGlobalSettings),
   getBlacklist: () => fetchWithFallback<BlacklistEntry[]>('/blacklist', mockBlacklist),
 
+  saveCredentials: async (exchange: string, keys: ApiKeyConfig): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/credentials/${exchange.toLowerCase()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(keys)
+      });
+      return response.ok;
+    } catch (error) {
+      console.error(`[API] Помилка збереження ключів для ${exchange}:`, error);
+      return false;
+    }
+  },
+
+  updateUserSettings: async (settings: UserSettings): Promise<boolean> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/settings/user`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      });
+      return response.ok;
+    } catch (error) {
+      console.error('[API] Помилка збереження налаштувань юзера:', error);
+      return false;
+    }
+  },
+
   checkConnection: async (): Promise<boolean> => {
     try {
       const response = await fetch(`${API_BASE_URL}/stats`);
@@ -691,7 +755,6 @@ export const api = {
       throw new Error('Backend not ready');
     } catch (error) {
       console.warn('[API] Мок-синхронізація з Telegram ботом');
-      // Mock response: overwrite with bot's settings, grant admin, and pull connected exchanges
       return {
         settings: {
           minCapital: 10000,
@@ -707,13 +770,13 @@ export const api = {
 
   updateTelegramSettings: async (telegramId: string, settings: any): Promise<void> => {
     try {
-      await fetch(`${API_BASE_URL}/telegram/sync/${telegramId}`, {
+      await fetch(`${API_BASE_URL}/user/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
+        body: JSON.stringify({ ...settings, telegramUserId: telegramId })
       });
     } catch (error) {
-      console.warn('[API] Мок-оновлення налаштувань у Telegram боті');
+      console.warn('[API] Мок-оновлення налаштувань у Telegram боті', error);
     }
   }
 };
@@ -722,10 +785,10 @@ export const api = {
 FILE: src/components/Dashboard.tsx
 ============================================================
 
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock } from 'lucide-react';
-import { ArbitrageOpportunity, Order, SystemStats } from '../types';
+import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Check, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Settings2, Activity } from 'lucide-react';
+import { ArbitrageOpportunity, Order, SystemStats, UserSettings } from '../types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { formatDistanceToNow } from 'date-fns';
@@ -737,61 +800,206 @@ function cn(...inputs: ClassValue[]) {
 interface DashboardProps {
   stats: SystemStats;
   opportunities: ArbitrageOpportunity[];
+  userSettings: UserSettings;
+  onUserChange: (key: keyof UserSettings, value: any) => void;
+  isFocusMode: boolean;
+  setIsFocusMode: (val: boolean) => void;
+  showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-export default function Dashboard({ stats, opportunities }: DashboardProps) {
-  // Використовуємо всі ордери, які прислав бекенд. 
-  // Бекенд сам має вирішувати, які ордери ще активні, а які вже викуплені.
-  const activeOpportunities = opportunities;
+export default function Dashboard({ stats, opportunities, userSettings, onUserChange, isFocusMode, setIsFocusMode, showToast }: DashboardProps) {
+  const [viewMode, setViewMode] = useState<'detailed' | 'compact'>('detailed');
+  const prevOppsLength = useRef(opportunities.length);
+
+  // Audio Notification
+  useEffect(() => {
+    if (opportunities.length > prevOppsLength.current) {
+      const newOpps = opportunities.slice(0, opportunities.length - prevOppsLength.current);
+      const hasHighSpread = newOpps.some(opp => opp.netSpread >= userSettings.minSpread);
+      if (hasHighSpread) {
+        try {
+          // Play a gentle pop sound
+          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+          const oscillator = audioCtx.createOscillator();
+          const gainNode = audioCtx.createGain();
+          oscillator.connect(gainNode);
+          gainNode.connect(audioCtx.destination);
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+          oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.1);
+          gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+          oscillator.start(audioCtx.currentTime);
+          oscillator.stop(audioCtx.currentTime + 0.1);
+        } catch (e) {
+          console.error("Audio playback failed", e);
+        }
+      }
+    }
+    prevOppsLength.current = opportunities.length;
+  }, [opportunities, userSettings.minSpread]);
+
+  // Hotkeys
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (userSettings.autoTrade) {
+          onUserChange('autoTrade', { ...userSettings.autoTrade, enabled: !userSettings.autoTrade.enabled });
+          showToast(`Scanner ${!userSettings.autoTrade.enabled ? 'Started' : 'Paused'}`, 'info');
+        }
+      } else if (e.key === 'Escape') {
+        // Reset filters
+        onUserChange('minSpread', 0.5);
+        showToast('Filters reset', 'info');
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [userSettings, onUserChange, showToast]);
+
+  const activeOpportunities = opportunities.filter(opp => opp.netSpread >= userSettings.minSpread);
+
+  const toggleExchange = (exchange: string) => {
+    if (!userSettings.autoTrade) return;
+    const current = userSettings.autoTrade.allowedExchanges;
+    const newExchanges = current.includes(exchange)
+      ? current.filter(e => e !== exchange)
+      : [...current, exchange];
+    onUserChange('autoTrade', { ...userSettings.autoTrade, allowedExchanges: newExchanges });
+  };
 
   return (
     <div className="space-y-8">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard
-          icon={<TrendingUp className="w-5 h-5 text-emerald-400" />}
-          label="Active Spreads"
-          value={activeOpportunities.length.toString()}
-          subValue="Real-time opportunities"
-        />
-        <StatCard
-          icon={<ArrowRightLeft className="w-5 h-5 text-blue-400" />}
-          label="Cycles Completed"
-          value={(stats?.cycles ?? 0).toLocaleString()}
-          subValue={`${stats.lastCycleMs}ms avg latency`}
-        />
-        <StatCard
-          icon={<ShieldAlert className="w-5 h-5 text-orange-400" />}
-          label="Bots Detected"
-          value={(stats.botsDetectedToday ?? 0).toString()}
-          subValue="Today's anomalies"
-        />
-        <StatCard
-          icon={<Clock className="w-5 h-5 text-purple-400" />}
-          label="LLM Queue"
-          value={(stats.llmQueue ?? 0).toString()}
-          subValue={`${stats.reviewQueue} reviews pending`}
-        />
-      </div>
+      {!isFocusMode && (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <StatCard
+              icon={<TrendingUp className="w-5 h-5 text-emerald-400" />}
+              label="Active Spreads"
+              value={activeOpportunities.length.toString()}
+              subValue="Real-time opportunities"
+              trend="+12%"
+              trendUp={true}
+            />
+            <StatCard
+              icon={<ArrowRightLeft className="w-5 h-5 text-blue-400" />}
+              label="Cycles Completed"
+              value={(stats?.cycles ?? 0).toLocaleString()}
+              subValue={`${stats.lastCycleMs}ms avg latency`}
+              trend="-5ms"
+              trendUp={true}
+            />
+            <StatCard
+              icon={<ShieldAlert className="w-5 h-5 text-orange-400" />}
+              label="Bots Detected"
+              value={(stats.botsDetectedToday ?? 0).toString()}
+              subValue="Today's anomalies"
+              trend="+2"
+              trendUp={false}
+            />
+            <GoalProgressCard 
+              currentCapital={userSettings.maxCapital} 
+              goalCapital={userSettings.goalCapital || 50000} 
+            />
+          </div>
+        </>
+      )}
 
       <div className="space-y-4">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-lg font-semibold flex items-center gap-2 text-white">
-            <TrendingUp className="w-5 h-5 text-emerald-500" />
-            Live Arbitrage Opportunities
-          </h2>
-          <span className="text-xs text-slate-500 font-mono">Updated every 5s</span>
+        {/* Quick Control Bar */}
+        <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 sticky top-16 md:top-0 z-10 shadow-lg">
+          <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            <div className="flex items-center gap-2 shrink-0">
+              <motion.div 
+                animate={{ scale: userSettings.autoTrade?.enabled ? [1, 1.2, 1] : 1 }}
+                transition={{ repeat: Infinity, duration: 2 }}
+              >
+                <Activity className={cn("w-5 h-5", userSettings.autoTrade?.enabled ? "text-emerald-500" : "text-slate-500")} />
+              </motion.div>
+              <span className="text-sm font-bold text-white">Scanner</span>
+            </div>
+            <div className="h-6 w-px bg-slate-800 shrink-0"></div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Min Spread:</span>
+              <input 
+                type="number" 
+                step="0.1"
+                value={userSettings.minSpread}
+                onChange={(e) => onUserChange('minSpread', parseFloat(e.target.value) || 0)}
+                className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none"
+              />
+              <span className="text-xs text-slate-400">%</span>
+            </div>
+            <div className="h-6 w-px bg-slate-800 shrink-0"></div>
+            <div className="flex items-center gap-1 shrink-0">
+              {['Binance', 'Bybit', 'OKX', 'MEXC'].map(ex => (
+                <button
+                  key={ex}
+                  onClick={() => toggleExchange(ex)}
+                  className={cn(
+                    "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
+                    userSettings.autoTrade?.allowedExchanges.includes(ex)
+                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                      : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
+                  )}
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 w-full md:w-auto justify-end border-t border-slate-800 md:border-none pt-3 md:pt-0">
+            <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
+              <button 
+                onClick={() => setViewMode('detailed')}
+                className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'detailed' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
+                title="Detailed View"
+              >
+                <LayoutGrid className="w-4 h-4" />
+              </button>
+              <button 
+                onClick={() => setViewMode('compact')}
+                className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'compact' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
+                title="Compact View"
+              >
+                <LayoutList className="w-4 h-4" />
+              </button>
+            </div>
+            <button 
+              onClick={() => setIsFocusMode(!isFocusMode)}
+              className={cn(
+                "p-2 rounded-lg transition-colors border focus:ring-2 focus:ring-emerald-500/50 outline-none",
+                isFocusMode ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+              )}
+              title="Focus Mode"
+            >
+              {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </button>
+          </div>
         </div>
 
         <AnimatePresence mode="popLayout">
           {activeOpportunities.length > 0 ? (
-            activeOpportunities.map((opp, index) => (
-                <OpportunityCard key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`} opp={opp} />
-            ))
+            <div className={cn("grid gap-4", viewMode === 'detailed' ? "grid-cols-1" : "grid-cols-1")}>
+              {activeOpportunities.map((opp, index) => (
+                <OpportunityCard 
+                  key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`} 
+                  opp={opp} 
+                  viewMode={viewMode}
+                  showToast={showToast}
+                />
+              ))}
+            </div>
           ) : (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="p-12 border-2 border-dashed border-slate-800 rounded-3xl flex flex-col items-center justify-center text-slate-500"
+              className="p-12 border-2 border-dashed border-slate-800 rounded-3xl flex flex-col items-center justify-center text-slate-400"
             >
               <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
                 <TrendingUp className="w-6 h-6 opacity-20" />
@@ -805,21 +1013,156 @@ export default function Dashboard({ stats, opportunities }: DashboardProps) {
   );
 }
 
-function StatCard({ icon, label, value, subValue }: any) {
+function StatCard({ icon, label, value, subValue, trend, trendUp }: any) {
   return (
-    <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl">
-      <div className="flex items-center gap-3 mb-3">
-        <div className="p-2 bg-slate-800 rounded-xl">{icon}</div>
-        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">{label}</span>
+    <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-slate-800 rounded-xl">{icon}</div>
+          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</span>
+        </div>
+        {trend && (
+          <span className={cn("text-xs font-bold", trendUp ? "text-emerald-400" : "text-red-400")}>
+            {trend}
+          </span>
+        )}
       </div>
       <div className="text-2xl font-bold text-white mb-1">{value}</div>
-      <div className="text-[10px] text-slate-500 font-medium uppercase tracking-widest">{subValue}</div>
+      <div className="text-xs text-slate-400 font-medium uppercase tracking-widest">{subValue}</div>
+      
+      {/* Mock Sparkline */}
+      <div className="absolute bottom-0 left-0 w-full h-8 opacity-20 pointer-events-none">
+        <svg viewBox="0 0 100 20" preserveAspectRatio="none" className="w-full h-full">
+          <polyline 
+            points="0,20 20,15 40,18 60,10 80,12 100,2" 
+            fill="none" 
+            stroke={trendUp ? "#10b981" : "#3b82f6"} 
+            strokeWidth="2"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
+      </div>
     </div>
   );
 }
 
-const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity }> = ({ opp }) => {
+function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: number, goalCapital: number }) {
+  const progress = Math.min(100, Math.max(0, (currentCapital / goalCapital) * 100));
+  
+  return (
+    <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-slate-800 rounded-xl">
+            <Target className="w-5 h-5 text-purple-400" />
+          </div>
+          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Goal Progress</span>
+        </div>
+        <span className="text-xs font-bold text-purple-400">{progress.toFixed(1)}%</span>
+      </div>
+      <div className="text-2xl font-bold text-white mb-2">{currentCapital.toLocaleString()} ₴</div>
+      
+      <div className="w-full bg-slate-800 rounded-full h-1.5 mb-1">
+        <div className="bg-purple-500 h-1.5 rounded-full" style={{ width: `${progress}%` }}></div>
+      </div>
+      <div className="text-xs text-slate-400 font-medium uppercase tracking-widest text-right">
+        Target: {goalCapital.toLocaleString()} ₴
+      </div>
+    </div>
+  );
+}
+
+const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact', showToast: (msg: string) => void }> = ({ opp, viewMode, showToast }) => {
   const isHighRisk = (opp.buyOrder.riskScore || 0) >= 50 || (opp.sellOrder.riskScore || 0) >= 50;
+  
+  // Decay Bar Logic (assuming 60s lifetime)
+  const [decay, setDecay] = useState(100);
+  useEffect(() => {
+    const age = Date.now() - opp.timestamp;
+    const maxAge = 60000; // 60s
+    const initialDecay = Math.max(0, 100 - (age / maxAge) * 100);
+    setDecay(initialDecay);
+
+    const interval = setInterval(() => {
+      const currentAge = Date.now() - opp.timestamp;
+      setDecay(Math.max(0, 100 - (currentAge / maxAge) * 100));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [opp.timestamp]);
+
+  const handleCopy = (text: string | number, label: string) => {
+    navigator.clipboard.writeText(text.toString());
+    showToast(`Copied ${label}!`);
+  };
+
+  if (viewMode === 'compact') {
+    return (
+      <motion.div
+        layout
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.98 }}
+        transition={{ type: "spring", stiffness: 300, damping: 30 }}
+        className={cn(
+          "bg-slate-900/80 backdrop-blur-md rounded-xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg",
+          isHighRisk ? "border border-red-500/30" : "border border-slate-800"
+        )}
+      >
+        <div className="p-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3 flex-1">
+            <div className="flex items-center -space-x-1">
+              <ExchangeIcon name={opp.buyOrder.exchange} size="sm" />
+              <motion.div 
+                animate={{ x: [0, 2, 0] }} 
+                transition={{ repeat: Infinity, duration: 1.5 }}
+                className="z-10 bg-slate-900 rounded-full"
+              >
+                <ArrowRightLeft className="w-3 h-3 text-slate-400" />
+              </motion.div>
+              <ExchangeIcon name={opp.sellOrder.exchange} size="sm" />
+            </div>
+            <div className="flex items-center gap-2 text-sm font-bold text-white">
+              <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.buyOrder.price, 'Buy Price')}>
+                {opp.buyOrder.price.toFixed(2)}
+              </span>
+              <span className="text-slate-500">→</span>
+              <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.sellOrder.price, 'Sell Price')}>
+                {opp.sellOrder.price.toFixed(2)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex-1 text-center">
+            <span className="text-xs font-medium text-slate-400 uppercase tracking-widest cursor-pointer hover:text-white transition-colors" onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}>
+              Deal: {opp.dealAmount.toFixed(0)} ₴
+            </span>
+          </div>
+
+          <div className="flex items-center gap-4 justify-end flex-1">
+            <div className="text-right">
+              <div className="text-sm font-black text-emerald-400">+{opp.netSpread.toFixed(2)}%</div>
+              <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">{opp.netProfit.toFixed(0)} ₴</div>
+            </div>
+            <div className="flex gap-1">
+              <a href={opp.buyOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors">
+                <ExternalLink className="w-3 h-3" />
+              </a>
+              <a href={opp.sellOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg transition-colors">
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          </div>
+        </div>
+        {/* Decay Bar */}
+        <div className="h-0.5 w-full bg-slate-800">
+          <div 
+            className={cn("h-full transition-all duration-1000 ease-linear", decay > 50 ? "bg-emerald-500" : decay > 20 ? "bg-orange-500" : "bg-red-500")} 
+            style={{ width: `${decay}%` }}
+          />
+        </div>
+      </motion.div>
+    );
+  }
 
   return (
     <motion.div
@@ -827,66 +1170,77 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity }> = ({ opp }) => {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95 }}
+      transition={{ type: "spring", stiffness: 300, damping: 30 }}
       className={cn(
-        "bg-slate-900 border rounded-4xl overflow-hidden transition-all hover:shadow-2xl hover:shadow-emerald-500/5",
-        isHighRisk ? "border-red-500/30" : "border-slate-800"
+        "bg-slate-900/80 backdrop-blur-md rounded-3xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg",
+        isHighRisk ? "border border-red-500/30" : "border border-slate-800"
       )}
     >
-      <div className="p-6">
-        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+      <div className="p-4 md:p-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-4">
             <div className="flex items-center -space-x-2">
               <ExchangeIcon name={opp.buyOrder.exchange} />
-              <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border-2 border-slate-900 z-10">
+              <motion.div 
+                animate={{ x: [0, 4, 0] }} 
+                transition={{ repeat: Infinity, duration: 2 }}
+                className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border-2 border-slate-900 z-10"
+              >
                 <ArrowRightLeft className="w-3 h-3 text-slate-400" />
-              </div>
+              </motion.div>
               <ExchangeIcon name={opp.sellOrder.exchange} />
             </div>
             <div>
               <div className="text-sm font-bold text-white flex items-center gap-2">
                 {opp.buyOrder.exchange} → {opp.sellOrder.exchange}
                 <span className={cn(
-                  "text-[10px] px-2 py-0.5 rounded-full font-black uppercase tracking-tighter",
+                  "text-xs px-2 py-0.5 rounded-full font-black uppercase tracking-tighter",
                   opp.routeType === 'CROSS' ? "bg-purple-500/20 text-purple-400" : "bg-blue-500/20 text-blue-400"
                 )}>
                   {opp.routeType}
                 </span>
               </div>
-              <div className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">
+              <div className="text-xs text-slate-400 font-mono uppercase tracking-widest">
                 {opp.buyBank} → {opp.sellBank}
               </div>
             </div>
           </div>
 
-          <div className="text-right">
-            <div className="text-2xl font-black text-emerald-400">+{(opp.netSpread ?? 0).toFixed(2)}%</div>
-            <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">Profit: {(opp.netProfit ?? 0).toFixed(0)} ₴</div>          </div>
+          <div className="text-left md:text-right border-t border-slate-800/50 md:border-none pt-3 md:pt-0">
+            <div className="text-2xl font-black text-emerald-400">+{opp.netSpread.toFixed(2)}%</div>
+            <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">Profit: {opp.netProfit.toFixed(0)} ₴</div>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <OrderDetails side="BUY" order={opp.buyOrder} />
-          <OrderDetails side="SELL" order={opp.sellOrder} />
+          <OrderDetails side="BUY" order={opp.buyOrder} onCopy={handleCopy} />
+          <OrderDetails side="SELL" order={opp.sellOrder} onCopy={handleCopy} />
         </div>
       </div>
 
-      <div className="bg-slate-800/30 px-6 py-4 flex items-center justify-between border-t border-slate-800">
-        <div className="flex items-center gap-4">
-          <div className="text-xs font-mono">
-            <span className="text-slate-500">DEAL:</span> <span className="text-white font-bold">{(opp.dealAmount ?? 0).toFixed(0)} ₴</span>
+      <div className="bg-slate-800/30 px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center justify-between border-t border-slate-800 gap-4 md:gap-0">
+        <div className="flex items-center justify-between md:justify-start gap-4 w-full md:w-auto">
+          <div 
+            className="text-xs font-mono cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1"
+            onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}
+          >
+            <span className="text-slate-400">DEAL:</span> 
+            <span className="text-white font-bold group-hover:text-emerald-400">{opp.dealAmount.toFixed(0)} ₴</span>
+            <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
           </div>
-          <div className="text-[10px] font-mono text-slate-500 flex items-center gap-1">
+          <div className="text-xs font-mono text-slate-400 flex items-center gap-1">
             <Clock className="w-3 h-3" />
             {opp.timestamp
               ? formatDistanceToNow(new Date(opp.timestamp), { addSuffix: true })
               : 'щойно'}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 w-full md:w-auto">
           <a
             href={opp.buyOrder.link}
             target="_blank"
             rel="noreferrer"
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-2"
+            className="flex-1 md:flex-none justify-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-2 focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             BUY <ExternalLink className="w-3 h-3" />
           </a>
@@ -894,26 +1248,33 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity }> = ({ opp }) => {
             href={opp.sellOrder.link}
             target="_blank"
             rel="noreferrer"
-            className="px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-colors flex items-center gap-2 shadow-lg shadow-emerald-500/20"
+            className="flex-1 md:flex-none justify-center px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-colors flex items-center gap-2 shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 outline-none"
           >
             SELL <ExternalLink className="w-3 h-3" />
           </a>
         </div>
       </div>
+      {/* Decay Bar */}
+      <div className="h-1 w-full bg-slate-800">
+        <div 
+          className={cn("h-full transition-all duration-1000 ease-linear", decay > 50 ? "bg-emerald-500" : decay > 20 ? "bg-orange-500" : "bg-red-500")} 
+          style={{ width: `${decay}%` }}
+        />
+      </div>
     </motion.div>
   );
 }
 
-function OrderDetails({ side, order }: { side: 'BUY' | 'SELL', order: Order }) {
+function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Order, onCopy: (text: string|number, label: string) => void }) {
   const isRisk = (order.riskScore || 0) > 0;
   return (
     <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50">
       <div className="flex items-center justify-between mb-3">
         <span className={cn(
-          "text-[10px] font-black px-2 py-0.5 rounded-md tracking-tighter",
+          "text-xs font-black px-2 py-0.5 rounded-md tracking-tighter",
           side === 'BUY' ? "bg-blue-500/20 text-blue-400" : "bg-emerald-500/20 text-emerald-400"
         )}>{side}</span>
-        <div className="flex items-center gap-1 text-[10px] font-mono text-slate-500">
+        <div className="flex items-center gap-1 text-xs font-mono text-slate-400">
           <span>{order.orderCount} orders</span>
           <span>•</span>
          <span>{(order.finishRate ?? 0).toFixed(1)}%</span>
@@ -921,18 +1282,28 @@ function OrderDetails({ side, order }: { side: 'BUY' | 'SELL', order: Order }) {
       </div>
 
       <div className="flex items-center justify-between mb-2">
-        <div className="text-sm font-bold text-white truncate max-w-30">{order.merchantName}</div>
-        <div className="text-lg font-black text-white">{(order.price ?? 0).toFixed(2)}</div>
+        <div className="text-sm font-bold text-white truncate max-w-[120px]">{order.merchantName}</div>
+        <div 
+          className="text-lg font-black text-white cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1"
+          onClick={() => onCopy(order.price, `${side} Price`)}
+        >
+          {(order.price ?? 0).toFixed(2)}
+          <Copy className="w-4 h-4 opacity-0 group-hover:opacity-100 text-slate-500" />
+        </div>
       </div>
 
-      <div className="text-[10px] text-slate-500 mb-3 font-mono">
+      <div 
+        className="text-xs text-slate-400 mb-3 font-mono cursor-pointer hover:text-white transition-colors group flex items-center gap-1"
+        onClick={() => onCopy(`${order.minLimit} - ${order.maxLimit}`, `${side} Limits`)}
+      >
         Limits: {order.minLimit} - {order.maxLimit} ₴
+        <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
       </div>
 
       {isRisk && (
         <div className="flex flex-wrap gap-1.5 mt-3">
           <div className={cn(
-            "flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight border",
+            "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
             (order.riskScore || 0) >= 50 
               ? "bg-red-500/10 text-red-400 border-red-500/20" 
               : "bg-orange-500/10 text-orange-400 border-orange-500/20"
@@ -945,7 +1316,7 @@ function OrderDetails({ side, order }: { side: 'BUY' | 'SELL', order: Order }) {
             if (!trimmed) return null;
             return (
               <div key={idx} className={cn(
-                "flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tight border",
+                "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
                 (order.riskScore || 0) >= 50 
                   ? "bg-red-500/10 text-red-400 border-red-500/20" 
                   : "bg-orange-500/10 text-orange-400 border-orange-500/20"
@@ -960,7 +1331,7 @@ function OrderDetails({ side, order }: { side: 'BUY' | 'SELL', order: Order }) {
   );
 }
 
-function ExchangeIcon({ name }: { name: string }) {
+function ExchangeIcon({ name, size = 'md' }: { name: string, size?: 'sm' | 'md' }) {
   const colors: Record<string, string> = {
     'Bybit': 'bg-orange-500',
     'OKX': 'bg-white',
@@ -968,7 +1339,11 @@ function ExchangeIcon({ name }: { name: string }) {
     'MEXC': 'bg-blue-500'
   };
   return (
-    <div className={cn("w-8 h-8 rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-[10px] text-slate-950", colors[name] || 'bg-slate-700')}>
+    <div className={cn(
+      "rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-slate-950", 
+      colors[name] || 'bg-slate-700',
+      size === 'sm' ? "w-6 h-6 text-[10px]" : "w-8 h-8 text-xs"
+    )}>
       {name[0]}
     </div>
   );
@@ -1076,7 +1451,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           <ExchangeIcon name={exchange} />
           <div>
             <h3 className="font-bold text-white text-lg">{exchange}</h3>
-            <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">
+            <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
               {isConnected ? 'Connected' : 'Not Connected'}
             </p>
           </div>
@@ -1084,7 +1459,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
         {!isEditing && (
           <button 
             onClick={() => setIsEditing(true)} 
-            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors"
+            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             UPDATE
           </button>
@@ -1094,28 +1469,28 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
       {isEditing ? (
         <div className="space-y-4">
           <div>
-            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">API Key</label>
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Key</label>
             <input
               type="text"
               value={localKeys.key}
               onChange={(e) => setLocalKeys({ ...localKeys, key: e.target.value })}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
               placeholder="Enter API Key"
             />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">API Secret</label>
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Secret</label>
             <div className="relative">
               <input
                 type={showSecret ? "text" : "password"}
                 value={localKeys.secret}
                 onChange={(e) => setLocalKeys({ ...localKeys, secret: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all pr-10"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all pr-10"
                 placeholder="Enter API Secret"
               />
               <button 
                 onClick={() => setShowSecret(!showSecret)} 
-                className="absolute right-3 top-3 text-slate-500 hover:text-slate-300"
+                className="absolute right-3 top-3 text-slate-400 hover:text-slate-300 focus:outline-none"
               >
                 {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -1123,12 +1498,12 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           </div>
           {hasPassphrase && (
             <div>
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Passphrase</label>
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">Passphrase</label>
               <input
                 type="password"
                 value={localKeys.passphrase}
                 onChange={(e) => setLocalKeys({ ...localKeys, passphrase: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                 placeholder="Enter Passphrase"
               />
             </div>
@@ -1137,7 +1512,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
             {isConnected && (
               <button
                 onClick={() => setIsEditing(false)}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all"
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
                 CANCEL
               </button>
@@ -1145,7 +1520,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
             <button
               onClick={handleSave}
               disabled={isSaving || !localKeys.key || !localKeys.secret}
-              className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+              className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
             >
               {isSaving ? 'SAVING...' : 'SAVE KEYS'}
             </button>
@@ -1159,7 +1534,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
               ••••••••••••••••••••
             </div>
           </div>
-          <div className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest bg-emerald-500/10 px-2 py-1 rounded">
+          <div className="text-xs font-bold text-emerald-500 uppercase tracking-widest bg-emerald-500/10 px-2 py-1 rounded">
             Active
           </div>
         </div>
@@ -1227,33 +1602,35 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
 
   return (
     <div className="bg-slate-900/80 border border-slate-800 rounded-[2rem] overflow-hidden">
-      <div className="p-6 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
+      <div className="p-4 md:p-6 border-b border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 md:gap-0 bg-slate-900/50">
         <div className="flex items-center gap-4">
           <div className={cn(
-            "w-12 h-12 rounded-2xl flex items-center justify-center shadow-lg transition-colors",
+            "w-10 h-10 md:w-12 md:h-12 rounded-2xl flex items-center justify-center shadow-lg transition-colors shrink-0",
             config.enabled ? "bg-emerald-500 shadow-emerald-500/20" : "bg-slate-800 shadow-slate-900/20"
           )}>
-            <Activity className={cn("w-6 h-6", config.enabled ? "text-slate-950" : "text-slate-400")} />
+            <Activity className={cn("w-5 h-5 md:w-6 md:h-6", config.enabled ? "text-slate-950" : "text-slate-400")} />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white">Auto-Trading Engine</h2>
-            <p className="text-xs text-slate-500 uppercase tracking-widest font-semibold">
+            <h2 className="text-lg md:text-xl font-bold text-white">Auto-Trading Engine</h2>
+            <p className="text-[10px] md:text-xs text-slate-400 uppercase tracking-widest font-semibold">
               {config.enabled ? 'Active & Scanning' : 'Currently Paused'}
             </p>
           </div>
         </div>
         
-        <div className="flex items-center gap-3">
-          <button
+        <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end">
+          <motion.button
+            whileHover={{ rotate: 90 }}
+            transition={{ type: "spring", stiffness: 300, damping: 20 }}
             onClick={() => setIsEditing(!isEditing)}
-            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-colors"
+            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             <Settings2 className="w-5 h-5" />
-          </button>
+          </motion.button>
           <button
             onClick={() => onConfigChange({ ...config, enabled: !config.enabled })}
             className={cn(
-              "flex items-center gap-2 px-6 py-2.5 text-sm font-bold rounded-xl transition-all shadow-lg",
+              "flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-2.5 text-sm font-bold rounded-xl transition-all shadow-lg focus:ring-2 focus:ring-emerald-500/50 outline-none",
               config.enabled 
                 ? "bg-red-500/10 hover:bg-red-500/20 text-red-500 border border-red-500/20" 
                 : "bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-emerald-500/20"
@@ -1279,18 +1656,18 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
             <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-4">
                 <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">
+                  <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">
                     Max Trade Amount (UAH)
                   </label>
                   <input
                     type="number"
                     value={localConfig.maxTradeAmount}
                     onChange={(e) => setLocalConfig({ ...localConfig, maxTradeAmount: Number(e.target.value) })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">
+                  <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">
                     Min Spread (%)
                   </label>
                   <input
@@ -1298,14 +1675,14 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                     step="0.1"
                     value={localConfig.minSpread}
                     onChange={(e) => setLocalConfig({ ...localConfig, minSpread: Number(e.target.value) })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                   />
                 </div>
               </div>
               
               <div className="space-y-4">
                 <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">
+                  <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">
                     Allowed Exchanges
                   </label>
                   <div className="flex flex-wrap gap-2">
@@ -1314,10 +1691,10 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                         key={ex}
                         onClick={() => toggleExchange(ex)}
                         className={cn(
-                          "px-4 py-2 rounded-xl text-xs font-bold transition-all border",
+                          "px-4 py-2 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
                           localConfig.allowedExchanges.includes(ex)
                             ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-                            : "bg-slate-900 border-slate-800 text-slate-500 hover:border-slate-700"
+                            : "bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700"
                         )}
                       >
                         {ex}
@@ -1327,7 +1704,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                 </div>
                 
                 <div>
-                  <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">
+                  <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">
                     Max Risk Score
                   </label>
                   <input
@@ -1350,13 +1727,13 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
             <div className="px-6 py-4 bg-slate-900/30 flex justify-end gap-3 border-t border-slate-800">
               <button
                 onClick={() => setIsEditing(false)}
-                className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all"
+                className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
                 CANCEL
               </button>
               <button
                 onClick={handleSave}
-                className="px-6 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20"
+                className="px-6 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 outline-none"
               >
                 SAVE CONFIG
               </button>
@@ -1389,7 +1766,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                   <div className="text-sm font-bold text-white">
                     {log.buyExchange} → {log.sellExchange}
                   </div>
-                  <div className="text-xs text-slate-500 font-mono">
+                  <div className="text-xs text-slate-400 font-mono">
                     {new Date(log.timestamp).toLocaleTimeString()} • {log.amountUah} ₴
                   </div>
                 </div>
@@ -1398,19 +1775,19 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
               <div className="text-right">
                 <div className={cn(
                   "text-sm font-black",
-                  log.status === 'SUCCESS' ? "text-emerald-400" : "text-slate-500"
+                  log.status === 'SUCCESS' ? "text-emerald-400" : "text-slate-400"
                 )}>
                   +{log.expectedProfit.toFixed(0)} ₴
                 </div>
                 {log.errorMessage && (
-                  <div className="text-[10px] text-red-400 max-w-[150px] truncate" title={log.errorMessage}>
+                  <div className="text-xs text-red-400 max-w-[150px] truncate" title={log.errorMessage}>
                     {log.errorMessage}
                   </div>
                 )}
               </div>
             </div>
           )) : (
-            <div className="text-center py-8 text-slate-500 text-sm">
+            <div className="text-center py-8 text-slate-400 text-sm">
               No auto-trades executed yet.
             </div>
           )}
@@ -1514,12 +1891,12 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 placeholder="Enter Telegram ID..." 
                 value={tgInput}
                 onChange={(e) => setTgInput(e.target.value)}
-                className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 outline-none w-full md:w-48"
+                className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 outline-none w-full md:w-48 transition-all"
               />
               <button 
                 onClick={handleConnect}
                 disabled={isConnecting || !tgInput}
-                className="px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap"
+                className="px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap focus:ring-2 focus:ring-blue-500/50 outline-none"
               >
                 {isConnecting ? 'Connecting...' : 'Connect'}
               </button>
@@ -1527,7 +1904,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
           ) : (
             <button 
               onClick={onDisconnectTelegram}
-              className="px-4 py-2 bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 font-bold rounded-xl transition-all border border-transparent hover:border-red-500/30 whitespace-nowrap"
+              className="px-4 py-2 bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 font-bold rounded-xl transition-all border border-transparent hover:border-red-500/30 whitespace-nowrap focus:ring-2 focus:ring-red-500/50 outline-none"
             >
               Disconnect
             </button>
@@ -1547,7 +1924,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               <button 
                 onClick={handleSyncFromBot}
                 disabled={isSyncing}
-                className="w-full py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+                className="w-full py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
               >
                 {isSyncing ? 'Syncing...' : 'PULL DATA'}
               </button>
@@ -1564,7 +1941,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               <button 
                 onClick={handleSyncToBot}
                 disabled={isSyncing}
-                className="w-full py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50"
+                className="w-full py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50 focus:ring-2 focus:ring-orange-500/50 outline-none"
               >
                 {isSyncing ? 'Syncing...' : 'PUSH DATA'}
               </button>
@@ -1581,7 +1958,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               <button 
                 onClick={toggleAutoSync}
                 className={cn(
-                  "w-full py-2 border rounded-xl text-xs font-bold transition-all",
+                  "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 focus:ring-blue-500/50 outline-none",
                   userSettings.autoSyncTelegram 
                     ? "bg-blue-500/20 border-blue-500/30 text-blue-400" 
                     : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
@@ -1601,33 +1978,33 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
           </div>
           <div>
             <h2 className="text-lg font-bold text-white">Особисті фільтри</h2>
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">Налаштування капіталу та спреду</p>
+            <p className="text-xs uppercase tracking-widest text-slate-400 font-semibold">Налаштування капіталу та спреду</p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           <div className="space-y-6">
             <div>
-              <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">Робочий капітал (UAH)</label>
+              <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Робочий капітал (UAH)</label>
               <div className="flex items-center gap-4 mb-3">
                 <div className="flex-1">
-                  <span className="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Min</span>
+                  <span className="text-xs text-slate-400 uppercase font-bold mb-1 block">Min</span>
                   <input
                     type="number"
                     min="0"
                     value={userSettings.minCapital}
                     onChange={(e) => onUserChange('minCapital', parseInt(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                   />
                 </div>
                 <div className="flex-1">
-                  <span className="text-[10px] text-slate-500 uppercase font-bold mb-1 block">Max</span>
+                  <span className="text-xs text-slate-400 uppercase font-bold mb-1 block">Max</span>
                   <input
                     type="number"
                     min="0"
                     value={userSettings.maxCapital}
                     onChange={(e) => onUserChange('maxCapital', parseInt(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                   />
                 </div>
               </div>
@@ -1638,14 +2015,14 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">Мінімальний спред (%)</label>
+              <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мінімальний спред (%)</label>
               <div className="grid grid-cols-4 gap-2 mb-3">
                 {[0.3, 0.5, 1.0, 2.0].map(val => (
                   <button
                     key={val}
                     onClick={() => onUserChange('minSpread', val)}
                     className={cn(
-                      "py-2.5 rounded-xl text-xs font-bold transition-all border",
+                      "py-2.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
                       userSettings.minSpread === val
                         ? "bg-emerald-500 border-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/20"
                         : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
@@ -1655,8 +2032,8 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                   </button>
                 ))}
               </div>
-              <div className="flex items-center gap-3 p-1 bg-slate-950 border border-slate-800 rounded-xl focus-within:border-emerald-500 transition-all">
-                <span className="text-xs font-bold text-slate-500 pl-3 uppercase tracking-widest">Ручний ввід:</span>
+              <div className="flex items-center gap-3 p-1 bg-slate-950 border border-slate-800 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/50 transition-all">
+                <span className="text-xs font-bold text-slate-400 pl-3 uppercase tracking-widest">Ручний ввід:</span>
                 <input
                   type="number"
                   step="0.1"
@@ -1664,13 +2041,13 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                   onChange={(e) => onUserChange('minSpread', parseFloat(e.target.value) || 0)}
                   className="flex-1 bg-transparent border-none text-sm font-bold text-white focus:ring-0 outline-none py-2"
                 />
-                <span className="pr-4 text-slate-500 font-bold">%</span>
+                <span className="pr-4 text-slate-400 font-bold">%</span>
               </div>
             </div>
           </div>
 
           <div>
-            <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">Цільові Банки</label>
+            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Цільові Банки</label>
             <div className="space-y-2">
               <BankToggle label="Monobank" active={(userSettings?.banks || []).includes("43")} onClick={() => toggleBank("43")} />
               <BankToggle label="PrivatBank" active={(userSettings?.banks || []).includes("14")} onClick={() => toggleBank("14")} />
@@ -1688,25 +2065,25 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
           </div>
           <div>
             <h2 className="text-lg font-bold text-white">Фільтри Мерчантів</h2>
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">Відсіювання ненадійних контрагентів</p>
+            <p className="text-xs uppercase tracking-widest text-slate-400 font-semibold">Відсіювання ненадійних контрагентів</p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
-            <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">Мін. угод (за місяць)</label>
+            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мін. угод (за місяць)</label>
             <input
               type="number"
               min="0"
               value={userSettings.merchantFilters?.minOrders || 0}
               onChange={(e) => handleMerchantFilterChange('minOrders', parseInt(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 outline-none"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
               placeholder="0 для вимкнення"
             />
           </div>
 
           <div>
-            <label className="text-xs font-semibold text-slate-500 mb-2 block uppercase tracking-tight">Мін. відсоток успішних (%)</label>
+            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мін. відсоток успішних (%)</label>
             <input
               type="number"
               min="0"
@@ -1714,7 +2091,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               step="0.1"
               value={userSettings.merchantFilters?.minRate || 0}
               onChange={(e) => handleMerchantFilterChange('minRate', parseFloat(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 outline-none"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
               placeholder="0 для вимкнення"
             />
           </div>
@@ -1731,7 +2108,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
             </div>
             <div>
               <h2 className="text-lg font-bold text-orange-400">Системні налаштування</h2>
-              <p className="text-[10px] uppercase tracking-widest text-orange-500/60 font-semibold">Впливають на поведінку всього сканера</p>
+              <p className="text-xs uppercase tracking-widest text-orange-500/60 font-semibold">Впливають на поведінку всього сканера</p>
             </div>
           </div>
 
@@ -1744,7 +2121,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               <select
                 value={globalSettings.riskMode}
                 onChange={(e) => onGlobalChange('riskMode', e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               >
                 <option value="RELAXED">RELAXED</option>
                 <option value="WARNING">WARNING</option>
@@ -1761,7 +2138,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 type="number"
                 value={globalSettings.behaviorAlertScore}
                 onChange={(e) => onGlobalChange('behaviorAlertScore', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               />
             </AdminSettingCard>
 
@@ -1775,7 +2152,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 step="0.1"
                 value={globalSettings.velocitySpikePerHour}
                 onChange={(e) => onGlobalChange('velocitySpikePerHour', parseFloat(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               />
             </AdminSettingCard>
 
@@ -1788,7 +2165,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 type="number"
                 value={globalSettings.stickyMinChain}
                 onChange={(e) => onGlobalChange('stickyMinChain', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               />
             </AdminSettingCard>
 
@@ -1802,7 +2179,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 step="0.1"
                 value={globalSettings.reviewTtlHours}
                 onChange={(e) => onGlobalChange('reviewTtlHours', parseFloat(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               />
             </AdminSettingCard>
 
@@ -1815,7 +2192,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                 type="number"
                 value={globalSettings.maxAlertsPerCycle}
                 onChange={(e) => onGlobalChange('maxAlertsPerCycle', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 outline-none"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
               />
             </AdminSettingCard>
           </div>
@@ -1832,7 +2209,7 @@ function AdminSettingCard({ icon, label, subLabel, children }: any) {
         {icon}
         <span className="text-sm font-bold text-white">{label}</span>
       </div>
-      <div className="text-[10px] font-mono text-slate-500 mb-3 pl-6">
+      <div className="text-xs font-mono text-slate-400 mb-3 pl-6">
         └ {subLabel}
       </div>
       {children}
@@ -1842,10 +2219,10 @@ function AdminSettingCard({ icon, label, subLabel, children }: any) {
 
 function BankToggle({ label, active, onClick }: any) {
   return (
-    <div
+    <button
       onClick={onClick}
       className={cn(
-        "flex items-center justify-between p-3 rounded-2xl border transition-all cursor-pointer",
+        "w-full flex items-center justify-between p-3 rounded-2xl border transition-all cursor-pointer focus:ring-2 focus:ring-emerald-500/50 outline-none",
         active ? "bg-emerald-500/10 border-emerald-500/30" : "bg-slate-950 border-slate-800 hover:border-slate-700"
       )}
     >
@@ -1856,7 +2233,7 @@ function BankToggle({ label, active, onClick }: any) {
       )}>
         {active && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -2026,7 +2403,8 @@ export const mockUserSettings: UserSettings = {
     maxRiskScore: 30,
     maxCapital: 15000
   },
-  apiKeys: {}
+  apiKeys: {},
+  goalCapital: 50000
 };
 
 export const mockBlacklist: BlacklistEntry[] = [
@@ -2142,7 +2520,7 @@ FILE: README.md
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/796ec189-2eb1-4cd8-9788-3f3ba1caf2a1
+View your app in AI Studio: https://ai.studio/apps/a619b915-121b-451a-9007-e99ae5ece380
 
 ## Run Locally
 
@@ -2209,10 +2587,10 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
               placeholder="Search by name, ID, or reason..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
             />
           </div>
-          <button className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all">
+          <button className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none">
             <Plus className="w-4 h-4" />
             MANUAL BAN
           </button>
@@ -2221,7 +2599,7 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="bg-slate-950/50 border-b border-slate-800 text-xs uppercase tracking-widest text-slate-500">
+              <tr className="bg-slate-950/50 border-b border-slate-800 text-xs uppercase tracking-widest text-slate-400">
                 <th className="p-4 font-semibold">Merchant</th>
                 <th className="p-4 font-semibold">Exchange</th>
                 <th className="p-4 font-semibold">Reason</th>
@@ -2234,10 +2612,10 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                 <tr key={`${entry.exchange}-${entry.merchantId}`} className="hover:bg-slate-800/20 transition-colors">
                   <td className="p-4">
                     <div className="font-bold text-white">{entry.merchantName}</div>
-                    <div className="text-[10px] font-mono text-slate-500">{entry.merchantId}</div>
+                    <div className="text-xs font-mono text-slate-400">{entry.merchantId}</div>
                   </td>
                   <td className="p-4">
-                    <span className="px-2 py-1 bg-slate-800 text-slate-300 text-[10px] font-bold rounded uppercase tracking-wider">
+                    <span className="px-2 py-1 bg-slate-800 text-slate-300 text-xs font-bold rounded uppercase tracking-wider">
                       {entry.exchange}
                     </span>
                   </td>
@@ -2248,14 +2626,14 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                   </td>
                   <td className="p-4">
                     <div className="text-xs text-slate-400">{entry.source}</div>
-                    <div className="text-[10px] text-slate-600 font-mono">
+                    <div className="text-xs text-slate-500 font-mono">
                       {new Date(entry.addedAt).toLocaleDateString()}
                     </div>
                   </td>
                   <td className="p-4 text-right">
                     <button
                       onClick={() => onUnban(entry.merchantId, entry.exchange)}
-                      className="p-2 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-lg transition-colors"
+                      className="p-2 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-lg transition-colors focus:ring-2 focus:ring-red-500/50 outline-none"
                       title="Unban Merchant"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -2264,7 +2642,7 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={5} className="p-8 text-center text-slate-500 text-sm">
+                  <td colSpan={5} className="p-8 text-center text-slate-400 text-sm">
                     No blacklisted merchants found.
                   </td>
                 </tr>
@@ -2313,25 +2691,35 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
   ];
 
   return (
-    <aside className={cn(
-      "bg-slate-900 border-r border-slate-800 flex flex-col h-screen sticky top-0 transition-all duration-300 relative z-20",
-      isOpen ? "w-64" : "w-20"
-    )}>
-      <button 
-        onClick={() => setIsOpen(!isOpen)}
-        className="absolute -right-3 top-8 bg-slate-800 border border-slate-700 rounded-full p-1 text-slate-400 hover:text-white z-50 hover:bg-slate-700 transition-colors"
-      >
-        {isOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-      </button>
+    <>
+      {/* Mobile Backdrop */}
+      <div 
+        className={cn(
+          "md:hidden fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-40 transition-opacity duration-300",
+          isOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+        )}
+        onClick={() => setIsOpen(false)}
+      />
 
-      <div className={cn("p-6 flex items-center gap-3 border-b border-slate-800", isOpen ? "" : "justify-center px-0")}>
+      <aside className={cn(
+        "fixed md:relative top-0 left-0 h-screen bg-slate-900 border-r border-slate-800 flex flex-col z-50 transition-all duration-500 ease-[cubic-bezier(0.16,1,0.3,1)]",
+        isOpen ? "w-64 translate-x-0" : "w-64 md:w-20 -translate-x-full md:translate-x-0"
+      )}>
+        <button 
+          onClick={() => setIsOpen(!isOpen)}
+          className="hidden md:flex absolute -right-3 top-8 bg-slate-800 border border-slate-700 rounded-full p-1 text-slate-400 hover:text-white z-50 hover:bg-slate-700 transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none"
+        >
+          {isOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+        </button>
+
+        <div className={cn("p-6 flex items-center gap-3 border-b border-slate-800", isOpen ? "" : "justify-center px-0")}>
         <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
           <Activity className="text-slate-950 w-6 h-6" />
         </div>
         {isOpen && (
           <div className="overflow-hidden whitespace-nowrap">
             <h1 className="text-xl font-bold tracking-tight text-white">ARBIX <span className="text-emerald-500">QUANTUM</span></h1>
-            <p className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">P2P Engine v5.0</p>
+            <p className="text-xs uppercase tracking-widest text-slate-400 font-medium">P2P Engine v5.0</p>
           </div>
         )}
       </div>
@@ -2345,7 +2733,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
               key={item.id}
               onClick={() => setActiveTab(item.id)}
               className={cn(
-                "w-full flex items-center rounded-xl transition-all font-bold text-sm",
+                "w-full flex items-center rounded-xl transition-all font-bold text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none",
                 isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center",
                 isActive 
                   ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
@@ -2365,7 +2753,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
           <button 
             onClick={onToggleAdmin}
             className={cn(
-              "w-full flex items-center rounded-xl transition-all font-bold text-sm border",
+              "w-full flex items-center rounded-xl transition-all font-bold text-sm border focus:ring-2 focus:ring-orange-500/50 outline-none",
               isOpen ? "justify-between px-4 py-3" : "justify-center p-3",
               isAdmin 
                 ? "bg-orange-500/10 text-orange-400 border-orange-500/20" 
@@ -2395,7 +2783,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
           <button 
             onClick={onLogout}
             className={cn(
-              "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm",
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm focus:ring-2 focus:ring-red-500/50 outline-none",
               isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
             )}
             title={!isOpen ? "Logout" : undefined}
@@ -2407,7 +2795,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
           <button 
             onClick={onLogin}
             className={cn(
-              "w-full flex items-center rounded-xl text-slate-400 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all font-bold text-sm",
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all font-bold text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none",
               isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
             )}
             title={!isOpen ? "Login" : undefined}
@@ -2445,6 +2833,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
         </div>
       </div>
     </aside>
+    </>
   );
 }
 

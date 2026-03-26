@@ -160,7 +160,11 @@ export const mockUserSettings: UserSettings = {
     maxRiskScore: 30,
     maxCapital: 15000
   },
-  apiKeys: {}
+  apiKeys: {},
+  goalCapital: 50000,
+  soundEnabled: true,
+  soundVolume: 0.5,
+  accentColor: 'emerald'
 };
 
 export const mockBlacklist: BlacklistEntry[] = [

@@ -1,26 +1,27 @@
 import React, { useState } from 'react';
 import { ShieldBan, Search, Trash2, Plus } from 'lucide-react';
 import { BlacklistEntry } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
+import { motion } from 'motion/react';
+import useSWR from 'swr';
+import { api } from '../services/api';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-
-interface BlacklistPanelProps {
-  blacklist: BlacklistEntry[];
-  onUnban: (merchantId: string, exchange: string) => void;
-}
-
-export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelProps) {
+export default function BlacklistPanel() {
   const [searchTerm, setSearchTerm] = useState('');
+  const { data: blacklist = [], mutate } = useSWR('/blacklist', api.getBlacklist);
 
   const filteredList = blacklist.filter(entry => 
     entry.merchantName.toLowerCase().includes(searchTerm.toLowerCase()) ||
     entry.merchantId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     entry.reason.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const handleUnban = async (merchantId: string, exchange: string) => {
+    const success = await api.removeFromBlacklist(merchantId, exchange);
+    if (success) {
+      mutate(blacklist.filter(entry => !(entry.merchantId === merchantId && entry.exchange === exchange)), false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -48,19 +49,23 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
               placeholder="Search by name, ID, or reason..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
             />
           </div>
-          <button className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all">
+          <motion.button 
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
+          >
             <Plus className="w-4 h-4" />
             MANUAL BAN
-          </button>
+          </motion.button>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="bg-slate-950/50 border-b border-slate-800 text-xs uppercase tracking-widest text-slate-500">
+              <tr className="bg-slate-950/50 border-b border-slate-800 text-xs uppercase tracking-widest text-slate-400">
                 <th className="p-4 font-semibold">Merchant</th>
                 <th className="p-4 font-semibold">Exchange</th>
                 <th className="p-4 font-semibold">Reason</th>
@@ -73,10 +78,10 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                 <tr key={`${entry.exchange}-${entry.merchantId}`} className="hover:bg-slate-800/20 transition-colors">
                   <td className="p-4">
                     <div className="font-bold text-white">{entry.merchantName}</div>
-                    <div className="text-[10px] font-mono text-slate-500">{entry.merchantId}</div>
+                    <div className="text-xs font-mono text-slate-400 tabular-nums">{entry.merchantId}</div>
                   </td>
                   <td className="p-4">
-                    <span className="px-2 py-1 bg-slate-800 text-slate-300 text-[10px] font-bold rounded uppercase tracking-wider">
+                    <span className="px-2 py-1 bg-slate-800 text-slate-300 text-xs font-bold rounded uppercase tracking-wider">
                       {entry.exchange}
                     </span>
                   </td>
@@ -87,23 +92,25 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                   </td>
                   <td className="p-4">
                     <div className="text-xs text-slate-400">{entry.source}</div>
-                    <div className="text-[10px] text-slate-600 font-mono">
+                    <div className="text-xs text-slate-500 font-mono tabular-nums">
                       {new Date(entry.addedAt).toLocaleDateString()}
                     </div>
                   </td>
                   <td className="p-4 text-right">
-                    <button
-                      onClick={() => onUnban(entry.merchantId, entry.exchange)}
-                      className="p-2 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-lg transition-colors"
+                    <motion.button
+                      whileHover={{ scale: 1.1 }}
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => handleUnban(entry.merchantId, entry.exchange)}
+                      className="p-2 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-lg transition-colors focus:ring-2 focus:ring-red-500/50 outline-none"
                       title="Unban Merchant"
                     >
                       <Trash2 className="w-4 h-4" />
-                    </button>
+                    </motion.button>
                   </td>
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={5} className="p-8 text-center text-slate-500 text-sm">
+                  <td colSpan={5} className="p-8 text-center text-slate-400 text-sm">
                     No blacklisted merchants found.
                   </td>
                 </tr>

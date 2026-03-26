@@ -1,19 +1,31 @@
 import React, { useState } from 'react';
 import { Key, Eye, EyeOff, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { ApiKeyConfig } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
+import { motion } from 'motion/react';
+import { useAppStore } from '../store';
+import { api } from '../services/api';
+import { toast } from 'sonner';
+import { doc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+export default function ApiKeysPanel() {
+  const { userSettings, setUserSettings } = useAppStore();
+  const connectedExchanges = Object.keys(userSettings.apiKeys || {}).map(k => k.toLowerCase());
 
-interface ApiKeysPanelProps {
-  connectedExchanges: string[];
-  onSaveKey: (exchange: string, config: ApiKeyConfig) => Promise<void>;
-}
+  const handleSaveKey = async (exchange: string, config: ApiKeyConfig) => {
+    const newApiKeys = { ...(userSettings.apiKeys || {}), [exchange.toLowerCase()]: config };
+    const newSettings = { ...userSettings, apiKeys: newApiKeys };
+    setUserSettings(newSettings);
+    
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+    }
+    
+    await api.saveCredentials(exchange, config);
+    toast.success(`Keys for ${exchange} saved successfully`);
+  };
 
-export default function ApiKeysPanel({ connectedExchanges, onSaveKey }: ApiKeysPanelProps) {
   return (
     <div className="space-y-6">
       <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-3xl p-6 mb-8">
@@ -35,33 +47,33 @@ export default function ApiKeysPanel({ connectedExchanges, onSaveKey }: ApiKeysP
         <ApiKeyCard
           exchange="Binance"
           isConnected={connectedExchanges.includes('binance')}
-          onSave={(config: any) => onSaveKey('Binance', config)}
+          onSave={(config: any) => handleSaveKey('Binance', config)}
         />
         <ApiKeyCard
           exchange="Bybit"
           isConnected={connectedExchanges.includes('bybit')}
-          onSave={(config: any) => onSaveKey('Bybit', config)}
+          onSave={(config: any) => handleSaveKey('Bybit', config)}
         />
         <ApiKeyCard
           exchange="OKX"
           isConnected={connectedExchanges.includes('okx')}
           hasPassphrase
-          onSave={(config: any) => onSaveKey('OKX', config)}
+          onSave={(config: any) => handleSaveKey('OKX', config)}
         />
         <ApiKeyCard
           exchange="MEXC"
           isConnected={connectedExchanges.includes('mexc')}
-          onSave={(config: any) => onSaveKey('MEXC', config)}
+          onSave={(config: any) => handleSaveKey('MEXC', config)}
         />
         <ApiKeyCard
           exchange="CryptoBot"
           isConnected={connectedExchanges.includes('cryptobot')}
-          onSave={(config: any) => onSaveKey('CryptoBot', config)}
+          onSave={(config: any) => handleSaveKey('CryptoBot', config)}
         />
         <ApiKeyCard
           exchange="Telegram Wallet"
           isConnected={connectedExchanges.includes('telegram wallet')}
-          onSave={(config: any) => onSaveKey('Telegram Wallet', config)}
+          onSave={(config: any) => handleSaveKey('Telegram Wallet', config)}
         />
       </div>
     </div>
@@ -96,46 +108,48 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           <ExchangeIcon name={exchange} />
           <div>
             <h3 className="font-bold text-white text-lg">{exchange}</h3>
-            <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">
+            <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
               {isConnected ? 'Connected' : 'Not Connected'}
             </p>
           </div>
         </div>
         {!isEditing && (
-          <button 
+          <motion.button 
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={() => setIsEditing(true)} 
-            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors"
+            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             UPDATE
-          </button>
+          </motion.button>
         )}
       </div>
 
       {isEditing ? (
         <div className="space-y-4">
           <div>
-            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">API Key</label>
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Key</label>
             <input
               type="text"
               value={localKeys.key}
               onChange={(e) => setLocalKeys({ ...localKeys, key: e.target.value })}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
               placeholder="Enter API Key"
             />
           </div>
           <div>
-            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">API Secret</label>
+            <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Secret</label>
             <div className="relative">
               <input
                 type={showSecret ? "text" : "password"}
                 value={localKeys.secret}
                 onChange={(e) => setLocalKeys({ ...localKeys, secret: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all pr-10"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all pr-10"
                 placeholder="Enter API Secret"
               />
               <button 
                 onClick={() => setShowSecret(!showSecret)} 
-                className="absolute right-3 top-3 text-slate-500 hover:text-slate-300"
+                className="absolute right-3 top-3 text-slate-400 hover:text-slate-300 focus:outline-none"
               >
                 {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -143,32 +157,36 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           </div>
           {hasPassphrase && (
             <div>
-              <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1.5 block">Passphrase</label>
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">Passphrase</label>
               <input
                 type="password"
                 value={localKeys.passphrase}
                 onChange={(e) => setLocalKeys({ ...localKeys, passphrase: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 outline-none transition-all"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
                 placeholder="Enter Passphrase"
               />
             </div>
           )}
           <div className="pt-2 flex gap-3">
             {isConnected && (
-              <button
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setIsEditing(false)}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all"
+                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
                 CANCEL
-              </button>
+              </motion.button>
             )}
-            <button
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.95 }}
               onClick={handleSave}
               disabled={isSaving || !localKeys.key || !localKeys.secret}
-              className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50"
+              className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
             >
               {isSaving ? 'SAVING...' : 'SAVE KEYS'}
-            </button>
+            </motion.button>
           </div>
         </div>
       ) : (
@@ -179,7 +197,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
               ••••••••••••••••••••
             </div>
           </div>
-          <div className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest bg-emerald-500/10 px-2 py-1 rounded">
+          <div className="text-xs font-bold text-emerald-500 uppercase tracking-widest bg-emerald-500/10 px-2 py-1 rounded">
             Active
           </div>
         </div>

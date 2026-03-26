@@ -50,6 +50,12 @@ export interface MerchantFilters {
   minOrders: number;
   minRate: number;
 }
+export interface SyncPreferences {
+  capital: boolean;
+  spread: boolean;
+  banks: boolean;
+  apiKeys: boolean;
+}
 
 export interface UserSettings {
   minCapital: number;
@@ -62,6 +68,11 @@ export interface UserSettings {
   telegramUserId?: string;
   isTelegramAdmin?: boolean;
   autoSyncTelegram?: boolean;
+  goalCapital?: number; // Added for Goal Progress
+  soundEnabled?: boolean; // New: Sound toggle
+  soundVolume?: number; // New: Sound volume (0-1)
+  accentColor?: string; // New: Theme accent
+  syncPreferences?: SyncPreferences;
 }
 
 export interface BlacklistEntry {

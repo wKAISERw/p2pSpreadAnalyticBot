@@ -1,33 +1,51 @@
 /// <reference types="vite/client" />
-import { mockStats, mockOpportunities, mockLogs, mockGlobalSettings, mockUserSettings, mockBlacklist } from '../data/mock';
-import { SystemStats, ArbitrageOpportunity, AutoTradeLog, GlobalSettings, UserSettings, BlacklistEntry } from '../types';
+import axios from 'axios';
+import { SystemStats, ArbitrageOpportunity, AutoTradeLog, GlobalSettings, UserSettings, BlacklistEntry, ApiKeyConfig } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
-async function fetchWithFallback<T>(endpoint: string, fallbackData: T): Promise<T> {
-  try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return await response.json();
-  } catch (error) {
-    console.warn(`[API] Бекенд недоступний (${endpoint}). Використовуються тестові дані.`, error);
-    return fallbackData;
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000,
+});
+
+apiClient.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    console.error(`[API Error] ${error.config?.url}:`, error.message);
+    return Promise.reject(error);
   }
-}
+);
 
 export const api = {
-  getStats: () => fetchWithFallback<SystemStats>('/stats', mockStats),
-  getOpportunities: () => fetchWithFallback<ArbitrageOpportunity[]>('/opportunities', mockOpportunities),
-  getLogs: () => fetchWithFallback<AutoTradeLog[]>('/logs', mockLogs),
-  getGlobalSettings: () => fetchWithFallback<GlobalSettings>('/settings/global', mockGlobalSettings),
-  getBlacklist: () => fetchWithFallback<BlacklistEntry[]>('/blacklist', mockBlacklist),
+  getStats: () => apiClient.get<any, SystemStats>('/stats'),
+  getOpportunities: () => apiClient.get<any, ArbitrageOpportunity[]>('/opportunities'),
+  getLogs: () => apiClient.get<any, AutoTradeLog[]>('/logs'),
+  getGlobalSettings: () => apiClient.get<any, GlobalSettings>('/settings/global'),
+  getBlacklist: () => apiClient.get<any, BlacklistEntry[]>('/blacklist'),
+
+  saveCredentials: async (exchange: string, keys: ApiKeyConfig): Promise<boolean> => {
+    try {
+      await apiClient.post(`/credentials/${exchange.toLowerCase()}`, keys);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  },
+
+  updateUserSettings: async (settings: UserSettings): Promise<boolean> => {
+    try {
+      await apiClient.post('/settings/user', settings);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  },
 
   checkConnection: async (): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/stats`);
-      return response.ok;
+      await apiClient.get('/stats');
+      return true;
     } catch (error) {
       return false;
     }
@@ -35,52 +53,36 @@ export const api = {
 
   updateGlobalSettings: async (settings: GlobalSettings): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/settings/global`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-      return response.ok;
+      await apiClient.post('/settings/global', settings);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка збереження налаштувань:', error);
       return false;
     }
   },
 
   addToBlacklist: async (entry: Omit<BlacklistEntry, 'addedAt'>): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/blacklist`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(entry)
-      });
-      return response.ok;
+      await apiClient.post('/blacklist', entry);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка додавання в чорний список:', error);
       return false;
     }
   },
 
   removeFromBlacklist: async (merchantId: string, exchange: string): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/blacklist/${exchange}/${merchantId}`, {
-        method: 'DELETE'
-      });
-      return response.ok;
+      await apiClient.delete(`/blacklist/${exchange}/${merchantId}`);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка видалення з чорного списку:', error);
       return false;
     }
   },
 
   syncTelegram: async (telegramId: string): Promise<any> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/telegram/sync/${telegramId}`);
-      if (response.ok) return await response.json();
-      throw new Error('Backend not ready');
+      return await apiClient.get(`/telegram/sync/${telegramId}`);
     } catch (error) {
       console.warn('[API] Мок-синхронізація з Telegram ботом');
-      // Mock response: overwrite with bot's settings, grant admin, and pull connected exchanges
       return {
         settings: {
           minCapital: 10000,
@@ -96,12 +98,7 @@ export const api = {
 
   updateTelegramSettings: async (telegramId: string, settings: any): Promise<void> => {
     try {
-      await fetch(`${API_BASE_URL}/user/settings`, { // Змінено на правильний ендпоінт з main.py
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // Явно передаємо telegramUserId в тілі, бо бекенд чекає його через settings.get("telegramUserId")
-        body: JSON.stringify({ ...settings, telegramUserId: telegramId })
-      });
+      await apiClient.post('/user/settings', { ...settings, telegramUserId: telegramId });
     } catch (error) {
       console.warn('[API] Мок-оновлення налаштувань у Telegram боті', error);
     }
