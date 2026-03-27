@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Check, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Settings2, Activity, ArrowUpDown } from 'lucide-react';
-import { ArbitrageOpportunity, Order, SystemStats, UserSettings } from '../types';
+import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers } from 'lucide-react';
+import { ArbitrageOpportunity, Order } from '../types';
 import { cn } from '../lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore } from '../store';
@@ -9,6 +9,13 @@ import { toast } from 'sonner';
 import CountUp from 'react-countup';
 import useSWR from 'swr';
 import { api } from '../services/api';
+
+// Modular components
+import { FilterControls } from './dashboard/FilterControls';
+import { TradingModeToggle } from './dashboard/TradingModeToggle';
+import { MakerOpportunityCard } from './dashboard/MakerOpportunityCard';
+import { useSpreadFilters, SortOption } from '../hooks/useSpreadFilters';
+import { useMakerData } from '../hooks/useMakerData';
 
 const BANK_NAMES_MAP: Record<string, string> = {
   "43": "Monobank",
@@ -60,14 +67,24 @@ const getRiskEmoji = (flag: string): string => {
 
 export default function Dashboard() {
   const [viewMode, setViewMode] = useState<'detailed' | 'compact'>('detailed');
-  const [sortBy, setSortBy] = useState<'spread' | 'profit' | 'deal' | 'risk'>('spread');
+  const [sortBy, setSortBy] = useState<SortOption>('spread');
+  
+  // Zustand state
   const userSettings = useAppStore(state => state.userSettings);
   const setUserSettings = useAppStore(state => state.setUserSettings);
   const isFocusMode = useAppStore(state => state.isFocusMode);
   const setIsFocusMode = useAppStore(state => state.setIsFocusMode);
+  const tradingMode = useAppStore(state => state.tradingMode);
 
+  // Data fetching
   const { data: stats, isLoading: isStatsLoading } = useSWR('/stats', api.getStats, { refreshInterval: 5000 });
   const { data: opportunities, isLoading: isOppsLoading } = useSWR('/opportunities', api.getOpportunities, { refreshInterval: 5000 });
+  
+  // Maker data (only fetched when in maker mode)
+  const { opportunities: makerOpportunities, isLoading: isMakerLoading } = useMakerData();
+  
+  // Use custom hook for filtering (Taker mode)
+  const { opportunities: activeOpportunities, hasExclusions } = useSpreadFilters(opportunities, { sortBy });
 
   const prevOppsLength = useRef(opportunities?.length || 0);
 
@@ -120,15 +137,6 @@ export default function Dashboard() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [userSettings, setUserSettings]);
-
-  const activeOpportunities = (opportunities?.filter(opp => opp.netSpread >= userSettings.minSpread) || [])
-    .sort((a, b) => {
-      if (sortBy === 'profit')  return b.netProfit - a.netProfit;
-      if (sortBy === 'deal')    return b.dealAmount - a.dealAmount;
-      if (sortBy === 'risk')    return ((b.buyOrder.riskScore || 0) + (b.sellOrder.riskScore || 0))
-                                     - ((a.buyOrder.riskScore || 0) + (a.sellOrder.riskScore || 0));
-      return b.netSpread - a.netSpread; // default: spread
-    });
 
   const toggleExchange = (exchange: string) => {
     if (!userSettings.autoTrade) return;
@@ -183,6 +191,7 @@ export default function Dashboard() {
         {/* Quick Control Bar */}
         <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 sticky top-16 md:top-0 z-10 shadow-lg">
           <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+            {/* Scanner Status */}
             <div className="flex items-center gap-2 shrink-0 relative">
               <motion.div
                 animate={{ scale: userSettings.autoTrade?.enabled ? [1, 1.2, 1] : 1 }}
@@ -191,30 +200,49 @@ export default function Dashboard() {
                 <Activity className={cn("w-5 h-5", userSettings.autoTrade?.enabled ? "text-emerald-500" : "text-slate-500")} />
               </motion.div>
               <span className="text-sm font-bold text-white">Scanner</span>
-
-              {/* Refresh Indicator */}
               <div className="absolute -bottom-2 left-0 w-full h-0.5 bg-slate-800 overflow-hidden rounded-full">
                 <motion.div
-                  className="h-full bg-emerald-500"
+                  className={cn("h-full", tradingMode === 'maker' ? "bg-purple-500" : "bg-emerald-500")}
                   initial={{ width: "0%" }}
                   animate={{ width: "100%" }}
                   transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
                 />
               </div>
             </div>
-            <div className="h-6 w-px bg-slate-800 shrink-0"></div>
-            <div className="flex items-center gap-2 shrink-0">
-              <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Min Spread:</span>
-              <input
-                type="number"
-                step="0.1"
-                value={userSettings.minSpread}
-                onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
-                className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums"
-              />
-              <span className="text-xs text-slate-400">%</span>
-            </div>
-            <div className="h-6 w-px bg-slate-800 shrink-0"></div>
+            
+            <div className="h-6 w-px bg-slate-800 shrink-0" />
+            
+            {/* Taker / Maker Toggle */}
+            <TradingModeToggle />
+            
+            <div className="h-6 w-px bg-slate-800 shrink-0" />
+            
+            {/* Min Spread (Taker only) */}
+            {tradingMode === 'taker' && (
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Min Spread:</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={userSettings.minSpread}
+                  onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
+                  className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums"
+                />
+                <span className="text-xs text-slate-400">%</span>
+              </div>
+            )}
+            
+            {/* Maker Mode Label */}
+            {tradingMode === 'maker' && (
+              <div className="flex items-center gap-2 shrink-0">
+                <Layers className="w-4 h-4 text-purple-400" />
+                <span className="text-xs text-purple-400 font-semibold uppercase tracking-widest">Order Book Analysis</span>
+              </div>
+            )}
+            
+            <div className="h-6 w-px bg-slate-800 shrink-0" />
+            
+            {/* Exchange Quick Toggles */}
             <div className="flex items-center gap-1 shrink-0">
               {['Binance', 'Bybit', 'OKX', 'MEXC'].map(ex => (
                 <motion.button
@@ -225,7 +253,9 @@ export default function Dashboard() {
                   className={cn(
                     "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
                     userSettings.autoTrade?.allowedExchanges.includes(ex)
-                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                      ? tradingMode === 'maker' 
+                        ? "bg-purple-500/10 border-purple-500/30 text-purple-400"
+                        : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
                       : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
                   )}
                 >
@@ -236,24 +266,31 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto justify-end border-t border-slate-800 md:border-none pt-3 md:pt-0">
-            {/* Sort selector */}
-            <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
-              <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
-              {(['spread', 'profit', 'deal', 'risk'] as const).map(opt => (
-                <button
-                  key={opt}
-                  onClick={() => setSortBy(opt)}
-                  className={cn(
-                    "px-2 py-1 rounded-md text-xs font-bold transition-all capitalize",
-                    sortBy === opt
-                      ? opt === 'risk' ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-white"
-                      : "text-slate-500 hover:text-slate-300"
-                  )}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
+            {/* Advanced Filter Controls */}
+            <FilterControls />
+            
+            {/* Sort selector (Taker only) */}
+            {tradingMode === 'taker' && (
+              <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
+                <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
+                {(['spread', 'profit', 'deal', 'risk'] as const).map(opt => (
+                  <button
+                    key={opt}
+                    onClick={() => setSortBy(opt)}
+                    className={cn(
+                      "px-2 py-1 rounded-md text-xs font-bold transition-all capitalize",
+                      sortBy === opt
+                        ? opt === 'risk' ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-white"
+                        : "text-slate-500 hover:text-slate-300"
+                    )}
+                  >
+                    {opt}
+                  </button>
+                ))}
+              </div>
+            )}
+            
+            {/* View Mode Toggle */}
             <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
               <motion.button
                 whileHover={{ scale: 1.05 }}
@@ -274,13 +311,19 @@ export default function Dashboard() {
                 <LayoutList className="w-4 h-4" />
               </motion.button>
             </div>
+            
+            {/* Focus Mode */}
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
               onClick={() => setIsFocusMode(!isFocusMode)}
               className={cn(
                 "p-2 rounded-lg transition-colors border focus:ring-2 focus:ring-emerald-500/50 outline-none",
-                isFocusMode ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                isFocusMode 
+                  ? tradingMode === 'maker'
+                    ? "bg-purple-500/10 border-purple-500/30 text-purple-400"
+                    : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
+                  : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
               )}
               title="Focus Mode"
             >
@@ -289,61 +332,162 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <AnimatePresence mode="popLayout">
-          {isOppsLoading ? (
-            <div className={cn("grid gap-4", viewMode === 'detailed' ? "grid-cols-1" : "grid-cols-1")}>
-              {[1, 2, 3].map((i) => (
-                <motion.div
-                  key={i}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="bg-slate-900/80 rounded-3xl p-6 border border-slate-800 animate-pulse"
-                >
-                  <div className="h-8 bg-slate-800 rounded-lg w-1/3 mb-6"></div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="h-32 bg-slate-800 rounded-2xl"></div>
-                    <div className="h-32 bg-slate-800 rounded-2xl"></div>
-                  </div>
-                </motion.div>
-              ))}
-            </div>
-          ) : activeOpportunities.length > 0 ? (
-            <motion.div
-              className={cn("grid gap-4", viewMode === 'detailed' ? "grid-cols-1" : "grid-cols-1")}
-              variants={{
-                hidden: { opacity: 0 },
-                show: {
-                  opacity: 1,
-                  transition: { staggerChildren: 0.1 }
-                }
-              }}
-              initial="hidden"
-              animate="show"
-            >
-              {activeOpportunities.map((opp, index) => (
-                <OpportunityCard
-                  key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`}
-                  opp={opp}
-                  viewMode={viewMode}
-                />
-              ))}
-            </motion.div>
-          ) : (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="p-12 border-2 border-dashed border-slate-800 rounded-3xl flex flex-col items-center justify-center text-slate-400"
-            >
-              <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
-                <TrendingUp className="w-6 h-6 opacity-20" />
-              </div>
-              <p>Searching for profitable spreads...</p>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Conditional rendering based on trading mode */}
+        {tradingMode === 'taker' ? (
+          <TakerOpportunitiesList 
+            opportunities={activeOpportunities}
+            isLoading={isOppsLoading}
+            viewMode={viewMode}
+          />
+        ) : (
+          <MakerOpportunitiesList
+            opportunities={makerOpportunities}
+            isLoading={isMakerLoading}
+            viewMode={viewMode}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+// Taker mode opportunities list
+function TakerOpportunitiesList({ 
+  opportunities, 
+  isLoading, 
+  viewMode 
+}: { 
+  opportunities: ArbitrageOpportunity[];
+  isLoading: boolean;
+  viewMode: 'detailed' | 'compact';
+}) {
+  if (isLoading) {
+    return (
+      <div className="grid gap-4 grid-cols-1">
+        {[1, 2, 3].map((i) => (
+          <motion.div
+            key={i}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="bg-slate-900/80 rounded-3xl p-6 border border-slate-800 animate-pulse"
+          >
+            <div className="h-8 bg-slate-800 rounded-lg w-1/3 mb-6" />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="h-32 bg-slate-800 rounded-2xl" />
+              <div className="h-32 bg-slate-800 rounded-2xl" />
+            </div>
+          </motion.div>
+        ))}
+      </div>
+    );
+  }
+
+  if (opportunities.length === 0) {
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="p-12 border-2 border-dashed border-slate-800 rounded-3xl flex flex-col items-center justify-center text-slate-400"
+      >
+        <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
+          <TrendingUp className="w-6 h-6 opacity-20" />
+        </div>
+        <p>Searching for profitable spreads...</p>
+      </motion.div>
+    );
+  }
+
+  return (
+    <AnimatePresence mode="popLayout">
+      <motion.div
+        className="grid gap-4 grid-cols-1"
+        variants={{
+          hidden: { opacity: 0 },
+          show: { opacity: 1, transition: { staggerChildren: 0.1 } }
+        }}
+        initial="hidden"
+        animate="show"
+      >
+        {opportunities.map((opp, index) => (
+          <OpportunityCard
+            key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`}
+            opp={opp}
+            viewMode={viewMode}
+          />
+        ))}
+      </motion.div>
+    </AnimatePresence>
+  );
+}
+
+// Maker mode opportunities list
+function MakerOpportunitiesList({ 
+  opportunities, 
+  isLoading, 
+  viewMode 
+}: { 
+  opportunities: ReturnType<typeof useMakerData>['opportunities'];
+  isLoading: boolean;
+  viewMode: 'detailed' | 'compact';
+}) {
+  if (isLoading) {
+    return (
+      <div className="grid gap-4 grid-cols-1">
+        {[1, 2, 3].map((i) => (
+          <motion.div
+            key={i}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="bg-slate-900/80 rounded-3xl p-6 border border-purple-500/30 animate-pulse"
+          >
+            <div className="h-8 bg-slate-800 rounded-lg w-1/3 mb-6" />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="h-40 bg-slate-800 rounded-2xl" />
+              <div className="h-40 bg-slate-800 rounded-2xl" />
+            </div>
+          </motion.div>
+        ))}
+      </div>
+    );
+  }
+
+  if (opportunities.length === 0) {
+    return (
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        className="p-12 border-2 border-dashed border-purple-500/30 rounded-3xl flex flex-col items-center justify-center text-slate-400"
+      >
+        <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
+          <Layers className="w-6 h-6 text-purple-400 opacity-40" />
+        </div>
+        <p className="text-purple-400/60">Analyzing order books for maker opportunities...</p>
+      </motion.div>
+    );
+  }
+
+  return (
+    <AnimatePresence mode="popLayout">
+      <motion.div
+        className="grid gap-4 grid-cols-1"
+        variants={{
+          hidden: { opacity: 0 },
+          show: { opacity: 1, transition: { staggerChildren: 0.1 } }
+        }}
+        initial="hidden"
+        animate="show"
+      >
+        {opportunities.map((opp) => (
+          <MakerOpportunityCard
+            key={opp.id}
+            opportunity={opp}
+            viewMode={viewMode}
+          />
+        ))}
+      </motion.div>
+    </AnimatePresence>
   );
 }
 

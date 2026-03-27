@@ -28,13 +28,20 @@ PRIORITY_FILES = [
     "src/types.ts",
     "src/App.tsx",
     "src/main.tsx",
+    "src/main.tsx",
     "src/services/api.ts",
     "src/components/Dashboard.tsx",
     "src/components/ApiKeysPanel.tsx",
     "src/components/AutoTradePanel.tsx",
     "src/components/SettingsPanel.tsx",
+    "src/components/AnalyticsPanel.tsx.tsx",
+    "src/components/CommandPalette.tsx.tsx",
+    "src/components/Sidebar.tsx.tsx",
     "src/data/mock.ts",
     "src/firebase.ts",
+    "src/store.ts",
+
+
 ]
 
 def should_skip(path: Path) -> bool:

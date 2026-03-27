@@ -19,6 +19,7 @@ import { cn } from './lib/utils';
 import { Toaster } from 'sonner';
 import { UserSettings } from './types';
 import { mockUserSettings } from './data/mock';
+import AccountsPanel from "@/src/components/AccountsPanel.tsx";
 
 function ErrorFallback({ error, resetErrorBoundary }: { error: Error, resetErrorBoundary: () => void }) {
   return (
@@ -90,8 +91,8 @@ export default function App() {
         {/* Mobile Header */}
         {!isFocusMode && (
           <div className="md:hidden absolute top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center px-4 z-30 gap-4">
-            <button 
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+            <button
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
               className="p-2 bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
             >
               {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -142,6 +143,7 @@ export default function App() {
                   <Route path="/analytics" element={<AnalyticsPanel />} />
                   <Route path="/settings" element={<SettingsPanel />} />
                   <Route path="/apikeys" element={<ApiKeysPanel />} />
+                  <Route path="/accounts" element={<AccountsPanel />} />
                   <Route path="/blacklist" element={<BlacklistPanel />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

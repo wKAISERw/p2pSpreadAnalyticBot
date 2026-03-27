@@ -1,6 +1,6 @@
 # PROJECT FRONTEND DUMP: Arbix Quantum
-# Generated: 2026-03-26 15:23
-# Files: 21
+# Generated: 2026-03-27 22:38
+# Files: 26
 #
 # STRUCTURE:
 #   package.json
@@ -9,6 +9,7 @@
 #   src\types.ts
 #   src\App.tsx
 #   src\main.tsx
+#   src\main.tsx
 #   src\services\api.ts
 #   src\components\Dashboard.tsx
 #   src\components\ApiKeysPanel.tsx
@@ -16,14 +17,18 @@
 #   src\components\SettingsPanel.tsx
 #   src\data\mock.ts
 #   src\firebase.ts
+#   src\store.ts
 #   .env.example
 #   firebase-applet-config.json
 #   index.html
 #   metadata.json
 #   README.md
+#   src\components\AnalyticsPanel.tsx
 #   src\components\BlacklistPanel.tsx
+#   src\components\CommandPalette.tsx
 #   src\components\Sidebar.tsx
 #   src\index.css
+#   src\lib\utils.ts
 
 
 ============================================================
@@ -46,7 +51,9 @@ FILE: package.json
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
+    "axios": "^1.13.6",
     "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -54,9 +61,16 @@ FILE: package.json
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.0",
+    "react-countup": "^6.5.3",
     "react-dom": "^19.0.0",
+    "react-error-boundary": "^6.1.1",
+    "react-router-dom": "^7.13.2",
+    "recharts": "^3.8.1",
+    "sonner": "^2.0.7",
+    "swr": "^2.4.1",
     "tailwind-merge": "^3.5.0",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
@@ -91,7 +105,7 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // HMR is disabled in AI Studio via DISABLE_HMR .env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
     },
@@ -185,6 +199,12 @@ export interface MerchantFilters {
   minOrders: number;
   minRate: number;
 }
+export interface SyncPreferences {
+  capital: boolean;
+  spread: boolean;
+  banks: boolean;
+  apiKeys: boolean;
+}
 
 export interface UserSettings {
   minCapital: number;
@@ -198,6 +218,10 @@ export interface UserSettings {
   isTelegramAdmin?: boolean;
   autoSyncTelegram?: boolean;
   goalCapital?: number; // Added for Goal Progress
+  soundEnabled?: boolean; // New: Sound toggle
+  soundVolume?: number; // New: Sound volume (0-1)
+  accentColor?: string; // New: Theme accent
+  syncPreferences?: SyncPreferences;
 }
 
 export interface BlacklistEntry {
@@ -257,50 +281,55 @@ export interface LogEntry {
 FILE: src/App.tsx
 ============================================================
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { ErrorBoundary } from 'react-error-boundary';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import AutoTradePanel from './components/AutoTradePanel';
 import SettingsPanel from './components/SettingsPanel';
 import ApiKeysPanel from './components/ApiKeysPanel';
 import BlacklistPanel from './components/BlacklistPanel';
-import { mockStats, mockOpportunities, mockLogs, mockGlobalSettings, mockUserSettings, mockBlacklist } from './data/mock';
-import { GlobalSettings, UserSettings, AutoTradeConfig, ApiKeyConfig, BlacklistEntry, SystemStats, ArbitrageOpportunity, AutoTradeLog } from './types';
+import { AnalyticsPanel } from './components/AnalyticsPanel';
+import { CommandPalette } from './components/CommandPalette';
+import { useAppStore } from './store';
 import { api } from './services/api';
 import { auth, db, loginWithGoogle, logout } from './firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-import { CheckCircle2, AlertTriangle, Info, Menu, X, Activity } from 'lucide-react';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { Menu, X, Activity, AlertTriangle } from 'lucide-react';
+import { cn } from './lib/utils';
+import { Toaster } from 'sonner';
+import { UserSettings } from './types';
+import { mockUserSettings } from './data/mock';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
+function ErrorFallback({ error, resetErrorBoundary }: { error: Error, resetErrorBoundary: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full min-h-[400px] bg-slate-900/50 rounded-2xl border border-red-500/20 p-8 text-center">
+      <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-6">
+        <AlertTriangle className="w-8 h-8 text-red-500" />
+      </div>
+      <h2 className="text-2xl font-bold text-white mb-2">Something went wrong</h2>
+      <p className="text-slate-400 mb-6 max-w-md">
+        An unexpected error occurred in the application. Our team has been notified.
+      </p>
+      <pre className="bg-slate-950 p-4 rounded-lg text-red-400 text-sm mb-6 max-w-2xl overflow-auto text-left w-full border border-slate-800">
+        {error.message}
+      </pre>
+      <button
+        onClick={resetErrorBoundary}
+        className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white font-medium rounded-xl transition-colors"
+      >
+        Try again
+      </button>
+    </div>
+  );
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [isAdmin, setIsAdmin] = useState(true);
+  const { isFocusMode, setUserSettings, setIsAdmin, isConnected, setIsConnected } = useAppStore();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isFocusMode, setIsFocusMode] = useState(false);
-
-  const [stats, setStats] = useState<SystemStats>(mockStats);
-  const [opportunities, setOpportunities] = useState<ArbitrageOpportunity[]>(mockOpportunities);
-  const [logs, setLogs] = useState<AutoTradeLog[]>(mockLogs);
-  const [globalSettings, setGlobalSettings] = useState<GlobalSettings>(mockGlobalSettings);
-  const [userSettings, setUserSettings] = useState<UserSettings>(mockUserSettings);
-  const [blacklist, setBlacklist] = useState<BlacklistEntry[]>(mockBlacklist);
-  const [isConnected, setIsConnected] = useState<boolean | null>(null);
-
   const [user, setUser] = useState<User | null>(null);
-  
-  // Toast Notification System
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
-
-  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -324,307 +353,104 @@ export default function App() {
       }
     });
     return () => unsubscribe();
-  }, [user]);
+  }, [user, setUserSettings, setIsAdmin]);
 
   useEffect(() => {
-    const loadData = async () => {
+    const checkConn = async () => {
       const isApiConnected = await api.checkConnection();
       setIsConnected(isApiConnected);
-
-      const [fetchedStats, fetchedOpps, fetchedLogs, fetchedGlobal, fetchedBlacklist] = await Promise.all([
-        api.getStats(),
-        api.getOpportunities(),
-        api.getLogs(),
-        api.getGlobalSettings(),
-        api.getBlacklist()
-      ]);
-
-      setStats(fetchedStats);
-      setOpportunities(fetchedOpps);
-      setLogs(fetchedLogs);
-      setGlobalSettings(fetchedGlobal);
-      setBlacklist(fetchedBlacklist);
     };
-
-    loadData();
-
-    const interval = setInterval(async () => {
-      const isApiConnected = await api.checkConnection();
-      setIsConnected(isApiConnected);
-
-      const fetchedStats = await api.getStats();
-      const fetchedOpps = await api.getOpportunities();
-      setStats(fetchedStats);
-      setOpportunities(fetchedOpps);
-    }, 5000);
-
+    checkConn();
+    const interval = setInterval(checkConn, 10000);
     return () => clearInterval(interval);
-  }, []);
-
-  const handleGlobalChange = async (key: keyof GlobalSettings, value: any) => {
-    const newSettings = { ...globalSettings, [key]: value };
-    setGlobalSettings(newSettings);
-    await api.updateGlobalSettings(newSettings);
-  };
-
-  const handleUserChange = async (key: keyof UserSettings, value: any) => {
-    const newSettings = { ...userSettings, [key]: value };
-    setUserSettings(newSettings);
-    if (user) {
-      await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
-    }
-    
-    // Sync to backend
-    await api.updateUserSettings(newSettings);
-
-    if (newSettings.telegramUserId && newSettings.autoSyncTelegram) {
-      try {
-        await api.updateTelegramSettings(newSettings.telegramUserId, { [key]: value });
-      } catch (e) {
-        showToast('Failed to auto-sync with bot', 'error');
-      }
-    }
-  };
-
-  const handleAutoTradeChange = async (newConfig: AutoTradeConfig) => {
-    const newSettings = { ...userSettings, autoTrade: newConfig };
-    setUserSettings(newSettings);
-    if (user) {
-      await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
-    }
-    if (newSettings.telegramUserId && newSettings.autoSyncTelegram) {
-      try {
-        await api.updateTelegramSettings(newSettings.telegramUserId, { autoTrade: newConfig });
-      } catch (e) {
-        showToast('Failed to auto-sync with bot', 'error');
-      }
-    }
-  };
-
-  const handleSaveKey = async (exchange: string, config: ApiKeyConfig) => {
-    const newApiKeys = { ...(userSettings.apiKeys || {}), [exchange.toLowerCase()]: config };
-    const newSettings = { ...userSettings, apiKeys: newApiKeys };
-    setUserSettings(newSettings);
-    if (user) {
-      await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
-    }
-    
-    // Sync to backend
-    await api.saveCredentials(exchange, config);
-    showToast(`Keys for ${exchange} saved successfully`, 'success');
-  };
-
-  const handleConnectTelegram = async (telegramId: string) => {
-    try {
-      const botData = await api.syncTelegram(telegramId);
-      if (botData) {
-        const newApiKeys = { ...(userSettings.apiKeys || {}) };
-        botData.keys.forEach((k: string) => {
-          if (!newApiKeys[k]) {
-            newApiKeys[k] = { key: 'imported_from_bot', secret: 'imported_from_bot' };
-          }
-        });
-
-        const newSettings = {
-          ...userSettings,
-          ...botData.settings,
-          apiKeys: newApiKeys,
-          telegramUserId: telegramId,
-          isTelegramAdmin: botData.isAdmin,
-          autoSyncTelegram: true
-        };
-
-        setUserSettings(newSettings);
-        setIsAdmin(botData.isAdmin);
-        if (user) {
-          await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
-        }
-        showToast('Successfully connected to Telegram Bot!', 'success');
-      }
-    } catch (error) {
-      showToast('Failed to connect to Telegram Bot', 'error');
-    }
-  };
-
-  const handleSyncFromBot = async () => {
-    if (!userSettings.telegramUserId) return;
-    try {
-      const botData = await api.syncTelegram(userSettings.telegramUserId);
-      if (botData) {
-        const newSettings = {
-          ...userSettings,
-          ...botData.settings,
-          isTelegramAdmin: botData.isAdmin
-        };
-        setUserSettings(newSettings);
-        setIsAdmin(botData.isAdmin);
-        if (user) {
-          await setDoc(doc(db, 'users', user.uid), newSettings, { merge: true });
-        }
-        showToast('Settings pulled from Telegram Bot successfully', 'success');
-      }
-    } catch (error) {
-      showToast('Failed to pull settings from bot', 'error');
-    }
-  };
-
-  const handleSyncToBot = async () => {
-    if (!userSettings.telegramUserId) return;
-    try {
-      await api.updateTelegramSettings(userSettings.telegramUserId, userSettings);
-      showToast('Settings pushed to Telegram Bot successfully', 'success');
-    } catch (error) {
-      showToast('Failed to push settings to bot', 'error');
-    }
-  };
-
-  const handleDisconnectTelegram = async () => {
-    const newSettings = { ...userSettings };
-    delete newSettings.telegramUserId;
-    delete newSettings.isTelegramAdmin;
-    delete newSettings.autoSyncTelegram;
-    setUserSettings(newSettings);
-    setIsAdmin(false);
-    if (user) {
-      await setDoc(doc(db, 'users', user.uid), { telegramUserId: null, isTelegramAdmin: null, autoSyncTelegram: null }, { merge: true });
-    }
-    showToast('Disconnected from Telegram Bot', 'info');
-  };
-
-  const handleUnban = async (merchantId: string, exchange: string) => {
-    const success = await api.removeFromBlacklist(merchantId, exchange);
-    if (success || !isConnected) {
-      setBlacklist(prev => prev.filter(entry => !(entry.merchantId === merchantId && entry.exchange === exchange)));
-    }
-  };
-
-  const connectedExchanges = Object.keys(userSettings.apiKeys || {}).map(k => k.toLowerCase());
+  }, [setIsConnected]);
 
   return (
-    <div className="flex h-screen bg-slate-950 text-slate-200 font-sans selection:bg-emerald-500/30 overflow-hidden relative">
-      {toast && (
-        <div className="absolute top-4 right-4 z-50 animate-in fade-in slide-in-from-top-4 duration-300">
-          <div className={cn(
-            "flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border bg-slate-900/80 backdrop-blur-md",
-            toast.type === 'success' ? "border-emerald-500/20 text-emerald-400" :
-            toast.type === 'error' ? "border-red-500/20 text-red-400" :
-            "border-blue-500/20 text-blue-400"
-          )}>
-            {toast.type === 'success' && <CheckCircle2 className="w-5 h-5" />}
-            {toast.type === 'error' && <AlertTriangle className="w-5 h-5" />}
-            {toast.type === 'info' && <Info className="w-5 h-5" />}
-            <span className="text-sm font-bold">{toast.message}</span>
-          </div>
-        </div>
-      )}
+    <Router>
+      <div className="flex h-screen bg-slate-950 text-slate-200 font-sans selection:bg-emerald-500/30 overflow-hidden relative">
+        <Toaster theme="dark" position="top-right" richColors />
 
-      {/* Mobile Header */}
-      {!isFocusMode && (
-        <div className="md:hidden absolute top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center px-4 z-30 gap-4">
-          <button 
-            onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
-            className="p-2 bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
-          >
-            {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
-              <Activity className="text-slate-950 w-5 h-5" />
-            </div>
-            <span className="font-bold text-white tracking-tight text-lg">ARBIX</span>
-          </div>
-        </div>
-      )}
-
-      {!isFocusMode && (
-        <Sidebar
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          isAdmin={isAdmin}
-          onToggleAdmin={() => setIsAdmin(!isAdmin)}
-          isOpen={isSidebarOpen}
-          setIsOpen={setIsSidebarOpen}
-          isConnected={isConnected}
-          user={user}
-          onLogin={loginWithGoogle}
-          onLogout={logout}
-        />
-      )}
-
-      <main className={cn("flex-1 overflow-y-auto relative", isFocusMode ? "p-4" : "p-4 md:p-8 pt-20 md:pt-8")}>
-        <div className={cn("mx-auto", isFocusMode ? "max-w-full" : "max-w-6xl")}>
-          {!user ? (
-            <div className="flex flex-col items-center justify-center h-full mt-32">
-              <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mb-6">
-                <div className="w-10 h-10 bg-emerald-500 rounded-full animate-pulse"></div>
+        {/* Mobile Header */}
+        {!isFocusMode && (
+          <div className="md:hidden absolute top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center px-4 z-30 gap-4">
+            <button 
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)} 
+              className="p-2 bg-slate-800 rounded-lg text-slate-400 hover:text-white transition-colors"
+            >
+              {isSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20">
+                <Activity className="text-slate-950 w-5 h-5" />
               </div>
-              <h1 className="text-3xl font-bold text-white mb-4">Welcome to Arbix Quantum</h1>
-              <p className="text-slate-400 mb-8 text-center max-w-md">
-                Please sign in to access your personalized dashboard, configure API keys, and manage auto-trading settings.
-              </p>
-              <button
-                onClick={loginWithGoogle}
-                className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-2xl transition-all shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 focus:border-transparent outline-none"
-              >
-                Sign in with Google
-              </button>
+              <span className="font-bold text-white tracking-tight text-lg">ARBIX</span>
             </div>
-          ) : (
-            <>
-              {activeTab === 'dashboard' && (
-                <Dashboard 
-                  stats={stats} 
-                  opportunities={opportunities} 
-                  userSettings={userSettings}
-                  onUserChange={handleUserChange}
-                  isFocusMode={isFocusMode}
-                  setIsFocusMode={setIsFocusMode}
-                  showToast={showToast}
-                />
-              )}
+          </div>
+        )}
 
-              {activeTab === 'autotrade' && userSettings.autoTrade && (
-                <AutoTradePanel
-                  config={userSettings.autoTrade}
-                  onConfigChange={handleAutoTradeChange}
-                  logs={logs}
-                />
-              )}
+        {!isFocusMode && (
+          <Sidebar
+            isOpen={isSidebarOpen}
+            setIsOpen={setIsSidebarOpen}
+            user={user}
+            onLogin={loginWithGoogle}
+            onLogout={logout}
+          />
+        )}
 
-              {activeTab === 'settings' && (
-                <SettingsPanel
-                  globalSettings={globalSettings}
-                  userSettings={userSettings}
-                  onGlobalChange={handleGlobalChange}
-                  onUserChange={handleUserChange}
-                  isAdmin={isAdmin}
-                  onConnectTelegram={handleConnectTelegram}
-                  onDisconnectTelegram={handleDisconnectTelegram}
-                  onSyncFromBot={handleSyncFromBot}
-                  onSyncToBot={handleSyncToBot}
-                />
-              )}
-
-              {activeTab === 'apikeys' && (
-                <ApiKeysPanel
-                  connectedExchanges={connectedExchanges}
-                  onSaveKey={handleSaveKey}
-                />
-              )}
-
-              {activeTab === 'blacklist' && (
-                <BlacklistPanel
-                  blacklist={blacklist}
-                  onUnban={handleUnban}
-                />
-              )}
-            </>
-          )}
-        </div>
-      </main>
-    </div>
+        <main className={cn("flex-1 overflow-y-auto relative", isFocusMode ? "p-4" : "p-4 md:p-8 pt-20 md:pt-8")}>
+          <CommandPalette />
+          <div className={cn("mx-auto", isFocusMode ? "max-w-full" : "max-w-6xl")}>
+            {!user ? (
+              <div className="flex flex-col items-center justify-center h-full mt-32">
+                <div className="w-20 h-20 bg-emerald-500/20 rounded-full flex items-center justify-center mb-6">
+                  <div className="w-10 h-10 bg-emerald-500 rounded-full animate-pulse"></div>
+                </div>
+                <h1 className="text-3xl font-bold text-white mb-4">Welcome to Arbix Quantum</h1>
+                <p className="text-slate-400 mb-8 text-center max-w-md">
+                  Please sign in to access your personalized dashboard, configure API keys, and manage auto-trading settings.
+                </p>
+                <button
+                  onClick={loginWithGoogle}
+                  className="px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-2xl transition-all shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 focus:border-transparent outline-none"
+                >
+                  Sign in with Google
+                </button>
+              </div>
+            ) : (
+              <ErrorBoundary FallbackComponent={ErrorFallback} onReset={() => window.location.href = '/'}>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/autotrade" element={<AutoTradePanel />} />
+                  <Route path="/analytics" element={<AnalyticsPanel />} />
+                  <Route path="/settings" element={<SettingsPanel />} />
+                  <Route path="/apikeys" element={<ApiKeysPanel />} />
+                  <Route path="/blacklist" element={<BlacklistPanel />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </ErrorBoundary>
+            )}
+          </div>
+        </main>
+      </div>
+    </Router>
   );
 }
+
+============================================================
+FILE: src/main.tsx
+============================================================
+
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
 
 ============================================================
 FILE: src/main.tsx
@@ -646,63 +472,53 @@ FILE: src/services/api.ts
 ============================================================
 
 /// <reference types="vite/client" />
-import { mockStats, mockOpportunities, mockLogs, mockGlobalSettings, mockUserSettings, mockBlacklist } from '../data/mock';
-import { SystemStats, ArbitrageOpportunity, AutoTradeLog, GlobalSettings, UserSettings, BlacklistEntry } from '../types';
+import axios from 'axios';
+import { SystemStats, ArbitrageOpportunity, AutoTradeLog, GlobalSettings, UserSettings, BlacklistEntry, ApiKeyConfig } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
-async function fetchWithFallback<T>(endpoint: string, fallbackData: T): Promise<T> {
-  try {
-    const response = await fetch(`${API_BASE_URL}${endpoint}`);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return await response.json();
-  } catch (error) {
-    console.warn(`[API] Бекенд недоступний (${endpoint}). Використовуються тестові дані.`, error);
-    return fallbackData;
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000,
+});
+
+apiClient.interceptors.response.use(
+  (response) => response.data,
+  (error) => {
+    console.error(`[API Error] ${error.config?.url}:`, error.message);
+    return Promise.reject(error);
   }
-}
+);
 
 export const api = {
-  getStats: () => fetchWithFallback<SystemStats>('/stats', mockStats),
-  getOpportunities: () => fetchWithFallback<ArbitrageOpportunity[]>('/opportunities', mockOpportunities),
-  getLogs: () => fetchWithFallback<AutoTradeLog[]>('/logs', mockLogs),
-  getGlobalSettings: () => fetchWithFallback<GlobalSettings>('/settings/global', mockGlobalSettings),
-  getBlacklist: () => fetchWithFallback<BlacklistEntry[]>('/blacklist', mockBlacklist),
+  getStats: () => apiClient.get<any, SystemStats>('/stats'),
+  getOpportunities: () => apiClient.get<any, ArbitrageOpportunity[]>('/opportunities'),
+  getLogs: () => apiClient.get<any, AutoTradeLog[]>('/logs'),
+  getGlobalSettings: () => apiClient.get<any, GlobalSettings>('/settings/global'),
+  getBlacklist: () => apiClient.get<any, BlacklistEntry[]>('/blacklist'),
 
   saveCredentials: async (exchange: string, keys: ApiKeyConfig): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/credentials/${exchange.toLowerCase()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(keys)
-      });
-      return response.ok;
+      await apiClient.post(`/credentials/${exchange.toLowerCase()}`, keys);
+      return true;
     } catch (error) {
-      console.error(`[API] Помилка збереження ключів для ${exchange}:`, error);
       return false;
     }
   },
 
   updateUserSettings: async (settings: UserSettings): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/settings/user`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-      return response.ok;
+      await apiClient.post('/settings/user', settings);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка збереження налаштувань юзера:', error);
       return false;
     }
   },
 
   checkConnection: async (): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/stats`);
-      return response.ok;
+      await apiClient.get('/stats');
+      return true;
     } catch (error) {
       return false;
     }
@@ -710,49 +526,34 @@ export const api = {
 
   updateGlobalSettings: async (settings: GlobalSettings): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/settings/global`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      });
-      return response.ok;
+      await apiClient.post('/settings/global', settings);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка збереження налаштувань:', error);
       return false;
     }
   },
 
   addToBlacklist: async (entry: Omit<BlacklistEntry, 'addedAt'>): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/blacklist`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(entry)
-      });
-      return response.ok;
+      await apiClient.post('/blacklist', entry);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка додавання в чорний список:', error);
       return false;
     }
   },
 
   removeFromBlacklist: async (merchantId: string, exchange: string): Promise<boolean> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/blacklist/${exchange}/${merchantId}`, {
-        method: 'DELETE'
-      });
-      return response.ok;
+      await apiClient.delete(`/blacklist/${exchange}/${merchantId}`);
+      return true;
     } catch (error) {
-      console.error('[API] Помилка видалення з чорного списку:', error);
       return false;
     }
   },
 
   syncTelegram: async (telegramId: string): Promise<any> => {
     try {
-      const response = await fetch(`${API_BASE_URL}/telegram/sync/${telegramId}`);
-      if (response.ok) return await response.json();
-      throw new Error('Backend not ready');
+      return await apiClient.get(`/telegram/sync/${telegramId}`);
     } catch (error) {
       console.warn('[API] Мок-синхронізація з Telegram ботом');
       return {
@@ -770,11 +571,7 @@ export const api = {
 
   updateTelegramSettings: async (telegramId: string, settings: any): Promise<void> => {
     try {
-      await fetch(`${API_BASE_URL}/user/settings`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...settings, telegramUserId: telegramId })
-      });
+      await apiClient.post('/user/settings', { ...settings, telegramUserId: telegramId });
     } catch (error) {
       console.warn('[API] Мок-оновлення налаштувань у Telegram боті', error);
     }
@@ -787,48 +584,97 @@ FILE: src/components/Dashboard.tsx
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Check, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Settings2, Activity } from 'lucide-react';
+import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Check, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Settings2, Activity, ArrowUpDown } from 'lucide-react';
 import { ArbitrageOpportunity, Order, SystemStats, UserSettings } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
 import { formatDistanceToNow } from 'date-fns';
+import { useAppStore } from '../store';
+import { toast } from 'sonner';
+import CountUp from 'react-countup';
+import useSWR from 'swr';
+import { api } from '../services/api';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+const BANK_NAMES_MAP: Record<string, string> = {
+  "43": "Monobank",
+  "14": "PrivatBank",
+  "64": "ПУМБ",
+  "48": "А-Банк",
+  "99": "Ощадбанк",
+  "380": "Raiffeisen",
+  "328": "Sense",
+  "319": "OTP",
+  "553": "izibank",
+  "transfer": "Global Transfer"
+};
 
-interface DashboardProps {
-  stats: SystemStats;
-  opportunities: ArbitrageOpportunity[];
-  userSettings: UserSettings;
-  onUserChange: (key: keyof UserSettings, value: any) => void;
-  isFocusMode: boolean;
-  setIsFocusMode: (val: boolean) => void;
-  showToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
-}
+const getBankName = (code: string) => BANK_NAMES_MAP[code] || code;
 
-export default function Dashboard({ stats, opportunities, userSettings, onUserChange, isFocusMode, setIsFocusMode, showToast }: DashboardProps) {
+// Ported from bot/formatters.py — RISK_BADGES
+const RISK_BADGES: Record<string, string> = {
+  "BEHAVIOR_BOTLIKE":    "🤖",
+  "EXACT_LIMITS":        "🎯",
+  "API_REPLENISH":       "🤖",
+  "STATIC_DROP":         "📏",
+  "VELOCITY_SPIKE":      "⚡",
+  "CROSS_EXCHANGE_BOT":  "👥",
+  "FLICKER_RELIST":      "🔄",
+  "BLOCK":               "🚫",
+  "NEEDS_LLM":           "🔍",
+  "EXTERNAL_LINK":       "🔗",
+  "TRIANGLE":            "🔺",
+  "CASINO":              "🎰",
+  "FINCRIME":            "💸",
+  "CHARGEBACK":          "↩️",
+  "SUSPICIOUS_BIZ":      "⚠️",
+  "CHAT_FIRST":          "💬",
+  "APPEAL_PRESSURE":     "📢",
+  "BADREVIEWS":          "👎",
+  "HIGH_RISK_SCORE":     "📊",
+  "BLACKLIST":           "⛔",
+};
+
+const getRiskEmoji = (flag: string): string => {
+  if (!flag) return "";
+  const upper = flag.toUpperCase();
+  for (const [key, emoji] of Object.entries(RISK_BADGES)) {
+    if (upper.includes(key)) return emoji;
+  }
+  return "⚠️";
+};
+
+export default function Dashboard() {
   const [viewMode, setViewMode] = useState<'detailed' | 'compact'>('detailed');
-  const prevOppsLength = useRef(opportunities.length);
+  const [sortBy, setSortBy] = useState<'spread' | 'profit' | 'deal' | 'risk'>('spread');
+  const userSettings = useAppStore(state => state.userSettings);
+  const setUserSettings = useAppStore(state => state.setUserSettings);
+  const isFocusMode = useAppStore(state => state.isFocusMode);
+  const setIsFocusMode = useAppStore(state => state.setIsFocusMode);
+
+  const { data: stats, isLoading: isStatsLoading } = useSWR('/stats', api.getStats, { refreshInterval: 5000 });
+  const { data: opportunities, isLoading: isOppsLoading } = useSWR('/opportunities', api.getOpportunities, { refreshInterval: 5000 });
+
+  const prevOppsLength = useRef(opportunities?.length || 0);
 
   // Audio Notification
   useEffect(() => {
-    if (opportunities.length > prevOppsLength.current) {
+    if (opportunities && opportunities.length > prevOppsLength.current) {
       const newOpps = opportunities.slice(0, opportunities.length - prevOppsLength.current);
       const hasHighSpread = newOpps.some(opp => opp.netSpread >= userSettings.minSpread);
-      if (hasHighSpread) {
+      if (hasHighSpread && userSettings.soundEnabled !== false) {
         try {
-          // Play a gentle pop sound
           const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
           const oscillator = audioCtx.createOscillator();
           const gainNode = audioCtx.createGain();
           oscillator.connect(gainNode);
           gainNode.connect(audioCtx.destination);
           oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
           oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.1);
-          gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+
+          const volume = userSettings.soundVolume !== undefined ? userSettings.soundVolume : 0.5;
+          gainNode.gain.setValueAtTime(volume * 0.2, audioCtx.currentTime);
           gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+
           oscillator.start(audioCtx.currentTime);
           oscillator.stop(audioCtx.currentTime + 0.1);
         } catch (e) {
@@ -836,32 +682,37 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
         }
       }
     }
-    prevOppsLength.current = opportunities.length;
-  }, [opportunities, userSettings.minSpread]);
+    prevOppsLength.current = opportunities?.length || 0;
+  }, [opportunities, userSettings.minSpread, userSettings.soundEnabled, userSettings.soundVolume]);
 
   // Hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if typing in an input
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       if (e.code === 'Space') {
         e.preventDefault();
         if (userSettings.autoTrade) {
-          onUserChange('autoTrade', { ...userSettings.autoTrade, enabled: !userSettings.autoTrade.enabled });
-          showToast(`Scanner ${!userSettings.autoTrade.enabled ? 'Started' : 'Paused'}`, 'info');
+          setUserSettings({ ...userSettings, autoTrade: { ...userSettings.autoTrade, enabled: !userSettings.autoTrade.enabled } });
+          toast.info(`Scanner ${!userSettings.autoTrade.enabled ? 'Started' : 'Paused'}`);
         }
       } else if (e.key === 'Escape') {
-        // Reset filters
-        onUserChange('minSpread', 0.5);
-        showToast('Filters reset', 'info');
+        setUserSettings({ ...userSettings, minSpread: 0.5 });
+        toast.info('Filters reset');
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [userSettings, onUserChange, showToast]);
+  }, [userSettings, setUserSettings]);
 
-  const activeOpportunities = opportunities.filter(opp => opp.netSpread >= userSettings.minSpread);
+  const activeOpportunities = (opportunities?.filter(opp => opp.netSpread >= userSettings.minSpread) || [])
+    .sort((a, b) => {
+      if (sortBy === 'profit')  return b.netProfit - a.netProfit;
+      if (sortBy === 'deal')    return b.dealAmount - a.dealAmount;
+      if (sortBy === 'risk')    return ((b.buyOrder.riskScore || 0) + (b.sellOrder.riskScore || 0))
+                                     - ((a.buyOrder.riskScore || 0) + (a.sellOrder.riskScore || 0));
+      return b.netSpread - a.netSpread; // default: spread
+    });
 
   const toggleExchange = (exchange: string) => {
     if (!userSettings.autoTrade) return;
@@ -869,7 +720,7 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
     const newExchanges = current.includes(exchange)
       ? current.filter(e => e !== exchange)
       : [...current, exchange];
-    onUserChange('autoTrade', { ...userSettings.autoTrade, allowedExchanges: newExchanges });
+    setUserSettings({ ...userSettings, autoTrade: { ...userSettings.autoTrade, allowedExchanges: newExchanges } });
   };
 
   return (
@@ -880,30 +731,33 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
             <StatCard
               icon={<TrendingUp className="w-5 h-5 text-emerald-400" />}
               label="Active Spreads"
-              value={activeOpportunities.length.toString()}
+              value={activeOpportunities.length}
               subValue="Real-time opportunities"
               trend="+12%"
               trendUp={true}
+              isLoading={isOppsLoading}
             />
             <StatCard
               icon={<ArrowRightLeft className="w-5 h-5 text-blue-400" />}
               label="Cycles Completed"
-              value={(stats?.cycles ?? 0).toLocaleString()}
-              subValue={`${stats.lastCycleMs}ms avg latency`}
+              value={stats?.cycles ?? 0}
+              subValue={`${stats?.lastCycleMs ?? 0}ms avg latency`}
               trend="-5ms"
               trendUp={true}
+              isLoading={isStatsLoading}
             />
             <StatCard
               icon={<ShieldAlert className="w-5 h-5 text-orange-400" />}
               label="Bots Detected"
-              value={(stats.botsDetectedToday ?? 0).toString()}
+              value={stats?.botsDetectedToday ?? 0}
               subValue="Today's anomalies"
               trend="+2"
               trendUp={false}
+              isLoading={isStatsLoading}
             />
-            <GoalProgressCard 
-              currentCapital={userSettings.maxCapital} 
-              goalCapital={userSettings.goalCapital || 50000} 
+            <GoalProgressCard
+              currentCapital={userSettings.maxCapital}
+              goalCapital={userSettings.goalCapital || 50000}
             />
           </div>
         </>
@@ -913,31 +767,43 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
         {/* Quick Control Bar */}
         <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 sticky top-16 md:top-0 z-10 shadow-lg">
           <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            <div className="flex items-center gap-2 shrink-0">
-              <motion.div 
+            <div className="flex items-center gap-2 shrink-0 relative">
+              <motion.div
                 animate={{ scale: userSettings.autoTrade?.enabled ? [1, 1.2, 1] : 1 }}
                 transition={{ repeat: Infinity, duration: 2 }}
               >
                 <Activity className={cn("w-5 h-5", userSettings.autoTrade?.enabled ? "text-emerald-500" : "text-slate-500")} />
               </motion.div>
               <span className="text-sm font-bold text-white">Scanner</span>
+
+              {/* Refresh Indicator */}
+              <div className="absolute -bottom-2 left-0 w-full h-0.5 bg-slate-800 overflow-hidden rounded-full">
+                <motion.div
+                  className="h-full bg-emerald-500"
+                  initial={{ width: "0%" }}
+                  animate={{ width: "100%" }}
+                  transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
+                />
+              </div>
             </div>
             <div className="h-6 w-px bg-slate-800 shrink-0"></div>
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Min Spread:</span>
-              <input 
-                type="number" 
+              <input
+                type="number"
                 step="0.1"
                 value={userSettings.minSpread}
-                onChange={(e) => onUserChange('minSpread', parseFloat(e.target.value) || 0)}
-                className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none"
+                onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
+                className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums"
               />
               <span className="text-xs text-slate-400">%</span>
             </div>
             <div className="h-6 w-px bg-slate-800 shrink-0"></div>
             <div className="flex items-center gap-1 shrink-0">
               {['Binance', 'Bybit', 'OKX', 'MEXC'].map(ex => (
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
                   key={ex}
                   onClick={() => toggleExchange(ex)}
                   className={cn(
@@ -948,29 +814,53 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
                   )}
                 >
                   {ex}
-                </button>
+                </motion.button>
               ))}
             </div>
           </div>
 
           <div className="flex items-center gap-2 w-full md:w-auto justify-end border-t border-slate-800 md:border-none pt-3 md:pt-0">
+            {/* Sort selector */}
+            <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
+              <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
+              {(['spread', 'profit', 'deal', 'risk'] as const).map(opt => (
+                <button
+                  key={opt}
+                  onClick={() => setSortBy(opt)}
+                  className={cn(
+                    "px-2 py-1 rounded-md text-xs font-bold transition-all capitalize",
+                    sortBy === opt
+                      ? opt === 'risk' ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-white"
+                      : "text-slate-500 hover:text-slate-300"
+                  )}
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
             <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
-              <button 
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setViewMode('detailed')}
                 className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'detailed' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
                 title="Detailed View"
               >
                 <LayoutGrid className="w-4 h-4" />
-              </button>
-              <button 
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setViewMode('compact')}
                 className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'compact' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
                 title="Compact View"
               >
                 <LayoutList className="w-4 h-4" />
-              </button>
+              </motion.button>
             </div>
-            <button 
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
               onClick={() => setIsFocusMode(!isFocusMode)}
               className={cn(
                 "p-2 rounded-lg transition-colors border focus:ring-2 focus:ring-emerald-500/50 outline-none",
@@ -979,22 +869,50 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
               title="Focus Mode"
             >
               {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            </button>
+            </motion.button>
           </div>
         </div>
 
         <AnimatePresence mode="popLayout">
-          {activeOpportunities.length > 0 ? (
+          {isOppsLoading ? (
             <div className={cn("grid gap-4", viewMode === 'detailed' ? "grid-cols-1" : "grid-cols-1")}>
-              {activeOpportunities.map((opp, index) => (
-                <OpportunityCard 
-                  key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`} 
-                  opp={opp} 
-                  viewMode={viewMode}
-                  showToast={showToast}
-                />
+              {[1, 2, 3].map((i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  className="bg-slate-900/80 rounded-3xl p-6 border border-slate-800 animate-pulse"
+                >
+                  <div className="h-8 bg-slate-800 rounded-lg w-1/3 mb-6"></div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="h-32 bg-slate-800 rounded-2xl"></div>
+                    <div className="h-32 bg-slate-800 rounded-2xl"></div>
+                  </div>
+                </motion.div>
               ))}
             </div>
+          ) : activeOpportunities.length > 0 ? (
+            <motion.div
+              className={cn("grid gap-4", viewMode === 'detailed' ? "grid-cols-1" : "grid-cols-1")}
+              variants={{
+                hidden: { opacity: 0 },
+                show: {
+                  opacity: 1,
+                  transition: { staggerChildren: 0.1 }
+                }
+              }}
+              initial="hidden"
+              animate="show"
+            >
+              {activeOpportunities.map((opp, index) => (
+                <OpportunityCard
+                  key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`}
+                  opp={opp}
+                  viewMode={viewMode}
+                />
+              ))}
+            </motion.div>
           ) : (
             <motion.div
               initial={{ opacity: 0 }}
@@ -1013,7 +931,7 @@ export default function Dashboard({ stats, opportunities, userSettings, onUserCh
   );
 }
 
-function StatCard({ icon, label, value, subValue, trend, trendUp }: any) {
+function StatCard({ icon, label, value, subValue, trend, trendUp, isLoading }: any) {
   return (
     <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
       <div className="flex items-center justify-between mb-3">
@@ -1027,16 +945,21 @@ function StatCard({ icon, label, value, subValue, trend, trendUp }: any) {
           </span>
         )}
       </div>
-      <div className="text-2xl font-bold text-white mb-1">{value}</div>
+      {isLoading ? (
+        <div className="h-8 bg-slate-800 rounded w-1/2 mb-1 animate-pulse"></div>
+      ) : (
+        <div className="text-2xl font-bold text-white mb-1 tabular-nums">
+          <CountUp end={Number(value)} duration={1} separator="," />
+        </div>
+      )}
       <div className="text-xs text-slate-400 font-medium uppercase tracking-widest">{subValue}</div>
-      
-      {/* Mock Sparkline */}
+
       <div className="absolute bottom-0 left-0 w-full h-8 opacity-20 pointer-events-none">
         <svg viewBox="0 0 100 20" preserveAspectRatio="none" className="w-full h-full">
-          <polyline 
-            points="0,20 20,15 40,18 60,10 80,12 100,2" 
-            fill="none" 
-            stroke={trendUp ? "#10b981" : "#3b82f6"} 
+          <polyline
+            points="0,20 20,15 40,18 60,10 80,12 100,2"
+            fill="none"
+            stroke={trendUp ? "#10b981" : "#3b82f6"}
             strokeWidth="2"
             vectorEffect="non-scaling-stroke"
           />
@@ -1048,7 +971,7 @@ function StatCard({ icon, label, value, subValue, trend, trendUp }: any) {
 
 function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: number, goalCapital: number }) {
   const progress = Math.min(100, Math.max(0, (currentCapital / goalCapital) * 100));
-  
+
   return (
     <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
       <div className="flex items-center justify-between mb-3">
@@ -1058,53 +981,56 @@ function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: num
           </div>
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Goal Progress</span>
         </div>
-        <span className="text-xs font-bold text-purple-400">{progress.toFixed(1)}%</span>
+        <span className="text-xs font-bold text-purple-400 tabular-nums">
+          <CountUp end={progress} decimals={1} duration={1} />%
+        </span>
       </div>
-      <div className="text-2xl font-bold text-white mb-2">{currentCapital.toLocaleString()} ₴</div>
-      
+      <div className="text-2xl font-bold text-white mb-2 tabular-nums">
+        <CountUp end={currentCapital} duration={1} separator="," /> ₴
+      </div>
+
       <div className="w-full bg-slate-800 rounded-full h-1.5 mb-1">
-        <div className="bg-purple-500 h-1.5 rounded-full" style={{ width: `${progress}%` }}></div>
+        <motion.div
+          className="bg-purple-500 h-1.5 rounded-full"
+          initial={{ width: 0 }}
+          animate={{ width: `${progress}%` }}
+          transition={{ duration: 1, ease: "easeOut" }}
+        />
       </div>
-      <div className="text-xs text-slate-400 font-medium uppercase tracking-widest text-right">
+      <div className="text-xs text-slate-400 font-medium uppercase tracking-widest text-right tabular-nums">
         Target: {goalCapital.toLocaleString()} ₴
       </div>
     </div>
   );
 }
 
-const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact', showToast: (msg: string) => void }> = ({ opp, viewMode, showToast }) => {
+const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact' }> = ({ opp, viewMode }) => {
   const isHighRisk = (opp.buyOrder.riskScore || 0) >= 50 || (opp.sellOrder.riskScore || 0) >= 50;
-  
-  // Decay Bar Logic (assuming 60s lifetime)
-  const [decay, setDecay] = useState(100);
-  useEffect(() => {
-    const age = Date.now() - opp.timestamp;
-    const maxAge = 60000; // 60s
-    const initialDecay = Math.max(0, 100 - (age / maxAge) * 100);
-    setDecay(initialDecay);
 
-    const interval = setInterval(() => {
-      const currentAge = Date.now() - opp.timestamp;
-      setDecay(Math.max(0, 100 - (currentAge / maxAge) * 100));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [opp.timestamp]);
+  const ageInSeconds = Math.floor((Date.now() - opp.timestamp) / 1000);
+  const initialProgress = Math.max(0, 100 - (ageInSeconds / 60) * 100);
 
   const handleCopy = (text: string | number, label: string) => {
     navigator.clipboard.writeText(text.toString());
-    showToast(`Copied ${label}!`);
+    toast.success(`Copied ${label}!`);
+  };
+
+  const variants = {
+    hidden: { opacity: 0, y: 20 },
+    show: { opacity: 1, y: 0 }
   };
 
   if (viewMode === 'compact') {
     return (
       <motion.div
         layout
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.98 }}
+        variants={variants}
+        initial="hidden"
+        animate="show"
+        exit={{ opacity: 0, scale: 0.95 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
         className={cn(
-          "bg-slate-900/80 backdrop-blur-md rounded-xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg",
+          "bg-slate-900/80 backdrop-blur-md overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg relative rounded-xl",
           isHighRisk ? "border border-red-500/30" : "border border-slate-800"
         )}
       >
@@ -1112,8 +1038,8 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
           <div className="flex items-center gap-3 flex-1">
             <div className="flex items-center -space-x-1">
               <ExchangeIcon name={opp.buyOrder.exchange} size="sm" />
-              <motion.div 
-                animate={{ x: [0, 2, 0] }} 
+              <motion.div
+                animate={{ x: [0, 2, 0] }}
                 transition={{ repeat: Infinity, duration: 1.5 }}
                 className="z-10 bg-slate-900 rounded-full"
               >
@@ -1121,7 +1047,7 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
               </motion.div>
               <ExchangeIcon name={opp.sellOrder.exchange} size="sm" />
             </div>
-            <div className="flex items-center gap-2 text-sm font-bold text-white">
+            <div className="flex items-center gap-2 text-sm font-bold text-white tabular-nums">
               <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.buyOrder.price, 'Buy Price')}>
                 {opp.buyOrder.price.toFixed(2)}
               </span>
@@ -1129,35 +1055,58 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
               <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.sellOrder.price, 'Sell Price')}>
                 {opp.sellOrder.price.toFixed(2)}
               </span>
+              <div className="text-xs text-slate-400 font-mono uppercase tracking-widest">
+                {getBankName(opp.buyBank)} → {getBankName(opp.sellBank)}
+              </div>
             </div>
           </div>
 
           <div className="flex-1 text-center">
-            <span className="text-xs font-medium text-slate-400 uppercase tracking-widest cursor-pointer hover:text-white transition-colors" onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}>
+            <span className="text-xs font-medium text-slate-400 uppercase tracking-widest cursor-pointer hover:text-white transition-colors tabular-nums" onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}>
               Deal: {opp.dealAmount.toFixed(0)} ₴
             </span>
+            {/* Risk badges compact */}
+            {(opp.buyOrder.riskScore || opp.sellOrder.riskScore ||
+              (opp.buyOrder as any).risk_score || (opp.sellOrder as any).risk_score) ? (
+              <div className="flex items-center justify-center gap-1 mt-1">
+                {[opp.buyOrder, opp.sellOrder].map((ord, i) => {
+                  const s = ord.riskScore || (ord as any).risk_score || 0;
+                  const f = ord.riskFlag || (ord as any).risk_flag || '';
+                  if (!s && !f) return null;
+                  return (
+                    <span key={i} className={cn(
+                      "text-[10px] font-bold px-1.5 py-0.5 rounded border tabular-nums",
+                      s >= 50 ? "bg-red-500/10 text-red-400 border-red-500/20" : "bg-orange-500/10 text-orange-400 border-orange-500/20"
+                    )} title={f}>
+                      {getRiskEmoji(f) || '⚠️'} {s}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : null}
           </div>
 
           <div className="flex items-center gap-4 justify-end flex-1">
             <div className="text-right">
-              <div className="text-sm font-black text-emerald-400">+{opp.netSpread.toFixed(2)}%</div>
-              <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">{opp.netProfit.toFixed(0)} ₴</div>
+              <div className="text-sm font-black text-emerald-400 tabular-nums">+{opp.netSpread.toFixed(2)}%</div>
+              <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest tabular-nums">{opp.netProfit.toFixed(0)} ₴</div>
             </div>
             <div className="flex gap-1">
-              <a href={opp.buyOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors">
+              <motion.a whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} href={opp.buyOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors">
                 <ExternalLink className="w-3 h-3" />
-              </a>
-              <a href={opp.sellOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg transition-colors">
+              </motion.a>
+              <motion.a whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} href={opp.sellOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg transition-colors">
                 <ExternalLink className="w-3 h-3" />
-              </a>
+              </motion.a>
             </div>
           </div>
         </div>
-        {/* Decay Bar */}
-        <div className="h-0.5 w-full bg-slate-800">
-          <div 
-            className={cn("h-full transition-all duration-1000 ease-linear", decay > 50 ? "bg-emerald-500" : decay > 20 ? "bg-orange-500" : "bg-red-500")} 
-            style={{ width: `${decay}%` }}
+        <div className="h-0.5 w-full bg-slate-800 absolute bottom-0 left-0">
+          <motion.div
+            className="h-full bg-emerald-500"
+            initial={{ width: "100%", backgroundColor: "#10b981" }}
+            animate={{ width: "0%", backgroundColor: "#ef4444" }}
+            transition={{ duration: 60, ease: "linear" }}
           />
         </div>
       </motion.div>
@@ -1167,12 +1116,13 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
   return (
     <motion.div
       layout
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
+      variants={variants}
+      initial="hidden"
+      animate="show"
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ type: "spring", stiffness: 300, damping: 30 }}
       className={cn(
-        "bg-slate-900/80 backdrop-blur-md rounded-3xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg",
+        "bg-slate-900/80 backdrop-blur-md rounded-3xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg relative",
         isHighRisk ? "border border-red-500/30" : "border border-slate-800"
       )}
     >
@@ -1181,8 +1131,8 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
           <div className="flex items-center gap-4">
             <div className="flex items-center -space-x-2">
               <ExchangeIcon name={opp.buyOrder.exchange} />
-              <motion.div 
-                animate={{ x: [0, 4, 0] }} 
+              <motion.div
+                animate={{ x: [0, 4, 0] }}
                 transition={{ repeat: Infinity, duration: 2 }}
                 className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center border-2 border-slate-900 z-10"
               >
@@ -1207,8 +1157,8 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
           </div>
 
           <div className="text-left md:text-right border-t border-slate-800/50 md:border-none pt-3 md:pt-0">
-            <div className="text-2xl font-black text-emerald-400">+{opp.netSpread.toFixed(2)}%</div>
-            <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest">Profit: {opp.netProfit.toFixed(0)} ₴</div>
+            <div className="text-2xl font-black text-emerald-400 tabular-nums">+{opp.netSpread.toFixed(2)}%</div>
+            <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest tabular-nums">Profit: {opp.netProfit.toFixed(0)} ₴</div>
           </div>
         </div>
 
@@ -1220,11 +1170,11 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
 
       <div className="bg-slate-800/30 px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center justify-between border-t border-slate-800 gap-4 md:gap-0">
         <div className="flex items-center justify-between md:justify-start gap-4 w-full md:w-auto">
-          <div 
-            className="text-xs font-mono cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1"
+          <div
+            className="text-xs font-mono cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1 tabular-nums"
             onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}
           >
-            <span className="text-slate-400">DEAL:</span> 
+            <span className="text-slate-400">DEAL:</span>
             <span className="text-white font-bold group-hover:text-emerald-400">{opp.dealAmount.toFixed(0)} ₴</span>
             <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
           </div>
@@ -1236,29 +1186,34 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
           </div>
         </div>
         <div className="flex gap-2 w-full md:w-auto">
-          <a
+          <motion.a
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.95 }}
             href={opp.buyOrder.link}
             target="_blank"
             rel="noreferrer"
             className="flex-1 md:flex-none justify-center px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-colors flex items-center gap-2 focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             BUY <ExternalLink className="w-3 h-3" />
-          </a>
-          <a
+          </motion.a>
+          <motion.a
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.95 }}
             href={opp.sellOrder.link}
             target="_blank"
             rel="noreferrer"
             className="flex-1 md:flex-none justify-center px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-colors flex items-center gap-2 shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 outline-none"
           >
             SELL <ExternalLink className="w-3 h-3" />
-          </a>
+          </motion.a>
         </div>
       </div>
-      {/* Decay Bar */}
-      <div className="h-1 w-full bg-slate-800">
-        <div 
-          className={cn("h-full transition-all duration-1000 ease-linear", decay > 50 ? "bg-emerald-500" : decay > 20 ? "bg-orange-500" : "bg-red-500")} 
-          style={{ width: `${decay}%` }}
+      <div className="h-1 w-full bg-slate-800 absolute bottom-0 left-0">
+        <motion.div
+          className="h-full bg-emerald-500"
+          initial={{ width: "100%", backgroundColor: "#10b981" }}
+          animate={{ width: "0%", backgroundColor: "#ef4444" }}
+          transition={{ duration: 60, ease: "linear" }}
         />
       </div>
     </motion.div>
@@ -1266,15 +1221,19 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
 }
 
 function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Order, onCopy: (text: string|number, label: string) => void }) {
-  const isRisk = (order.riskScore || 0) > 0;
+  const score = order.riskScore || (order as any).risk_score || 0;
+  // Python backend sends snake_case — handle both
+  const riskFlag: string = order.riskFlag || (order as any).risk_flag || '';
+  const isRisk = score > 0 || (riskFlag && riskFlag !== 'OK');
+
   return (
-    <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50">
+     <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50">
       <div className="flex items-center justify-between mb-3">
         <span className={cn(
           "text-xs font-black px-2 py-0.5 rounded-md tracking-tighter",
           side === 'BUY' ? "bg-blue-500/20 text-blue-400" : "bg-emerald-500/20 text-emerald-400"
         )}>{side}</span>
-        <div className="flex items-center gap-1 text-xs font-mono text-slate-400">
+        <div className="flex items-center gap-1 text-xs font-mono text-slate-400 tabular-nums">
           <span>{order.orderCount} orders</span>
           <span>•</span>
          <span>{(order.finishRate ?? 0).toFixed(1)}%</span>
@@ -1283,8 +1242,8 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
 
       <div className="flex items-center justify-between mb-2">
         <div className="text-sm font-bold text-white truncate max-w-[120px]">{order.merchantName}</div>
-        <div 
-          className="text-lg font-black text-white cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1"
+        <div
+          className="text-lg font-black text-white cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1 tabular-nums"
           onClick={() => onCopy(order.price, `${side} Price`)}
         >
           {(order.price ?? 0).toFixed(2)}
@@ -1292,8 +1251,8 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
         </div>
       </div>
 
-      <div 
-        className="text-xs text-slate-400 mb-3 font-mono cursor-pointer hover:text-white transition-colors group flex items-center gap-1"
+      <div
+        className="text-xs text-slate-400 mb-3 font-mono cursor-pointer hover:text-white transition-colors group flex items-center gap-1 tabular-nums"
         onClick={() => onCopy(`${order.minLimit} - ${order.maxLimit}`, `${side} Limits`)}
       >
         Limits: {order.minLimit} - {order.maxLimit} ₴
@@ -1302,25 +1261,29 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
 
       {isRisk && (
         <div className="flex flex-wrap gap-1.5 mt-3">
-          <div className={cn(
-            "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
-            (order.riskScore || 0) >= 50 
-              ? "bg-red-500/10 text-red-400 border-red-500/20" 
-              : "bg-orange-500/10 text-orange-400 border-orange-500/20"
-          )}>
-            <AlertTriangle className="w-2.5 h-2.5" />
-            SCORE: {order.riskScore}
-          </div>
-          {order.riskFlag && order.riskFlag !== 'OK' && order.riskFlag.split(/[:,]/).map((flag, idx) => {
+          {score > 0 && (
+            <div className={cn(
+              "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
+              score >= 50
+                ? "bg-red-500/10 text-red-400 border-red-500/20"
+                : "bg-orange-500/10 text-orange-400 border-orange-500/20"
+            )}>
+              <AlertTriangle className="w-2.5 h-2.5" />
+              SCORE: {score}
+            </div>
+          )}
+          {riskFlag && riskFlag !== 'OK' && riskFlag.split(/[:,\s]+/).map((flag, idx) => {
             const trimmed = flag.trim();
-            if (!trimmed) return null;
+            if (!trimmed || trimmed.match(/^\d+$/)) return null;
+            const emoji = getRiskEmoji(trimmed);
             return (
               <div key={idx} className={cn(
                 "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
-                (order.riskScore || 0) >= 50 
-                  ? "bg-red-500/10 text-red-400 border-red-500/20" 
+                score >= 50
+                  ? "bg-red-500/10 text-red-400 border-red-500/20"
                   : "bg-orange-500/10 text-orange-400 border-orange-500/20"
               )}>
+                {emoji && <span className="text-[11px] leading-none">{emoji}</span>}
                 {trimmed}
               </div>
             );
@@ -1340,7 +1303,7 @@ function ExchangeIcon({ name, size = 'md' }: { name: string, size?: 'sm' | 'md' 
   };
   return (
     <div className={cn(
-      "rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-slate-950", 
+      "rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-slate-950",
       colors[name] || 'bg-slate-700',
       size === 'sm' ? "w-6 h-6 text-[10px]" : "w-8 h-8 text-xs"
     )}>
@@ -1356,19 +1319,31 @@ FILE: src/components/ApiKeysPanel.tsx
 import React, { useState } from 'react';
 import { Key, Eye, EyeOff, CheckCircle2, AlertTriangle } from 'lucide-react';
 import { ApiKeyConfig } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
+import { motion } from 'motion/react';
+import { useAppStore } from '../store';
+import { api } from '../services/api';
+import { toast } from 'sonner';
+import { doc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+export default function ApiKeysPanel() {
+  const { userSettings, setUserSettings } = useAppStore();
+  const connectedExchanges = Object.keys(userSettings.apiKeys || {}).map(k => k.toLowerCase());
 
-interface ApiKeysPanelProps {
-  connectedExchanges: string[];
-  onSaveKey: (exchange: string, config: ApiKeyConfig) => Promise<void>;
-}
+  const handleSaveKey = async (exchange: string, config: ApiKeyConfig) => {
+    const newApiKeys = { ...(userSettings.apiKeys || {}), [exchange.toLowerCase()]: config };
+    const newSettings = { ...userSettings, apiKeys: newApiKeys };
+    setUserSettings(newSettings);
+    
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+    }
+    
+    await api.saveCredentials(exchange, config);
+    toast.success(`Keys for ${exchange} saved successfully`);
+  };
 
-export default function ApiKeysPanel({ connectedExchanges, onSaveKey }: ApiKeysPanelProps) {
   return (
     <div className="space-y-6">
       <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-3xl p-6 mb-8">
@@ -1390,33 +1365,33 @@ export default function ApiKeysPanel({ connectedExchanges, onSaveKey }: ApiKeysP
         <ApiKeyCard
           exchange="Binance"
           isConnected={connectedExchanges.includes('binance')}
-          onSave={(config: any) => onSaveKey('Binance', config)}
+          onSave={(config: any) => handleSaveKey('Binance', config)}
         />
         <ApiKeyCard
           exchange="Bybit"
           isConnected={connectedExchanges.includes('bybit')}
-          onSave={(config: any) => onSaveKey('Bybit', config)}
+          onSave={(config: any) => handleSaveKey('Bybit', config)}
         />
         <ApiKeyCard
           exchange="OKX"
           isConnected={connectedExchanges.includes('okx')}
           hasPassphrase
-          onSave={(config: any) => onSaveKey('OKX', config)}
+          onSave={(config: any) => handleSaveKey('OKX', config)}
         />
         <ApiKeyCard
           exchange="MEXC"
           isConnected={connectedExchanges.includes('mexc')}
-          onSave={(config: any) => onSaveKey('MEXC', config)}
+          onSave={(config: any) => handleSaveKey('MEXC', config)}
         />
         <ApiKeyCard
           exchange="CryptoBot"
           isConnected={connectedExchanges.includes('cryptobot')}
-          onSave={(config: any) => onSaveKey('CryptoBot', config)}
+          onSave={(config: any) => handleSaveKey('CryptoBot', config)}
         />
         <ApiKeyCard
           exchange="Telegram Wallet"
           isConnected={connectedExchanges.includes('telegram wallet')}
-          onSave={(config: any) => onSaveKey('Telegram Wallet', config)}
+          onSave={(config: any) => handleSaveKey('Telegram Wallet', config)}
         />
       </div>
     </div>
@@ -1457,12 +1432,14 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           </div>
         </div>
         {!isEditing && (
-          <button 
+          <motion.button 
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={() => setIsEditing(true)} 
             className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             UPDATE
-          </button>
+          </motion.button>
         )}
       </div>
 
@@ -1510,20 +1487,24 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           )}
           <div className="pt-2 flex gap-3">
             {isConnected && (
-              <button
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setIsEditing(false)}
                 className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
                 CANCEL
-              </button>
+              </motion.button>
             )}
-            <button
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.95 }}
               onClick={handleSave}
               disabled={isSaving || !localKeys.key || !localKeys.secret}
               className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
             >
               {isSaving ? 'SAVING...' : 'SAVE KEYS'}
-            </button>
+            </motion.button>
           </div>
         </div>
       ) : (
@@ -1565,22 +1546,19 @@ FILE: src/components/AutoTradePanel.tsx
 
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, Square, Settings2, AlertTriangle, CheckCircle2, XCircle, Clock, Activity } from 'lucide-react';
+import { Play, Square, Settings2, AlertTriangle, CheckCircle2, XCircle, Clock, Activity, Download } from 'lucide-react';
 import { AutoTradeConfig, AutoTradeLog } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
+import { useAppStore } from '../store';
+import useSWR from 'swr';
+import { api } from '../services/api';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+export default function AutoTradePanel() {
+  const { userSettings, setUserSettings } = useAppStore();
+  const config = userSettings.autoTrade!;
+  
+  const { data: logs = [] } = useSWR('/logs', api.getLogs, { refreshInterval: 5000 });
 
-interface AutoTradePanelProps {
-  config: AutoTradeConfig;
-  onConfigChange: (newConfig: AutoTradeConfig) => void;
-  logs: AutoTradeLog[];
-}
-
-export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTradePanelProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [localConfig, setLocalConfig] = useState<AutoTradeConfig>(config);
 
@@ -1589,7 +1567,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
   }, [config]);
 
   const handleSave = () => {
-    onConfigChange(localConfig);
+    setUserSettings({ ...userSettings, autoTrade: localConfig });
     setIsEditing(false);
   };
 
@@ -1598,6 +1576,33 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
       ? localConfig.allowedExchanges.filter(e => e !== exchange)
       : [...localConfig.allowedExchanges, exchange];
     setLocalConfig({ ...localConfig, allowedExchanges: newExchanges });
+  };
+
+  const exportLogsToCSV = () => {
+    if (!logs.length) return;
+    
+    const headers = ['Timestamp', 'Status', 'Message', 'Expected Profit', 'Amount UAH', 'Exchange'];
+    const csvContent = [
+      headers.join(','),
+      ...logs.map(log => [
+        new Date(log.timestamp).toISOString(),
+        log.status,
+        `"${log.errorMessage || ''}"`,
+        log.expectedProfit || '',
+        log.amountUah || '',
+        `${log.buyExchange} -> ${log.sellExchange}`
+      ].join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `autotrade_logs_${new Date().toISOString().split('T')[0]}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -1620,15 +1625,27 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
         
         <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end">
           <motion.button
-            whileHover={{ rotate: 90 }}
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={exportLogsToCSV}
+            className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
+            title="Export Logs to CSV"
+          >
+            <Download className="w-5 h-5" />
+          </motion.button>
+          <motion.button
+            whileHover={{ rotate: 90, scale: 1.1 }}
+            whileTap={{ scale: 0.9 }}
             transition={{ type: "spring", stiffness: 300, damping: 20 }}
             onClick={() => setIsEditing(!isEditing)}
             className="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
           >
             <Settings2 className="w-5 h-5" />
           </motion.button>
-          <button
-            onClick={() => onConfigChange({ ...config, enabled: !config.enabled })}
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => setUserSettings({ ...userSettings, autoTrade: { ...config, enabled: !config.enabled } })}
             className={cn(
               "flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-2.5 text-sm font-bold rounded-xl transition-all shadow-lg focus:ring-2 focus:ring-emerald-500/50 outline-none",
               config.enabled 
@@ -1637,11 +1654,11 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
             )}
           >
             {config.enabled ? (
-              <><Square className="w-4 h-4 fill-current" /> STOP ENGINE</>
+              <><Square className="w-4 h-4 fill-current" /> STOP</>
             ) : (
-              <><Play className="w-4 h-4 fill-current" /> START ENGINE</>
+              <><Play className="w-4 h-4 fill-current" /> START</>
             )}
-          </button>
+          </motion.button>
         </div>
       </div>
 
@@ -1663,7 +1680,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                     type="number"
                     value={localConfig.maxTradeAmount}
                     onChange={(e) => setLocalConfig({ ...localConfig, maxTradeAmount: Number(e.target.value) })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
                   />
                 </div>
                 <div>
@@ -1675,7 +1692,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                     step="0.1"
                     value={localConfig.minSpread}
                     onChange={(e) => setLocalConfig({ ...localConfig, minSpread: Number(e.target.value) })}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
                   />
                 </div>
               </div>
@@ -1687,7 +1704,9 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                   </label>
                   <div className="flex flex-wrap gap-2">
                     {['Binance', 'Bybit', 'OKX', 'MEXC'].map(ex => (
-                      <button
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
                         key={ex}
                         onClick={() => toggleExchange(ex)}
                         className={cn(
@@ -1698,7 +1717,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                         )}
                       >
                         {ex}
-                      </button>
+                      </motion.button>
                     ))}
                   </div>
                 </div>
@@ -1716,7 +1735,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                     onChange={(e) => setLocalConfig({ ...localConfig, maxRiskScore: Number(e.target.value) })}
                     className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
                   />
-                  <div className="flex justify-between mt-2 font-mono text-xs text-slate-400">
+                  <div className="flex justify-between mt-2 font-mono text-xs text-slate-400 tabular-nums">
                     <span>0 (Safest)</span>
                     <span className="text-emerald-500 font-bold">{localConfig.maxRiskScore}</span>
                     <span>100 (Risky)</span>
@@ -1725,18 +1744,22 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
               </div>
             </div>
             <div className="px-6 py-4 bg-slate-900/30 flex justify-end gap-3 border-t border-slate-800">
-              <button
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={() => setIsEditing(false)}
                 className="px-6 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
                 CANCEL
-              </button>
-              <button
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={handleSave}
                 className="px-6 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 outline-none"
               >
                 SAVE CONFIG
-              </button>
+              </motion.button>
             </div>
           </motion.div>
         )}
@@ -1766,7 +1789,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
                   <div className="text-sm font-bold text-white">
                     {log.buyExchange} → {log.sellExchange}
                   </div>
-                  <div className="text-xs text-slate-400 font-mono">
+                  <div className="text-xs text-slate-400 font-mono tabular-nums">
                     {new Date(log.timestamp).toLocaleTimeString()} • {log.amountUah} ₴
                   </div>
                 </div>
@@ -1774,7 +1797,7 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
               
               <div className="text-right">
                 <div className={cn(
-                  "text-sm font-black",
+                  "text-sm font-black tabular-nums",
                   log.status === 'SUCCESS' ? "text-emerald-400" : "text-slate-400"
                 )}>
                   +{log.expectedProfit.toFixed(0)} ₴
@@ -1801,176 +1824,578 @@ export default function AutoTradePanel({ config, onConfigChange, logs }: AutoTra
 FILE: src/components/SettingsPanel.tsx
 ============================================================
 
-import React, { useState } from 'react';
-import { Settings, ShieldAlert, CheckCircle2, Filter, Shield, Bot, Zap, Pin, MessageSquare, Bell, Send, Download, Upload, RefreshCw } from 'lucide-react';
-import { GlobalSettings, UserSettings } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import React, {useEffect, useRef, useState} from 'react';
+import {
+  Settings, ShieldAlert, CheckCircle2, Filter, Shield, Bot, Zap,
+  Pin, MessageSquare, Bell, Send, Download, Upload, RefreshCw,
+  Volume2, VolumeX, DollarSign, Percent, Building2, Link2, Unlink,
+  ArrowDownToLine, Trash2, AlertTriangle, Users, Database
+} from 'lucide-react';
+import { cn } from '../lib/utils';
+import { motion } from 'motion/react';
+import { useAppStore } from '../store';
+import { api } from '../services/api';
+import { toast } from 'sonner';
+import { doc, setDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
+import { GlobalSettings } from '../types';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
+export default function SettingsPanel() {
+  const { userSettings, isAdmin } = useAppStore();
+  const isFirstRender = useRef(true);
+  const isUpdatingFromBot = useRef(false); // 🔴 ОСЬ ЦЕЙ ЩИТ РЯТУЄ ВІД ЦИКЛІВ!
+
+  // 1. PUSH: САЙТ -> БОТ (Коли юзер крутить повзунки на сайті)
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+
+    if (!userSettings.autoSyncTelegram || !userSettings.telegramUserId) return;
+    if (isUpdatingFromBot.current) {
+      isUpdatingFromBot.current = false;
+      return;
+    }
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        const prefs = userSettings.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
+
+        const botData = await api.syncTelegram(userSettings.telegramUserId!);
+        const botSettings = botData?.settings || {};
+
+        const payloadToBot = {
+          ...userSettings,
+          maxCapital: prefs.capital ? userSettings.maxCapital : (botSettings.maxCapital || userSettings.maxCapital),
+          minSpread: prefs.spread ? userSettings.minSpread : (botSettings.minSpread || userSettings.minSpread),
+          banks: prefs.banks ? userSettings.banks : (botSettings.banks || userSettings.banks),
+          // apiKeys: якщо дозволено — відправляємо, інакше залишаємо те що є в боті
+          apiKeys: prefs.apiKeys ? userSettings.apiKeys : (botSettings.apiKeys || userSettings.apiKeys),
+        };
+
+        await api.updateTelegramSettings(userSettings.telegramUserId, payloadToBot);
+
+        if (auth.currentUser) {
+          await setDoc(doc(db, 'users', auth.currentUser.uid), userSettings, { merge: true });
+        }
+
+        toast.success('Налаштування відправлено в бот 📤', {
+          icon: <RefreshCw className="w-4 h-4 text-blue-400" />
+        });
+      } catch (error) {
+        toast.error('Помилка авто-синхронізації');
+      }
+    }, 1000);
+
+    return () => clearTimeout(timeoutId);
+
+  },[
+    userSettings.minCapital,
+    userSettings.maxCapital,
+    userSettings.minSpread,
+    userSettings.banks,
+    userSettings.merchantFilters,
+    userSettings.autoSyncTelegram,
+    userSettings.apiKeys,
+    userSettings.syncPreferences
+  ]);
+
+  // 2. PULL: БОТ -> САЙТ (Опитування кожні 5 секунд)
+  useEffect(() => {
+    if (!userSettings.telegramUserId || !userSettings.autoSyncTelegram) return;
+
+    const checkBotSettings = async () => {
+      try {
+        const botData = await api.syncTelegram(userSettings.telegramUserId!);
+        if (botData) {
+          const current = useAppStore.getState().userSettings;
+          const botSettings = botData.settings;
+          const prefs = current.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
+
+          let hasChanges = false;
+          const newSettings = { ...current };
+
+          if (prefs.capital && botSettings.maxCapital !== current.maxCapital) {
+            newSettings.maxCapital = botSettings.maxCapital;
+            hasChanges = true;
+          }
+          if (prefs.spread && botSettings.minSpread !== current.minSpread) {
+            newSettings.minSpread = botSettings.minSpread;
+            hasChanges = true;
+          }
+          if (prefs.banks && JSON.stringify(botSettings.banks) !== JSON.stringify(current.banks)) {
+            newSettings.banks = botSettings.banks;
+            hasChanges = true;
+          }
+          // Мердж ключів бірж: не затираємо існуючі — лише додаємо відсутні з бота
+          if (prefs.apiKeys && botSettings.apiKeys) {
+            const mergedKeys = { ...(current.apiKeys || {}) };
+            let keysChanged = false;
+            for (const [exchange, keys] of Object.entries(botSettings.apiKeys as Record<string, any>)) {
+              if (!mergedKeys[exchange]) {
+                mergedKeys[exchange] = keys;
+                keysChanged = true;
+              }
+            }
+            if (keysChanged) {
+              newSettings.apiKeys = mergedKeys;
+              hasChanges = true;
+            }
+          }
+
+          if (hasChanges) {
+            isUpdatingFromBot.current = true;
+            useAppStore.getState().setUserSettings(newSettings);
+
+            if (auth.currentUser) {
+              await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+            }
+            toast.info('🤖 Налаштування оновлено з Телеграму 📥');
+          }
+        }
+      } catch (e) {
+        // Ignore network errors
+      }
+    };
+
+    const intervalId = setInterval(checkBotSettings, 5000);
+    checkBotSettings();
+
+    return () => clearInterval(intervalId);
+  }, [userSettings.telegramUserId, userSettings.autoSyncTelegram, userSettings.syncPreferences]);
+
+
+  return (
+    <div className="space-y-8">
+      <TelegramSync />
+      <SoundSettings />
+      <UserFilters />
+      {isAdmin && <AdminSettings />}
+    </div>
+  );
 }
 
-interface SettingsPanelProps {
-  globalSettings: GlobalSettings;
-  userSettings: UserSettings;
-  onGlobalChange: (key: keyof GlobalSettings, value: any) => void;
-  onUserChange: (key: keyof UserSettings, value: any) => void;
-  isAdmin: boolean;
-  onConnectTelegram: (telegramId: string) => Promise<void>;
-  onDisconnectTelegram: () => Promise<void>;
-  onSyncFromBot: () => Promise<void>;
-  onSyncToBot: () => Promise<void>;
+function SoundSettings() {
+  const { userSettings, setUserSettings } = useAppStore();
+
+  const toggleSound = async () => {
+    const newVal = !userSettings.soundEnabled;
+    setUserSettings({ ...userSettings, soundEnabled: newVal });
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), { soundEnabled: newVal }, { merge: true });
+    }
+  };
+
+  const changeVolume = async (val: number) => {
+    setUserSettings({ ...userSettings, soundVolume: val });
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), { soundVolume: val }, { merge: true });
+    }
+  };
+
+  return (
+    <section className="bg-slate-900/50 border border-slate-800/50 rounded-3xl p-6">
+      <div className="flex items-center gap-4 mb-6">
+        <div className="p-3 bg-indigo-500/20 rounded-xl">
+          <Volume2 className="w-6 h-6 text-indigo-400" />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-white">Audio Notifications</h2>
+          <p className="text-sm text-slate-400">Manage sound alerts for new opportunities</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-bold text-slate-300">Enable Sounds</span>
+            <button
+              onClick={toggleSound} // <--- ЗМІНЕНО ТУТ
+              className={cn(
+                "w-12 h-6 rounded-full transition-colors relative",
+                userSettings.soundEnabled ? "bg-indigo-500" : "bg-slate-700"
+              )}
+            >
+              <motion.div
+                className="w-4 h-4 bg-white rounded-full absolute top-1"
+                animate={{ left: userSettings.soundEnabled ? '26px' : '4px' }}
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+              />
+            </button>
+          </div>
+          <p className="text-xs text-slate-500">Play a sound when a high-spread opportunity is found.</p>
+        </div>
+
+        <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
+          <div className="flex items-center justify-between mb-4">
+            <span className="text-sm font-bold text-slate-300">Volume</span>
+            <span className="text-xs font-medium text-indigo-400 bg-indigo-500/10 px-2 py-1 rounded-md">
+              {Math.round((userSettings.soundVolume || 0.5) * 100)}%
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <VolumeX className="w-4 h-4 text-slate-500" />
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={userSettings.soundVolume || 0.5}
+              onChange={(e) => changeVolume(parseFloat(e.target.value))} // <--- ЗМІНЕНО ТУТ
+              className="w-full accent-indigo-500"
+              disabled={!userSettings.soundEnabled}
+            />
+            <Volume2 className="w-4 h-4 text-slate-400" />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
-export default function SettingsPanel({ globalSettings, userSettings, onGlobalChange, onUserChange, isAdmin, onConnectTelegram, onDisconnectTelegram, onSyncFromBot, onSyncToBot }: SettingsPanelProps) {
+function TelegramSync() {
+  const { userSettings, setUserSettings, setIsAdmin } = useAppStore();
   const [tgInput, setTgInput] = useState('');
-  const [isConnecting, setIsConnecting] = useState(false);
+  const[isConnecting, setIsConnecting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+
+  // Дефолтні налаштування синхронізації (apiKeys вимкнено за замовчуванням — безпечніше)
+  const prefs = userSettings.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
+
+  const togglePref = async (key: keyof typeof prefs) => {
+    const newPrefs = { ...prefs, [key]: !prefs[key] };
+    const newSettings = { ...userSettings, syncPreferences: newPrefs };
+    setUserSettings(newSettings);
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), { syncPreferences: newPrefs }, { merge: true });
+    }
+  };
 
   const handleConnect = async () => {
     if (!tgInput) return;
     setIsConnecting(true);
-    await onConnectTelegram(tgInput);
-    setIsConnecting(false);
+    try {
+      const botData = await api.syncTelegram(tgInput);
+      if (botData) {
+        const newApiKeys = { ...(userSettings.apiKeys || {}) };
+        botData.keys.forEach((k: string) => {
+          if (!newApiKeys[k]) {
+            newApiKeys[k] = { key: 'imported_from_bot', secret: 'imported_from_bot' };
+          }
+        });
+
+        const newSettings = {
+          ...userSettings,
+          ...botData.settings,
+          apiKeys: newApiKeys,
+          telegramUserId: tgInput,
+          isTelegramAdmin: botData.isAdmin,
+          autoSyncTelegram: true
+        };
+
+        setUserSettings(newSettings);
+        setIsAdmin(botData.isAdmin);
+        if (auth.currentUser) {
+          await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+        }
+        toast.success('Successfully connected to Telegram Bot!');
+      }
+    } catch (error) {
+      toast.error('Failed to connect to Telegram Bot');
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleDisconnectTelegram = async () => {
+    const newSettings = { ...userSettings };
+    delete newSettings.telegramUserId;
+    delete newSettings.isTelegramAdmin;
+    delete newSettings.autoSyncTelegram;
+    setUserSettings(newSettings);
+    setIsAdmin(false);
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), { telegramUserId: null, isTelegramAdmin: null, autoSyncTelegram: null }, { merge: true });
+    }
+    toast.info('Disconnected from Telegram Bot');
   };
 
   const handleSyncFromBot = async () => {
+    if (!userSettings.telegramUserId) return;
     setIsSyncing(true);
-    await onSyncFromBot();
-    setIsSyncing(false);
+    try {
+      const botData = await api.syncTelegram(userSettings.telegramUserId);
+      if (botData) {
+        const botSettings = botData.settings;
+
+        // Мердж ключів бірж: не затираємо існуючі — лише додаємо відсутні
+        const mergedKeys = { ...(userSettings.apiKeys || {}) };
+        if (prefs.apiKeys && botSettings.apiKeys) {
+          for (const [exchange, keys] of Object.entries(botSettings.apiKeys as Record<string, any>)) {
+            if (!mergedKeys[exchange]) mergedKeys[exchange] = keys;
+          }
+        }
+
+        const newSettings = {
+          ...userSettings,
+          maxCapital: prefs.capital ? botSettings.maxCapital : userSettings.maxCapital,
+          minSpread: prefs.spread ? botSettings.minSpread : userSettings.minSpread,
+          banks: prefs.banks ? botSettings.banks : userSettings.banks,
+          apiKeys: prefs.apiKeys ? mergedKeys : userSettings.apiKeys,
+          isTelegramAdmin: botData.isAdmin
+        };
+        setUserSettings(newSettings);
+        setIsAdmin(botData.isAdmin);
+        if (auth.currentUser) {
+          await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+        }
+        toast.success('Налаштування стягнуто з бота');
+      }
+    } catch (error) {
+      toast.error('Помилка стягування налаштувань');
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const handleSyncToBot = async () => {
+    if (!userSettings.telegramUserId) return;
     setIsSyncing(true);
-    await onSyncToBot();
-    setIsSyncing(false);
+    try {
+      const botData = await api.syncTelegram(userSettings.telegramUserId);
+      const botSettings = botData?.settings || {};
+
+      const payloadToBot = {
+        ...userSettings,
+        maxCapital: prefs.capital ? userSettings.maxCapital : (botSettings.maxCapital || userSettings.maxCapital),
+        minSpread: prefs.spread ? userSettings.minSpread : (botSettings.minSpread || userSettings.minSpread),
+        banks: prefs.banks ? userSettings.banks : (botSettings.banks || userSettings.banks),
+        apiKeys: prefs.apiKeys ? userSettings.apiKeys : (botSettings.apiKeys || userSettings.apiKeys),
+      };
+
+      await api.updateTelegramSettings(userSettings.telegramUserId, payloadToBot);
+      toast.success('Налаштування відправлено в бот');
+    } catch (error) {
+      toast.error('Помилка відправки налаштувань');
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const toggleAutoSync = () => {
-    onUserChange('autoSyncTelegram', !userSettings.autoSyncTelegram);
+    const newVal = !userSettings.autoSyncTelegram;
+    setUserSettings({ ...userSettings, autoSyncTelegram: newVal });
+    if (auth.currentUser) {
+      setDoc(doc(db, 'users', auth.currentUser.uid), { autoSyncTelegram: newVal }, { merge: true });
+    }
   };
+
+  return (
+    <section className="bg-blue-500/10 border border-blue-500/20 rounded-3xl p-6">
+      {/* ... Верхня частина (input для ID) залишається БЕЗ ЗМІН ... */}
+      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
+        <div className="flex items-center gap-4">
+          <div className="p-3 bg-blue-500/20 rounded-xl">
+            <Send className="w-6 h-6 text-blue-400" />
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-blue-400">Telegram Bot Sync</h2>
+            <p className="text-sm text-blue-500/80">
+              {userSettings.telegramUserId
+                ? `Connected to Telegram ID: ${userSettings.telegramUserId}`
+                : "Connect your Telegram account to sync settings, API keys, and admin rights."}
+            </p>
+          </div>
+        </div>
+
+        {!userSettings.telegramUserId ? (
+          <div className="flex w-full md:w-auto gap-2">
+            <input
+              type="text"
+              placeholder="Enter Telegram ID..."
+              value={tgInput}
+              onChange={(e) => setTgInput(e.target.value)}
+              className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 outline-none w-full md:w-48 transition-all"
+            />
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={handleConnect}
+              disabled={isConnecting || !tgInput}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap focus:ring-2 focus:ring-blue-500/50 outline-none"
+            >
+              <Link2 className="w-4 h-4" />
+              {isConnecting ? 'Connecting...' : 'Connect'}
+            </motion.button>
+          </div>
+        ) : (
+          <motion.button
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={handleDisconnectTelegram}
+            className="flex items-center gap-2 px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded-xl transition-all border border-red-500/30 hover:bg-red-500/30 whitespace-nowrap focus:ring-2 focus:ring-red-500/50 outline-none"
+          >
+            <Unlink className="w-4 h-4" />
+            Disconnect
+          </motion.button>
+        )}
+      </div>
+
+      {userSettings.telegramUserId && (
+        <div className="flex items-center gap-2 text-sm text-blue-400 mb-4 mt-2">
+          <CheckCircle2 className="w-4 h-4" />
+          Connected · ID: {userSettings.telegramUserId}
+        </div>
+      )}
+
+      {userSettings.telegramUserId && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-blue-500/20 pt-6">
+          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Download className="w-4 h-4 text-emerald-400" />
+                <span className="text-sm font-bold text-white">Pull from Bot</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-4">Overwrite site settings with bot data.</p>
+            </div>
+            <motion.button
+              whileHover={{ scale: userSettings.autoSyncTelegram ? 1 : 1.02 }}
+              whileTap={{ scale: userSettings.autoSyncTelegram ? 1 : 0.95 }}
+              onClick={handleSyncFromBot}
+              disabled={isSyncing || !!userSettings.autoSyncTelegram}
+              title={userSettings.autoSyncTelegram ? 'Вимкни Auto-Sync щоб використовувати ручне керування' : undefined}
+              className={cn(
+                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 outline-none",
+                userSettings.autoSyncTelegram
+                  ? "bg-slate-800/50 border-slate-700/50 text-slate-600 cursor-not-allowed"
+                  : "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/20 focus:ring-emerald-500/50"
+              )}
+            >
+              {userSettings.autoSyncTelegram ? '🔒 AUTO-SYNC ON' : isSyncing ? 'Syncing...' : 'PULL DATA'}
+            </motion.button>
+          </div>
+
+          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Upload className="w-4 h-4 text-orange-400" />
+                <span className="text-sm font-bold text-white">Push to Bot</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-4">Overwrite bot settings with site data.</p>
+            </div>
+            <motion.button
+              whileHover={{ scale: userSettings.autoSyncTelegram ? 1 : 1.02 }}
+              whileTap={{ scale: userSettings.autoSyncTelegram ? 1 : 0.95 }}
+              onClick={handleSyncToBot}
+              disabled={isSyncing || !!userSettings.autoSyncTelegram}
+              title={userSettings.autoSyncTelegram ? 'Вимкни Auto-Sync щоб використовувати ручне керування' : undefined}
+              className={cn(
+                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 outline-none",
+                userSettings.autoSyncTelegram
+                  ? "bg-slate-800/50 border-slate-700/50 text-slate-600 cursor-not-allowed"
+                  : "bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border-orange-500/20 focus:ring-orange-500/50"
+              )}
+            >
+              {userSettings.autoSyncTelegram ? '🔒 AUTO-SYNC ON' : isSyncing ? 'Syncing...' : 'PUSH DATA'}
+            </motion.button>
+          </div>
+
+          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <RefreshCw className={cn("w-4 h-4 text-blue-400 transition-all", userSettings.autoSyncTelegram && "animate-spin")} />
+                <span className="text-sm font-bold text-white">Auto-Sync</span>
+              </div>
+              <p className="text-xs text-slate-400 mb-4">Automatically push changes to bot.</p>
+            </div>
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={toggleAutoSync}
+              className={cn(
+                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 focus:ring-blue-500/50 outline-none",
+                userSettings.autoSyncTelegram
+                  ? "bg-blue-500/20 border-blue-500/30 text-blue-400"
+                  : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
+              )}
+            >
+              {userSettings.autoSyncTelegram ? 'ENABLED' : 'DISABLED'}
+            </motion.button>
+          </div>
+
+          {/* НОВИЙ БЛОК: Вибір даних для синхронізації */}
+          <div className="col-span-1 md:col-span-3 mt-2 p-4 bg-slate-950/50 rounded-2xl border border-blue-500/10">
+            <h3 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
+              <Filter className="w-4 h-4 text-blue-400" />
+              Що саме синхронізувати:
+            </h3>
+            <div className="flex flex-wrap gap-6">
+               <label className="flex items-center gap-2 cursor-pointer group">
+                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.capital ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
+                    {prefs.capital && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
+                  </div>
+                  <input type="checkbox" checked={prefs.capital} onChange={() => togglePref('capital')} className="hidden" />
+                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Робочий Капітал</span>
+               </label>
+
+               <label className="flex items-center gap-2 cursor-pointer group">
+                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.spread ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
+                    {prefs.spread && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
+                  </div>
+                  <input type="checkbox" checked={prefs.spread} onChange={() => togglePref('spread')} className="hidden" />
+                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Мінімальний Спред</span>
+               </label>
+
+               <label className="flex items-center gap-2 cursor-pointer group">
+                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.banks ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
+                    {prefs.banks && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
+                  </div>
+                  <input type="checkbox" checked={prefs.banks} onChange={() => togglePref('banks')} className="hidden" />
+                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Цільові Банки</span>
+               </label>
+
+               <label className="flex items-center gap-2 cursor-pointer group">
+                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.apiKeys ? "bg-amber-500 border-amber-500" : "border-slate-600 group-hover:border-amber-500/50")}>
+                    {prefs.apiKeys && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
+                  </div>
+                  <input type="checkbox" checked={prefs.apiKeys} onChange={() => togglePref('apiKeys')} className="hidden" />
+                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">
+                    Ключі Бірж
+                    <span className="ml-1.5 text-[10px] text-amber-500/70 font-semibold uppercase tracking-wider">⚠ sensitive</span>
+                  </span>
+               </label>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-3 font-medium uppercase tracking-wider">
+              Зняті галочки назавжди роз'єднують цей параметр між сайтом та телеграмом.
+            </p>
+          </div>
+
+        </div>
+      )}
+    </section>
+  );
+}
+
+function UserFilters() {
+  const { userSettings, setUserSettings } = useAppStore();
 
   const toggleBank = (code: string) => {
     const newBanks = userSettings.banks.includes(code)
       ? userSettings.banks.filter(b => b !== code)
       : [...userSettings.banks, code];
-    onUserChange('banks', newBanks);
+    setUserSettings({ ...userSettings, banks: newBanks });
   };
 
   const handleMerchantFilterChange = (key: 'minOrders' | 'minRate', value: number) => {
     const currentFilters = userSettings.merchantFilters || { minOrders: 0, minRate: 0 };
-    onUserChange('merchantFilters', { ...currentFilters, [key]: value });
+    setUserSettings({ ...userSettings, merchantFilters: { ...currentFilters, [key]: value } });
   };
 
   const averageCapital = Math.floor((userSettings.minCapital + userSettings.maxCapital) / 2);
 
   return (
-    <div className="space-y-8">
-      {/* Telegram Sync Section */}
-      <section className="bg-blue-500/10 border border-blue-500/20 rounded-3xl p-6">
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
-          <div className="flex items-center gap-4">
-            <div className="p-3 bg-blue-500/20 rounded-xl">
-              <Send className="w-6 h-6 text-blue-400" />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-blue-400">Telegram Bot Sync</h2>
-              <p className="text-sm text-blue-500/80">
-                {userSettings.telegramUserId
-                  ? `Connected to Telegram ID: ${userSettings.telegramUserId}`
-                  : "Connect your Telegram account to sync settings, API keys, and admin rights."}
-              </p>
-            </div>
-          </div>
-          
-          {!userSettings.telegramUserId ? (
-            <div className="flex w-full md:w-auto gap-2">
-              <input 
-                type="text" 
-                placeholder="Enter Telegram ID..." 
-                value={tgInput}
-                onChange={(e) => setTgInput(e.target.value)}
-                className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 outline-none w-full md:w-48 transition-all"
-              />
-              <button 
-                onClick={handleConnect}
-                disabled={isConnecting || !tgInput}
-                className="px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap focus:ring-2 focus:ring-blue-500/50 outline-none"
-              >
-                {isConnecting ? 'Connecting...' : 'Connect'}
-              </button>
-            </div>
-          ) : (
-            <button 
-              onClick={onDisconnectTelegram}
-              className="px-4 py-2 bg-slate-800 hover:bg-red-500/20 text-slate-300 hover:text-red-400 font-bold rounded-xl transition-all border border-transparent hover:border-red-500/30 whitespace-nowrap focus:ring-2 focus:ring-red-500/50 outline-none"
-            >
-              Disconnect
-            </button>
-          )}
-        </div>
-
-        {userSettings.telegramUserId && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-blue-500/20 pt-6">
-            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <Download className="w-4 h-4 text-emerald-400" />
-                  <span className="text-sm font-bold text-white">Pull from Bot</span>
-                </div>
-                <p className="text-xs text-slate-400 mb-4">Overwrite site settings with bot data.</p>
-              </div>
-              <button 
-                onClick={handleSyncFromBot}
-                disabled={isSyncing}
-                className="w-full py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
-              >
-                {isSyncing ? 'Syncing...' : 'PULL DATA'}
-              </button>
-            </div>
-
-            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <Upload className="w-4 h-4 text-orange-400" />
-                  <span className="text-sm font-bold text-white">Push to Bot</span>
-                </div>
-                <p className="text-xs text-slate-400 mb-4">Overwrite bot settings with site data.</p>
-              </div>
-              <button 
-                onClick={handleSyncToBot}
-                disabled={isSyncing}
-                className="w-full py-2 bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border border-orange-500/20 rounded-xl text-xs font-bold transition-all disabled:opacity-50 focus:ring-2 focus:ring-orange-500/50 outline-none"
-              >
-                {isSyncing ? 'Syncing...' : 'PUSH DATA'}
-              </button>
-            </div>
-
-            <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-              <div>
-                <div className="flex items-center gap-2 mb-2">
-                  <RefreshCw className="w-4 h-4 text-blue-400" />
-                  <span className="text-sm font-bold text-white">Auto-Sync</span>
-                </div>
-                <p className="text-xs text-slate-400 mb-4">Automatically push changes to bot.</p>
-              </div>
-              <button 
-                onClick={toggleAutoSync}
-                className={cn(
-                  "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 focus:ring-blue-500/50 outline-none",
-                  userSettings.autoSyncTelegram 
-                    ? "bg-blue-500/20 border-blue-500/30 text-blue-400" 
-                    : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
-                )}
-              >
-                {userSettings.autoSyncTelegram ? 'ENABLED' : 'DISABLED'}
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
+    <>
       <section className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="p-2 bg-slate-800 rounded-xl">
@@ -1993,8 +2418,8 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                     type="number"
                     min="0"
                     value={userSettings.minCapital}
-                    onChange={(e) => onUserChange('minCapital', parseInt(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+                    onChange={(e) => setUserSettings({ ...userSettings, minCapital: parseInt(e.target.value) || 0 })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
                   />
                 </div>
                 <div className="flex-1">
@@ -2003,14 +2428,14 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                     type="number"
                     min="0"
                     value={userSettings.maxCapital}
-                    onChange={(e) => onUserChange('maxCapital', parseInt(e.target.value) || 0)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+                    onChange={(e) => setUserSettings({ ...userSettings, maxCapital: parseInt(e.target.value) || 0 })}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
                   />
                 </div>
               </div>
               <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex justify-between items-center">
                 <span className="text-xs font-bold text-emerald-500/80">Середня сума угоди:</span>
-                <span className="text-sm font-black text-emerald-400">{averageCapital.toLocaleString()} ₴</span>
+                <span className="text-sm font-black text-emerald-400 tabular-nums">{averageCapital.toLocaleString()} ₴</span>
               </div>
             </div>
 
@@ -2018,18 +2443,20 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мінімальний спред (%)</label>
               <div className="grid grid-cols-4 gap-2 mb-3">
                 {[0.3, 0.5, 1.0, 2.0].map(val => (
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.05 }}
+                    whileTap={{ scale: 0.95 }}
                     key={val}
-                    onClick={() => onUserChange('minSpread', val)}
+                    onClick={() => setUserSettings({ ...userSettings, minSpread: val })}
                     className={cn(
-                      "py-2.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
+                      "py-2.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums",
                       userSettings.minSpread === val
                         ? "bg-emerald-500 border-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/20"
                         : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
                     )}
                   >
                     {val}%
-                  </button>
+                  </motion.button>
                 ))}
               </div>
               <div className="flex items-center gap-3 p-1 bg-slate-950 border border-slate-800 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/50 transition-all">
@@ -2038,8 +2465,8 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
                   type="number"
                   step="0.1"
                   value={userSettings.minSpread}
-                  onChange={(e) => onUserChange('minSpread', parseFloat(e.target.value) || 0)}
-                  className="flex-1 bg-transparent border-none text-sm font-bold text-white focus:ring-0 outline-none py-2"
+                  onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
+                  className="flex-1 bg-transparent border-none text-sm font-bold text-white focus:ring-0 outline-none py-2 tabular-nums"
                 />
                 <span className="pr-4 text-slate-400 font-bold">%</span>
               </div>
@@ -2077,7 +2504,7 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               min="0"
               value={userSettings.merchantFilters?.minOrders || 0}
               onChange={(e) => handleMerchantFilterChange('minOrders', parseInt(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
               placeholder="0 для вимкнення"
             />
           </div>
@@ -2091,114 +2518,141 @@ export default function SettingsPanel({ globalSettings, userSettings, onGlobalCh
               step="0.1"
               value={userSettings.merchantFilters?.minRate || 0}
               onChange={(e) => handleMerchantFilterChange('minRate', parseFloat(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
               placeholder="0 для вимкнення"
             />
           </div>
         </div>
       </section>
+    </>
+  );
+}
 
-      {isAdmin && (
-        <section className="bg-slate-900 border border-orange-500/20 rounded-3xl p-6 relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none"></div>
+function AdminSettings() {
+  const { globalSettings, setGlobalSettings } = useAppStore();
 
-          <div className="flex items-center gap-3 mb-8">
-            <div className="p-2 bg-orange-500/10 rounded-xl border border-orange-500/20">
-              <ShieldAlert className="w-5 h-5 text-orange-400" />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-orange-400">Системні налаштування</h2>
-              <p className="text-xs uppercase tracking-widest text-orange-500/60 font-semibold">Впливають на поведінку всього сканера</p>
-            </div>
-          </div>
+  const handleGlobalChange = async (key: keyof GlobalSettings, value: any) => {
+    const newSettings = { ...globalSettings, [key]: value };
+    setGlobalSettings(newSettings);
+    await api.updateGlobalSettings(newSettings);
+  };
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <AdminSettingCard
-              icon={<Shield className="w-4 h-4 text-red-400" />}
-              label="Рівень антифроду"
-              subLabel="risk_mode"
-            >
-              <select
-                value={globalSettings.riskMode}
-                onChange={(e) => onGlobalChange('riskMode', e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              >
-                <option value="RELAXED">RELAXED</option>
-                <option value="WARNING">WARNING</option>
-                <option value="STRICT">STRICT</option>
-              </select>
-            </AdminSettingCard>
+  return (
+    <section className="bg-slate-900 border border-orange-500/20 rounded-3xl p-6 relative overflow-hidden">
+      <div className="absolute top-0 right-0 w-32 h-32 bg-orange-500/5 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none"></div>
 
-            <AdminSettingCard
-              icon={<Bot className="w-4 h-4 text-blue-400" />}
-              label="Поріг балів ботів"
-              subLabel="behavior_alert_score"
-            >
-              <input
-                type="number"
-                value={globalSettings.behaviorAlertScore}
-                onChange={(e) => onGlobalChange('behaviorAlertScore', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              />
-            </AdminSettingCard>
+      <div className="flex items-center gap-3 mb-8">
+        <div className="p-2 bg-orange-500/10 rounded-xl border border-orange-500/20">
+          <ShieldAlert className="w-5 h-5 text-orange-400" />
+        </div>
+        <div>
+          <h2 className="text-lg font-bold text-orange-400">Системні налаштування</h2>
+          <p className="text-xs uppercase tracking-widest text-orange-500/60 font-semibold">Впливають на поведінку всього сканера</p>
+        </div>
+      </div>
 
-            <AdminSettingCard
-              icon={<Zap className="w-4 h-4 text-yellow-400" />}
-              label="Аномальна швидкість (угод/год)"
-              subLabel="velocity_spike_per_hour"
-            >
-              <input
-                type="number"
-                step="0.1"
-                value={globalSettings.velocitySpikePerHour}
-                onChange={(e) => onGlobalChange('velocitySpikePerHour', parseFloat(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              />
-            </AdminSettingCard>
+      <motion.div
+        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"
+        initial="hidden"
+        animate="visible"
+        variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.08 } } }}
+      >
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Shield className="w-4 h-4 text-red-400" />}
+          label="Рівень антифроду"
+          subLabel="risk_mode"
+        >
+          <select
+            value={globalSettings.riskMode}
+            onChange={(e) => handleGlobalChange('riskMode', e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
+          >
+            <option value="RELAXED">RELAXED</option>
+            <option value="WARNING">WARNING</option>
+            <option value="STRICT">STRICT</option>
+          </select>
+        </AdminSettingCard>
+        </motion.div>
 
-            <AdminSettingCard
-              icon={<Pin className="w-4 h-4 text-red-500" />}
-              label="Липкі ліміти (циклів)"
-              subLabel="sticky_min_chain"
-            >
-              <input
-                type="number"
-                value={globalSettings.stickyMinChain}
-                onChange={(e) => onGlobalChange('stickyMinChain', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              />
-            </AdminSettingCard>
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Bot className="w-4 h-4 text-blue-400" />}
+          label="Поріг балів ботів"
+          subLabel="behavior_alert_score"
+        >
+          <input
+            type="number"
+            value={globalSettings.behaviorAlertScore}
+            onChange={(e) => handleGlobalChange('behaviorAlertScore', parseInt(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
 
-            <AdminSettingCard
-              icon={<MessageSquare className="w-4 h-4 text-slate-300" />}
-              label="Кеш відгуків (годин)"
-              subLabel="review_ttl_hours"
-            >
-              <input
-                type="number"
-                step="0.1"
-                value={globalSettings.reviewTtlHours}
-                onChange={(e) => onGlobalChange('reviewTtlHours', parseFloat(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              />
-            </AdminSettingCard>
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Zap className="w-4 h-4 text-yellow-400" />}
+          label="Аномальна швидкість (угод/год)"
+          subLabel="velocity_spike_per_hour"
+        >
+          <input
+            type="number"
+            step="0.1"
+            value={globalSettings.velocitySpikePerHour}
+            onChange={(e) => handleGlobalChange('velocitySpikePerHour', parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
 
-            <AdminSettingCard
-              icon={<Bell className="w-4 h-4 text-yellow-500" />}
-              label="Макс. алертів за цикл"
-              subLabel="max_alerts_per_cycle"
-            >
-              <input
-                type="number"
-                value={globalSettings.maxAlertsPerCycle}
-                onChange={(e) => onGlobalChange('maxAlertsPerCycle', parseInt(e.target.value) || 0)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
-              />
-            </AdminSettingCard>
-          </div>
-        </section>
-      )}
-    </div>
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Pin className="w-4 h-4 text-red-500" />}
+          label="Липкі ліміти (циклів)"
+          subLabel="sticky_min_chain"
+        >
+          <input
+            type="number"
+            value={globalSettings.stickyMinChain}
+            onChange={(e) => handleGlobalChange('stickyMinChain', parseInt(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
+
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<MessageSquare className="w-4 h-4 text-slate-300" />}
+          label="Кеш відгуків (годин)"
+          subLabel="review_ttl_hours"
+        >
+          <input
+            type="number"
+            step="0.1"
+            value={globalSettings.reviewTtlHours}
+            onChange={(e) => handleGlobalChange('reviewTtlHours', parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
+
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Bell className="w-4 h-4 text-yellow-500" />}
+          label="Макс. алертів за цикл"
+          subLabel="max_alerts_per_cycle"
+        >
+          <input
+            type="number"
+            value={globalSettings.maxAlertsPerCycle}
+            onChange={(e) => handleGlobalChange('maxAlertsPerCycle', parseInt(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
+      </motion.div>
+    </section>
   );
 }
 
@@ -2219,7 +2673,9 @@ function AdminSettingCard({ icon, label, subLabel, children }: any) {
 
 function BankToggle({ label, active, onClick }: any) {
   return (
-    <button
+    <motion.button
+      whileHover={{ scale: 1.02 }}
+      whileTap={{ scale: 0.98 }}
       onClick={onClick}
       className={cn(
         "w-full flex items-center justify-between p-3 rounded-2xl border transition-all cursor-pointer focus:ring-2 focus:ring-emerald-500/50 outline-none",
@@ -2233,7 +2689,7 @@ function BankToggle({ label, active, onClick }: any) {
       )}>
         {active && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
       </div>
-    </button>
+    </motion.button>
   );
 }
 
@@ -2404,7 +2860,10 @@ export const mockUserSettings: UserSettings = {
     maxCapital: 15000
   },
   apiKeys: {},
-  goalCapital: 50000
+  goalCapital: 50000,
+  soundEnabled: true,
+  soundVolume: 0.5,
+  accentColor: 'emerald'
 };
 
 export const mockBlacklist: BlacklistEntry[] = [
@@ -2452,6 +2911,52 @@ export const loginWithGoogle = () => signInWithPopup(auth, googleProvider);
 export const logout = () => signOut(auth);
 
 ============================================================
+FILE: src/store.ts
+============================================================
+
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware'; // ДОДАНО
+import { UserSettings, GlobalSettings, SystemStats, ArbitrageOpportunity, AutoTradeLog, BlacklistEntry } from './types';
+import { mockUserSettings, mockGlobalSettings } from './data/mock';
+
+
+
+interface AppState {
+  userSettings: UserSettings;
+  globalSettings: GlobalSettings;
+  isAdmin: boolean;
+  isFocusMode: boolean;
+  isConnected: boolean | null;
+  
+  setUserSettings: (settings: UserSettings) => void;
+  setGlobalSettings: (settings: GlobalSettings) => void;
+  setIsAdmin: (isAdmin: boolean) => void;
+  setIsFocusMode: (isFocusMode: boolean) => void;
+  setIsConnected: (isConnected: boolean | null) => void;
+}
+
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
+      userSettings: mockUserSettings,
+      globalSettings: mockGlobalSettings,
+      isAdmin: false,
+      isFocusMode: false,
+      isConnected: null,
+
+      setUserSettings: (settings) => set({ userSettings: settings }),
+      setGlobalSettings: (settings) => set({ globalSettings: settings }),
+      setIsAdmin: (isAdmin) => set({ isAdmin }),
+      setIsFocusMode: (isFocusMode) => set({ isFocusMode }),
+      setIsConnected: (isConnected) => set({ isConnected }),
+    }),
+    {
+      name: 'arbix-storage', // Ім'я ключа в localStorage браузера
+    }
+  )
+);
+
+============================================================
 FILE: .env.example
 ============================================================
 
@@ -2487,9 +2992,10 @@ FILE: index.html
 <!doctype html>
 <html lang="en">
   <head>
+    <link rel="icon" href="data:,">
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <title>Arbix Quantum</title>
   </head>
   <body>
     <div id="root"></div>
@@ -2520,7 +3026,7 @@ FILE: README.md
 
 This contains everything you need to run your app locally.
 
-View your app in AI Studio: https://ai.studio/apps/a619b915-121b-451a-9007-e99ae5ece380
+View your app in AI Studio: https://ai.studio/apps/766ff038-1d29-4847-b387-66daa2238ec1
 
 ## Run Locally
 
@@ -2534,32 +3040,251 @@ View your app in AI Studio: https://ai.studio/apps/a619b915-121b-451a-9007-e99ae
    `npm run dev`
 
 ============================================================
+FILE: src/components/AnalyticsPanel.tsx
+============================================================
+
+import React, { useState, useMemo } from 'react';
+import { motion } from 'motion/react';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from 'recharts';
+import { useAppStore } from '../store';
+import { TrendingUp, Activity, DollarSign, Target } from 'lucide-react';
+import { cn } from '../lib/utils';
+
+// Generate realistic mock data for the last 30 days
+const generateMockData = () => {
+  const data = [];
+  let currentCapital = 50000;
+  
+  for (let i = 30; i >= 0; i--) {
+    const date = new Date();
+    date.setDate(date.getDate() - i);
+    
+    const dailyProfit = Math.random() * 500 + 100; // 100 to 600 UAH
+    const volume = Math.random() * 20000 + 5000; // 5k to 25k UAH
+    const trades = Math.floor(Math.random() * 15) + 2;
+    
+    currentCapital += dailyProfit;
+    
+    data.push({
+      date: date.toLocaleDateString('uk-UA', { month: 'short', day: 'numeric' }),
+      profit: Math.round(dailyProfit),
+      capital: Math.round(currentCapital),
+      volume: Math.round(volume),
+      trades
+    });
+  }
+  return data;
+};
+
+export function AnalyticsPanel() {
+  const [timeframe, setTimeframe] = useState<'7d' | '14d' | '30d'>('14d');
+  
+  const mockData = useMemo(() => generateMockData(), []);
+  
+  const filteredData = useMemo(() => {
+    const days = timeframe === '7d' ? 7 : timeframe === '14d' ? 14 : 30;
+    return mockData.slice(-days);
+  }, [mockData, timeframe]);
+
+  const totalProfit = filteredData.reduce((sum, day) => sum + day.profit, 0);
+  const totalVolume = filteredData.reduce((sum, day) => sum + day.volume, 0);
+  const totalTrades = filteredData.reduce((sum, day) => sum + day.trades, 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-100">Analytics & PnL</h1>
+          <p className="text-sm text-zinc-400">Track your arbitrage performance over time</p>
+        </div>
+        
+        <div className="flex items-center gap-2 bg-zinc-900/50 p-1 rounded-lg border border-zinc-800/50">
+          {(['7d', '14d', '30d'] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTimeframe(t)}
+              className={cn(
+                "px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                timeframe === t 
+                  ? "bg-zinc-800 text-zinc-100 shadow-sm" 
+                  : "text-zinc-400 hover:text-zinc-200"
+              )}
+            >
+              {t.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <StatCard 
+          title="Total Profit" 
+          value={`+${totalProfit.toLocaleString('uk-UA')} ₴`} 
+          icon={<TrendingUp className="h-5 w-5 text-emerald-400" />} 
+          trend="+12.5%" 
+        />
+        <StatCard 
+          title="Trading Volume" 
+          value={`${totalVolume.toLocaleString('uk-UA')} ₴`} 
+          icon={<DollarSign className="h-5 w-5 text-blue-400" />} 
+          trend="+5.2%" 
+        />
+        <StatCard 
+          title="Total Trades" 
+          value={totalTrades.toString()} 
+          icon={<Activity className="h-5 w-5 text-purple-400" />} 
+        />
+        <StatCard 
+          title="Avg. Profit / Trade" 
+          value={`${Math.round(totalProfit / totalTrades)} ₴`} 
+          icon={<Target className="h-5 w-5 text-amber-400" />} 
+        />
+      </div>
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Main PnL Chart */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="lg:col-span-2 bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-6"
+        >
+          <h3 className="text-sm font-medium text-zinc-400 mb-6">Cumulative Capital Growth</h3>
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={filteredData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="colorCapital" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                <XAxis 
+                  dataKey="date" 
+                  stroke="#52525b" 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false}
+                  dy={10}
+                />
+                <YAxis 
+                  stroke="#52525b" 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false}
+                  tickFormatter={(val) => `${val / 1000}k`}
+                  dx={-10}
+                />
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px' }}
+                  itemStyle={{ color: '#e4e4e7' }}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey="capital" 
+                  stroke="#10b981" 
+                  strokeWidth={2}
+                  fillOpacity={1} 
+                  fill="url(#colorCapital)" 
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </motion.div>
+
+        {/* Daily Profit Bar Chart */}
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+          className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-6"
+        >
+          <h3 className="text-sm font-medium text-zinc-400 mb-6">Daily Profit (UAH)</h3>
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={filteredData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                <XAxis 
+                  dataKey="date" 
+                  stroke="#52525b" 
+                  fontSize={12} 
+                  tickLine={false} 
+                  axisLine={false}
+                  dy={10}
+                />
+                <Tooltip 
+                  cursor={{ fill: '#27272a', opacity: 0.4 }}
+                  contentStyle={{ backgroundColor: '#18181b', borderColor: '#27272a', borderRadius: '8px' }}
+                />
+                <Bar 
+                  dataKey="profit" 
+                  fill="#3b82f6" 
+                  radius={[4, 4, 0, 0]} 
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </motion.div>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ title, value, icon, trend }: { title: string, value: string, icon: React.ReactNode, trend?: string }) {
+  return (
+    <motion.div 
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="bg-zinc-900/50 border border-zinc-800/50 rounded-xl p-5 flex flex-col"
+    >
+      <div className="flex items-center justify-between mb-4">
+        <span className="text-sm font-medium text-zinc-400">{title}</span>
+        <div className="p-2 bg-zinc-800/50 rounded-lg">
+          {icon}
+        </div>
+      </div>
+      <div className="flex items-end justify-between mt-auto">
+        <span className="text-2xl font-bold text-zinc-100 tabular-nums">{value}</span>
+        {trend && (
+          <span className="text-xs font-medium text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded-md">
+            {trend}
+          </span>
+        )}
+      </div>
+    </motion.div>
+  );
+}
+
+============================================================
 FILE: src/components/BlacklistPanel.tsx
 ============================================================
 
 import React, { useState } from 'react';
 import { ShieldBan, Search, Trash2, Plus } from 'lucide-react';
 import { BlacklistEntry } from '../types';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { cn } from '../lib/utils';
+import { motion } from 'motion/react';
+import useSWR from 'swr';
+import { api } from '../services/api';
 
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-
-interface BlacklistPanelProps {
-  blacklist: BlacklistEntry[];
-  onUnban: (merchantId: string, exchange: string) => void;
-}
-
-export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelProps) {
+export default function BlacklistPanel() {
   const [searchTerm, setSearchTerm] = useState('');
+  const { data: blacklist = [], mutate } = useSWR('/blacklist', api.getBlacklist);
 
   const filteredList = blacklist.filter(entry => 
     entry.merchantName.toLowerCase().includes(searchTerm.toLowerCase()) ||
     entry.merchantId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     entry.reason.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const handleUnban = async (merchantId: string, exchange: string) => {
+    const success = await api.removeFromBlacklist(merchantId, exchange);
+    if (success) {
+      mutate(blacklist.filter(entry => !(entry.merchantId === merchantId && entry.exchange === exchange)), false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -2590,10 +3315,14 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
               className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-12 pr-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
             />
           </div>
-          <button className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none">
+          <motion.button 
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
+          >
             <Plus className="w-4 h-4" />
             MANUAL BAN
-          </button>
+          </motion.button>
         </div>
 
         <div className="overflow-x-auto">
@@ -2612,7 +3341,7 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                 <tr key={`${entry.exchange}-${entry.merchantId}`} className="hover:bg-slate-800/20 transition-colors">
                   <td className="p-4">
                     <div className="font-bold text-white">{entry.merchantName}</div>
-                    <div className="text-xs font-mono text-slate-400">{entry.merchantId}</div>
+                    <div className="text-xs font-mono text-slate-400 tabular-nums">{entry.merchantId}</div>
                   </td>
                   <td className="p-4">
                     <span className="px-2 py-1 bg-slate-800 text-slate-300 text-xs font-bold rounded uppercase tracking-wider">
@@ -2626,18 +3355,20 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
                   </td>
                   <td className="p-4">
                     <div className="text-xs text-slate-400">{entry.source}</div>
-                    <div className="text-xs text-slate-500 font-mono">
+                    <div className="text-xs text-slate-500 font-mono tabular-nums">
                       {new Date(entry.addedAt).toLocaleDateString()}
                     </div>
                   </td>
                   <td className="p-4 text-right">
-                    <button
-                      onClick={() => onUnban(entry.merchantId, entry.exchange)}
+                    <motion.button
+                      whileHover={{ scale: 1.1 }}
+                      whileTap={{ scale: 0.9 }}
+                      onClick={() => handleUnban(entry.merchantId, entry.exchange)}
                       className="p-2 hover:bg-red-500/10 text-slate-500 hover:text-red-400 rounded-lg transition-colors focus:ring-2 focus:ring-red-500/50 outline-none"
                       title="Unban Merchant"
                     >
                       <Trash2 className="w-4 h-4" />
-                    </button>
+                    </motion.button>
                   </td>
                 </tr>
               )) : (
@@ -2656,38 +3387,157 @@ export default function BlacklistPanel({ blacklist, onUnban }: BlacklistPanelPro
 }
 
 ============================================================
+FILE: src/components/CommandPalette.tsx
+============================================================
+
+import { useEffect, useState } from 'react';
+import { Command } from 'cmdk';
+import { useNavigate } from 'react-router-dom';
+import { useAppStore } from '../store';
+import { Search, LayoutDashboard, Settings, Key, ShieldBan, Activity, Volume2, VolumeX, Power, PowerOff } from 'lucide-react';
+
+export function CommandPalette() {
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const { userSettings, setUserSettings, globalSettings, setGlobalSettings, isAdmin } = useAppStore();
+
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setOpen((open) => !open);
+      }
+    };
+
+    document.addEventListener('keydown', down);
+    return () => document.removeEventListener('keydown', down);
+  }, []);
+
+  const runCommand = (command: () => void) => {
+    setOpen(false);
+    command();
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] bg-black/50 backdrop-blur-sm">
+      <div className="fixed inset-0" onClick={() => setOpen(false)} />
+      <Command
+        className="relative z-50 w-full max-w-lg overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+        label="Global Command Menu"
+      >
+        <div className="flex items-center border-b border-zinc-800 px-3">
+          <Search className="mr-2 h-5 w-5 shrink-0 text-zinc-500" />
+          <Command.Input
+            autoFocus
+            className="flex h-12 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-zinc-500 text-zinc-100"
+            placeholder="Type a command or search..."
+          />
+        </div>
+        <Command.List className="max-h-[300px] overflow-y-auto p-2">
+          <Command.Empty className="py-6 text-center text-sm text-zinc-500">
+            No results found.
+          </Command.Empty>
+
+          <Command.Group heading="Navigation" className="text-xs font-medium text-zinc-500 px-2 py-1.5">
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <LayoutDashboard className="mr-2 h-4 w-4" />
+              Dashboard
+            </Command.Item>
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/autotrade'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <Activity className="mr-2 h-4 w-4" />
+              Auto-Trade
+            </Command.Item>
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/analytics'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <Activity className="mr-2 h-4 w-4" />
+              Analytics
+            </Command.Item>
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/apikeys'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <Key className="mr-2 h-4 w-4" />
+              API Keys
+            </Command.Item>
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/blacklist'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <ShieldBan className="mr-2 h-4 w-4" />
+              Blacklist
+            </Command.Item>
+            <Command.Item
+              onSelect={() => runCommand(() => navigate('/settings'))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              <Settings className="mr-2 h-4 w-4" />
+              Settings
+            </Command.Item>
+          </Command.Group>
+
+          <Command.Group heading="Quick Actions" className="text-xs font-medium text-zinc-500 px-2 py-1.5 mt-2">
+            <Command.Item
+              onSelect={() => runCommand(() => setUserSettings({ ...userSettings, soundEnabled: !userSettings.soundEnabled }))}
+              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+            >
+              {userSettings.soundEnabled ? <VolumeX className="mr-2 h-4 w-4" /> : <Volume2 className="mr-2 h-4 w-4" />}
+              {userSettings.soundEnabled ? 'Mute Sounds' : 'Enable Sounds'}
+            </Command.Item>
+            
+            {isAdmin && (
+              <Command.Item
+                onSelect={() => runCommand(() => setGlobalSettings({ ...globalSettings, riskMode: globalSettings.riskMode === 'STRICT' ? 'WARNING' : 'STRICT' }))}
+                className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+              >
+                {globalSettings.riskMode === 'STRICT' ? <PowerOff className="mr-2 h-4 w-4 text-red-400" /> : <Power className="mr-2 h-4 w-4 text-emerald-400" />}
+                {globalSettings.riskMode === 'STRICT' ? 'Relax Risk Mode' : 'Strict Risk Mode'}
+              </Command.Item>
+            )}
+          </Command.Group>
+        </Command.List>
+      </Command>
+    </div>
+  );
+}
+
+============================================================
 FILE: src/components/Sidebar.tsx
 ============================================================
 
 import React from 'react';
-import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, LogIn, ShieldAlert, ChevronLeft, ChevronRight } from 'lucide-react';
-import { clsx, type ClassValue } from 'clsx';
-import { twMerge } from 'tailwind-merge';
-
-function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { NavLink } from 'react-router-dom';
+import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, LogIn, ShieldAlert, ChevronLeft, ChevronRight, BarChart3 } from 'lucide-react';
+import { cn } from '../lib/utils';
+import { useAppStore } from '../store';
 
 interface SidebarProps {
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
-  isAdmin: boolean;
-  onToggleAdmin: () => void;
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
-  isConnected?: boolean | null;
   user: any;
   onLogin: () => void;
   onLogout: () => void;
 }
 
-export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmin, isOpen, setIsOpen, isConnected, user, onLogin, onLogout }: SidebarProps) {
+export default function Sidebar({ isOpen, setIsOpen, user, onLogin, onLogout }: SidebarProps) {
+  const { isAdmin, setIsAdmin, isConnected } = useAppStore();
+
   const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'autotrade', label: 'Auto-Trade', icon: Activity },
-    { id: 'apikeys', label: 'API Keys', icon: Key },
-    { id: 'settings', label: 'Settings', icon: Settings },
-    { id: 'blacklist', label: 'Blacklist', icon: ShieldBan },
+    { id: 'dashboard', path: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'autotrade', path: '/autotrade', label: 'Auto-Trade', icon: Activity },
+    { id: 'analytics', path: '/analytics', label: 'Analytics', icon: BarChart3 },
+    { id: 'apikeys', path: '/apikeys', label: 'API Keys', icon: Key },
+    { id: 'settings', path: '/settings', label: 'Settings', icon: Settings },
+    { id: 'blacklist', path: '/blacklist', label: 'Blacklist', icon: ShieldBan },
   ];
 
   return (
@@ -2727,12 +3577,11 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
       <nav className="flex-1 p-4 space-y-2 overflow-x-hidden">
         {navItems.map((item) => {
           const Icon = item.icon;
-          const isActive = activeTab === item.id;
           return (
-            <button
+            <NavLink
               key={item.id}
-              onClick={() => setActiveTab(item.id)}
-              className={cn(
+              to={item.path}
+              className={({ isActive }) => cn(
                 "w-full flex items-center rounded-xl transition-all font-bold text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none",
                 isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center",
                 isActive 
@@ -2743,7 +3592,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
             >
               <Icon className="w-5 h-5 shrink-0" />
               {isOpen && <span className="whitespace-nowrap">{item.label}</span>}
-            </button>
+            </NavLink>
           );
         })}
       </nav>
@@ -2751,7 +3600,7 @@ export default function Sidebar({ activeTab, setActiveTab, isAdmin, onToggleAdmi
       <div className="p-4 border-t border-slate-800 space-y-2 overflow-x-hidden">
         {user && (
           <button 
-            onClick={onToggleAdmin}
+            onClick={() => setIsAdmin(!isAdmin)}
             className={cn(
               "w-full flex items-center rounded-xl transition-all font-bold text-sm border focus:ring-2 focus:ring-orange-500/50 outline-none",
               isOpen ? "justify-between px-4 py-3" : "justify-center p-3",
@@ -2842,3 +3691,32 @@ FILE: src/index.css
 ============================================================
 
 @import "tailwindcss";
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #020617; /* slate-950 */
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b; /* slate-800 */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155; /* slate-700 */
+}
+
+============================================================
+FILE: src/lib/utils.ts
+============================================================
+
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}

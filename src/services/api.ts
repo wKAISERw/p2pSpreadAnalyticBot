@@ -23,7 +23,7 @@ export const api = {
   getLogs: () => apiClient.get<any, AutoTradeLog[]>('/logs'),
   getGlobalSettings: () => apiClient.get<any, GlobalSettings>('/settings/global'),
   getBlacklist: () => apiClient.get<any, BlacklistEntry[]>('/blacklist'),
-
+  getAccounts: (telegramId: string) => apiClient.get<any, any[]>(`/accounts/${telegramId}`),
   saveCredentials: async (exchange: string, keys: ApiKeyConfig): Promise<boolean> => {
     try {
       await apiClient.post(`/credentials/${exchange.toLowerCase()}`, keys);

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Key, Eye, EyeOff, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Key, Eye, EyeOff, CheckCircle2, Trash2 } from 'lucide-react';
 import { ApiKeyConfig } from '../types';
 import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
@@ -22,8 +22,23 @@ export default function ApiKeysPanel() {
       await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
     }
     
-    await api.saveCredentials(exchange, config);
+    // await api.saveCredentials(exchange, config);
     toast.success(`Keys for ${exchange} saved successfully`);
+  };
+
+  const handleDisconnect = async (exchange: string) => {
+    const newApiKeys = { ...(userSettings.apiKeys || {}) };
+    delete newApiKeys[exchange.toLowerCase()];
+    
+    const newSettings = { ...userSettings, apiKeys: newApiKeys };
+    setUserSettings(newSettings);
+    
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+    }
+    
+    // await api.deleteCredentials(exchange);
+    toast.success(`Disconnected ${exchange}`);
   };
 
   return (
@@ -48,39 +63,45 @@ export default function ApiKeysPanel() {
           exchange="Binance"
           isConnected={connectedExchanges.includes('binance')}
           onSave={(config: any) => handleSaveKey('Binance', config)}
+          onDisconnect={() => handleDisconnect('Binance')}
         />
         <ApiKeyCard
           exchange="Bybit"
           isConnected={connectedExchanges.includes('bybit')}
           onSave={(config: any) => handleSaveKey('Bybit', config)}
+          onDisconnect={() => handleDisconnect('Bybit')}
         />
         <ApiKeyCard
           exchange="OKX"
           isConnected={connectedExchanges.includes('okx')}
           hasPassphrase
           onSave={(config: any) => handleSaveKey('OKX', config)}
+          onDisconnect={() => handleDisconnect('OKX')}
         />
         <ApiKeyCard
           exchange="MEXC"
           isConnected={connectedExchanges.includes('mexc')}
           onSave={(config: any) => handleSaveKey('MEXC', config)}
+          onDisconnect={() => handleDisconnect('MEXC')}
         />
         <ApiKeyCard
           exchange="CryptoBot"
           isConnected={connectedExchanges.includes('cryptobot')}
           onSave={(config: any) => handleSaveKey('CryptoBot', config)}
+          onDisconnect={() => handleDisconnect('CryptoBot')}
         />
         <ApiKeyCard
           exchange="Telegram Wallet"
           isConnected={connectedExchanges.includes('telegram wallet')}
           onSave={(config: any) => handleSaveKey('Telegram Wallet', config)}
+          onDisconnect={() => handleDisconnect('Telegram Wallet')}
         />
       </div>
     </div>
   );
 }
 
-function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
+function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase }: any) {
   const [isEditing, setIsEditing] = useState(!isConnected);
   const [showSecret, setShowSecret] = useState(false);
   const [localKeys, setLocalKeys] = useState<ApiKeyConfig>({ key: '', secret: '', passphrase: '' });
@@ -114,14 +135,25 @@ function ApiKeyCard({ exchange, isConnected, onSave, hasPassphrase }: any) {
           </div>
         </div>
         {!isEditing && (
-          <motion.button 
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => setIsEditing(true)} 
-            className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
-          >
-            UPDATE
-          </motion.button>
+          <div className="flex items-center gap-2">
+            <motion.button 
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setIsEditing(true)} 
+              className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-lg transition-colors focus:ring-2 focus:ring-slate-500/50 outline-none"
+            >
+              UPDATE
+            </motion.button>
+            <motion.button 
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={onDisconnect} 
+              className="p-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg transition-colors focus:ring-2 focus:ring-red-500/50 outline-none"
+              title="Disconnect Exchange"
+            >
+              <Trash2 className="w-4 h-4" />
+            </motion.button>
+          </div>
         )}
       </div>
 
