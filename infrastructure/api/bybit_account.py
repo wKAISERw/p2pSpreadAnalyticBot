@@ -63,24 +63,12 @@ class BybitAccountClient(BaseHttpClient):
         return await self.get_balance("FUND")
 
     async def get_my_ads(self, status: str = "ONLINE") -> list[dict]:
-        """Мої активні P2P оголошення. status: ONLINE | OFFLINE | CANCELED"""
-        if not self.is_authenticated: return []
-        query = f"status={status}&tokenId=USDT&currencyId=UAH&limit=20"
-        try:
-            data = await self._get(f"{BASE_URL}/v5/p2p/item/personal/list?{query}", headers=self._sign_headers(query))
-            return data.get("result", {}).get("items", []) or []
-        except Exception as e:
-            logger.warning("get_my_ads: %s", e); return []
+        """Заглушка: Bybit не віддає P2P дані через звичайний API (повертає 404)"""
+        return []
 
     async def get_my_orders(self, status: str = "TRADING", limit: int = 20) -> list[dict]:
-        """Мої P2P угоди. status: PENDING | TRADING | SOLD | FINISHED | CANCELLED"""
-        if not self.is_authenticated: return []
-        query = f"status={status}&tokenId=USDT&limit={limit}"
-        try:
-            data = await self._get(f"{BASE_URL}/v5/p2p/order/simplifyList?{query}", headers=self._sign_headers(query))
-            return data.get("result", {}).get("items", []) or []
-        except Exception as e:
-            logger.warning("get_my_orders: %s", e); return []
+        """Заглушка: Bybit не віддає P2P дані через звичайний API"""
+        return []
 
     async def get_account_info(self) -> dict:
         """Базова інформація акаунта (UID, рівень, статус верифікації)."""

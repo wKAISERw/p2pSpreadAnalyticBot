@@ -28,7 +28,12 @@ class Order:
     risk_flag: str = ""
     # Верифікований мерчант (жовта/синя галочка де доступно)
     is_verified: bool = False
-
+# ── НОВІ ПОЛЯ (ДОДАТИ СЮДИ) ──
+    account_age_days: int = 0
+    composite_score: int = 0
+    review_score: int = 0
+    review_neg_pct: float = 0.0
+    review_fetched: bool = False
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""

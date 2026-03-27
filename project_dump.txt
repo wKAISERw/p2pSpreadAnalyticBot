@@ -1,6 +1,6 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-26 19:06
-# Files: 76
+# Generated: 2026-03-27 22:38
+# Files: 77
 #
 # STRUCTURE:
 #   config\settings.py
@@ -13,7 +13,6 @@
 #   core\analysis\regex_analyzer.py
 #   core\analysis\behavioral_analyzer.py
 #   core\analysis\identity_analyzer.py
-#   core\analysis\rules.py
 #   core\workers\llm_worker.py
 #   core\workers\review_fetcher.py
 #   core\engine\cross_matcher.py
@@ -54,6 +53,8 @@
 #   config\__init__.py
 #   config.py
 #   core\analysis\__init__.py
+#   core\analysis\review_analyzer.py
+#   core\analysis\rules.py
 #   core\engine\__init__.py
 #   core\engine\risk_engine.py
 #   core\storage\__init__.py
@@ -153,7 +154,7 @@ class Settings(BaseSettings):
     stability_ttl_seconds: float = 15.0
 
     # ── DB ────────────────────────────────────────────────────────────────
-    snapshot_retention_hours: int = 168
+    snapshot_retention_hours: int = 24
     snapshot_heartbeat_minutes: int = 10
     db_async_analyze_concurrency: int = 8
 
@@ -230,7 +231,7 @@ LIMIT_EPSILON: float = 0.01
 IDENTITY_TWIN_MINUTES: int = 15
 
 # ── DB / Storage ──────────────────────────────────────────────────────
-SNAPSHOT_RETENTION_HOURS: int = 168
+SNAPSHOT_RETENTION_HOURS: int = 24
 SNAPSHOT_HEARTBEAT_MINUTES: int = 10
 
 # ── Scanner ────────────────────────────────────────────────────────────
@@ -815,7 +816,8 @@ async def _db_maintenance_loop(
         db: MerchantDB,
         interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
 ) -> None:
-    max_age = getattr(settings, "db_snapshot_max_age_h", 168)
+    # 24 години історії повністю достатньо для детекції ботів
+    max_age = getattr(settings, "db_snapshot_max_age_h", 24)
     while True:
         await asyncio.sleep(interval_hours * 3600)
         try:
@@ -859,8 +861,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
-
-    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
+    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
@@ -1024,7 +1025,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         for o in b_orders:
                             if merchant_filter.passed(o):
                                 if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
@@ -1032,7 +1033,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         for o in s_orders:
                             if merchant_filter.passed(o):
                                 if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
@@ -1212,7 +1213,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         sent_count += 1
 
                         if not is_muted():
-                            await dispatcher.dispatch(alert, opp)
+                            # Fire-and-forget: не блокуємо сканер чекаючи Telegram API
+                            asyncio.create_task(dispatcher.dispatch(alert, opp))
                     state.opportunities = current_frontend_opps[:50]
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
@@ -1797,12 +1799,18 @@ class MerchantDB:
                                          NOT
                                          NULL
                                      );
-
+                                    CREATE TABLE IF NOT EXISTS merchant_review_history (
+                                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                            exchange TEXT NOT NULL,
+                                            merchant_id TEXT NOT NULL,
+                                            positive_count INTEGER DEFAULT 0,
+                                            negative_count INTEGER DEFAULT 0,
+                                            neg_pct REAL DEFAULT 0.0,
+                                            recorded_at REAL NOT NULL
+                                        );
+                                    CREATE INDEX IF NOT EXISTS idx_rev_hist ON merchant_review_history(exchange, merchant_id, recorded_at);
                                      CREATE INDEX IF NOT EXISTS idx_verdict_lookup
                                          ON merchant_verdict (exchange, merchant_id);
-
-                                     CREATE INDEX IF NOT EXISTS idx_reviews_lookup
-                                         ON merchant_reviews (exchange, merchant_id);
 
                                      /* 🚀 ІНДЕКСИ ДЛЯ СНАПШОТІВ */
                                      CREATE INDEX IF NOT EXISTS idx_snap_lookup
@@ -2525,6 +2533,39 @@ class MerchantDB:
 
         return [dict(r) for r in rows]
 
+    async def get_verdict_timestamp(self, exchange: str, merchant_id: str) -> float:
+        if not self._db: return 0.0
+        try:
+            async with self._db.execute(
+                    "SELECT updated_at FROM merchant_verdict WHERE exchange=? AND merchant_id=? ORDER BY updated_at DESC LIMIT 1",
+                    (exchange, merchant_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return float(row["updated_at"]) if row else 0.0
+        except Exception:
+            return 0.0
+
+    async def save_review_snapshot(self, exchange: str, merchant_id: str, pos: int, neg: int, neg_pct: float) -> None:
+        if not self._db: return
+        await self._db.execute(
+            "INSERT INTO merchant_review_history (exchange, merchant_id, positive_count, negative_count, neg_pct, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (exchange, merchant_id, pos, neg, neg_pct, time.time())
+        )
+        await self._db.commit()
+
+    async def get_review_trend(self, exchange: str, merchant_id: str, days: int = 7) -> dict:
+        if not self._db: return {"trend": "stable", "delta": 0.0}
+        since = time.time() - (days * 86400)
+        async with self._db.execute(
+                "SELECT neg_pct FROM merchant_review_history WHERE exchange=? AND merchant_id=? AND recorded_at > ? ORDER BY recorded_at ASC",
+                (exchange, merchant_id, since)
+        ) as cur:
+            rows = await cur.fetchall()
+
+        if len(rows) < 2: return {"trend": "stable", "delta": 0.0}
+        delta = float(rows[-1]["neg_pct"]) - float(rows[0]["neg_pct"])
+        trend = "worsening" if delta > 3.0 else "improving" if delta < -3.0 else "stable"
+        return {"trend": trend, "delta": delta}
 
 ============================================================
 FILE: core/analysis/regex_analyzer.py
@@ -2945,9 +2986,9 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-LIMIT_EPSILON = 0.01
+# 🚀 НОВЕ: Відносна похибка для лімітів 2% (замість 1 копійки)
+LIMIT_TOLERANCE_PCT = 0.02
 PRICE_BAND_TOLERANCE = 0.005  # ±0.5% для ціни
-
 
 @dataclass(slots=True)
 class IdentityResult:
@@ -2955,37 +2996,32 @@ class IdentityResult:
     twin_exchanges: List[str] = field(default_factory=list)
     reason: str = ""
 
-
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
 
-
 def _get_hash(terms: str) -> str:
-    """Генерує MD5 хеш для тексту умов, якщо його немає."""
     if not terms:
         return ""
     return hashlib.md5(terms.encode('utf-8')).hexdigest()
 
+def _limits_match(c_val: float, s_val: float) -> bool:
+    """Порівнює ліміти з допустимою похибкою 2%."""
+    if s_val == 0: return False
+    return abs(c_val - s_val) / s_val <= LIMIT_TOLERANCE_PCT
 
 def analyze_identity(current_order, twins_snapshots: List[Dict[str, Any]]) -> IdentityResult:
-    """
-    Identity V2: Порівнює поточний ордер з двійниками.
-    Умова (збіг всіх трьох): terms_hash + price_band (±0.5%) + limit_pair.
-    """
     if not twins_snapshots:
         return IdentityResult()
 
     c_min = _to_float(getattr(current_order, "min_limit", 0.0))
     c_max = _to_float(getattr(current_order, "max_limit", 0.0))
     c_price = _to_float(getattr(current_order, "price", 0.0))
-
     c_terms = getattr(current_order, "trade_terms", "") or ""
     c_terms_hash = getattr(current_order, "terms_hash", "") or _get_hash(c_terms)
 
-    # Якщо немає базових даних, аналіз неможливий
     if c_min <= 0 or c_max <= 0 or c_price <= 0 or not c_terms_hash:
         return IdentityResult()
 
@@ -2997,577 +3033,42 @@ def analyze_identity(current_order, twins_snapshots: List[Dict[str, Any]]) -> Id
         s_price = _to_float(snap.get("price", 0.0))
         s_terms_hash = snap.get("terms_hash", "")
 
-        # 1. Збіг лімітів (limit_pair)
-        limits_match = abs(c_min - s_min) <= LIMIT_EPSILON and abs(c_max - s_max) <= LIMIT_EPSILON
+        # 1. Збіг лімітів (відносний)
+        limits_match = _limits_match(c_min, s_min) and _limits_match(c_max, s_max)
 
-        # 2. Збіг ціни (price_band ±0.5%)
+        # 2. Збіг ціни (±0.5%)
         price_match = False
         if s_price > 0:
-            price_diff_pct = abs(c_price - s_price) / s_price
-            price_match = price_diff_pct <= PRICE_BAND_TOLERANCE
+            price_match = abs(c_price - s_price) / s_price <= PRICE_BAND_TOLERANCE
 
-        # 3. Збіг тексту умов (terms_hash)
+        # 3. Збіг тексту умов
         hash_match = bool(s_terms_hash) and c_terms_hash == s_terms_hash
 
-        # ТІЛЬКИ ПРИ ЗБІГУ ВСІХ ТРЬОХ ФАКТОРІВ
         if limits_match and price_match and hash_match:
             matched.add(snap.get("exchange", "Unknown"))
 
     if matched:
         ex_str = ",".join(sorted(matched))
-        return IdentityResult(
-            is_twin=True,
-            twin_exchanges=list(matched),
-            reason=f"CLONES:{ex_str}"
-        )
+        return IdentityResult(is_twin=True, twin_exchanges=list(matched), reason=f"CLONES:{ex_str}")
 
     return IdentityResult()
-
-============================================================
-FILE: core/analysis/rules.py
-============================================================
-
-# core/rules_generated.py
-# =============================================================================
-# AUTO-GENERATED by build_rules.py — НЕ РЕДАГУВАТИ РУКАМИ
-# Джерела: antifrod_trade_terms.json + antifrod_reviews.json + antifrod_concepts.json
-# Policy:
-#   - trade_terms  → merchant instruction layer, severity as-is
-#   - reviews      → capped at SOFT (review_only=True), no direct BLOCK
-#   - concepts     → base regex atoms, deduped + merged
-#   - short ambiguous atoms → SOFT, require LLM co-eval
-# =============================================================================
-"""
-Розширений реєстр правил v2.0.
-
-Нові правила додані поверх базового rules.py:
-  - HARD/SOFT/WARN/SAFE шари збережені
-  - review_only правила мають окремий review_only=True прапор
-  - suppress_hard поля заповнені де є explicit SAFE кандидати
-
-Додавання нових правил:
-  1. Оновіть antifrod_*.json
-  2. Запустіть build_rules.py → rules_generated.py
-  3. Скопіюйте нові RegexRule в production rules.py
-"""
-from __future__ import annotations
-
-import re
-from dataclasses import dataclass
-
-HARD_CONFIRM_REQUIRED = frozenset({"EXTERNAL_LINK", "TRIANGLE"})
-HARD_DIRECT_BLOCK     = frozenset({"NO_COMMENTS", "CASINO"})
-
-
-@dataclass(slots=True)
-class RegexRule:
-    id:            str
-    category:      str
-    pattern:       re.Pattern
-    weight:        int
-    action:        str
-    description:   str
-    suppress_hard: frozenset = frozenset()
-    review_only:   bool      = False
-
-
-
-HARD_RULES: list[RegexRule] = [
-    RegexRule(
-        "GEN_H01_EXTERNAL",
-        "EXTERNAL_LINK",
-        re.compile(
-            r"(?:t\.me)|(?:telegram\.me)|(?:@\w{4,})|(?:\bтг\b)|(?:телег(а|рам))|(?:вайбер)|(?:viber:)|(?:whatsapp)|(?:watsap)|(?:\bлс\b.{0,10}(до|перед|оплат))|(?:(пишіть|write|contact).{0,25}(telegram|tg|viber|whatsapp|signal|телеграм|вайбер))",
-            re.IGNORECASE,
-        ),
-        100,
-        "BLOCK",
-        "Виведення угоди в зовнішній месенджер — перший крок скаму: поза контролем платформи мерчант може дав",
-        suppress_hard=frozenset({'не пишіть у тг', 'в месенджери не переходжу', 'тільки чат біржі', 'не виходжу за межі платформи'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_H02_TRIANGLE",
-        "TRIANGLE",
-        re.compile(
-            r"(?:дроп(и|ів|овод|ер|ів)?)|(?:треугол)|(?:трикутник)|(?:чуж[аіо].{0,5}(карт|рахун))|(?:від.{0,10}(знайом|друг|родич))|(?:карта.{0,15}(знайом|друг|дружин|брат|сестр))|(?:карта.{0,15}(знайом|друг|дружин|брат|сестр|родич))|(?:чуж[аіою].{0,10}(карт|рахун|особ))|(?:переказ.{0,15}від.{0,15}(знайом|друг))|(?:від\sіншої\s(особи|людини))|(?:дроп[иів]?.{0,10}(вітаються|ок|ok|прийма|можна|допускаються|норм|welcome|allowed))|(?:лев[иіо].{0,5}(реквіз|рекв))|(?:чуж[іаою].{0,5}(реквіз|рахун|ібан|картк))|(?:реквізити.{0,10}(не\s*мо[їя]|від\s*інш|чужі))",
-            re.IGNORECASE,
-        ),
-        100,
-        "BLOCK",
-        "Дроп = підставна особа для прийому/відправки коштів. Трикутник = схема де мерчант дає реквізити не с",
-        suppress_hard=frozenset({'без дропів', 'дропи заборонені', 'дроп не приймаю', 'дроп відмовлю'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_H03_NO_COMME",
-        "NO_COMMENTS",
-        re.compile(
-            r"(?:без.{0,10}(коментар|призначен|комент))|(?:пуст(е|о).{0,5}(поле|призначен))|(?:нічого.{0,5}(не\s*)?пиш)|(?:не.{0,10}вказуйте.{0,10}призначен)|(?:поле.{0,10}(залиш|лиш).{0,5}пустим)|(?:\bб/к\b)|(?:no.?comment)|(?:пуст(е|е).{0,10}(поле|призначен))",
-            re.IGNORECASE,
-        ),
-        100,
-        "BLOCK",
-        "Заборона коментарів у призначенні переказу — класичний спосіб приховати зв'язок між P2P угодою і бан",
-        suppress_hard=frozenset(),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_H04_CASINO",
-        "CASINO",
-        re.compile(
-            r"(?:казино|casino|казик)|(?:гембл[аиу]|gambling)|(?:букмекер|bookie)|(?:беттинг|betting)|(?:\bбетк[аиу]\b)|(?:проц\b|процесинг|processing)|(?:агрегатор)|(?:1x.?bet|melbet|mostbet|betway|parimatch|fonbet)|(?:казино)|(?:casino)|(?:казик)|(?:1x.?bet)|(?:melbet)|(?:mostbet)|(?:betway)|(?:parimatch)|(?:fonbet)|(?:покер)|(?:poker)|(?:букмекер)|(?:bookie)|(?:ставки.{0,10}(на\s*)?спорт)|(?:гральн)|(?:gambling)|(?:гембл)|(?:беттинг)|(?:betting)|(?:процесинг)|(?:processing)|(?:проц\b)|(?:бетк[аиу])|(?:\bбук\b)|(?:ставки.{0,10}(спорт|онлайн|прийма))",
-            re.IGNORECASE,
-        ),
-        100,
-        "BLOCK",
-        "Усі ці сервіси заборонені або обмежені більшістю Ukrainian банків та P2P платформ. Участь у їх проце",
-        suppress_hard=frozenset({'не беру казино трафік', 'без гемблінгу', 'без беттингу'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S02_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:обнал(ичк|ьн|ьщик|ьник)?)|(?:фінмон|фінансов.{0,5}моніторинг)|(?:aml|anti.?money)|(?:заморозк)|(?:серяк|сірак)|(?:грязн|брудн.{0,5}(гроші|кошти))|(?:відмивання)|(?:мутн(ий|а|ка))|(?:фінмон)|(?:фінансов.{0,5}моніторинг)|(?:aml)|(?:anti.?money)|(?:блокуван.{0,10}(рахунк|картк))|(?:сір[аі].{0,10}(схем|гроші))|(?:обнал)|(?:обнал(ичк|ьн|ьщик|ичиван)?\b)|(?:грязн)|(?:брудн.{0,5}(гроші|кошти))|(?:сір[аі].{0,5}(схем|гроші|кошти))|(?:dirty.{0,5}money)|(?:черн.{0,5}деньг)|(?:серы.{0,5}деньг)",
-            re.IGNORECASE,
-        ),
-        100,
-        "BLOCK",
-        "Пряма або прихована ознака участі у відмиванні коштів або роботі з коштами незаконного походження.",
-        suppress_hard=frozenset({'без обналу', 'не обнал', 'без сірих схем', 'чисті кошти тільки'}),
-        review_only=False,
-    ),
-]
-
-SOFT_RULES: list[RegexRule] = [
-    RegexRule(
-        "GEN_S01_CHARGEBA",
-        "CHARGEBACK",
-        re.compile(
-            r"(?:\bреф(анд)?\b)|(?:чардж(бек|нув|ував)?)|(?:charge.?back)|(?:\bдисп(ут)?\b)|(?:dispute)|(?:апел(ка|яці|яха|юха)?)|(?:refund)|(?:чардж)|(?:chargeback)|(?:реф(анд)?\b)|(?:диспут)|(?:dispute.{0,15}(відкри|подам|open))|(?:відкрию.{0,10}спір)|(?:повернення.{0,10}(через\s*банк|коштів\s*через))",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Chargeback та refund у P2P — класичний фінансовий скам: отримав крипту, повернув переказ через банк.",
-        suppress_hard=frozenset({'без чарджів', 'чардж не роблю', 'захист від рефанду'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S03_ANONYMOU",
-        "ANONYMOUS",
-        re.compile(
-            r"(?:анонімн)|(?:anonymous)|(?:без.{0,10}(перевірк|питань|kyc|kyk|документ|верифікац))|(?:no.{0,5}(questions|kyc|id|checks))|(?:cash.?in)|(?:термінал.{0,10}(оплат|поповнен|готівк))|(?:без.{0,10}(перевірк|питань|kyk|kyc|документ|верифікац))|(?:no.{0,5}(questions|kyc|id))|(?:термінал.{0,10}(оплат|поповнен))",
-            re.IGNORECASE,
-        ),
-        30,
-        "NEEDS_LLM",
-        "Пропозиція угоди без ідентифікації — обхід AML/KYC вимог, типово для дропів та відмивання.",
-        suppress_hard=frozenset({"верифікація обов'язкова", 'тільки верифіковані'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S04_MIDDLEMA",
-        "MIDDLEMAN",
-        re.compile(
-            r"(?:посередник|посеред\b|посред(ник)?)|(?:номінал(ьн)?|номік)|(?:прокладка)|(?:middleman|nominee)|(?:транзит.{0,10}(рахунок|кошти))|(?:посередник)|(?:номінал)|(?:через.{0,10}посередника)|(?:middleman)|(?:nominee)|(?:номік)|(?:посеред\b)",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Використання посередника або номінального власника приховує реального бенефіціара — типово для струк",
-        suppress_hard=frozenset({'без посередників', 'без номіналів', 'прямий переказ'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S05_CHAT_FIR",
-        "CHAT_FIRST",
-        re.compile(
-            r"(?:пишіть?.{0,15}(до оплат|перед|спочатку))|(?:написати?.{0,15}(до|перед).{0,10}оплат)|(?:write.{0,15}(before|first))|(?:contact.{0,10}(me\s*)?before)|(?:\bлс\b.{0,10}(до|перед))|(?:повідомте.{0,5}мене.{0,5}перед)|(?:написати.{0,15}(до|перед))|(?:лс.{0,10}(до|перед|оплат))",
-            re.IGNORECASE,
-        ),
-        30,
-        "NEEDS_LLM",
-        "Вимога контакту поза чатом до угоди — типовий крок виведення з платформи або інструктаж дропової схе",
-        suppress_hard=frozenset({'не пишіть до оплати', 'не потрібно писати перед'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S06_SUSPICIO",
-        "SUSPICIOUS_BIZ",
-        re.compile(
-            r"(?:фоп.{0,10}(оплат|рахун))|(?:рахунок.{0,10}фоп)|(?:iban.{0,10}фоп)|(?:рахунок.{0,10}підприємц)|(?:бізнес.{0,10}рахунок)",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Оплата на бізнес-рахунок у P2P — нетипова і ризикована, може бути прикриттям легалізації. Але деякі ",
-        suppress_hard=frozenset(),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S07_APPEAL_P",
-        "APPEAL_PRESSURE",
-        re.compile(
-            r"(?:апел(яці|яцію|яцій|к[ауи]))|(?:відкри(ю|ємо).{0,15}(апел|спір|суперечку|диспут))|(?:скарг)|(?:поскаржусь)|(?:appeal)|(?:report\s+you)|(?:dispute.{0,10}(open|will|відкри))",
-            re.IGNORECASE,
-        ),
-        30,
-        "NEEDS_LLM",
-        "Погроза апеляцією як тиск — типовий прийом шахрая щоб змусити відпустити кошти без виконання умов.",
-        suppress_hard=frozenset(),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_S08_THIRD_PA",
-        "THIRD_PARTY_HINT",
-        re.compile(
-            r"(?:третіх.{0,10}осіб)|(?:3.{0,5}особ)|(?:third.{0,5}part)|(?:від.{0,10}інших.{0,10}осіб)",
-            re.IGNORECASE,
-        ),
-        20,
-        "NEEDS_LLM",
-        "Двозначна фраза — може бути заборона (SAFE) або дозвіл (HARD). LLM повинен оцінити контекст.",
-        suppress_hard=frozenset(),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_H05_TRIANGLE",
-        "TRIANGLE",
-        re.compile(
-            r"(?:треугол)|(?:трикутник)|(?:треуг\b)|(?:triangle.{0,10}scam)",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Назва конкретної схеми відмивання через P2P. Відгук з цим словом майже завжди означає реальну скаргу",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S09_TRIANGLE",
-        "TRIANGLE",
-        re.compile(
-            r"дроп(и|ів|овод|ер|ів)?\b",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Дроп у негативному відгуку = підозра що мерчант використовує підставних осіб для переказів.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_H06_TRIANGLE",
-        "TRIANGLE",
-        re.compile(
-            r"(?:дроповод)|(?:дроп.?вод\b)",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Дроповод = організатор дроп-мережі. Назва ролі в P2P-злочинній схемі.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_H07_TRIANGLE",
-        "TRIANGLE",
-        re.compile(
-            r"(?:чуж[аяіо].{0,5}(карт|рахун|реквіз|картк))|(?:карта.{0,10}не.{0,5}(його|моя|своя))|(?:рахунок.{0,10}не.{0,5}(його|мій))|(?:лев[иіо].{0,5}(реквіз|рекв))",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Конкретна ознака дропа — переказ на рахунок що не належить мерчанту.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S10_CASINO",
-        "CASINO",
-        re.compile(
-            r"(?:\bпроц\b)|(?:процес(инг|с\b))|(?:processing\b)",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Скорочений сленг для processing — ознака що мерчант займається обробкою платежів для high-risk бізне",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_H08_CASINO",
-        "CASINO",
-        re.compile(
-            r"(?:гембл[аиу])|(?:гемба\b)|(?:gambling)|(?:казик)|(?:казін[оу].{0,10}(трафік|схем))",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Сленгова назва гемблінг-бізнесу. Якщо у відгуку — підтверджує що мерчант пов'язаний з казино.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S11_CASINO",
-        "CASINO",
-        re.compile(
-            r"(?:\bбук(а|ач)?\b)|(?:bookie)|(?:беттинг)|(?:бетк[аиу])",
-            re.IGNORECASE,
-        ),
-        100,
-        "NEEDS_LLM",
-        "Сленг букмекера або беттинг-бізнесу. Двозначне — може бути контекст і без схеми.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S12_CHARGEBA",
-        "CHARGEBACK",
-        re.compile(
-            r"(?:\bреф(анд)?\b)|(?:refund)|(?:реф.{0,15}(банк|апел|схем|через))",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Рефанд через банк після P2P = класична схема шахрайства (отримав крипту, скасував переказ).",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S13_CHARGEBA",
-        "CHARGEBACK",
-        re.compile(
-            r"(?:чардж(бек|нув|ував)?)|(?:chargeback)|(?:charge.?back)|(?:зчарджив)",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Chargeback = повернення через банк після отриманої крипти. У відгуках майже завжди скарга на реальни",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S14_APPEAL_P",
-        "APPEAL_PRESSURE",
-        re.compile(
-            r"(?:\bдисп(ут|утував)?\b)|(?:dispute)|(?:апел(ка|яція|яха|юха|ювання)?\b)",
-            re.IGNORECASE,
-        ),
-        30,
-        "NEEDS_LLM",
-        "Диспут як інструмент тиску або як результат конфлікту — маркер проблемної угоди.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S15_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:мутк[аиу])|(?:мутн(ий|а|о))|(?:мутняк)|(?:темн(ий|а|о|як))|(?:темна.{0,5}(схем|тем))",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Жаргонне визначення підозрілої/незрозумілої/нечесної операції. У відгуках = попередження від досвідч",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S16_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:серяк)|(?:сірак)|(?:сір[аі].{0,5}(схем|гроші|трафік|контор|тем))|(?:gray.{0,5}scheme)|(?:grey.{0,5}money)",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Жаргонна назва напівлегальних або нелегальних фінансових операцій.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_H09_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:обнальщик)|(?:обнальн)|(?:обнал(ичк|ьник)?\b)",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Прямий опис ролі у незаконному обналічуванні коштів.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S17_MIDDLEMA",
-        "MIDDLEMAN",
-        re.compile(
-            r"(?:посеред(ник)?\b)|(?:посред(ник)?\b)|(?:номік)|(?:номінал\b)|(?:прокладка)|(?:middleman)",
-            re.IGNORECASE,
-        ),
-        40,
-        "NEEDS_LLM",
-        "Наявність посередника у P2P = прихований бенефіціар, типово для відмивання.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S18_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:скам(ер|ував)?)|(?:scam(mer)?)|(?:кинув)|(?:кидало)|(?:розвів)|(?:шахрай)|(?:фейк.{0,5}(мерч|акаун))|(?:розвод)",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Пряме звинувачення у шахрайстві у відгуку — дуже важливий сигнал.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S19_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:заморозив)|(?:заморозил[иа])|(?:заморозк)|(?:заблокував)|(?:заблокувал[иа])|(?:freeze)|(?:blocked.{0,10}account)|(?:рахунок.{0,5}заморожен)",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Заморозка рахунку після угоди = ознака що кошти мали кримінальне походження або банк їх ідентифікува",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_S20_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:лев[аяиу]к)|(?:лів[аяиу]к)|(?:лів(а|ий|ій).{0,5}(схем|тем|трафік|мерч))|(?:лева.{0,5}(схем|тем))",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Жаргонне позначення нелегальної/тіньової операції або мерчанта.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_H10_FINCRIME",
-        "FINCRIME",
-        re.compile(
-            r"(?:грязн)|(?:брудн.{0,5}(гроші|кошти|трафік))|(?:dirty.{0,5}money)|(?:грязь)",
-            re.IGNORECASE,
-        ),
-        50,
-        "NEEDS_LLM",
-        "Пряма назва коштів злочинного походження у відгуках.",
-        suppress_hard=frozenset(),
-        review_only=True,  # review-only signal
-    ),
-]
-
-WARN_RULES: list[RegexRule] = [
-    RegexRule(
-        "GEN_W01_RECEIPT_",
-        "RECEIPT_REQUIRED",
-        re.compile(
-            r"(?:квитанці[яю])|(?:скриншот.{0,10}(оплат|квитанц))|(?:фото.{0,10}(чеку|квитанц))|(?:чек.{0,10}(оплат|надішл|скинь))|(?:підтвердження.{0,10}оплати.{0,10}(надішл|скинь))|(?:screenshot.{0,5}of.{0,5}payment)|(?:\bпруф\b.{0,10}оплат)|(?:\bскрін\b.{0,5}(чек|оплат|квитанц))|(?:чек.{0,10}(оплат|надішл))|(?:пруф.{0,10}оплат)",
-            re.IGNORECASE,
-        ),
-        10,
-        "WARN",
-        "Вимога квитанції — WARN рівень. Саме по собі не небезпечно, але може бути використано для відмови пі",
-        suppress_hard=frozenset(),
-        review_only=False,
-    ),
-]
-
-SAFE_RULES: list[RegexRule] = [
-    RegexRule(
-        "GEN_F01_SAFE",
-        "SAFE",
-        re.compile(
-            r"(?:без.{0,5}третіх.{0,5}осіб)|(?:не.{0,10}(від|приймаю.{0,5}від).{0,5}третіх)|(?:тільки.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:тільки.{0,5}власник.{0,5}картк)|(?:дроп.{0,5}(заборонен|не\s*прийма|відмовлю))|(?:без.{0,5}посередників)|(?:не.{0,10}пишіть.{0,10}(у|в).{0,5}(telegram|tg|viber|whatsapp|телеграм|вайбер))|(?:в.{0,5}месенджери.{0,5}не.{0,5}переходжу)|(?:спілкування.{0,5}тільки.{0,5}(в\s*)?чаті.{0,5}біржі)|(?:тільки.{0,5}чат.{0,5}(біржі|платформи))|(?:не.{0,5}виходжу.{0,5}за.{0,5}межі)",
-            re.IGNORECASE,
-        ),
-        -50,
-        "SAFE",
-        "Не ризикована — навпаки, захист від трикутника.",
-        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_F03_SAFE",
-        "SAFE",
-        re.compile(
-            r"(?:не.{0,10}(бере|приймає).{0,10}від.{0,10}(третіх|чужих))|(?:тільки.{0,5}своїх.{0,5}реквізит)|(?:без\s*дропів)|(?:дропи.{0,5}не.{0,5}прийма)",
-            re.IGNORECASE,
-        ),
-        -50,
-        "SAFE",
-        "Не ризикова — підтвердження що мерчант дотримується правил.",
-        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
-        review_only=True,  # review-only signal
-    ),
-    RegexRule(
-        "GEN_SAFE_ANTI_EXT",
-        "SAFE",
-        re.compile(
-            r"(?:не.{0,10}пишіть.{0,10}(у|в).{0,5}(telegram|tg|viber|whatsapp|signal|телеграм|вайбер))|(?:в.{0,5}месенджери.{0,5}не.{0,5}переходжу)|(?:спілкування.{0,5}тільки.{0,5}(в\s*)?чаті.{0,5}біржі)|(?:тільки.{0,5}чат.{0,5}(біржі|платформи))|(?:не.{0,5}виходжу.{0,5}за.{0,5}межі)|(?:chat.{0,5}only.{0,5}(on\s*)?platform)",
-            re.IGNORECASE,
-        ),
-        -50,
-        "SAFE",
-        "Мерчант забороняє зовнішні месенджери",
-        suppress_hard=frozenset({'EXTERNAL_LINK'}),
-        review_only=False,
-    ),
-    RegexRule(
-        "GEN_SAFE_ANTI_DROP",
-        "SAFE",
-        re.compile(
-            r"(?:без.{0,5}третіх.{0,5}осіб)|(?:не.{0,10}(від|приймаю.{0,5}від).{0,5}третіх.{0,5}осіб)|(?:тільки.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:лише.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:тільки.{0,5}з.{0,5}особистої.{0,5}картк)|(?:оплата.{0,5}лише.{0,5}з.{0,5}картки.{0,5}власника)|(?:переказ.{0,5}тільки.{0,5}від.{0,5}власника)|(?:не.{0,5}приймаю.{0,5}від.{0,5}інших.{0,5}осіб)|(?:без.{0,5}посередників)|(?:тільки.{0,5}власник.{0,5}картки)|(?:дроп[иі]?.{0,5}(заборонен|не\s*прийма|відмовлю))|(?:без.{0,5}дропів)",
-            re.IGNORECASE,
-        ),
-        -50,
-        "SAFE",
-        "Мерчант явно забороняє третіх осіб та дропів",
-        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
-        review_only=False,
-    ),
-]
-
-
-ALL_RULES: list[RegexRule] = HARD_RULES + SOFT_RULES + WARN_RULES + SAFE_RULES
-
-
-SUPPRESSOR_MAP: dict[str, frozenset] = {
-    rule.category: rule.suppress_hard
-    for rule in SAFE_RULES
-    if rule.suppress_hard
-}
 
 ============================================================
 FILE: core/workers/llm_worker.py
 ============================================================
 
-# core/llm_worker.py
+# core/workers/llm_worker.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v1.0  (Крок 1: канонічна версія + Groq backoff)
+# БОЙОВА ВЕРСІЯ v2.0
 # =============================================================================
 """
 Асинхронний LLM-воркер.
 
-Поточний pipeline:
-scanner -> RiskEngine -> asyncio.Queue -> llm_worker -> MerchantDB
-
-Апгрейд:
-- короткий структурований prompt замість сирого text dump
-- використання score / matches / normalized_text з RegexResult
-- жорсткіший JSON parsing
-- кращі логи для подальшого тюнінгу правил
+Зміни v2.0:
+  - smart_truncate: зберігає початок + кінець trade_terms (scam часто в кінці)
+  - bad_texts передаються в LLM навіть при UNAVAILABLE статусі
+  - account_age_days в промпті
+  - LLMTask розширено: account_age_days
 """
 
 from __future__ import annotations
@@ -3577,7 +3078,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
@@ -3596,6 +3097,7 @@ logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
 GROQ_MODEL   = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile").strip()
 
+
 def _setup_llm_log() -> logging.Logger:
     Path("logs").mkdir(exist_ok=True)
     llm_log = logging.getLogger("LLMDecisions")
@@ -3612,6 +3114,7 @@ def _setup_llm_log() -> logging.Logger:
         llm_log.propagate = False
     return llm_log
 
+
 class RateLimitError(RuntimeError):
     pass
 
@@ -3623,16 +3126,17 @@ class PermanentModelError(RuntimeError):
 class ProviderRateLimitError(RuntimeError):
     pass
 
+
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS = 3
-LLM_TIMEOUT = 7.0
-MAX_QUEUE = 200
-MAX_NORM_TERMS = 220
+LLM_WORKERS          = 3
+LLM_TIMEOUT          = 7.0
+MAX_QUEUE            = 200
+MAX_NORM_TERMS       = 800   # v2: збільшено з 220 — тепер smart truncate
 MAX_MATCHES_IN_PROMPT = 3
-MAX_EXCERPT_LEN = 90
+MAX_EXCERPT_LEN      = 90
 
-SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.0).
+SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.1).
 Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
 
 ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
@@ -3652,28 +3156,33 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - BOT_API: використання скриптів/процесингу (прапори API_REPLENISH).
 
 КРИТИЧНО:
-- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант чітко пише "тільки своя карта", "без 3-х осіб", "з 3 особами не працюю" — ЦЕ БЕЗПЕЧНО (OK). НЕ видумуй прихованих ризиків і НЕ припускай винятків, якщо про них прямо не написано!
-- 🧾 КВИТАНЦІЇ ТА ЧЕКИ: Прохання надати чек, квитанцію або відео екрану після оплати — це НОРМАЛЬНО і БЕЗПЕЧНО. НІКОЛИ не блокуй і не став SUSPICIOUS тільки за те, що мерчант вимагає чек.
-- 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — це БЕЗПЕЧНО (OK). Ризиком є лише довірені особи З ІНШИМ прізвищем.
-- ПОВЕДІНКА СТАКАНУ: Якщо в полі "Поведінка" є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. Ти ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
-- Враховуй СТАТИСТИКУ! Якщо мерчант ВЕРИФІКОВАНИЙ, має >500 угод і >95% успішності, але немає прапорів ботів — його жорсткі вимоги щодо своєї безпеки є нормою.
+- 🚀 РОЗРІЗНЯЙ "ЗАБОРОНЯЄ" ТА "ДОПУСКАЄ ВИНЯТКИ". Якщо мерчант чітко пише "тільки своя карта", "без 3-х осіб", "з 3 особами не працюю" — ЦЕ БЕЗПЕЧНО (OK). НЕ видумуй прихованих ризиків!
+- 🧾 КВИТАНЦІЇ ТА ЧЕКИ: Прохання надати чек — це НОРМАЛЬНО. НІКОЛИ не блокуй тільки за вимогу чеку.
+- 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — БЕЗПЕЧНО.
+- ПОВЕДІНКА СТАКАНУ: Якщо є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
+- НОВИЙ АКАУНТ: Якщо акаунт молодший 14 днів, а кількість угод підозріло велика — підвищуй ризик.
+- ВІДГУКИ: Негативні відгуки зі словами "шахрай", "кинув", "дроп" — сильний сигнал BLOCK навіть без тексту умов.
+- Враховуй СТАТИСТИКУ! Верифікований мерчант з >500 угодами і >95% — його жорсткі вимоги щодо безпеки є нормою.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
-{"status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ_ВИЩЕ","reason":"до 120 символів українською"}"""
+{"thought_process":"твій логічний ланцюжок роздумів перед вердиктом","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"короткий підсумок"}"""
+
 
 @dataclass
 class LLMTask:
-    exchange: str
-    merchant_id: str
-    merchant_name: str
-    trade_terms: str
-    regex_result: RegexResult
-    finish_rate: float
+    exchange:          str
+    merchant_id:       str
+    merchant_name:     str
+    trade_terms:       str
+    regex_result:      RegexResult
+    finish_rate:       float
     month_order_count: int
-    is_verified: bool
-    min_limit: float
-    max_limit: float
-    behavior_flags: list[str]
+    is_verified:       bool
+    min_limit:         float
+    max_limit:         float
+    behavior_flags:    list[str] = field(default_factory=list)
+    account_age_days:  int = 0       # v2: вік акаунту в днях (0 = невідомо)
+
 
 class LLMWorkerPool:
     def __init__(self, db: MerchantDB):
@@ -3683,7 +3192,6 @@ class LLMWorkerPool:
         self._workers: list[asyncio.Task] = []
         self._session: Optional[aiohttp.ClientSession] = None
         self._stats = {"processed": 0, "blocks": 0, "timeouts": 0, "errors": 0}
-        # 🚀 ШАР 2: Anti-requeue кеш (останній виклик LLM)
         self._recent_calls = TTLCache(ttl_seconds=600)
 
     async def start(self) -> None:
@@ -3704,30 +3212,27 @@ class LLMWorkerPool:
         s = self._stats
         logger.info(
             "LLMWorkerPool зупинено: оброблено=%d блоків=%d таймаутів=%d помилок=%d",
-            s["processed"], s["blocks"], s["timeouts"], s["errors"]
+            s["processed"], s["blocks"], s["timeouts"], s["errors"],
         )
 
     def schedule(
         self,
-        exchange: str,
-        merchant_id: str,
-        merchant_name: str,
-        trade_terms: str,
-        regex_result: RegexResult,
-        finish_rate: float = 0.0,
-        month_order_count: int = 0,
-        is_verified: bool = False,
-        min_limit: float = 0.0,
-        max_limit: float = 0.0,
-        behavior_flags: list[str] = None
+        exchange:          str,
+        merchant_id:       str,
+        merchant_name:     str,
+        trade_terms:       str,
+        regex_result:      RegexResult,
+        finish_rate:       float = 0.0,
+        month_order_count: int   = 0,
+        is_verified:       bool  = False,
+        min_limit:         float = 0.0,
+        max_limit:         float = 0.0,
+        behavior_flags:    list[str] = None,
+        account_age_days:  int = 0,
     ) -> bool:
         cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
         if key in self._pending or self._recent_calls.seen(cache_key):
-            return False
-            # 🚀 Забороняємо ставити в чергу частіше ніж раз на 10 хвилин (600 сек)
-        now = time.time()
-        if now - self._recent_calls.get(key, 0) < 600:
             return False
         task = LLMTask(
             exchange=exchange,
@@ -3740,7 +3245,8 @@ class LLMWorkerPool:
             is_verified=is_verified,
             min_limit=min_limit,
             max_limit=max_limit,
-            behavior_flags=behavior_flags or []
+            behavior_flags=behavior_flags or [],
+            account_age_days=account_age_days,
         )
         try:
             self._queue.put_nowait(task)
@@ -3760,16 +3266,13 @@ class LLMWorkerPool:
                 finally:
                     self._pending.discard((task.exchange, task.merchant_id))
                     self._queue.task_done()
-
                 await asyncio.sleep(0.25)
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self._stats["errors"] += 1
                 logger.error("LLM Worker %d помилка: %s", worker_id, e, exc_info=True)
                 await asyncio.sleep(1.0)
-
 
     async def _process(self, task: LLMTask) -> None:
         cached = await self._db.get_verdict(
@@ -3782,99 +3285,71 @@ class LLMWorkerPool:
         result = await self._call_with_fallback(task, review_summary)
         self._stats["processed"] += 1
 
-        verdict = result.get("status", "UNKNOWN").upper()
+        verdict   = result.get("status", "UNKNOWN").upper()
         risk_type = result.get("risk", "") or "NONE"
-        reason = (result.get("reason", "") or "")[:150]
-        source = result.get("_source", "unknown")
+        reason    = (result.get("reason", "") or "")[:150]
+        source    = result.get("_source", "unknown")
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
 
         await self._db.save_verdict(
-            task.exchange,
-            task.merchant_id,
-            task.merchant_name,
-            task.trade_terms,
-            verdict,
-            risk_type,
-            reason,
-            source,
+            task.exchange, task.merchant_id, task.merchant_name,
+            task.trade_terms, verdict, risk_type, reason, source,
         )
 
-        rr = task.regex_result
+        rr    = task.regex_result
         score = getattr(rr, "score", 0)
-        cats = _regex_categories(rr)
+        cats  = _regex_categories(rr)
 
         LLM_LOG.info(
             "%-8s | %-10s | %-10s | %-14s | score=%-3s | cats=%-30s | %-8s | %s | %s",
-            task.exchange,
-            task.merchant_id[:10],
-            verdict,
-            risk_type,
-            score,
-            ",".join(cats)[:30] or "NONE",
-            source,
-            task.merchant_name[:20],
-            reason[:80],
+            task.exchange, task.merchant_id[:10], verdict, risk_type, score,
+            ",".join(cats)[:30] or "NONE", source, task.merchant_name[:20], reason[:80],
         )
 
         if verdict == "BLOCK":
             logger.warning(
                 "🚫 LLM BLOCK [%s] %s [%s]: %s — %s",
-                source, task.merchant_name, task.exchange, risk_type, reason
+                source, task.merchant_name, task.exchange, risk_type, reason,
             )
 
-            # Фіксуємо звернення (TTLCache сам його видалить через 600 сек)
         self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
-    # Groq cooldown — class-level щоб всі воркери бачили той самий стан
-    _groq_cooldown_until: float = 0.0
-    _groq_consecutive_429: int  = 0
-
-    # 🚀 ДОДАЄМО: Gemini cooldown
+    # ── Groq / Gemini cooldown (class-level) ─────────────────────────────────
+    _groq_cooldown_until:   float = 0.0
+    _groq_consecutive_429:  int   = 0
     _gemini_cooldown_until: float = 0.0
 
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
-        import random, time as _time
+        import random
+        import time as _time
+
         user_msg = _build_prompt(task, review_summary)
 
-        # Перевіряємо cooldown перед запитом
-        now = _time.monotonic()
-        groq_available = LLMWorkerPool._groq_cooldown_until <= now
+        now             = _time.monotonic()
+        groq_available  = LLMWorkerPool._groq_cooldown_until   <= now
         gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
 
-        # 🚀 ФІКС: Якщо обидва сервіси на паузі - економимо час і не стукаємо
         if not groq_available and not gemini_available:
             self._stats["timeouts"] += 1
-            logger.warning("⛔ Обидві LLM на паузі (Rate Limit). Пропускаємо %s", task.merchant_name)
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "Both APIs on rate limit cooldown",
-                "_source": "cooldown_skip",
-            }
-
-        if not groq_available:
-            remaining = LLMWorkerPool._groq_cooldown_until - now
-            logger.debug("Groq cooldown %.0fs → Gemini", remaining)
+            logger.warning("⛔ Обидві LLM на паузі. Пропускаємо %s", task.merchant_name)
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Both APIs on cooldown", "_source": "cooldown_skip"}
 
         if groq_available:
             try:
                 result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
                 result["_source"] = "groq"
-                LLMWorkerPool._groq_consecutive_429 = 0  # успіх → скидаємо
+                LLMWorkerPool._groq_consecutive_429 = 0
                 return result
             except RateLimitError:
                 LLMWorkerPool._groq_consecutive_429 += 1
-                n = LLMWorkerPool._groq_consecutive_429
-                # Exponential backoff: 30s → 60s → 120s → 240s → 480s (max)
+                n    = LLMWorkerPool._groq_consecutive_429
                 base = 30.0 * (2 ** min(n - 1, 4))
-                wait = base * random.uniform(0.85, 1.15)  # jitter ±15%
+                wait = base * random.uniform(0.85, 1.15)
                 LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
                 self._stats["timeouts"] += 1
-                logger.warning(
-                    "⛔ Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait
-                )
+                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
             except asyncio.TimeoutError:
                 self._stats["timeouts"] += 1
                 logger.warning("⏳ Groq timeout для %s", task.merchant_name)
@@ -3887,115 +3362,114 @@ class LLMWorkerPool:
             return result
         except PermanentModelError as e:
             logger.error("❌ Gemini config помилка: %s", e)
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "Gemini model config error",
-                "_source": "gemini_404",
-            }
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error", "_source": "gemini_404"}
         except ProviderRateLimitError as e:
-            # 🚀 ФІКС: Якщо Gemini дає 429, ставимо його на паузу на 60 секунд
             LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
             logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "Gemini rate limit",
-                "_source": "gemini_429",
-            }
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
         except asyncio.TimeoutError:
             self._stats["timeouts"] += 1
             logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "Gemini timeout",
-                "_source": "gemini_timeout",
-            }
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
         except Exception as e:
             logger.error("❌ Gemini помилка: %s", e)
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "Gemini error",
-                "_source": "gemini_error",
-            }
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
 
     async def _call_groq(self, user_msg: str) -> dict:
-        api_key = os.getenv("GROQ_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY не встановлений")
-
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            raise PermanentModelError("GROQ_API_KEY не встановлено")
         payload = {
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
+                {"role": "user",   "content": user_msg},
             ],
             "temperature": 0.1,
-            "max_tokens": 120,
-            "response_format": {"type": "json_object"},
+            "max_tokens": 600,
+            "response_format": {"type": "json_object"}  # 🚀 ПРИМУСОВИЙ JSON
         }
-
         async with self._session.post(
             "https://api.groq.com/openai/v1/chat/completions",
             json=payload,
-            headers={"Authorization": f"Bearer {api_key}"},
+            headers={"Authorization": f"Bearer {groq_key}"},
         ) as resp:
             if resp.status == 429:
-                raise RateLimitError("Groq rate limit 429")
-            if resp.status != 200:
-                raise RuntimeError(f"Groq HTTP {resp.status}")
+                raise RateLimitError("Groq 429")
+            if resp.status >= 500:
+                raise RuntimeError(f"Groq server error {resp.status}")
             data = await resp.json()
-
         text = data["choices"][0]["message"]["content"]
         return _parse_json(text)
 
     async def _call_gemini(self, user_msg: str) -> dict:
-        api_key = os.getenv("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY не встановлений")
-
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        if not gemini_key:
+            raise PermanentModelError("GEMINI_API_KEY не встановлено")
         full_prompt = f"{SYSTEM_PROMPT}\n\n{user_msg}"
         payload = {
-            "contents": [{"parts": [{"text": full_prompt}]}],
+            "contents":         [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 120,
-                "responseMimeType": "application/json",
+                "maxOutputTokens": 800, # 🚀 ЗБІЛЬШЕНО З 200
+                "responseMimeType": "application/json" # 🚀 ПРИМУСОВИЙ JSON
             },
         }
-
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{GEMINI_MODEL}:generateContent?key={api_key}"
-        )
-
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={gemini_key}"
         async with self._session.post(url, json=payload) as resp:
-            # 🚀 ФІКС: Коректно ловимо 429 і прокидаємо його наверх
             if resp.status == 429:
-                raise ProviderRateLimitError("Gemini rate limit 429 (Resource Exhausted)")
-
-            if resp.status != 200:
-                error_text = await resp.text()
-                raise RuntimeError(f"Gemini HTTP {resp.status} - Деталі: {error_text}")
+                raise ProviderRateLimitError("Gemini 429")
+            if resp.status == 404:
+                raise PermanentModelError(f"Gemini model not found: {GEMINI_MODEL}")
+            if resp.status >= 500:
+                raise RuntimeError(f"Gemini server error {resp.status}")
             data = await resp.json()
-
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         return _parse_json(text)
 
 
-def _build_behavior_block(task: "LLMTask") -> list[str]:
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt builders
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _smart_truncate(text: str, max_len: int = MAX_NORM_TERMS) -> str:
     """
-    Формує структурований behavioral блок для промпту.
-    LLM бачить конкретні факти, а не просто список флагів.
+    v2: Замість простого обрізання — зберігаємо початок + кінець.
+
+    Scam-фрази часто ховаються в кінці тексту умов. Стара логіка
+    `text[:220]` їх просто втрачала. Тепер беремо 2/3 початку і
+    1/3 кінця — жодна частина не губиться.
     """
+    if not text or len(text) <= max_len:
+        return text or "(не вказані)"
+    head_len = (max_len * 2) // 3
+    tail_len = max_len - head_len
+    head = text[:head_len]
+    tail = text[-tail_len:]
+    return f"{head}…[скорочено]…{tail}"
+
+
+def _build_account_age_note(task: LLMTask) -> str:
+    """Формує примітку про вік акаунту для промпту."""
+    days = task.account_age_days
+    if days <= 0:
+        return ""
+    if days < 7:
+        return f" ⚠️ ДУЖЕ НОВИЙ АКАУНТ ({days} днів)!"
+    if days < 14 and task.month_order_count > 50:
+        return f" ⚠️ НОВИЙ АКАУНТ ({days} днів) з підозріло великою активністю!"
+    if days < 30:
+        return f" (акаунт {days} днів — молодий)"
+    return f" (акаунт {days} днів)"
+
+
+def _build_behavior_block(task: LLMTask) -> list[str]:
+    """Структурований behavioral блок для промпту."""
     flags = task.behavior_flags or []
     if not flags:
         return ["ПОВЕДІНКА: Нормальна"]
 
     lines = ["ПОВЕДІНКА (аномалії):"]
-
     for f in flags:
         if f.startswith("API_REPLENISH:"):
             n = f.split(":", 1)[1] if ":" in f else "?"
@@ -4017,48 +3491,57 @@ def _build_behavior_block(task: "LLMTask") -> list[str]:
         elif f.startswith("BEHAVIOR_BOTLIKE:"):
             s = f.split(":", 1)[1]
             lines.append(f"  - ЗАГАЛЬНА ПІДОЗРА НА БОТА: score={s}")
+        elif f.startswith("ALWAYS_ONLINE_24H:"):
+            h = f.split(":", 1)[1]
+            lines.append(f"  - АКТИВНИЙ 24/7: {h} різних годин доби за 48h (людина так не працює)")
+        elif f.startswith("PRICE_TRAP:"):
+            d = f.split(":", 1)[1]
+            lines.append(f"  - ЦІНОВА ПАСТКА: ціна {d} нижче медіани ринку (honey pot)")
         else:
             lines.append(f"  - {f}")
-
-
     return lines
-
 
 
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
-    score = getattr(rr, "score", 0)
-    norm_text = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
-    norm_text = norm_text[:MAX_NORM_TERMS] if norm_text else "(не вказані)"
+    score       = getattr(rr, "score", 0)
+    norm_text   = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
+    # v2: smart truncate замість простого [:220]
+    norm_text   = _smart_truncate(norm_text, MAX_NORM_TERMS)
 
-    risk_type = getattr(rr, "risk_type", "") or "NONE"
-    reason = getattr(rr, "reason", "") or "-"
-    categories = _regex_categories(rr)
-    excerpts = _top_excerpts(rr)
-    rev_status = review_summary.get("status", "OK")
+    risk_type   = getattr(rr, "risk_type", "") or "NONE"
+    categories  = _regex_categories(rr)
+    excerpts    = _top_excerpts(rr)
 
-    pos = int(review_summary.get("positive", 0) or 0)
-    neg = int(review_summary.get("negative", 0) or 0)
-    neutral = int(review_summary.get("neutral", 0) or 0)
-    total = pos + neg + neutral
-    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
-    bad_texts = review_summary.get("bad_texts", []) or []
+    rev_status  = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
+    pos         = int((review_summary or {}).get("positive", 0) or 0)
+    neg         = int((review_summary or {}).get("negative", 0) or 0)
+    neutral     = int((review_summary or {}).get("neutral",  0) or 0)
+    total       = pos + neg + neutral
+    neg_pct     = (neg / total * 100.0) if total > 0 else 0.0
+    bad_texts   = (review_summary or {}).get("bad_texts", []) or []
 
-    # Математика зірваних угод
     failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
+    age_note      = _build_account_age_note(task)
 
     lines = [
         f"Біржа: {task.exchange}",
         f"Мерчант: {task.merchant_name} (ID: {task.merchant_id})",
-        f"СТАТИСТИКА:",
+        "СТАТИСТИКА:",
         f"- Угод за місяць: {task.month_order_count}",
         f"- Успішність: {task.finish_rate}% (~{failed_orders} зірваних/проблемних угод)",
         f"- Верифікація: {'ТАК' if task.is_verified else 'НІ'}",
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
-        # ── Behavioral block ──────────────────────────────────────────────
-        *_build_behavior_block(task),
-        # ─────────────────────────────────────────────────────────────────
+    ]
+
+    # v2: вік акаунту
+    if age_note:
+        lines.append(f"- Вік акаунту:{age_note}")
+
+    lines += _build_behavior_block(task)
+
+    lines += [
         "",
         f"Regex verdict: {rr.verdict} (Score: {score})",
         f"Regex main risk: {risk_type}",
@@ -4072,18 +3555,27 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "",
     ]
 
-    # Статус відгуків
-    if rev_status != "OK":
-        lines.append(f"Reviews summary: UNAVAILABLE (API біржі {task.exchange} тимчасово не відповідає. Вважай репутацію невідомою і суди лише по тексту).")
+    # v2: відгуки — передаємо навіть при UNAVAILABLE якщо є збережені bad_texts
+    if rev_status not in ("OK",):
+        if bad_texts:
+            lines.append(
+                f"Reviews: API недоступний ({rev_status}), але є {len(bad_texts)} "
+                f"збережених поганих відгуків з минулого оновлення:"
+            )
+        else:
+            lines.append(f"Reviews: API недоступний ({rev_status}). Репутація невідома.")
     else:
-        lines.append(f"Reviews summary: pos={pos}, neg={neg}, neutral={neutral}, neg_pct={neg_pct:.1f}%")
+        if total > 0:
+            lines.append(f"Reviews: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%")
+        else:
+            lines.append("Reviews: дані відсутні (мерчант новий або API не повернув дані)")
 
-    # 🚀 ВИПРАВЛЕНИЙ БАГ: Тепер ми реально передаємо текст відгуків у нейронку!
-    if bad_texts and rev_status == "OK":
+    # bad_texts завжди — незалежно від статусу
+    if bad_texts:
         lines.append("Негативні відгуки:")
-        for i, t in enumerate(bad_texts[:3], 1):
-            clean_t = str(t).replace('\n', ' ').strip()
-            lines.append(f"  {i}. {clean_t[:120]}")
+        for i, t in enumerate(bad_texts[:4], 1):
+            clean_t = str(t).replace("\n", " ").strip()
+            lines.append(f"  {i}. {clean_t[:150]}")
 
     if excerpts:
         lines.append("Regex фрагменти:")
@@ -4091,18 +3583,20 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так (враховуй зірвані угоди)"}'
+        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
     )
     return "\n".join(lines)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _regex_categories(regex_result: RegexResult) -> list[str]:
     matches = getattr(regex_result, "matches", []) or []
-    seen = set()
-    out = []
+    seen, out = set(), []
     for m in matches:
-        cat = getattr(m, "category", "")
+        cat    = getattr(m, "category", "")
         weight = getattr(m, "weight", 0)
         if not cat or weight <= 0:
             continue
@@ -4116,12 +3610,9 @@ def _top_excerpts(regex_result: RegexResult) -> list[str]:
     matches = getattr(regex_result, "matches", []) or []
     pos = [m for m in matches if getattr(m, "weight", 0) > 0]
     pos.sort(key=lambda x: getattr(x, "weight", 0), reverse=True)
-
-    out = []
-    seen = set()
+    out, seen = [], set()
     for m in pos[:MAX_MATCHES_IN_PROMPT]:
-        ex = (getattr(m, "excerpt", "") or "").replace("\n", " ").strip()
-        ex = ex[:MAX_EXCERPT_LEN]
+        ex = (getattr(m, "excerpt", "") or "").replace("\n", " ").strip()[:MAX_EXCERPT_LEN]
         if ex and ex not in seen:
             seen.add(ex)
             out.append(ex)
@@ -4136,7 +3627,6 @@ def _parse_json(text: str) -> dict:
         .removesuffix("```")
         .strip()
     )
-
     try:
         data = json.loads(clean)
     except json.JSONDecodeError:
@@ -4146,24 +3636,22 @@ def _parse_json(text: str) -> dict:
             try:
                 data = json.loads(clean[start:end + 1])
             except json.JSONDecodeError:
-                return {
-                    "status": "UNKNOWN",
-                    "risk": "NONE",
-                    "reason": "JSON parse error",
-                }
+                logger.error(f"❌ JSON parse error. Сирий текст: {text!r}")  # ДОДАНО
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
         else:
-            return {
-                "status": "UNKNOWN",
-                "risk": "NONE",
-                "reason": "JSON parse error",
-            }
+            logger.error(f"❌ JSON parse error (немає дужок). Сирий текст: {text!r}")  # ДОДАНО
+            return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
 
     status = str(data.get("status", "UNKNOWN")).upper()
     if status not in ("OK", "SUSPICIOUS", "BLOCK"):
         status = "UNKNOWN"
-
     risk = str(data.get("risk", "NONE")).upper()[:32]
     reason = str(data.get("reason", "")).strip()[:150]
+
+    # 🚀 Логуємо ланцюжок думок у дебаг
+    thought = data.get("thought_process", "")
+    if thought:
+        logger.debug(f"🧠 LLM Thoughts: {thought}")
 
     return {
         "status": status,
@@ -4175,7 +3663,16 @@ def _parse_json(text: str) -> dict:
 FILE: core/workers/review_fetcher.py
 ============================================================
 
-# core/review_fetcher.py
+# core/workers/review_fetcher.py
+"""
+ReviewFetcher v2.0 — повний рефакторинг.
+
+Ключові виправлення:
+  1. pos/neg/neutral більше не нулі — беремо з профілю мерчанта
+  2. Пріоритетна черга (urgent) для нових мерчантів
+  3. Окремий аналіз тексту відгуків по review_only правилах
+  4. Degraded mode залишено без змін
+"""
 
 from __future__ import annotations
 
@@ -4188,35 +3685,44 @@ from core.storage.merchant_db import MerchantDB
 from core.analysis.rules import ALL_RULES
 
 if TYPE_CHECKING:
-    from infrastructure.api.binance_account import BinanceAccountClient
-    from infrastructure.api.bybit_account import BybitAccountClient
-    from infrastructure.api.okx_account import OkxAccountClient
+    from infrastructure.http.binance_client import BinanceClient
+    from infrastructure.http.bybit_p2p_client import BybitP2PClient
+    from infrastructure.http.okx_client import OkxClient
 
 logger = logging.getLogger("ReviewFetcher")
 
+# Затримки між запитами на біржу (rate limiting)
 RATE_LIMITS = {
     "Binance": 2.0,
     "Bybit": 1.5,
     "OKX": 1.5,
 }
 
+# Пороги для автоматичного флагування
 BAD_REVIEW_THRESHOLD_PCT = 15.0
 
-# Базові слова для швидкого фільтру (без regex)
+# Базові ключові слова для швидкого pre-фільтру
 _BASIC_BAD = [
-    "scam", "шахрай", "кидало", "кинув", "розвів", "fraud", "fake", "не платить",
+    "scam", "шахрай", "кидало", "кинув", "розвів", "fraud",
+    "fake", "не платить", "обманув", "обдурив", "кинули",
 ]
 
-# Категорії з rules.py що свідчать про схеми
+# Тільки review_only правила для аналізу текстів
+_REVIEW_ONLY_RULES = [r for r in ALL_RULES if getattr(r, "review_only", False)]
+
+# Усі правила для цільових категорій (для швидкого фільтру)
 _TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _has_bad_keywords(text: str) -> bool:
     """
-    Фільтрує відгуки по двох рівнях:
-    1. Швидкий фільтр по базових словах
-    2. Regex по цільових категоріях з rules.py
+    Дворівневий фільтр:
+    1. Швидкий пошук базових слів (str.contains)
+    2. Regex по цільових категоріях
     """
     if not text:
         return False
@@ -4230,56 +3736,96 @@ def _has_bad_keywords(text: str) -> bool:
     return False
 
 
+def _analyze_review_text(text: str) -> dict:
+    """
+    Повноцінний аналіз тексту відгуку по review_only правилах.
+    Повертає: {score, categories, top_excerpt}
+    """
+    if not text or not _REVIEW_ONLY_RULES:
+        return {"score": 0, "categories": [], "top_excerpt": ""}
+
+    t = text.lower()
+    score = 0
+    categories: list[str] = []
+    top_excerpt = ""
+
+    for rule in _REVIEW_ONLY_RULES:
+        m = rule.pattern.search(t)
+        if m:
+            score += rule.weight
+            if rule.category not in categories:
+                categories.append(rule.category)
+            if not top_excerpt:
+                start = max(0, m.start() - 20)
+                end = min(len(t), m.end() + 20)
+                top_excerpt = t[start:end].strip()
+
+    return {
+        "score": min(100, max(0, score)),
+        "categories": categories,
+        "top_excerpt": top_excerpt[:100],
+    }
+
+
+def _enrich_bad_text(text: str) -> dict:
+    """Збагачує текст відгуку аналітикою для збереження в БД."""
+    analysis = _analyze_review_text(text)
+    return {
+        "text": text[:200],
+        "score": analysis["score"],
+        "categories": analysis["categories"],
+        "excerpt": analysis["top_excerpt"],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ReviewFetcher
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ReviewFetcher:
     def __init__(
-        self,
-        db: MerchantDB,
-        max_queue: int = 500,
-        review_ttl_hours: float = 24.0,
-        # HTTP клієнти передаються з scanner.py (вже мають session)
-        binance_client=None,
-        bybit_client=None,
-        okx_client=None,
+            self,
+            db: MerchantDB,
+            max_queue: int = 500,
+            review_ttl_hours: float = 24.0,
+            binance_client=None,
+            bybit_client=None,
+            okx_client=None,
     ):
         self._db = db
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
         self._review_ttl = review_ttl_hours
+
+        self._urgent_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
+
         self._worker_task: Optional[asyncio.Task] = None
         self._processed = 0
         self._errors = 0
         self._pending: set[tuple[str, str]] = set()
 
-        # Account клієнти (infrastructure/api/) — підключаються з scanner.py
-        # Якщо є API ключ → повні профілі мерчантів + реальні відгуки
-        # Якщо немає → анонімний fallback (може давати 404)
-        self._binance: Optional["BinanceAccountClient"] = binance_client
-        self._bybit:   Optional["BybitAccountClient"]   = bybit_client
-        self._okx:     Optional["OkxAccountClient"]     = okx_client
+        # In-memory кеш для швидкого визначення нових мерчантів (замість повільних запитів до БД)
+        self._known_merchants: set[tuple[str, str]] = set()
+
+        self._binance: Optional["BinanceClient"] = binance_client
+        self._bybit: Optional["BybitP2PClient"] = bybit_client
+        self._okx: Optional["OkxClient"] = okx_client
 
         self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
         self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
 
     def bind_clients(self, binance=None, bybit=None, okx=None) -> None:
-        """
-        Прив'язує HTTP клієнти після ініціалізації.
-        Викликається з scanner.py після старту клієнтів.
-        В майбутньому — викликається з /connect команди бота.
-        """
-        if binance is not None:
-            self._binance = binance
-        if bybit is not None:
-            self._bybit = bybit
-        if okx is not None:
-            self._okx = okx
+        """Прив'язує HTTP клієнти після ініціалізації."""
+        if binance is not None: self._binance = binance
+        if bybit is not None: self._bybit = bybit
+        if okx is not None: self._okx = okx
         logger.info(
             "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s",
-            "✅" if self._binance and self._binance.is_authenticated else "❌",
-            "✅" if self._bybit  and self._bybit.is_authenticated  else "❌",
-            "✅" if self._okx   and self._okx.is_authenticated    else "❌",
+            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
+            "✅" if self._bybit and getattr(self._bybit, "is_authenticated", False) else "❌",
+            "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
         )
+
     async def start(self) -> None:
-        # Сесія більше не потрібна — використовуємо клієнти від scanner.py
         if self._worker_task and not self._worker_task.done():
             logger.debug("ReviewFetcher start skipped: already running")
             return
@@ -4287,11 +3833,13 @@ class ReviewFetcher:
             self._worker_loop(), name="review-fetcher"
         )
         logger.info(
-            "ReviewFetcher запущено | ttl=%.1fh | max_queue=%d | auth: Binance=%s Bybit=%s OKX=%s",
-            self._review_ttl, self._queue.maxsize,
+            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | auth: B=%s By=%s OKX=%s",
+            self._review_ttl,
+            self._urgent_queue.maxsize,
+            self._queue.maxsize,
             "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
-            "✅" if self._bybit  and getattr(self._bybit,   "is_authenticated", False) else "❌",
-            "✅" if self._okx   and getattr(self._okx,    "is_authenticated", False) else "❌",
+            "✅" if self._bybit and getattr(self._bybit, "is_authenticated", False) else "❌",
+            "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
         )
 
     async def stop(self) -> None:
@@ -4301,70 +3849,104 @@ class ReviewFetcher:
                 await self._worker_task
             self._worker_task = None
         logger.info(
-            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d, queue: %d",
-            self._processed, self._errors, len(self._pending), self._queue.qsize()
+            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d",
+            self._processed, self._errors, len(self._pending),
         )
 
     def schedule(self, exchange: str, merchant_id: str) -> bool:
-        if exchange not in RATE_LIMITS:
-            logger.debug("ReviewFetcher skip unsupported exchange %s [%s]", merchant_id, exchange)
-            return False
-
-        if not merchant_id:
-            logger.debug("ReviewFetcher skip empty merchant_id [%s]", exchange)
+        """
+        Ставить мерчанта в чергу на завантаження відгуків.
+        Fast in-memory перевірка: якщо мерчанта ще немає в кеші, він йде в urgent_queue.
+        """
+        if exchange not in RATE_LIMITS or not merchant_id:
             return False
 
         key = (exchange, merchant_id)
         if key in self._pending:
-            logger.debug("ReviewFetcher skip duplicate in pending %s [%s]", merchant_id, exchange)
             return False
 
+        # Магія швидкості: визначаємо urgent без запиту до БД!
+        urgent = key not in self._known_merchants
+        target = self._urgent_queue if urgent else self._queue
+
         try:
-            self._queue.put_nowait(key)
+            target.put_nowait(key)
             self._pending.add(key)
-            logger.debug(
-                "ReviewFetcher queued %s [%s] | queue=%d pending=%d",
-                merchant_id, exchange, self._queue.qsize(), len(self._pending)
-            )
             return True
         except asyncio.QueueFull:
-            logger.warning(
-                "ReviewFetcher queue full, skip %s [%s] | pending=%d",
-                merchant_id, exchange, len(self._pending)
-            )
             return False
+
+    async def fetch_now(self, exchange: str, merchant_id: str) -> dict:
+        """
+        🚀 СИНХРОННИЙ ФЕТЧ: Викликається напряму з RiskEngine для нових мерчантів,
+        щоб уникнути 'стану перегонів' (Race Condition), коли ордер аналізується швидше,
+        ніж завантажаться його відгуки.
+        """
+        if exchange not in RATE_LIMITS or not merchant_id:
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+
+        try:
+            if exchange == "Binance":
+                pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
+            elif exchange == "Bybit":
+                pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
+            elif exchange == "OKX":
+                pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            else:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+
+            # Одразу зберігаємо в БД
+            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK")
+            self._known_merchants.add((exchange, merchant_id))
+
+            return {
+                "positive": pos,
+                "negative": neg,
+                "neutral": neutral,
+                "bad_texts": bad_texts,
+                "status": "OK"
+            }
+        except Exception as e:
+            logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNAVAILABLE"}
+
+    # ─── Worker loop ────────────────────────────────────────────────────────
 
     async def _worker_loop(self) -> None:
         while True:
             try:
-                exchange, merchant_id = await self._queue.get()
-                key = (exchange, merchant_id)
-
+                # Пріоритет: спочатку urgent, потім normal
                 try:
-                    # 🚀 ПЕРЕВІРКА НА DEGRADED MODE (Якщо кулдаун ще діє - пропускаємо)
+                    exchange, merchant_id = self._urgent_queue.get_nowait()
+                    from_urgent = True
+                except asyncio.QueueEmpty:
+                    exchange, merchant_id = await self._queue.get()
+                    from_urgent = False
+
+                key = (exchange, merchant_id)
+                try:
                     now = asyncio.get_event_loop().time()
                     if now < self._exchange_cooldown.get(exchange, 0):
-                        logger.debug("ReviewFetcher в Degraded Mode для %s, пропускаємо", exchange)
+                        logger.debug("ReviewFetcher Degraded Mode для %s, пропускаємо", exchange)
                         await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
                         continue
 
                     needs_fetch = await self._db.needs_review_fetch(
                         exchange, merchant_id, self._review_ttl
                     )
-                    if not needs_fetch:
-                        logger.debug(
-                            "ReviewFetcher TTL skip %s [%s]",
-                            merchant_id, exchange
-                        )
+                    if not needs_fetch and not from_urgent:
+                        logger.debug("ReviewFetcher TTL skip %s [%s]", merchant_id, exchange)
                         continue
 
-                    logger.info("ReviewFetcher fetch start %s [%s]", merchant_id, exchange)
+                    logger.debug("ReviewFetcher fetch [%s] %s urgent=%s", exchange, merchant_id, from_urgent)
                     await self._fetch_and_save(exchange, merchant_id)
                     await asyncio.sleep(RATE_LIMITS.get(exchange, 2.0))
 
                 finally:
                     self._pending.discard(key)
-                    self._queue.task_done()
+                    # task_done тільки для нормальної черги (urgent — get_nowait)
+                    if not from_urgent:
+                        self._queue.task_done()
 
             except asyncio.CancelledError:
                 break
@@ -4382,106 +3964,194 @@ class ReviewFetcher:
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
             else:
-                logger.debug("ReviewFetcher unexpected exchange skip %s [%s]", merchant_id, exchange)
                 return
 
-            total = pos + neg + neutral
-            # 🚀 ЯКЩО УСПІШНО — СКИДАЄМО ЛІЧИЛЬНИК
             self._exchange_fails[exchange] = 0
+            total = pos + neg + neutral
             bad_pct = (neg / total * 100.0) if total > 0 else 0.0
 
-            logger.info(
-                "ReviewFetcher fetched %s [%s] | pos=%d neg=%d neu=%d total=%d bad_pct=%.1f bad_texts=%d",
-                merchant_id, exchange, pos, neg, neutral, total, bad_pct, len(bad_texts)
-            )
+            # Додаємо до in-memory кешу, щоб наступного разу він йшов у фонову чергу
+            self._known_merchants.add((exchange, merchant_id))
 
+            # Передаємо bad_texts прямо списком словників (json.dumps в БД впорається)
             await self._db.save_reviews(
                 exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK"
             )
             self._processed += 1
 
-            logger.info(
-                "ReviewFetcher saved %s [%s] | processed=%d",
-                merchant_id, exchange, self._processed
-            )
-
             if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
                 logger.warning(
                     "🚨 Поганий мерчант %s [%s]: %.0f%% негативних (%d/%d)",
-                    merchant_id, exchange, bad_pct, neg, total
+                    merchant_id, exchange, bad_pct, neg, total,
                 )
 
         except Exception as e:
             self._errors += 1
-            # 🚀 НАКОПИЧУЄМО ПОМИЛКИ І ВМИКАЄМО DEGRADED MODE
             self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
             if self._exchange_fails[exchange] >= 3:
-                # Таймаут залежить від типу біржі:
-                # Bybit/OKX можуть впасти на хвилини, Binance — рідко
                 cooldown_sec = {"Binance": 300.0, "OKX": 600.0}.get(exchange, 7200.0)
                 self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
-                logger.error(
-                    "🚨 %s API впало 3 рази підряд! Degraded Mode на %.0f хв.",
-                    exchange, cooldown_sec / 60,
-                )
+                logger.error("🚨 %s API впало 3 рази! Degraded Mode на %.0f хв.", exchange, cooldown_sec / 60)
 
             await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
-            logger.warning("Помилка відгуків %s [%s]: %s", merchant_id, exchange, e)
 
+    # ─── Exchange fetchers ───────────────────────────────────────────────────
 
-    async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Binance: тільки через API ключ. Без ключа — пропускаємо."""
+    async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        """
+        Binance: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+
+        fetch_merchant_profile → поля userAsset.positiveRate, totalFinishOrder
+        fetch_negative_reviews → тексти поганих відгуків
+        """
         client = self._binance
         if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
+
         try:
-            raw = await client.fetch_negative_reviews(merchant_id, rows=10)
-            bad_texts = [
-                str(item.get("message") or item.get("content") or "")[:200]
-                for item in raw
-                if _has_bad_keywords(str(item.get("message") or item.get("content") or ""))
-            ]
-            logger.debug("Binance [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
-            return 0, 0, 0, bad_texts
+            # 1. Профіль — отримуємо загальну статистику
+            profile_data = await client.fetch_merchant_profile(merchant_id)
+            user_info = profile_data.get("advertiser", profile_data) or {}
+
+            # Binance profile: positiveRate = "98.50", totalOrderNum, monthFinishRate
+            total = int(user_info.get("totalOrderNum", 0) or user_info.get("monthOrderNum", 0) or 0)
+            pos_rate_str = str(user_info.get("positiveRate", "") or user_info.get("monthFinishRate", "") or "100")
+            try:
+                pos_rate = float(pos_rate_str.replace("%", ""))
+            except ValueError:
+                pos_rate = 100.0
+
+            if total > 0:
+                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
+                pos = total - neg
+                neutral = 0
+            else:
+                pos = neg = neutral = 0
+
+            # 2. Тексти негативних відгуків
+            raw_neg = await client.fetch_negative_reviews(merchant_id, rows=10)
+            bad_texts: list[dict] = []
+            for item in raw_neg:
+                content = str(item.get("message") or item.get("content") or "").strip()
+                if content and _has_bad_keywords(content):
+                    bad_texts.append(_enrich_bad_text(content))
+
+            logger.debug("Binance [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg,
+                         len(bad_texts))
+            return pos, neg, neutral, bad_texts
+
         except Exception as e:
             logger.debug("Binance fetch error %s: %s", merchant_id, e)
             return 0, 0, 0, []
 
-    async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """Bybit: тільки через API ключ."""
+    async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        """
+        Bybit: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+
+        fetch_merchant_profile → поля recentRate, totalFinishCount
+        fetch_merchant_feedback → тексти поганих відгуків
+        """
         client = self._bybit
         if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
+
         try:
-            raw = await client.fetch_merchant_feedback(merchant_id)
-            bad_texts = [
-                str(item.get("content") or "")[:200]
-                for item in raw
-                if _has_bad_keywords(str(item.get("content") or ""))
-            ]
-            logger.debug("Bybit [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
-            return 0, 0, 0, bad_texts
+            # 1. Профіль
+            profile_data = await client.fetch_merchant_profile(merchant_id)
+            # Bybit profile: recentRate="98.5", monthFinishCount, recentExecuteRate
+            total = int(
+                profile_data.get("monthFinishCount", 0)
+                or profile_data.get("recentExecuteCount", 0)
+                or 0
+            )
+            pos_rate_str = str(
+                profile_data.get("recentRate", "")
+                or profile_data.get("recentExecuteRate", "")
+                or "100"
+            )
+            try:
+                pos_rate = float(pos_rate_str.replace("%", ""))
+            except ValueError:
+                pos_rate = 100.0
+
+            if total > 0:
+                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
+                pos = total - neg
+                neutral = 0
+            else:
+                pos = neg = neutral = 0
+
+            # 2. Тексти
+            raw_neg = await client.fetch_merchant_feedback(merchant_id)
+            bad_texts: list[dict] = []
+            for item in raw_neg:
+                content = str(item.get("content") or item.get("message") or "").strip()
+                if content and _has_bad_keywords(content):
+                    bad_texts.append(_enrich_bad_text(content))
+
+            logger.debug("Bybit [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
+            return pos, neg, neutral, bad_texts
+
         except Exception as e:
             logger.debug("Bybit fetch error %s: %s", merchant_id, e)
             return 0, 0, 0, []
 
-    async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[str]]:
-        """OKX: тільки через API ключ + passphrase."""
+    async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        """
+        OKX: два окремих виклики — type=1 (positive) і type=2 (negative).
+        v2.1: додана пагінація щоб обійти ліміт в 20 відгуків за запит.
+        Без пагінації neg_pct рахувався відносно max(20+20=40) відгуків,
+        що давало хибно завищений % для мерчантів з сотнями угод.
+        """
         client = self._okx
         if not client or not getattr(client, "is_authenticated", False):
             return 0, 0, 0, []
+
         try:
-            raw = await client.fetch_merchant_feedback(merchant_id)
-            bad_texts = [
-                str(item.get("content") or item.get("feedback") or "")[:200]
-                for item in raw
-                if _has_bad_keywords(str(item.get("content") or item.get("feedback") or ""))
-            ]
-            logger.debug("OKX [auth] %s: bad_texts=%d", merchant_id, len(bad_texts))
-            return 0, 0, 0, bad_texts
+            # type=1 → позитивні, type=2 → негативні; пагінація до 3 сторінок
+            pos_raw = await self._fetch_okx_paginated(client, merchant_id, feedback_type=1, max_pages=3)
+            neg_raw = await self._fetch_okx_paginated(client, merchant_id, feedback_type=2, max_pages=3)
+
+            pos = len(pos_raw)
+            neg = len(neg_raw)
+            neutral = 0
+
+            bad_texts: list[dict] = []
+            for item in neg_raw:
+                content = str(item.get("content") or item.get("feedback") or "").strip()
+                if content and _has_bad_keywords(content):
+                    bad_texts.append(_enrich_bad_text(content))
+
+            logger.debug("OKX [auth] %s: pos=%d neg=%d (paginated) | bad_texts=%d", merchant_id, pos, neg,
+                         len(bad_texts))
+            return pos, neg, neutral, bad_texts
+
         except Exception as e:
             logger.debug("OKX fetch error %s: %s", merchant_id, e)
             return 0, 0, 0, []
+
+    async def _fetch_okx_paginated(self, client, merchant_id: str, feedback_type: int, max_pages: int = 3) -> list[
+        dict]:
+        """Завантажує OKX відгуки з пагінацією (cursor-based)."""
+        all_items: list[dict] = []
+        cursor = ""
+        for _ in range(max_pages):
+            try:
+                cursor_param = f"&cursor={cursor}" if cursor else ""
+                path = f"/api/v5/c2c/order/user-feedback?userId={merchant_id}&type={feedback_type}&limit=20{cursor_param}"
+                url = f"https://www.okx.com{path}"
+                headers = client._sign_headers("GET", path)
+                data = await client._get(url, headers=headers)
+                items = data.get("data", []) or []
+                all_items.extend(items)
+                # OKX повертає nextCursor якщо є ще сторінки
+                next_cursor = data.get("nextCursor", "")
+                if not next_cursor or len(items) < 20:
+                    break
+                cursor = next_cursor
+            except Exception:
+                break
+        return all_items
 
 ============================================================
 FILE: core/engine/cross_matcher.py
@@ -4504,35 +4174,35 @@ class CrossMatchingEngine:
         min_spread_pct: float,
         safety_buffer_pct: float = 0.0,
     ):
-        self.max_capital = Decimal(str(max_capital_uah))
-        self.min_trade = Decimal(str(min_trade_uah))
-        self.min_spread = Decimal(str(min_spread_pct))
-        self.safety_buffer = Decimal(str(safety_buffer_pct))
+        self.max_capital = float(max_capital_uah)
+        self.min_trade = float(min_trade_uah)
+        self.min_spread = float(min_spread_pct)
+        self.safety_buffer = float(safety_buffer_pct)
 
     @property
     def max_capital_uah(self) -> float:
-        return float(self.max_capital)
+        return self.max_capital
 
     @max_capital_uah.setter
     def max_capital_uah(self, value: float) -> None:
         """scanner.py оновлює через цей setter на кожному циклі."""
-        self.max_capital = Decimal(str(value))
+        self.max_capital = float(value)
 
     @property
     def min_spread_pct(self) -> float:
-        return float(self.min_spread)
+        return self.min_spread
 
     @min_spread_pct.setter
     def min_spread_pct(self, value: float) -> None:
         """scanner.py оновлює через цей setter на кожному циклі."""
-        self.min_spread = Decimal(str(value))
+        self.min_spread = float(value)
 
     def match(
         self,
         buy_grouped: dict[str, list[Order]],
         sell_grouped: dict[str, list[Order]],
     ) -> list[dict]:
-        best_opportunities = []
+        best_opportunities =[]
 
         for buy_bank, buy_orders in buy_grouped.items():
             for sell_bank, sell_orders in sell_grouped.items():
@@ -4553,43 +4223,39 @@ class CrossMatchingEngine:
 
                         max_buy_fiat = min(
                             self.max_capital,
-                            buy.max_limit,
-                            buy.available_amount * buy.price,
+                            float(buy.max_limit),
+                            float(buy.available_amount) * float(buy.price),
                         )
 
-                        if max_buy_fiat < self.min_trade or max_buy_fiat < buy.min_limit:
+                        if max_buy_fiat < self.min_trade or max_buy_fiat < float(buy.min_limit):
                             continue
 
-                        usdt_bought = max_buy_fiat / buy.price
+                        usdt_bought = max_buy_fiat / float(buy.price)
                         usdt_to_sell = min(
                             usdt_bought,
-                            sell.max_limit / sell.price,
-                            sell.available_amount,
+                            float(sell.max_limit) / float(sell.price),
+                            float(sell.available_amount),
                         )
 
-                        if usdt_to_sell <= Decimal("0"):
+                        if usdt_to_sell <= 0.0:
                             continue
 
-                        actual_buy_fiat = usdt_to_sell * buy.price
-                        actual_sell_fiat = usdt_to_sell * sell.price
+                        actual_buy_fiat = usdt_to_sell * float(buy.price)
+                        actual_sell_fiat = usdt_to_sell * float(sell.price)
 
-                        if actual_sell_fiat < sell.min_limit:
+                        if actual_sell_fiat < float(sell.min_limit):
                             continue
 
                         gross_profit = actual_sell_fiat - actual_buy_fiat
-                        gross_spread_pct = (
-                            gross_profit / actual_buy_fiat
-                        ) * Decimal("100.0")
+                        gross_spread_pct = (gross_profit / actual_buy_fiat) * 100.0
 
                         _, total_fee, fee_details = calculator.calculate_net(
                             actual_buy_fiat,
-                            usdt_price=buy.price,
+                            usdt_price=float(buy.price),
                         )
 
                         net_profit = gross_profit - total_fee
-                        net_spread_pct = (
-                            net_profit / actual_buy_fiat
-                        ) * Decimal("100.0")
+                        net_spread_pct = (net_profit / actual_buy_fiat) * 100.0
 
                         if net_spread_pct >= (self.min_spread + self.safety_buffer):
                             route_type = (
@@ -5098,32 +4764,32 @@ from dataclasses import dataclass
 
 @dataclass
 class FeeResult:
-    amount: Decimal
+    amount: float
     description: str
 
 
 class BaseFee(ABC):
     @abstractmethod
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         pass
 
 
 class FixedFee(BaseFee):
     def __init__(self, fee_amount: str, description: str):
-        self._fee_amount = Decimal(fee_amount)
+        self._fee_amount = float(fee_amount)
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         actual_fee = min(self._fee_amount, current_amount)
         return FeeResult(actual_fee, self._description)
 
 
 class PercentFee(BaseFee):
     def __init__(self, rate_pct: str, description: str):
-        self._rate = Decimal(rate_pct) / Decimal("100.0")
+        self._rate = float(rate_pct) / 100.0
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         fee = current_amount * self._rate
         return FeeResult(fee, self._description)
 
@@ -5131,11 +4797,10 @@ class PercentFee(BaseFee):
 # === НОВИЙ КЛАС ДЛЯ ДИНАМІЧНОЇ КОМІСІЇ В USDT ===
 class NetworkFee(BaseFee):
     def __init__(self, usdt_amount: str, description: str):
-        self._usdt_amount = Decimal(usdt_amount)
+        self._usdt_amount = float(usdt_amount)
         self._description = description
 
-    def calculate(self, current_amount: Decimal, usdt_price: Decimal) -> FeeResult:
-        # Рахуємо вартість комісії в гривнях по ЖИВОМУ курсу
+    def calculate(self, current_amount: float, usdt_price: float) -> FeeResult:
         fee_in_uah = self._usdt_amount * usdt_price
         return FeeResult(fee_in_uah, self._description)
 
@@ -5144,9 +4809,9 @@ class FeeCalculator:
     def __init__(self, fees: list[BaseFee]):
         self._fees = fees
 
-    def calculate_net(self, initial_amount: Decimal, usdt_price: Decimal) -> tuple[Decimal, Decimal, list[FeeResult]]:
+    def calculate_net(self, initial_amount: float, usdt_price: float) -> tuple[float, float, list[FeeResult]]:
         current_amount = initial_amount
-        results = []
+        results =[]
         for fee in self._fees:
             fee_result = fee.calculate(current_amount, usdt_price)
             current_amount -= fee_result.amount
@@ -7270,7 +6935,12 @@ class Order:
     risk_flag: str = ""
     # Верифікований мерчант (жовта/синя галочка де доступно)
     is_verified: bool = False
-
+# ── НОВІ ПОЛЯ (ДОДАТИ СЮДИ) ──
+    account_age_days: int = 0
+    composite_score: int = 0
+    review_score: int = 0
+    review_neg_pct: float = 0.0
+    review_fetched: bool = False
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""
@@ -7478,7 +7148,7 @@ class BybitExchange(BaseExchange):
             "side": side,
             "size": "50",
             "page": "1",
-            "amount": str(int(amount)),
+            "amount": str(int(amount)) if amount > 0 else "",
             "authMaker": False,
             "canTrade": False
         }
@@ -7497,23 +7167,12 @@ class BybitExchange(BaseExchange):
         return await self._fetch_orders(amount, banks, side="0")
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
-        tasks = []
-        for amount in amounts:
-            tasks.append(self.get_buy_orders(amount, banks))
-            tasks.append(self.get_sell_orders(amount, banks))
-
-        results = await asyncio.gather(*tasks)
-
-        raw_buys = []
-        raw_sells = []
-        for i in range(0, len(results), 2):
-            raw_buys.extend(results[i])
-            raw_sells.extend(results[i + 1])
-
-        buy_orders = self.dedup(raw_buys)
-        sell_orders = self.dedup(raw_sells)
-
-        return buy_orders, sell_orders
+        # Отримуємо топ-50 ордерів у стакані без фільтру суми (мінімізація API викликів)
+        buy_orders, sell_orders = await asyncio.gather(
+            self.get_buy_orders(0, banks),
+            self.get_sell_orders(0, banks)
+        )
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
 
 ============================================================
@@ -7607,7 +7266,6 @@ class OkxExchange(BaseExchange):
         buys = await self.get_buy_orders(max_amount, banks)
         sells = await self.get_sell_orders(max_amount, banks)
         return buys, sells
-
 
 ============================================================
 FILE: exchanges/wallet.py
@@ -9384,9 +9042,30 @@ class AnomalyFilter:
             return self._filter_by_mad(orders, prices)
         elif self.method == "mean":
             return self._filter_by_mean(orders, prices)
+        elif self.method == "median":
+            return self._filter_by_median(orders, prices)
         else:
             logger.warning("⚠️ Невідомий метод аномалій: %s. Фільтр вимкнено.", self.method)
             return orders
+
+
+    def _filter_by_median(self, orders: List[Order], prices: List[Decimal]) -> List[Order]:
+        float_prices = [float(p) for p in prices]
+        median_price = statistics.median(float_prices)
+
+        # median multiplier represents percentage allowed deviation from median.
+        # e.g., multiplier 2.5 = 2.5% variation max
+        threshold = median_price * (float(self.multiplier) * 0.01)
+
+        valid_orders = []
+        for order in orders:
+            if abs(float(order.price) - median_price) <= threshold:
+                valid_orders.append(order)
+            else:
+                logger.debug("🗑 Відкинуто аномалію (Median): %s ₴ (Мерчант: %s)", order.price, order.merchant_name)
+
+        return valid_orders
+
 
     def _filter_by_mad(self, orders: List[Order], prices: List[Decimal]) -> List[Order]:
         # Явний каст у float для безпечної роботи statistics (Python 3.11+)
@@ -9578,6 +9257,567 @@ FILE: core/analysis/__init__.py
 # Аналізатори: regex, behavioral, identity, rules
 
 ============================================================
+FILE: core/analysis/review_analyzer.py
+============================================================
+
+from core.analysis.rules import ALL_RULES
+
+REVIEW_ONLY_RULES = [r for r in ALL_RULES if getattr(r, "review_only", False)]
+
+def analyze_review_text(text: str) -> dict:
+    if not text:
+        return {"text": "", "score": 0, "categories": [], "excerpts":[]}
+
+    from core.analysis.regex_analyzer import _clean_text, _fuzzy_text, _excerpt
+    raw = _clean_text(text)
+    fuzzy = _fuzzy_text(raw)
+
+    score = 0
+    categories = []
+    excerpts =[]
+
+    for rule in REVIEW_ONLY_RULES:
+        m = rule.pattern.search(raw) or rule.pattern.search(fuzzy)
+        if m:
+            score += rule.weight
+            if rule.category not in categories:
+                categories.append(rule.category)
+            excerpts.append(f"{rule.category}: {_excerpt(raw, m)}")
+
+    return {
+        "text": text[:200],
+        "score": min(100, max(0, score)),
+        "categories": categories,
+        "excerpts": excerpts[:3],
+    }
+
+============================================================
+FILE: core/analysis/rules.py
+============================================================
+
+# core/rules_generated.py
+# =============================================================================
+# AUTO-GENERATED by build_rules.py — НЕ РЕДАГУВАТИ РУКАМИ
+# Джерела: antifrod_trade_terms.json + antifrod_reviews.json + antifrod_concepts.json
+# Policy:
+#   - trade_terms  → merchant instruction layer, severity as-is
+#   - reviews      → capped at SOFT (review_only=True), no direct BLOCK
+#   - concepts     → base regex atoms, deduped + merged
+#   - short ambiguous atoms → SOFT, require LLM co-eval
+# =============================================================================
+"""
+Розширений реєстр правил v2.0.
+
+Нові правила додані поверх базового rules.py:
+  - HARD/SOFT/WARN/SAFE шари збережені
+  - review_only правила мають окремий review_only=True прапор
+  - suppress_hard поля заповнені де є explicit SAFE кандидати
+
+Додавання нових правил:
+  1. Оновіть antifrod_*.json
+  2. Запустіть build_rules.py → rules_generated.py
+  3. Скопіюйте нові RegexRule в production rules.py
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+HARD_CONFIRM_REQUIRED = frozenset({"EXTERNAL_LINK", "TRIANGLE"})
+HARD_DIRECT_BLOCK     = frozenset({"NO_COMMENTS", "CASINO"})
+
+
+@dataclass(slots=True)
+class RegexRule:
+    id:            str
+    category:      str
+    pattern:       re.Pattern
+    weight:        int
+    action:        str
+    description:   str
+    suppress_hard: frozenset = frozenset()
+    review_only:   bool      = False
+
+
+
+HARD_RULES: list[RegexRule] = [
+    RegexRule(
+        "GEN_H01_EXTERNAL",
+        "EXTERNAL_LINK",
+        re.compile(
+            r"(?:t\.me)|(?:telegram\.me)|(?:@\w{4,})|(?:\bтг\b)|(?:телег(а|рам))|(?:вайбер)|(?:viber:)|(?:whatsapp)|(?:watsap)|(?:\bлс\b.{0,10}(до|перед|оплат))|(?:(пишіть|write|contact).{0,25}(telegram|tg|viber|whatsapp|signal|телеграм|вайбер))",
+            re.IGNORECASE,
+        ),
+        100,
+        "BLOCK",
+        "Виведення угоди в зовнішній месенджер — перший крок скаму: поза контролем платформи мерчант може дав",
+        suppress_hard=frozenset({'не пишіть у тг', 'в месенджери не переходжу', 'тільки чат біржі', 'не виходжу за межі платформи'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_H02_TRIANGLE",
+        "TRIANGLE",
+        re.compile(
+            r"(?:дроп(и|ів|овод|ер|ів)?)|(?:треугол)|(?:трикутник)|(?:чуж[аіо].{0,5}(карт|рахун))|(?:від.{0,10}(знайом|друг|родич))|(?:карта.{0,15}(знайом|друг|дружин|брат|сестр))|(?:карта.{0,15}(знайом|друг|дружин|брат|сестр|родич))|(?:чуж[аіою].{0,10}(карт|рахун|особ))|(?:переказ.{0,15}від.{0,15}(знайом|друг))|(?:від\sіншої\s(особи|людини))|(?:дроп[иів]?.{0,10}(вітаються|ок|ok|прийма|можна|допускаються|норм|welcome|allowed))|(?:лев[иіо].{0,5}(реквіз|рекв))|(?:чуж[іаою].{0,5}(реквіз|рахун|ібан|картк))|(?:реквізити.{0,10}(не\s*мо[їя]|від\s*інш|чужі))",
+            re.IGNORECASE,
+        ),
+        100,
+        "BLOCK",
+        "Дроп = підставна особа для прийому/відправки коштів. Трикутник = схема де мерчант дає реквізити не с",
+        suppress_hard=frozenset({'без дропів', 'дропи заборонені', 'дроп не приймаю', 'дроп відмовлю'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_H03_NO_COMME",
+        "NO_COMMENTS",
+        re.compile(
+            r"(?:без.{0,10}(коментар|призначен|комент))|(?:пуст(е|о).{0,5}(поле|призначен))|(?:нічого.{0,5}(не\s*)?пиш)|(?:не.{0,10}вказуйте.{0,10}призначен)|(?:поле.{0,10}(залиш|лиш).{0,5}пустим)|(?:\bб/к\b)|(?:no.?comment)|(?:пуст(е|е).{0,10}(поле|призначен))",
+            re.IGNORECASE,
+        ),
+        100,
+        "BLOCK",
+        "Заборона коментарів у призначенні переказу — класичний спосіб приховати зв'язок між P2P угодою і бан",
+        suppress_hard=frozenset(),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_H04_CASINO",
+        "CASINO",
+        re.compile(
+            r"(?:казино|casino|казик)|(?:гембл[аиу]|gambling)|(?:букмекер|bookie)|(?:беттинг|betting)|(?:\bбетк[аиу]\b)|(?:проц\b|процесинг|processing)|(?:агрегатор)|(?:1x.?bet|melbet|mostbet|betway|parimatch|fonbet)|(?:казино)|(?:casino)|(?:казик)|(?:1x.?bet)|(?:melbet)|(?:mostbet)|(?:betway)|(?:parimatch)|(?:fonbet)|(?:покер)|(?:poker)|(?:букмекер)|(?:bookie)|(?:ставки.{0,10}(на\s*)?спорт)|(?:гральн)|(?:gambling)|(?:гембл)|(?:беттинг)|(?:betting)|(?:процесинг)|(?:processing)|(?:проц\b)|(?:бетк[аиу])|(?:\bбук\b)|(?:ставки.{0,10}(спорт|онлайн|прийма))",
+            re.IGNORECASE,
+        ),
+        100,
+        "BLOCK",
+        "Усі ці сервіси заборонені або обмежені більшістю Ukrainian банків та P2P платформ. Участь у їх проце",
+        suppress_hard=frozenset({'не беру казино трафік', 'без гемблінгу', 'без беттингу'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S02_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:обнал(ичк|ьн|ьщик|ьник)?)|(?:фінмон|фінансов.{0,5}моніторинг)|(?:aml|anti.?money)|(?:заморозк)|(?:серяк|сірак)|(?:грязн|брудн.{0,5}(гроші|кошти))|(?:відмивання)|(?:мутн(ий|а|ка))|(?:фінмон)|(?:фінансов.{0,5}моніторинг)|(?:aml)|(?:anti.?money)|(?:блокуван.{0,10}(рахунк|картк))|(?:сір[аі].{0,10}(схем|гроші))|(?:обнал)|(?:обнал(ичк|ьн|ьщик|ичиван)?\b)|(?:грязн)|(?:брудн.{0,5}(гроші|кошти))|(?:сір[аі].{0,5}(схем|гроші|кошти))|(?:dirty.{0,5}money)|(?:черн.{0,5}деньг)|(?:серы.{0,5}деньг)",
+            re.IGNORECASE,
+        ),
+        100,
+        "BLOCK",
+        "Пряма або прихована ознака участі у відмиванні коштів або роботі з коштами незаконного походження.",
+        suppress_hard=frozenset({'без обналу', 'не обнал', 'без сірих схем', 'чисті кошти тільки'}),
+        review_only=False,
+    ),
+]
+
+SOFT_RULES: list[RegexRule] = [
+    RegexRule(
+        "GEN_S01_CHARGEBA",
+        "CHARGEBACK",
+        re.compile(
+            r"(?:\bреф(анд)?\b)|(?:чардж(бек|нув|ував)?)|(?:charge.?back)|(?:\bдисп(ут)?\b)|(?:dispute)|(?:апел(ка|яці|яха|юха)?)|(?:refund)|(?:чардж)|(?:chargeback)|(?:реф(анд)?\b)|(?:диспут)|(?:dispute.{0,15}(відкри|подам|open))|(?:відкрию.{0,10}спір)|(?:повернення.{0,10}(через\s*банк|коштів\s*через))",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Chargeback та refund у P2P — класичний фінансовий скам: отримав крипту, повернув переказ через банк.",
+        suppress_hard=frozenset({'без чарджів', 'чардж не роблю', 'захист від рефанду'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S03_ANONYMOU",
+        "ANONYMOUS",
+        re.compile(
+            r"(?:анонімн)|(?:anonymous)|(?:без.{0,10}(перевірк|питань|kyc|kyk|документ|верифікац))|(?:no.{0,5}(questions|kyc|id|checks))|(?:cash.?in)|(?:термінал.{0,10}(оплат|поповнен|готівк))|(?:без.{0,10}(перевірк|питань|kyk|kyc|документ|верифікац))|(?:no.{0,5}(questions|kyc|id))|(?:термінал.{0,10}(оплат|поповнен))",
+            re.IGNORECASE,
+        ),
+        30,
+        "NEEDS_LLM",
+        "Пропозиція угоди без ідентифікації — обхід AML/KYC вимог, типово для дропів та відмивання.",
+        suppress_hard=frozenset({"верифікація обов'язкова", 'тільки верифіковані'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S04_MIDDLEMA",
+        "MIDDLEMAN",
+        re.compile(
+            r"(?:посередник|посеред\b|посред(ник)?)|(?:номінал(ьн)?|номік)|(?:прокладка)|(?:middleman|nominee)|(?:транзит.{0,10}(рахунок|кошти))|(?:посередник)|(?:номінал)|(?:через.{0,10}посередника)|(?:middleman)|(?:nominee)|(?:номік)|(?:посеред\b)",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Використання посередника або номінального власника приховує реального бенефіціара — типово для струк",
+        suppress_hard=frozenset({'без посередників', 'без номіналів', 'прямий переказ'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S05_CHAT_FIR",
+        "CHAT_FIRST",
+        re.compile(
+            r"(?:пишіть?.{0,15}(до оплат|перед|спочатку))|(?:написати?.{0,15}(до|перед).{0,10}оплат)|(?:write.{0,15}(before|first))|(?:contact.{0,10}(me\s*)?before)|(?:\bлс\b.{0,10}(до|перед))|(?:повідомте.{0,5}мене.{0,5}перед)|(?:написати.{0,15}(до|перед))|(?:лс.{0,10}(до|перед|оплат))",
+            re.IGNORECASE,
+        ),
+        30,
+        "NEEDS_LLM",
+        "Вимога контакту поза чатом до угоди — типовий крок виведення з платформи або інструктаж дропової схе",
+        suppress_hard=frozenset({'не пишіть до оплати', 'не потрібно писати перед'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S06_SUSPICIO",
+        "SUSPICIOUS_BIZ",
+        re.compile(
+            r"(?:фоп.{0,10}(оплат|рахун))|(?:рахунок.{0,10}фоп)|(?:iban.{0,10}фоп)|(?:рахунок.{0,10}підприємц)|(?:бізнес.{0,10}рахунок)",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Оплата на бізнес-рахунок у P2P — нетипова і ризикована, може бути прикриттям легалізації. Але деякі ",
+        suppress_hard=frozenset(),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S07_APPEAL_P",
+        "APPEAL_PRESSURE",
+        re.compile(
+            r"(?:апел(яці|яцію|яцій|к[ауи]))|(?:відкри(ю|ємо).{0,15}(апел|спір|суперечку|диспут))|(?:скарг)|(?:поскаржусь)|(?:appeal)|(?:report\s+you)|(?:dispute.{0,10}(open|will|відкри))",
+            re.IGNORECASE,
+        ),
+        30,
+        "NEEDS_LLM",
+        "Погроза апеляцією як тиск — типовий прийом шахрая щоб змусити відпустити кошти без виконання умов.",
+        suppress_hard=frozenset(),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_S08_THIRD_PA",
+        "THIRD_PARTY_HINT",
+        re.compile(
+            r"(?:третіх.{0,10}осіб)|(?:3.{0,5}особ)|(?:third.{0,5}part)|(?:від.{0,10}інших.{0,10}осіб)",
+            re.IGNORECASE,
+        ),
+        20,
+        "NEEDS_LLM",
+        "Двозначна фраза — може бути заборона (SAFE) або дозвіл (HARD). LLM повинен оцінити контекст.",
+        suppress_hard=frozenset(),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_H05_TRIANGLE",
+        "TRIANGLE",
+        re.compile(
+            r"(?:треугол)|(?:трикутник)|(?:треуг\b)|(?:triangle.{0,10}scam)",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Назва конкретної схеми відмивання через P2P. Відгук з цим словом майже завжди означає реальну скаргу",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S09_TRIANGLE",
+        "TRIANGLE",
+        re.compile(
+            r"дроп(и|ів|овод|ер|ів)?\b",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Дроп у негативному відгуку = підозра що мерчант використовує підставних осіб для переказів.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_H06_TRIANGLE",
+        "TRIANGLE",
+        re.compile(
+            r"(?:дроповод)|(?:дроп.?вод\b)",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Дроповод = організатор дроп-мережі. Назва ролі в P2P-злочинній схемі.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_H07_TRIANGLE",
+        "TRIANGLE",
+        re.compile(
+            r"(?:чуж[аяіо].{0,5}(карт|рахун|реквіз|картк))|(?:карта.{0,10}не.{0,5}(його|моя|своя))|(?:рахунок.{0,10}не.{0,5}(його|мій))|(?:лев[иіо].{0,5}(реквіз|рекв))",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Конкретна ознака дропа — переказ на рахунок що не належить мерчанту.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S10_CASINO",
+        "CASINO",
+        re.compile(
+            r"(?:\bпроц\b)|(?:процес(инг|с\b))|(?:processing\b)",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Скорочений сленг для processing — ознака що мерчант займається обробкою платежів для high-risk бізне",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_H08_CASINO",
+        "CASINO",
+        re.compile(
+            r"(?:гембл[аиу])|(?:гемба\b)|(?:gambling)|(?:казик)|(?:казін[оу].{0,10}(трафік|схем))",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Сленгова назва гемблінг-бізнесу. Якщо у відгуку — підтверджує що мерчант пов'язаний з казино.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S11_CASINO",
+        "CASINO",
+        re.compile(
+            r"(?:\bбук(а|ач)?\b)|(?:bookie)|(?:беттинг)|(?:бетк[аиу])",
+            re.IGNORECASE,
+        ),
+        100,
+        "NEEDS_LLM",
+        "Сленг букмекера або беттинг-бізнесу. Двозначне — може бути контекст і без схеми.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S12_CHARGEBA",
+        "CHARGEBACK",
+        re.compile(
+            r"(?:\bреф(анд)?\b)|(?:refund)|(?:реф.{0,15}(банк|апел|схем|через))",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Рефанд через банк після P2P = класична схема шахрайства (отримав крипту, скасував переказ).",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S13_CHARGEBA",
+        "CHARGEBACK",
+        re.compile(
+            r"(?:чардж(бек|нув|ував)?)|(?:chargeback)|(?:charge.?back)|(?:зчарджив)",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Chargeback = повернення через банк після отриманої крипти. У відгуках майже завжди скарга на реальни",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S14_APPEAL_P",
+        "APPEAL_PRESSURE",
+        re.compile(
+            r"(?:\bдисп(ут|утував)?\b)|(?:dispute)|(?:апел(ка|яція|яха|юха|ювання)?\b)",
+            re.IGNORECASE,
+        ),
+        30,
+        "NEEDS_LLM",
+        "Диспут як інструмент тиску або як результат конфлікту — маркер проблемної угоди.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S15_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:мутк[аиу])|(?:мутн(ий|а|о))|(?:мутняк)|(?:темн(ий|а|о|як))|(?:темна.{0,5}(схем|тем))",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Жаргонне визначення підозрілої/незрозумілої/нечесної операції. У відгуках = попередження від досвідч",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S16_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:серяк)|(?:сірак)|(?:сір[аі].{0,5}(схем|гроші|трафік|контор|тем))|(?:gray.{0,5}scheme)|(?:grey.{0,5}money)",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Жаргонна назва напівлегальних або нелегальних фінансових операцій.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_H09_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:обнальщик)|(?:обнальн)|(?:обнал(ичк|ьник)?\b)",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Прямий опис ролі у незаконному обналічуванні коштів.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S17_MIDDLEMA",
+        "MIDDLEMAN",
+        re.compile(
+            r"(?:посеред(ник)?\b)|(?:посред(ник)?\b)|(?:номік)|(?:номінал\b)|(?:прокладка)|(?:middleman)",
+            re.IGNORECASE,
+        ),
+        40,
+        "NEEDS_LLM",
+        "Наявність посередника у P2P = прихований бенефіціар, типово для відмивання.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S18_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:скам(ер|ував)?)|(?:scam(mer)?)|(?:кинув)|(?:кидало)|(?:розвів)|(?:шахрай)|(?:фейк.{0,5}(мерч|акаун))|(?:розвод)",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Пряме звинувачення у шахрайстві у відгуку — дуже важливий сигнал.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S19_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:заморозив)|(?:заморозил[иа])|(?:заморозк)|(?:заблокував)|(?:заблокувал[иа])|(?:freeze)|(?:blocked.{0,10}account)|(?:рахунок.{0,5}заморожен)",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Заморозка рахунку після угоди = ознака що кошти мали кримінальне походження або банк їх ідентифікува",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_S20_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:лев[аяиу]к)|(?:лів[аяиу]к)|(?:лів(а|ий|ій).{0,5}(схем|тем|трафік|мерч))|(?:лева.{0,5}(схем|тем))",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Жаргонне позначення нелегальної/тіньової операції або мерчанта.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_H10_FINCRIME",
+        "FINCRIME",
+        re.compile(
+            r"(?:грязн)|(?:брудн.{0,5}(гроші|кошти|трафік))|(?:dirty.{0,5}money)|(?:грязь)",
+            re.IGNORECASE,
+        ),
+        50,
+        "NEEDS_LLM",
+        "Пряма назва коштів злочинного походження у відгуках.",
+        suppress_hard=frozenset(),
+        review_only=True,  # review-only signal
+    ),
+]
+
+WARN_RULES: list[RegexRule] = [
+    RegexRule(
+        "GEN_W01_RECEIPT_",
+        "RECEIPT_REQUIRED",
+        re.compile(
+            r"(?:квитанці[яю])|(?:скриншот.{0,10}(оплат|квитанц))|(?:фото.{0,10}(чеку|квитанц))|(?:чек.{0,10}(оплат|надішл|скинь))|(?:підтвердження.{0,10}оплати.{0,10}(надішл|скинь))|(?:screenshot.{0,5}of.{0,5}payment)|(?:\bпруф\b.{0,10}оплат)|(?:\bскрін\b.{0,5}(чек|оплат|квитанц))|(?:чек.{0,10}(оплат|надішл))|(?:пруф.{0,10}оплат)",
+            re.IGNORECASE,
+        ),
+        10,
+        "WARN",
+        "Вимога квитанції — WARN рівень. Саме по собі не небезпечно, але може бути використано для відмови пі",
+        suppress_hard=frozenset(),
+        review_only=False,
+    ),
+]
+
+SAFE_RULES: list[RegexRule] = [
+    RegexRule(
+        "GEN_F01_SAFE",
+        "SAFE",
+        re.compile(
+            r"(?:без.{0,5}третіх.{0,5}осіб)|(?:не.{0,10}(від|приймаю.{0,5}від).{0,5}третіх)|(?:тільки.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:тільки.{0,5}власник.{0,5}картк)|(?:дроп.{0,5}(заборонен|не\s*прийма|відмовлю))|(?:без.{0,5}посередників)|(?:не.{0,10}пишіть.{0,10}(у|в).{0,5}(telegram|tg|viber|whatsapp|телеграм|вайбер))|(?:в.{0,5}месенджери.{0,5}не.{0,5}переходжу)|(?:спілкування.{0,5}тільки.{0,5}(в\s*)?чаті.{0,5}біржі)|(?:тільки.{0,5}чат.{0,5}(біржі|платформи))|(?:не.{0,5}виходжу.{0,5}за.{0,5}межі)",
+            re.IGNORECASE,
+        ),
+        -50,
+        "SAFE",
+        "Не ризикована — навпаки, захист від трикутника.",
+        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_F03_SAFE",
+        "SAFE",
+        re.compile(
+            r"(?:не.{0,10}(бере|приймає).{0,10}від.{0,10}(третіх|чужих))|(?:тільки.{0,5}своїх.{0,5}реквізит)|(?:без\s*дропів)|(?:дропи.{0,5}не.{0,5}прийма)",
+            re.IGNORECASE,
+        ),
+        -50,
+        "SAFE",
+        "Не ризикова — підтвердження що мерчант дотримується правил.",
+        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
+        review_only=True,  # review-only signal
+    ),
+    RegexRule(
+        "GEN_SAFE_ANTI_EXT",
+        "SAFE",
+        re.compile(
+            r"(?:не.{0,10}пишіть.{0,10}(у|в).{0,5}(telegram|tg|viber|whatsapp|signal|телеграм|вайбер))|(?:в.{0,5}месенджери.{0,5}не.{0,5}переходжу)|(?:спілкування.{0,5}тільки.{0,5}(в\s*)?чаті.{0,5}біржі)|(?:тільки.{0,5}чат.{0,5}(біржі|платформи))|(?:не.{0,5}виходжу.{0,5}за.{0,5}межі)|(?:chat.{0,5}only.{0,5}(on\s*)?platform)",
+            re.IGNORECASE,
+        ),
+        -50,
+        "SAFE",
+        "Мерчант забороняє зовнішні месенджери",
+        suppress_hard=frozenset({'EXTERNAL_LINK'}),
+        review_only=False,
+    ),
+    RegexRule(
+        "GEN_SAFE_ANTI_DROP",
+        "SAFE",
+        re.compile(
+            r"(?:без.{0,5}третіх.{0,5}осіб)|(?:не.{0,10}(від|приймаю.{0,5}від).{0,5}третіх.{0,5}осіб)|(?:тільки.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:лише.{0,5}(зі?|з).{0,5}своєї.{0,5}картк)|(?:тільки.{0,5}з.{0,5}особистої.{0,5}картк)|(?:оплата.{0,5}лише.{0,5}з.{0,5}картки.{0,5}власника)|(?:переказ.{0,5}тільки.{0,5}від.{0,5}власника)|(?:не.{0,5}приймаю.{0,5}від.{0,5}інших.{0,5}осіб)|(?:без.{0,5}посередників)|(?:тільки.{0,5}власник.{0,5}картки)|(?:дроп[иі]?.{0,5}(заборонен|не\s*прийма|відмовлю))|(?:без.{0,5}дропів)",
+            re.IGNORECASE,
+        ),
+        -50,
+        "SAFE",
+        "Мерчант явно забороняє третіх осіб та дропів",
+        suppress_hard=frozenset({'TRIANGLE', 'THIRD_PARTY_HINT'}),
+        review_only=False,
+    ),
+]
+
+
+ALL_RULES: list[RegexRule] = HARD_RULES + SOFT_RULES + WARN_RULES + SAFE_RULES
+
+
+SUPPRESSOR_MAP: dict[str, frozenset] = {
+    rule.category: rule.suppress_hard
+    for rule in SAFE_RULES
+    if rule.suppress_hard
+}
+
+============================================================
 FILE: core/engine/__init__.py
 ============================================================
 
@@ -9587,12 +9827,27 @@ FILE: core/engine/__init__.py
 FILE: core/engine/risk_engine.py
 ============================================================
 
-# core/risk_engine.py
+# core/engine/risk_engine.py
+"""
+RiskEngine v2.0
+
+Зміни:
+  1. CompositeScorer — єдиний normalized score 0-100 зі всіх шарів
+  2. Verdict freshness — вердикт живе 7 днів, потім перераховується
+  3. _build_review_flags_from_summary — враховує neg_pct тепер коректно
+     (pos/neg більше не нулі після фіксу review_fetcher)
+  4. Кеш-інвалідація при зростанні composite_score
+  5. Identity: weighted matching (замість all-or-nothing) перенесено
+     в identity_analyzer.py; тут тільки оркестрація
+"""
+
+from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 import time
+from typing import Optional
+
 from exchanges.base import Order
 from core.analysis.regex_analyzer import analyze as regex_analyze, RegexResult
 from core.storage.merchant_db import MerchantDB
@@ -9608,372 +9863,136 @@ from config.defaults import (
     REVIEW_WARN_NEG_PCT, REVIEW_WARN_MIN_NEG,
     REVIEW_BLOCK_NEG_PCT, REVIEW_BLOCK_MIN_NEG,
 )
+
 logger = logging.getLogger("RiskEngine")
 
-# MIN_ORDERS — з config/defaults.py
-
-# MIN_COMPLETION — з config/defaults.py
-
-# TRUSTED_MAX_RISK_SCORE — з config/defaults.py
-# TRUSTED_LLM_MIN_SCORE — з config/defaults.py
-
-# BEHAVIOR_HISTORY_MINUTES — з config/defaults.py
-BEHAVIOR_ALERT_SCORE = 60
-# BOT_ALERT_COOLDOWN_SEC — з config/defaults.py
-
+BEHAVIOR_ALERT_SCORE       = 60
 _ASYNC_ANALYZE_CONCURRENCY = DB_ASYNC_ANALYZE_CONCURRENCY
 
-# REVIEW_* — з config/defaults.py
+# Вердикт живе 3 дні (знижено з 7 — відгуки TTL=24h, 7d давало стейл вердикти).
+VERDICT_MAX_AGE_DAYS = 3
 
 
-# _BoundedTTLCache → замінено на core/utils/cache.py TTLCache
+# ─────────────────────────────────────────────────────────────────────────────
+# CompositeScorer — єдиний normalized score 0-100
+# ─────────────────────────────────────────────────────────────────────────────
 
+class CompositeScorer:
+    """
+    Зводить сигнали з усіх шарів в єдиний normalized_risk_score 0-100.
+
+    Ваги підібрані так щоб:
+      - Regex BLOCK (score=100) + будь-що ще → composite >= 75 → BLOCK
+      - Тільки behavioral бот (score=50) без інших → composite ~= 40 → SUSPICIOUS
+      - Тільки погані відгуки (25% neg) без інших → composite ~= 30 → WARN
+      - Identity клон (is_twin) тепер дає суттєвий внесок (~15 балів)
+      - review_text_score враховує аналіз текстів відгуків (окремо від neg_pct)
+
+    Зміни v2.1:
+      - W_IDENTITY: 0.05 → 0.10 (клон це сильний сигнал)
+      - W_REVIEWS розбито: W_REVIEWS_PCT (кількісний) + W_REVIEWS_TEXT (текстовий)
+      - review_text_score: новий параметр, avg score bad_texts (0-100)
+    """
+    W_REGEX        = 0.28
+    W_BEHAVIOR     = 0.22
+    W_REVIEWS_PCT  = 0.12   # neg_pct (кількісний сигнал)
+    W_REVIEWS_TEXT = 0.08   # текстовий аналіз bad_texts (раніше ігнорувався)
+    W_LLM          = 0.20
+    W_IDENTITY     = 0.10   # підвищено з 0.05 — підтверджений клон важливий
+
+    @classmethod
+    def compute(
+        cls,
+        regex_score:       int,
+        behavior_score:    int,
+        review_neg_pct:    float,
+        llm_verdict:       str,
+        is_twin:           bool,
+        finish_rate:       float = 100.0,
+        order_count:       int   = 0,
+        review_text_score: float = 0.0,   # новий: avg score текстів bad_texts
+    ) -> int:
+        """Повертає composite_score 0-100."""
+
+        r_norm    = min(100, max(0, regex_score))
+        b_norm    = min(100, max(0, behavior_score))
+        rev_norm  = min(100, review_neg_pct * 2.5)   # 40% neg = 100 score
+        rtext_norm = min(100, max(0, review_text_score))
+        l_map     = {"OK": 0, "SUSPICIOUS": 50, "BLOCK": 100, "UNKNOWN": 25}
+        l_norm    = l_map.get(llm_verdict.upper(), 25)
+        id_norm   = 100 if is_twin else 0
+
+        raw = (
+            r_norm     * cls.W_REGEX        +
+            b_norm     * cls.W_BEHAVIOR     +
+            rev_norm   * cls.W_REVIEWS_PCT  +
+            rtext_norm * cls.W_REVIEWS_TEXT +
+            l_norm     * cls.W_LLM          +
+            id_norm    * cls.W_IDENTITY
+        )
+
+        # Підвищений ризик для нових акаунтів з поганим рейтингом
+        if order_count < 50 and finish_rate < 92.0:
+            raw = min(100, raw * 1.3)
+
+        return min(100, int(raw))
+
+    @classmethod
+    def to_verdict(cls, score: int) -> str:
+        if score >= 75: return "BLOCK"
+        if score >= 45: return "SUSPICIOUS"
+        if score >= 20: return "WARN"
+        return "OK"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
     return (
-            order.month_order_count >= TRUSTED_MIN_ORDERS
-            and order.finish_rate_pct >= TRUSTED_MIN_COMPLETION
-            and risk_score <= TRUSTED_MAX_RISK_SCORE
+        order.month_order_count >= TRUSTED_MIN_ORDERS
+        and order.finish_rate_pct >= TRUSTED_MIN_COMPLETION
+        and risk_score <= TRUSTED_MAX_RISK_SCORE
     )
-
-
-class RiskEngine:
-    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None):
-        self._db = db
-        self._llm = llm_pool
-        self._analyzed = 0
-        self._db_hits = 0
-        self._bot_alert_cache: dict[tuple[str, str], tuple[str, float]] = {}
-        self._b_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
-        self._id_cache = TTLCache(ttl_seconds=60.0, max_size=2000)
-        self._db_sem = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
-
-    def analyze(self, order: Order) -> Order:
-        self._analyzed += 1
-        behavior_flags = self._behavior(order)
-
-        if self._db and order.merchant_id:
-            asyncio.ensure_future(self._async_analyze(order, behavior_flags))
-            initial_flags = _dedupe_flags(behavior_flags)
-            order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
-            return order
-
-        result = regex_analyze(
-            order.trade_terms,
-            order.finish_rate_pct,
-            order.month_order_count,
-            order.is_verified,
-        )
-
-        order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
-        order.regex_score = int(getattr(result, "score", 0) or 0)
-
-        flags: list[str] = []
-
-        if result.verdict == "BLOCK":
-            flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
-        elif result.verdict == "NEEDS_LLM":
-            flags.append(_build_pending_flag(result))
-        elif result.reason:
-            flags.append(_build_weak_regex_flag(result))
-
-        flags.extend(behavior_flags)
-        flags = _dedupe_flags(flags)
-        order.risk_flag = _join_flags(flags) if flags else "OK"
-        return order
-
-    async def _async_analyze(self, order: Order, behavior_flags: list[str]) -> None:
-        async with self._db_sem:
-            await self._async_analyze_inner(order, behavior_flags)
-
-    async def _async_analyze_inner(self, order: Order, behavior_flags: list[str]) -> None:
-        try:
-            exchange = order.exchange
-            mid = order.merchant_id
-            terms = getattr(order, "trade_terms", "") or ""
-            now = time.time()
-
-            cache_key = (exchange, mid)
-
-            need_snapshots = self._b_cache.get(cache_key) is None
-            need_twins = bool(order.merchant_name) and self._id_cache.get(cache_key) is None
-
-            coros = [
-                self._db.is_blacklisted(exchange, mid),
-                self._db.get_reviews_summary(exchange, mid),
-                self._db.get_recent_snapshots(exchange, mid, minutes=BEHAVIOR_HISTORY_MINUTES)
-                if need_snapshots else _noop(None),
-                self._db.find_digital_twins(order.merchant_name, exchange, minutes=15)
-                if need_twins else _noop(None),
-                self._db.get_verdict(exchange, mid, terms),
-                self._db.get_risk_score(exchange, mid),
-            ]
-
-            (
-                (is_bl, bl_reason),
-                review_summary_raw,
-                snapshots_raw,
-                twins_raw,
-                cached_verdict,
-                score,
-            ) = await asyncio.gather(*coros)
-
-            if is_bl:
-                order.risk_flag = f"BLOCK:BLACKLIST:{bl_reason}"
-                logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
-                return
-
-            review_flags = _build_review_flags_from_summary(review_summary_raw)
-
-            # ── 1. ПОВЕДІНКОВИЙ ШАР ───────────────────────────────────────────
-            cached_b = self._b_cache.get(cache_key)
-            if cached_b is not None:
-                behavior_result = cached_b
-            else:
-                behavior_result = analyze_history(order, snapshots_raw or [])
-                self._b_cache.set(cache_key, behavior_result)
-
-            if behavior_result.flags:
-                behavior_flags.extend(behavior_result.flags)
-
-            behavior_score = int(getattr(behavior_result, "score", 0) or 0)
-            behavior_reason = str(getattr(behavior_result, "reason", "") or "")
-            behavior_needs_llm = bool(getattr(behavior_result, "needs_llm", False))
-
-            # ── 2. ШАР ЦИФРОВИХ ДВІЙНИКІВ ─────────────────────────────────────
-            if order.merchant_name:
-                cached_id = self._id_cache.get(cache_key)
-                if cached_id is not None:
-                    id_result = cached_id
-                else:
-                    id_result = analyze_identity(order, twins_raw or [])
-                    self._id_cache.set(cache_key, id_result)
-
-                if id_result.is_twin:
-                    behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")
-
-            if behavior_score >= BEHAVIOR_ALERT_SCORE or behavior_needs_llm:
-                behavior_flags.append(f"BEHAVIOR_BOTLIKE:S{behavior_score}")
-                signature = _behavior_signature(behavior_result.flags, behavior_score, behavior_reason)
-                if _should_log_behavior_alert(self._bot_alert_cache, exchange, mid, signature):
-                    logger.warning("🤖 Підозра на БОТА: %s [%s] — %s", order.merchant_name, exchange,
-                                   behavior_reason or signature)
-
-            behavior_flags = _dedupe_flags(behavior_flags)
-
-            # 🚀 МАТРИЦЯ ДОКАЗІВ: ПІДГОТОВКА ЗМІННИХ
-            has_exact_limits = any(f.startswith("EXACT_LIMITS") or f.startswith("STATIC_DROP") for f in behavior_flags)
-            has_cross_bot = any(f.startswith("CROSS_EXCHANGE_BOT") for f in behavior_flags)
-            has_api_replenish = any(f.startswith("API_REPLENISH") for f in behavior_flags)
-            has_bad_reviews = any(f.startswith("BADREVIEWS:") for f in review_flags)
-
-            # 🚨 CACHE OVERRIDE (ІНВАЛІДАЦІЯ)
-            has_anomalous_behavior = has_exact_limits or has_cross_bot or has_api_replenish
-            if has_anomalous_behavior and cached_verdict == "OK":
-                cached_verdict = None
-                logger.debug("💥 Cache Override: Знайдено поведінкові аномалії для %s", order.merchant_name)
-
-            # ── 3. ПОВЕРНЕННЯ З КЕШУ (Тільки якщо все чисто) ──────────────────
-            if cached_verdict and cached_verdict not in ("NEEDS_LLM",):
-                self._db_hits += 1
-
-            if score >= 80 and cached_verdict == "OK":
-                flags = _dedupe_flags(["HIGH_RISK_SCORE"] + review_flags + behavior_flags)
-                order.risk_flag = _join_flags(flags) or "HIGH_RISK_SCORE"
-                return
-
-            if cached_verdict is not None:
-                cached_flag = await _build_cached_flag(cached_verdict, exchange, mid, self._db)
-
-                block_review = _pick_block_review(review_flags)
-                if block_review:
-                    order.risk_flag = block_review
-                    return
-
-                flags: list[str] = []
-                if cached_flag and cached_flag != "OK":
-                    flags.append(cached_flag)
-                flags.extend(review_flags)
-                flags.extend(behavior_flags)
-
-                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
-                return
-
-            # ── 4. REGEX АНАЛІЗ ───────────────────────────────────────────────
-            regex_result = regex_analyze(
-                terms,
-                order.finish_rate_pct,
-                order.month_order_count,
-                order.is_verified,
-            )
-
-            order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
-            order.regex_score = int(getattr(regex_result, "score", 0) or 0)
-            has_soft_regex = order.regex_score > 0
-
-            # 🚀 HARD EVIDENCE 1: Детерміністичний REGEX BLOCK
-            if regex_result.verdict == "BLOCK":
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", regex_result.risk_type, regex_result.reason, "regex"
-                )
-                block_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
-                flags = _dedupe_flags([block_flag] + review_flags + behavior_flags)
-                order.risk_flag = _join_flags(flags) or block_flag
-                logger.warning("🚫 Regex BLOCK: %s [%s] %s — %s", order.merchant_name, exchange, regex_result.risk_type,
-                               regex_result.reason)
-                return
-
-            # 🚀 HARD EVIDENCE 2: Детерміністичний BAD REVIEWS BLOCK
-            block_review = _pick_block_review(review_flags)
-            if block_review:
-                order.risk_flag = block_review
-                return
-
-            # 🚀 COMPOSITE EVIDENCE (ДЕЛЕГУЄМО ФІНАЛЬНЕ РІШЕННЯ В LLM)
-            composite_risk = ""
-            if has_cross_bot and has_bad_reviews:
-                composite_risk = "Мережа клонів + Негативні відгуки"
-            elif has_api_replenish and has_soft_regex:
-                composite_risk = "Бот-автопоповнення + Підозрілі умови в тексті"
-            elif has_exact_limits and has_cross_bot and has_soft_regex:
-                composite_risk = "Фіксована сума + Клони на біржах + М'які ризики"
-
-            if composite_risk:
-                logger.info("⚖️ КОМПОЗИТНИЙ РИЗИК: %s [%s] — %s. Делегуємо фінальне рішення в LLM.",
-                            order.merchant_name, exchange, composite_risk)
-                behavior_needs_llm = True  # 🚀 Форсуємо виклик нейронки
-                behavior_flags.append("COMPOSITE_RISK")
-
-                # Інвалідуємо старий чистий кеш, щоб перепровірити
-                if cached_verdict == "OK":
-                    cached_verdict = None
-
-            # ── 5. LLM TIE-BREAKER ────────────────────────────────────────────
-            # 🚀 ФІКС: Нейронка тепер викликається і через текст (regex), і через поведінку (behavior)
-            if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
-                trusted = _is_trusted_merchant(order, score)
-
-                # ЗНЯТТЯ ІМУНІТЕТУ: поведінкові аномалії змушують VIP-мерчанта йти на перевірку LLM
-                if trusted and has_anomalous_behavior:
-                    logger.debug("🔍 Trusted immunity stripped for %s due to anomalous behavior.", order.merchant_name)
-                    trusted = False
-
-                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE:
-                    logger.debug("✅ Trusted skip: %s [%s] score=%d < %d", order.merchant_name, exchange,
-                                 regex_result.score, TRUSTED_LLM_MIN_SCORE)
-                    flags: list[str] = []
-                    flags.extend(review_flags)
-                    flags.extend(behavior_flags)
-                    if not flags and regex_result.reason:
-                        flags.append(_build_weak_regex_flag(regex_result))
-                    order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
-                    return
-
-                # 🚀 ФІКС: Передаємо всю статистику та ліміти у воркер!
-                scheduled = self._llm.schedule(
-                    exchange=exchange,
-                    merchant_id=mid,
-                    merchant_name=order.merchant_name,
-                    trade_terms=terms,
-                    regex_result=regex_result,
-                    finish_rate=order.finish_rate_pct,
-                    month_order_count=order.month_order_count,
-                    is_verified=order.is_verified,
-                    min_limit=order.min_limit,
-                    max_limit=order.max_limit,
-                    behavior_flags=behavior_flags
-                )
-
-                if scheduled:
-                    # 🚀 Правильний PENDING маркер для поведінкових тригерів
-                    if composite_risk or behavior_needs_llm:
-                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}"
-                    else:
-                        pending_flag = _build_pending_flag(regex_result)
-
-                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
-                    order.risk_flag = _join_flags(flags) or pending_flag
-                    return
-
-                else:
-                    # 🚀 ЗАХИСТ ВІД СПАМУ: Якщо форсували LLM через бот-поведінку,
-                    # але спрацював кулдаун (щоб не платити за API) або черга повна —
-                    # заморожуємо статус у PENDING, щоб не було помилкових OK.
-                    if composite_risk or behavior_needs_llm:
-                        order.risk_flag = f"LLM_PENDING:COOLDOWN:Зачекайте_на_LLM"
-                        return
-
-            # Якщо не потребує LLM або не вдалося запланувати:
-            flags: list[str] = []
-            if regex_result.reason:
-                flags.append(_build_weak_regex_flag(regex_result))
-            flags.extend(review_flags)
-            flags.extend(behavior_flags)
-            order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
-
-        except Exception as e:
-            logger.error("RiskEngine async помилка для %s: %s", order.merchant_name, e, exc_info=True)
-
-    def _behavior(self, order: Order) -> list[str]:
-        flags = []
-        exchange = order.exchange
-
-        # LOW_STATS більше не є глобальним блоком — перенесено в AlertDispatcher._user_wants()
-        # де кожен юзер має свої персональні пороги (merchant_filters_json)
-
-        # 🚀 ФІКС 3: ЗНЯТТЯ ІМУНІТЕТУ ДЛЯ ФІКСОВАНИХ СУМ
-        if order.min_limit > 0 and order.max_limit > 0:
-            # Різниця до 5 грн — це вже аномалія (EXACT_TOLERANCE)
-            is_exact = abs(order.max_limit - order.min_limit) <= 5.0
-
-            if is_exact:
-                # ЖОДНОГО ІМУНІТЕТУ для фіксованих сум
-                flags.append("SUSPICIOUS_LIMITS")
-            else:
-                # Для звичайних ордерів залишаємо старе правило (імунітет > 1000 угод)
-                spread = float(order.max_limit - order.min_limit) / float(order.max_limit)
-                if spread < 0.02 and float(order.max_limit) > 500:
-                    if not (order.is_verified or order.month_order_count > 1000):
-                        flags.append("SUSPICIOUS_LIMITS")
-
-        return flags
-
-    def analyze_batch(self, orders: list[Order]) -> list[Order]:
-        for order in orders:
-            self.analyze(order)
-        return orders
-
-    async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
-        for order in orders:
-            self.analyze(order)
-        return orders
-
-    def stats(self) -> str:
-        return f"RiskEngine: {self._analyzed} analyzed, {self._db_hits} db hits"
-
-
-async def _noop(value):
-    return value
 
 
 def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     if not summary:
-        return []
+        return[]
 
-    pos = int(summary.get("positive", 0) or 0)
-    neg = int(summary.get("negative", 0) or 0)
-    neutral = int(summary.get("neutral", 0) or 0)
-    bad_texts = summary.get("bad_texts", []) or []
+    status = summary.get("status", "OK")
+    if status == "UNAVAILABLE":
+        return[]
+
+    pos       = int(summary.get("positive",  0) or 0)
+    neg       = int(summary.get("negative",  0) or 0)
+    neutral   = int(summary.get("neutral",   0) or 0)
+    bad_texts = summary.get("bad_texts", []) or[]
+
+    # 🚀 НОВЕ: ХАРД-БЛОК ЗА КРИТИЧНІ ВІДГУКИ (Навіть якщо він один)
+    CRITICAL_CATEGORIES = {"TRIANGLE", "CHARGEBACK", "FINCRIME", "CASINO"}
+    for bad_text_item in bad_texts:
+        if isinstance(bad_text_item, dict):
+            cats = bad_text_item.get("categories",[])
+            if any(c in CRITICAL_CATEGORIES for c in cats):
+                cat_names = ", ".join(cats)
+                excerpt = str(bad_text_item.get("excerpt", ""))[:100]
+                return[f"BLOCK:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
 
     total = pos + neg + neutral
     if total <= 0:
-        return []
+        if bad_texts:
+            sample = str(bad_texts[0]).replace("\n", " ").strip()[:120]
+            return[f"BADREVIEWS_TEXTS:відгуки є але лічильники відсутні | {sample}"]
+        return[]
 
     neg_pct = (neg / total) * 100.0
-    sample = ""
+    sample  = ""
     if bad_texts:
-        sample = str(bad_texts[0]).replace("\n", " ").strip()[:120]
+        # Для логування беремо текст (або словник)
+        first_bad = bad_texts[0]
+        sample = str(first_bad.get("text", first_bad) if isinstance(first_bad, dict) else first_bad).replace("\n", " ").strip()[:120]
 
     reason = f"{neg_pct:.0f}% neg ({neg}/{total})"
     if sample:
@@ -9985,7 +10004,22 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
         return [f"BADREVIEWS:{reason}"]
 
-    return []
+    return[]
+
+
+def _is_verdict_stale(analyzed_at: float) -> bool:
+    """
+    Вердикт вважається застарілим якщо він старший VERDICT_MAX_AGE_DAYS.
+    Примушує перерахунок навіть якщо terms_hash не змінився.
+    """
+    if not analyzed_at:
+        return True
+    age_days = (time.time() - analyzed_at) / 86400.0
+    return age_days > VERDICT_MAX_AGE_DAYS
+
+
+async def _noop(value):
+    return value
 
 
 def _join_flags(flags: list[str]) -> str:
@@ -10001,13 +10035,13 @@ def _pick_block_review(flags: list[str]) -> str | None:
 
 
 def _build_pending_flag(result: RegexResult) -> str:
-    risk = result.risk_type or "SUSPICIOUS"
+    risk  = result.risk_type or "SUSPICIOUS"
     score = getattr(result, "score", 0) or 0
     return f"LLM_PENDING:{risk}:S{score}"
 
 
 def _build_weak_regex_flag(result: RegexResult) -> str:
-    risk = result.risk_type or "WEAK_SIGNAL"
+    risk  = result.risk_type or "WEAK_SIGNAL"
     score = getattr(result, "score", 0) or 0
     return f"REGEX_WEAK:{risk}:S{score}"
 
@@ -10015,7 +10049,7 @@ def _build_weak_regex_flag(result: RegexResult) -> str:
 async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: MerchantDB) -> str:
     risk_type, reason = await db.get_reason(exchange, merchant_id)
     risk_type = (risk_type or "").strip()
-    reason = (reason or "").strip()[:120]
+    reason    = (reason    or "").strip()[:120]
 
     if verdict == "BLOCK":
         if risk_type or reason:
@@ -10033,38 +10067,517 @@ async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: 
 
 
 def _behavior_signature(flags: list[str], score: int, reason: str = "") -> str:
-    core = ",".join(flags)
+    core         = ",".join(flags)
     short_reason = (reason or "")[:160]
-    if short_reason:
-        return f"{core}|S{score}|{short_reason}"
-    return f"{core}|S{score}"
+    return f"{core}|S{score}|{short_reason}" if short_reason else f"{core}|S{score}"
 
 
-def _should_log_behavior_alert(cache: dict[tuple[str, str], tuple[str, float]], exchange: str, merchant_id: str,
-                               signature: str, cooldown_sec: int = BOT_ALERT_COOLDOWN_SEC) -> bool:
-    import time
-    key = (exchange, merchant_id)
-    now = time.time()
-    prev = cache.get(key)
-    if prev is None:
-        cache[key] = (signature, now)
-        return True
-    prev_signature, prev_ts = prev
-    if signature != prev_signature or (now - prev_ts) >= cooldown_sec:
-        cache[key] = (signature, now)
+def _should_log_behavior_alert(
+    cache: TTLCache, exchange: str, merchant_id: str,
+    signature: str, cooldown_sec: int = BOT_ALERT_COOLDOWN_SEC,
+) -> bool:
+    key            = f"{exchange}:{merchant_id}"
+    prev_signature = cache.get(key)
+    if prev_signature != signature:
+        cache.set(key, signature)
         return True
     return False
 
 
 def _dedupe_flags(flags: list[str]) -> list[str]:
-    out = []
-    seen = set()
+    out, seen = [], set()
     for f in flags:
         if not f or f in seen:
             continue
         seen.add(f)
         out.append(f)
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RiskEngine
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RiskEngine:
+    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None, review_fetcher=None):
+        self._db      = db
+        self._llm     = llm_pool
+        self._review_fetcher = review_fetcher  # 🚀 ДОДАНО
+        self._analyzed  = 0
+        self._db_hits   = 0
+        self._bot_alert_cache = TTLCache(ttl_seconds=BOT_ALERT_COOLDOWN_SEC, max_size=5000)
+        self._b_cache   = TTLCache(ttl_seconds=60.0, max_size=2000)
+        self._id_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
+        self._db_sem    = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
+
+        # 🚀 ДОДАЄМО МЕТОД СИНЕРГІЙ ОДРАЗУ ПІСЛЯ __init__
+    def _check_synergies(self, order: Order, regex_flags: list[str], behavior_flags: list[str]) -> list[str]:
+        synergies = []
+        has_api    = any("API_REPLENISH"   in f for f in behavior_flags)
+        has_exact  = any("EXACT_LIMITS"    in f for f in behavior_flags)
+        has_cross  = any("CROSS_EXCHANGE_BOT" in f for f in behavior_flags)
+        has_static = any("STATIC_DROP"     in f for f in behavior_flags)
+        has_flicker = any("FLICKER_RELIST" in f for f in behavior_flags)
+        has_velocity = any("VELOCITY_SPIKE" in f for f in behavior_flags)
+
+        has_ext_link       = any("EXTERNAL_LINK" in f for f in regex_flags)
+        has_chat_first     = any("CHAT_FIRST"    in f for f in regex_flags)
+        has_chargeback_warn = any("CHARGEBACK"   in f for f in regex_flags)
+        has_anonymous      = any("ANONYMOUS"     in f for f in regex_flags)
+        has_fincrime       = any("FINCRIME"      in f for f in regex_flags)
+
+        is_new   = order.month_order_count < 50
+        bad_rate = order.finish_rate_pct < 90.0
+
+        # Оригінальні 4
+        if has_api and has_ext_link:
+            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Зовнішній лінк")
+        if is_new and has_exact and has_chargeback_warn:
+            synergies.append("BLOCK:SYNERGY:Новий акаунт + Фікс.ліміт + Ризик рефанду")
+        if has_api and has_chat_first and bad_rate:
+            synergies.append("BLOCK:SYNERGY:Бот + Тягне в чат + Низький %")
+        if has_cross and has_ext_link:
+            synergies.append("BLOCK:SYNERGY:Кросс-біржовий клон + Зовнішній лінк")
+
+        # Нові комбо v2.1
+        if has_api and has_cross:
+            # Бот на кількох біржах одночасно — беззаперечна автоматизація
+            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Крос-біржовий клон")
+        if has_flicker and has_ext_link:
+            # Скрипт блимає і виводить у зовнішній чат — класичний скам-патерн
+            synergies.append("BLOCK:SYNERGY:Flicker-relist + Зовнішній лінк")
+        if has_velocity and has_exact and not order.is_verified:
+            # Висока швидкість угод + фікс.ліміт + не верифікований
+            synergies.append("BLOCK:SYNERGY:Velocity spike + Фікс.ліміт + Не верифікований")
+        if is_new and has_api:
+            # Новий акаунт вже з ботом — не може бути органіки
+            synergies.append("BLOCK:SYNERGY:Новий акаунт + Бот-автопоповнення")
+        if has_static and has_anonymous:
+            # Стабільний дроп + без KYC = сервіс обналу
+            synergies.append("BLOCK:SYNERGY:Static-drop + Анонімність/без KYC")
+        if has_fincrime and (has_api or has_cross):
+            # Regex вже бачить fincrime-слова + бот/клон = підтверджена схема
+            synergies.append("BLOCK:SYNERGY:Fincrime-сигнал + Автоматизований аккаунт")
+
+        return synergies
+
+    def analyze(self, order: Order) -> Order:
+        self._analyzed += 1
+        behavior_flags = self._behavior(order)
+
+        if self._db and order.merchant_id:
+            asyncio.ensure_future(self._async_analyze(order, behavior_flags))
+            initial_flags = _dedupe_flags(behavior_flags)
+            order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
+            return order
+
+        result = regex_analyze(
+            order.trade_terms,
+            order.finish_rate_pct,
+            order.month_order_count,
+            order.is_verified,
+        )
+        order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+        order.regex_score      = int(getattr(result, "score", 0) or 0)
+
+        flags: list[str] = []
+        if result.verdict == "BLOCK":
+            flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
+        elif result.verdict == "NEEDS_LLM":
+            flags.append(_build_pending_flag(result))
+        elif result.reason:
+            flags.append(_build_weak_regex_flag(result))
+
+        flags.extend(behavior_flags)
+        order.risk_flag = _join_flags(_dedupe_flags(flags)) if flags else "OK"
+        return order
+
+    async def _async_analyze(self, order: Order, behavior_flags: list[str]) -> None:
+        async with self._db_sem:
+            await self._async_analyze_inner(order, behavior_flags)
+
+    async def _async_analyze_inner(self, order: Order, behavior_flags: list[str]) -> None:
+        try:
+            exchange  = order.exchange
+            mid       = order.merchant_id
+            terms     = getattr(order, "trade_terms", "") or ""
+            cache_key = (exchange, mid)
+
+            need_snapshots = self._b_cache.get(cache_key) is None
+            need_twins     = bool(order.merchant_name) and self._id_cache.get(cache_key) is None
+
+            coros = [
+                self._db.is_blacklisted(exchange, mid),
+                self._db.get_reviews_summary(exchange, mid),
+                self._db.get_recent_snapshots(exchange, mid, minutes=BEHAVIOR_HISTORY_MINUTES)
+                    if need_snapshots else _noop(None),
+                self._db.find_digital_twins(order.merchant_name, exchange, minutes=15)
+                    if need_twins else _noop(None),
+                self._db.get_verdict(exchange, mid, terms),
+                self._db.get_risk_score(exchange, mid),
+                self._db.get_verdict_timestamp(exchange, mid),   # v2: для freshness check
+            ]
+
+            (
+                (is_bl, bl_reason),
+                review_summary_raw,
+                snapshots_raw,
+                twins_raw,
+                cached_verdict,
+                score,
+                verdict_ts,
+            ) = await asyncio.gather(*coros)
+
+            # ── 🚀 СИНХРОННИЙ ДОКАЧ ВІДГУКІВ ДЛЯ НОВИХ МЕРЧАНТІВ ──────────
+            rev_summary_test = review_summary_raw or {}
+            rev_total_test = int(rev_summary_test.get("positive", 0)) + int(rev_summary_test.get("negative", 0)) + int(
+                rev_summary_test.get("neutral", 0))
+
+            if rev_total_test == 0 and self._review_fetcher and rev_summary_test.get("status") != "UNAVAILABLE":
+                logger.debug(f"⏳ Синхронний fetch відгуків для нового мерчанта {order.merchant_name} [{exchange}]")
+                review_summary_raw = await self._review_fetcher.fetch_now(exchange, mid)
+
+            # ── Blacklist: найвищий пріоритет ──────────────────────────────
+            if is_bl:
+                order.risk_flag = f"BLOCK:BLACKLIST:{bl_reason}"
+                logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
+                return
+
+            review_flags = _build_review_flags_from_summary(review_summary_raw)
+
+            # ── v2.1: Розрахунок review_neg_pct + review_text_score ──────────
+            rev_summary = review_summary_raw or {}
+            rev_pos  = int(rev_summary.get("positive", 0) or 0)
+            rev_neg  = int(rev_summary.get("negative", 0) or 0)
+            rev_neu  = int(rev_summary.get("neutral",  0) or 0)
+            rev_total = rev_pos + rev_neg + rev_neu
+            review_neg_pct = (rev_neg / rev_total * 100.0) if rev_total > 0 else 0.0
+
+            # review_text_score: середній score bad_texts (аналіз текстів відгуків)
+            # Раніше цей сигнал ніколи не потрапляв у CompositeScorer.
+            bad_texts = rev_summary.get("bad_texts") or []
+            if bad_texts:
+                text_scores = [
+                    int(bt.get("score", 0))
+                    for bt in bad_texts
+                    if isinstance(bt, dict) and bt.get("score", 0) > 0
+                ]
+                review_text_score = float(sum(text_scores) / len(text_scores)) if text_scores else 0.0
+            else:
+                review_text_score = 0.0
+
+            # ── 1. Behavioral ───────────────────────────────────────────────
+            cached_b = self._b_cache.get(cache_key)
+            if cached_b is not None:
+                behavior_result = cached_b
+            else:
+                behavior_result = analyze_history(order, snapshots_raw or [])
+                self._b_cache.set(cache_key, behavior_result)
+
+            if behavior_result.flags:
+                behavior_flags.extend(behavior_result.flags)
+
+            behavior_score    = int(getattr(behavior_result, "score", 0) or 0)
+            behavior_reason   = str(getattr(behavior_result, "reason", "") or "")
+            behavior_needs_llm = bool(getattr(behavior_result, "needs_llm", False))
+
+            # ── 2. Identity ─────────────────────────────────────────────────
+            is_twin = False
+            if order.merchant_name:
+                cached_id = self._id_cache.get(cache_key)
+                if cached_id is not None:
+                    id_result = cached_id
+                else:
+                    id_result = analyze_identity(order, twins_raw or [])
+                    self._id_cache.set(cache_key, id_result)
+
+                if id_result.is_twin:
+                    is_twin = True
+                    behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")
+
+            if behavior_score >= BEHAVIOR_ALERT_SCORE or behavior_needs_llm:
+                behavior_flags.append(f"BEHAVIOR_BOTLIKE:S{behavior_score}")
+                signature = _behavior_signature(behavior_result.flags, behavior_score, behavior_reason)
+                if _should_log_behavior_alert(self._bot_alert_cache, exchange, mid, signature):
+                    logger.warning(
+                        "🤖 Підозра на БОТА: %s [%s] — %s",
+                        order.merchant_name, exchange, behavior_reason or signature,
+                    )
+
+            behavior_flags = _dedupe_flags(behavior_flags)
+
+            # ── v2.1: CompositeScorer ───────────────────────────────────────
+            # Рахуємо composite на поточному стані (без LLM — він async)
+            composite_score = CompositeScorer.compute(
+                regex_score        = 0,   # буде оновлено після regex
+                behavior_score     = behavior_score,
+                review_neg_pct     = review_neg_pct,
+                llm_verdict        = "UNKNOWN",
+                is_twin            = is_twin,
+                finish_rate        = order.finish_rate_pct,
+                order_count        = order.month_order_count,
+                review_text_score  = review_text_score,
+            )
+            order.composite_score = composite_score   # зберігаємо на ордері
+
+            # ── Матриця доказів ─────────────────────────────────────────────
+            has_exact_limits   = any(f.startswith("EXACT_LIMITS") or f.startswith("STATIC_DROP") for f in behavior_flags)
+            has_cross_bot      = any(f.startswith("CROSS_EXCHANGE_BOT") for f in behavior_flags)
+            has_api_replenish  = any(f.startswith("API_REPLENISH") for f in behavior_flags)
+            has_bad_reviews    = any(f.startswith("BADREVIEWS") for f in review_flags)
+            has_anomalous_behavior = has_exact_limits or has_cross_bot or has_api_replenish
+
+            # ── v2: Verdict freshness — інвалідуємо застарілий кеш ─────────
+            if cached_verdict and _is_verdict_stale(verdict_ts):
+                logger.debug(
+                    "🔄 Verdict freshness: %s [%s] вердикт старший %dd, перераховуємо",
+                    order.merchant_name, exchange, VERDICT_MAX_AGE_DAYS,
+                )
+                cached_verdict = None
+
+            # Cache override при поведінкових аномаліях
+            if has_anomalous_behavior and cached_verdict == "OK":
+                cached_verdict = None
+                logger.debug("💥 Cache Override: аномалії для %s", order.merchant_name)
+
+            # ── 3. Повернення з кешу ────────────────────────────────────────
+            if score >= 80 and cached_verdict == "OK":
+                flags = _dedupe_flags(["HIGH_RISK_SCORE"] + review_flags + behavior_flags)
+                order.risk_flag = _join_flags(flags) or "HIGH_RISK_SCORE"
+                return
+
+            if cached_verdict is not None:
+                self._db_hits += 1
+                cached_flag   = await _build_cached_flag(cached_verdict, exchange, mid, self._db)
+
+                block_review = _pick_block_review(review_flags)
+                if block_review:
+                    order.risk_flag = block_review
+                    return
+
+                flags: list[str] = []
+                if cached_flag and cached_flag != "OK":
+                    flags.append(cached_flag)
+                flags.extend(review_flags)
+                flags.extend(behavior_flags)
+                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+                return
+
+            # ── 4. Regex аналіз ─────────────────────────────────────────────
+            regex_result = regex_analyze(
+                terms,
+                order.finish_rate_pct,
+                order.month_order_count,
+                order.is_verified,
+            )
+            order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
+            order.regex_score      = int(getattr(regex_result, "score", 0) or 0)
+            has_soft_regex         = order.regex_score > 0
+
+            # Оновлюємо composite з реальним regex_score
+            composite_score = CompositeScorer.compute(
+                regex_score        = order.regex_score,
+                behavior_score     = behavior_score,
+                review_neg_pct     = review_neg_pct,
+                llm_verdict        = "UNKNOWN",
+                is_twin            = is_twin,
+                finish_rate        = order.finish_rate_pct,
+                order_count        = order.month_order_count,
+                review_text_score  = review_text_score,
+            )
+            order.composite_score = composite_score
+
+            # HARD EVIDENCE 1: Regex BLOCK
+            if regex_result.verdict == "BLOCK":
+                await self._db.save_verdict(
+                    exchange, mid, order.merchant_name, terms,
+                    "BLOCK", regex_result.risk_type, regex_result.reason, "regex",
+                )
+                block_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
+                flags      = _dedupe_flags([block_flag] + review_flags + behavior_flags)
+                order.risk_flag = _join_flags(flags) or block_flag
+                logger.warning(
+                    "🚫 Regex BLOCK: %s [%s] %s — %s",
+                    order.merchant_name, exchange, regex_result.risk_type, regex_result.reason,
+                )
+                return
+
+            # HARD EVIDENCE 2: Bad reviews BLOCK
+            block_review = _pick_block_review(review_flags)
+            if block_review:
+                order.risk_flag = block_review
+                logger.warning(
+                    "🚫 Reviews BLOCK: %s [%s] — %s",
+                    order.merchant_name, exchange, block_review,
+                )
+                return
+
+            # v2: Composite BLOCK (без LLM якщо composite >= 80)
+            if composite_score >= 80:
+                composite_reason = f"composite_score={composite_score}/100"
+                await self._db.save_verdict(
+                    exchange, mid, order.merchant_name, terms,
+                    "BLOCK", "COMPOSITE_HIGH_RISK", composite_reason, "composite",
+                )
+                flags = _dedupe_flags(
+                    [f"BLOCK:COMPOSITE_HIGH_RISK:{composite_reason}"] + review_flags + behavior_flags
+                )
+                order.risk_flag = _join_flags(flags)
+                logger.warning(
+                    "🚫 Composite BLOCK: %s [%s] score=%d",
+                    order.merchant_name, exchange, composite_score,
+                )
+                return
+
+            temp_regex_flags = []
+            if regex_result.verdict == "NEEDS_LLM":
+                temp_regex_flags.append(regex_result.risk_type)
+            elif regex_result.reason:
+                temp_regex_flags.append(regex_result.risk_type)
+
+            synergy_flags = self._check_synergies(order, temp_regex_flags, behavior_flags)
+            if synergy_flags:
+                # Синергія дає миттєвий бан!
+                await self._db.save_verdict(
+                    exchange, mid, order.merchant_name, terms,
+                    "BLOCK", "SYNERGY", synergy_flags[0], "synergy_engine",
+                )
+                order.risk_flag = _join_flags(_dedupe_flags(synergy_flags + review_flags + behavior_flags))
+                logger.warning(f"🚫 Synergy BLOCK: {order.merchant_name} [{exchange}] — {synergy_flags[0]}")
+                return
+
+            # COMPOSITE EVIDENCE → LLM (якщо немає синергії)
+            composite_risk = ""
+            if has_cross_bot and has_bad_reviews:
+                composite_risk = "Мережа клонів + Негативні відгуки"
+
+            # ── 5. LLM ──────────────────────────────────────────────────────
+            if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
+                trusted = _is_trusted_merchant(order, score)
+
+                if trusted and has_anomalous_behavior:
+                    logger.debug("🔍 Trusted immunity stripped for %s (anomaly)", order.merchant_name)
+                    trusted = False
+
+                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE:
+                    logger.debug(
+                        "✅ Trusted skip: %s [%s] score=%d < %d",
+                        order.merchant_name, exchange, regex_result.score, TRUSTED_LLM_MIN_SCORE,
+                    )
+                    flags = list(review_flags) + list(behavior_flags)
+                    if not flags and regex_result.reason:
+                        flags.append(_build_weak_regex_flag(regex_result))
+                    order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+                    return
+
+                scheduled = self._llm.schedule(
+                    exchange          = exchange,
+                    merchant_id       = mid,
+                    merchant_name     = order.merchant_name,
+                    trade_terms       = terms,
+                    regex_result      = regex_result,
+                    finish_rate       = order.finish_rate_pct,
+                    month_order_count = order.month_order_count,
+                    is_verified       = order.is_verified,
+                    min_limit         = order.min_limit,
+                    max_limit         = order.max_limit,
+                    behavior_flags    = behavior_flags,
+                    account_age_days  = getattr(order, "account_age_days", 0),
+                )
+
+                if scheduled:
+                    if composite_risk or behavior_needs_llm:
+                        pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}:C{composite_score}"
+                    else:
+                        pending_flag = _build_pending_flag(regex_result)
+
+                    flags = _dedupe_flags([pending_flag] + review_flags + behavior_flags)
+                    order.risk_flag = _join_flags(flags) or pending_flag
+                    return
+                else:
+                    if composite_risk or behavior_needs_llm:
+                        order.risk_flag = f"LLM_PENDING:COOLDOWN:C{composite_score}"
+                        return
+
+            # Без LLM або не вдалося запланувати
+            flags = []
+            if regex_result.reason:
+                flags.append(_build_weak_regex_flag(regex_result))
+            flags.extend(review_flags)
+            flags.extend(behavior_flags)
+            order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+        except Exception as e:
+            logger.error("RiskEngine async помилка для %s: %s", order.merchant_name, e, exc_info=True)
+
+    def _behavior(self, order: Order) -> list[str]:
+        """
+        Швидкий синхронний pre-check до завантаження снапшотів з БД.
+        EXACT_LIMITS тепер виключно в behavioral_analyzer (з контекстом history).
+        Тут залишаємо тільки NARROW_SPREAD — аномально вузький діапазон без
+        точного співпадіння (< 1% spread, сума > 500, не верифікований).
+        """
+        flags = []
+        if order.min_limit > 0 and order.max_limit > 0:
+            max_f = float(order.max_limit)
+            min_f = float(order.min_limit)
+            diff  = max_f - min_f
+            # EXACT_LIMITS (diff <= 5) — вже обробляється behavioral_analyzer з history
+            # Тут ловимо тільки non-exact але дуже вузький діапазон
+            if diff > 5:
+                spread = diff / max_f
+                if spread < 0.01 and max_f > 500:
+                    if not (order.is_verified or order.month_order_count > 1000):
+                        flags.append("NARROW_SPREAD")
+        return flags
+
+    def analyze_batch(self, orders: list[Order]) -> list[Order]:
+        for order in orders:
+            self.analyze(order)
+        return orders
+
+    async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
+        """
+        Справжній async batch — всі ордери обробляються паралельно через gather.
+        Попередня версія викликала sync analyze() і ніколи не чекала async аналізу.
+        """
+        tasks = []
+        for order in orders:
+            self._analyzed += 1
+            behavior_flags = self._behavior(order)
+            if self._db and order.merchant_id:
+                order.risk_flag = _join_flags(_dedupe_flags(behavior_flags)) or "PENDING"
+                tasks.append(self._async_analyze(order, behavior_flags))
+            else:
+                # fallback: немає DB → sync regex
+                result = regex_analyze(
+                    order.trade_terms,
+                    order.finish_rate_pct,
+                    order.month_order_count,
+                    order.is_verified,
+                )
+                order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+                order.regex_score      = int(getattr(result, "score", 0) or 0)
+                flags: list[str] = []
+                if result.verdict == "BLOCK":
+                    flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
+                elif result.verdict == "NEEDS_LLM":
+                    flags.append(_build_pending_flag(result))
+                elif result.reason:
+                    flags.append(_build_weak_regex_flag(result))
+                flags.extend(behavior_flags)
+                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for exc in results:
+                if isinstance(exc, Exception):
+                    logger.error("analyze_batch_async помилка: %s", exc, exc_info=False)
+
+        return orders
+
+    def stats(self) -> str:
+        return f"RiskEngine: {self._analyzed} analyzed, {self._db_hits} db hits"
 
 ============================================================
 FILE: core/storage/__init__.py

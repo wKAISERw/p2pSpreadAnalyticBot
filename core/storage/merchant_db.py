@@ -259,12 +259,18 @@ class MerchantDB:
                                          NOT
                                          NULL
                                      );
-
+                                    CREATE TABLE IF NOT EXISTS merchant_review_history (
+                                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                            exchange TEXT NOT NULL,
+                                            merchant_id TEXT NOT NULL,
+                                            positive_count INTEGER DEFAULT 0,
+                                            negative_count INTEGER DEFAULT 0,
+                                            neg_pct REAL DEFAULT 0.0,
+                                            recorded_at REAL NOT NULL
+                                        );
+                                    CREATE INDEX IF NOT EXISTS idx_rev_hist ON merchant_review_history(exchange, merchant_id, recorded_at);
                                      CREATE INDEX IF NOT EXISTS idx_verdict_lookup
                                          ON merchant_verdict (exchange, merchant_id);
-
-                                     CREATE INDEX IF NOT EXISTS idx_reviews_lookup
-                                         ON merchant_reviews (exchange, merchant_id);
 
                                      /* 🚀 ІНДЕКСИ ДЛЯ СНАПШОТІВ */
                                      CREATE INDEX IF NOT EXISTS idx_snap_lookup
@@ -987,3 +993,36 @@ class MerchantDB:
 
         return [dict(r) for r in rows]
 
+    async def get_verdict_timestamp(self, exchange: str, merchant_id: str) -> float:
+        if not self._db: return 0.0
+        try:
+            async with self._db.execute(
+                    "SELECT updated_at FROM merchant_verdict WHERE exchange=? AND merchant_id=? ORDER BY updated_at DESC LIMIT 1",
+                    (exchange, merchant_id),
+            ) as cur:
+                row = await cur.fetchone()
+            return float(row["updated_at"]) if row else 0.0
+        except Exception:
+            return 0.0
+
+    async def save_review_snapshot(self, exchange: str, merchant_id: str, pos: int, neg: int, neg_pct: float) -> None:
+        if not self._db: return
+        await self._db.execute(
+            "INSERT INTO merchant_review_history (exchange, merchant_id, positive_count, negative_count, neg_pct, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (exchange, merchant_id, pos, neg, neg_pct, time.time())
+        )
+        await self._db.commit()
+
+    async def get_review_trend(self, exchange: str, merchant_id: str, days: int = 7) -> dict:
+        if not self._db: return {"trend": "stable", "delta": 0.0}
+        since = time.time() - (days * 86400)
+        async with self._db.execute(
+                "SELECT neg_pct FROM merchant_review_history WHERE exchange=? AND merchant_id=? AND recorded_at > ? ORDER BY recorded_at ASC",
+                (exchange, merchant_id, since)
+        ) as cur:
+            rows = await cur.fetchall()
+
+        if len(rows) < 2: return {"trend": "stable", "delta": 0.0}
+        delta = float(rows[-1]["neg_pct"]) - float(rows[0]["neg_pct"])
+        trend = "worsening" if delta > 3.0 else "improving" if delta < -3.0 else "stable"
+        return {"trend": trend, "delta": delta}

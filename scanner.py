@@ -270,8 +270,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
-
-    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool)
+    risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
@@ -435,7 +434,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         for o in b_orders:
                             if merchant_filter.passed(o):
                                 if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
@@ -443,7 +442,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         for o in s_orders:
                             if merchant_filter.passed(o):
                                 if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)
+                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)

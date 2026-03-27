@@ -13,7 +13,10 @@ import uvicorn
 from pydantic import BaseModel
 from core.storage.merchant_db import MerchantDB
 from bot.commands import _is_admin
-
+from infrastructure.api.binance_account import BinanceAccountClient
+from infrastructure.api.bybit_account import BybitAccountClient
+from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.api.mexc_account import MEXCAccountClient
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
 from state import state
@@ -290,6 +293,100 @@ async def update_telegram_settings(settings: dict): # Змінено ім'я ф�
         state.user_settings.update(snake_settings)
 
     return {"status": "success"}
+
+
+@app.get("/api/v1/accounts/{telegram_id}")
+async def get_real_exchange_accounts(telegram_id: int):
+    # Отримуємо ключі з БД
+    creds = await db.get_all_credentials(user_id=telegram_id)
+
+    if not creds:
+        return []
+
+    accounts = []
+
+    for exchange_name, keys in creds.items():
+        api_key = keys.get("api_key", "")
+        api_secret = keys.get("api_secret", "")
+        passphrase = keys.get("passphrase", "")
+
+        # Базова модель (буде перезаписана реальними даними)
+        account_data = {
+            "id": exchange_name.lower(),
+            "exchange": exchange_name.capitalize(),
+            "balanceUAH": 0.0,
+            "balanceUSDT": 0.0,
+            "kycLevel": "Verified",
+            "merchantStatus": "None",
+            "tradingVolume30d": 0,
+            "volumeLimit": 100000  # Залишаємо базовий ліміт для візуалізації прогрес-бару
+        }
+
+        try:
+            balances = []
+
+            if exchange_name.lower() == "binance":
+                client = BinanceAccountClient(api_key, api_secret)
+                balances = await client.get_balance()
+                info = await client.get_account_info()
+
+                # Реальний KYC: якщо біржа дозволяє торгувати, значить KYC пройдено
+                account_data["kycLevel"] = "Verified Plus" if info.get("canTrade") else "Unverified"
+
+                # Реальний об'єм та статус: тягнемо останні 100 угод (50 на покупку, 50 на продаж)
+                p2p_buy = await client.get_my_p2p_orders("BUY", rows=50)
+                p2p_sell = await client.get_my_p2p_orders("SELL", rows=50)
+                all_p2p = p2p_buy + p2p_sell
+
+                account_data["merchantStatus"] = "Active" if len(all_p2p) > 0 else "None"
+                # Рахуємо реальний об'єм за останні угоди (приблизно за 30 днів)
+                account_data["tradingVolume30d"] = sum(float(o.get("amount", 0)) for o in all_p2p)
+
+
+            elif exchange_name.lower() == "bybit":
+
+                client = BybitAccountClient(api_key, api_secret)
+
+                balances = await client.get_balance()
+
+                # Для Bybit залишаємо заглушки на відгуки/ордери, щоб не було 403
+
+            elif exchange_name.lower() == "okx":
+                client = OKXAccountClient(api_key, api_secret, passphrase)
+                balances = await client.get_funding_balance()
+
+                # Реальні дані OKX
+                info = await client.get_account_info()
+                p2p_orders = await client.get_my_p2p_orders(limit=50)
+
+                # Парсимо рівень акаунта з відповіді OKX
+                acct_data = info.get("data", [{}])[0]
+                account_data["kycLevel"] = f"Level {acct_data.get('acctLv', '1')}"
+                account_data["merchantStatus"] = "Active" if len(p2p_orders) > 0 else "None"
+                account_data["tradingVolume30d"] = sum(float(o.get("amount", 0)) for o in p2p_orders)
+
+            elif exchange_name.lower() == "mexc":
+                client = MEXCAccountClient(api_key, api_secret)
+                balances = await client.get_balance()
+                info = await client.get_account_info()
+                account_data["kycLevel"] = "Verified"  # MEXC вимагає KYC для API
+
+            # Парсимо знайдений баланс
+            for b in balances:
+                if b["coin"] == "USDT":
+                    account_data["balanceUSDT"] = b["total"]
+                elif b["coin"] == "UAH":
+                    account_data["balanceUAH"] = b["total"]
+
+        except Exception as e:
+            logging.getLogger("Main").error(f"Помилка даних акаунта {exchange_name}: {e}")
+            account_data["kycLevel"] = "API Error"
+            account_data["merchantStatus"] = "API Error"
+
+        accounts.append(account_data)
+
+    return dict_to_camel(accounts)
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

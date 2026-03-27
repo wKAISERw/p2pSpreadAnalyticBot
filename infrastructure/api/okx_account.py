@@ -70,17 +70,8 @@ class OKXAccountClient(BaseHttpClient):
             logger.warning("get_funding_balance: %s", e); return []
 
     async def get_my_p2p_orders(self, state: str = "ongoing", limit: int = 20) -> list[dict]:
-        """
-        Мої P2P угоди.
-        state: ongoing | end | all
-        """
-        if not self.is_authenticated: return []
-        path = f"/api/v5/c2c/order/list?state={state}&limit={limit}"
-        try:
-            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
-            return data.get("data", []) or []
-        except Exception as e:
-            logger.warning("get_my_p2p_orders: %s", e); return []
+        """Заглушка: OKX не віддає приватні P2P дані без спеціальних дозволів (повертає 404)"""
+        return []
 
     async def get_account_info(self) -> dict:
         """Інформація акаунта (UID, рівень)."""

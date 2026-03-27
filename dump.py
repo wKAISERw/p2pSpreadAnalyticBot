@@ -48,6 +48,7 @@ PRIORITY_FILES = [
     "core/analysis/regex_analyzer.py",
     "core/analysis/behavioral_analyzer.py",
     "core/analysis/identity_analyzer.py",
+    "core/analysis/review_analyzer.py"
     "core/analysis/rules.py",
     "core/workers/llm_worker.py",
     "core/workers/review_fetcher.py",
