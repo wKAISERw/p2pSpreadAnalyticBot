@@ -217,8 +217,26 @@ class ReviewFetcher:
         щоб уникнути 'стану перегонів' (Race Condition), коли ордер аналізується швидше,
         ніж завантажаться його відгуки.
         """
-        if exchange not in RATE_LIMITS or not merchant_id:
+        if not merchant_id:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+
+        if exchange not in RATE_LIMITS:
+            # Біржа не підтримує API відгуків (MEXC, Wallet, CryptoBot)
+            logger.debug("fetch_now: %s не підтримує API відгуків [%s]", exchange, merchant_id[:12])
+            # Зберігаємо щоб needs_review_fetch повертав False і не смикав знову
+            try:
+                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
+            except Exception:
+                pass
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NOT_SUPPORTED"}
+
+        # Перевірка автентифікації ПЕРЕД спробою запиту
+        _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx}
+        client = _client_map.get(exchange)
+        if not client or not getattr(client, "is_authenticated", False):
+            logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", merchant_id[:12], exchange)
+            # НЕ зберігаємо в БД — коли з'являться ключі, треба одразу refetch
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
 
         try:
             if exchange == "Binance":
@@ -292,6 +310,14 @@ class ReviewFetcher:
 
     async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
         try:
+            # Перевірка автентифікації ПЕРЕД запитом
+            _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx}
+            client = _client_map.get(exchange)
+            if not client or not getattr(client, "is_authenticated", False):
+                logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
+                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_AUTH")
+                return
+
             if exchange == "Binance":
                 pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
             elif exchange == "Bybit":

@@ -77,7 +77,7 @@ MAX_NORM_TERMS       = 800   # v2: збільшено з 220 — тепер smar
 MAX_MATCHES_IN_PROMPT = 3
 MAX_EXCERPT_LEN      = 90
 
-SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.1).
+SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.2).
 Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
 
 ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
@@ -102,11 +102,19 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — БЕЗПЕЧНО.
 - ПОВЕДІНКА СТАКАНУ: Якщо є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
 - НОВИЙ АКАУНТ: Якщо акаунт молодший 14 днів, а кількість угод підозріло велика — підвищуй ризик.
+- ФІКСОВАНІ ЛІМІТИ: Якщо min_limit ≈ max_limit (фіксована сума) — це РІДКІСТЬ серед звичайних продавців. Разом з 100% рейтингом і великою кількістю угод = бот-процесинг (BOT_API). Разом з підозрілими умовами = трикутна схема (TRIANGLE). Один факт фіксованих лімітів без інших сигналів — verdict: SUSPICIOUS.
 - ВІДГУКИ: Негативні відгуки зі словами "шахрай", "кинув", "дроп" — сильний сигнал BLOCK навіть без тексту умов.
 - Враховуй СТАТИСТИКУ! Верифікований мерчант з >500 угодами і >95% — його жорсткі вимоги щодо безпеки є нормою.
 
+🔍 ОБОВ'ЯЗКОВО АНАЛІЗУЙ ВІДГУКИ:
+- ЗАВЖДИ коментуй стан відгуків у thought_process: скільки позитивних/негативних, чи є тексти поганих відгуків, що саме там написано.
+- Якщо відгуки чисті (neg=0 або дуже низький %) — напиши це явно: "Відгуки чисті, neg=X/Y, загроз не виявлено".
+- Якщо відгуки відсутні — зазнач це як фактор невизначеності.
+- Якщо є негативні тексти — проаналізуй їх зміст (скам, дроп, кинув — це BLOCK; повільно, не відповідає — це м'який сигнал).
+- Якщо мерчант підозрілий за поведінкою, але відгуки повністю чисті — це пом'якшуючий фактор, зазнач це.
+
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
-{"thought_process":"твій логічний ланцюжок роздумів перед вердиктом","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"короткий підсумок"}"""
+{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт"}"""
 
 
 @dataclass
@@ -122,7 +130,8 @@ class LLMTask:
     min_limit:         float
     max_limit:         float
     behavior_flags:    list[str] = field(default_factory=list)
-    account_age_days:  int = 0       # v2: вік акаунту в днях (0 = невідомо)
+    account_age_days:  int  = 0       # вік акаунту в днях (0 = невідомо)
+    review_summary:    dict = field(default_factory=dict)  # lazy-fetched відгуки
 
 
 class LLMWorkerPool:
@@ -170,6 +179,7 @@ class LLMWorkerPool:
         max_limit:         float = 0.0,
         behavior_flags:    list[str] = None,
         account_age_days:  int = 0,
+        review_summary:    dict = None,
     ) -> bool:
         cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
@@ -188,6 +198,7 @@ class LLMWorkerPool:
             max_limit=max_limit,
             behavior_flags=behavior_flags or [],
             account_age_days=account_age_days,
+            review_summary=review_summary or {},
         )
         try:
             self._queue.put_nowait(task)
@@ -222,13 +233,18 @@ class LLMWorkerPool:
         if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
             return
 
-        review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
+        # Використовуємо review_summary що вже lazy-fetched в risk_engine
+        # Якщо порожній (старий шлях) — беремо з БД
+        if task.review_summary:
+            review_summary = task.review_summary
+        else:
+            review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
         result = await self._call_with_fallback(task, review_summary)
         self._stats["processed"] += 1
 
         verdict   = result.get("status", "UNKNOWN").upper()
         risk_type = result.get("risk", "") or "NONE"
-        reason    = (result.get("reason", "") or "")[:150]
+        reason    = (result.get("reason", "") or "")[:900]
         source    = result.get("_source", "unknown")
 
         if verdict == "BLOCK":
@@ -244,9 +260,9 @@ class LLMWorkerPool:
         cats  = _regex_categories(rr)
 
         LLM_LOG.info(
-            "%-8s | %-10s | %-10s | %-14s | score=%-3s | cats=%-30s | %-8s | %s | %s",
-            task.exchange, task.merchant_id[:10], verdict, risk_type, score,
-            ",".join(cats)[:30] or "NONE", source, task.merchant_name[:20], reason[:80],
+            "%-8s | %-11s | %-10s | %-14s | score=%-3s | cats=%-35s | %-8s | %s | %s",
+            task.exchange, task.merchant_id[:11], verdict, risk_type, score,
+            ",".join(cats)[:35] or "NONE", source, task.merchant_name[:40], reason[:900],
         )
 
         if verdict == "BLOCK":
@@ -327,7 +343,7 @@ class LLMWorkerPool:
                 {"role": "user",   "content": user_msg},
             ],
             "temperature": 0.1,
-            "max_tokens": 600,
+            "max_tokens": 1000,
             "response_format": {"type": "json_object"}  # 🚀 ПРИМУСОВИЙ JSON
         }
         async with self._session.post(
@@ -352,7 +368,7 @@ class LLMWorkerPool:
             "contents":         [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 800, # 🚀 ЗБІЛЬШЕНО З 200
+                "maxOutputTokens": 1200, # 🚀 ЗБІЛЬШЕНО — розгорнутий аналіз
                 "responseMimeType": "application/json" # 🚀 ПРИМУСОВИЙ JSON
             },
         }
@@ -497,19 +513,30 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     ]
 
     # v2: відгуки — передаємо навіть при UNAVAILABLE якщо є збережені bad_texts
-    if rev_status not in ("OK",):
+    # v2.1: розрізняємо причини відсутності відгуків
+    _NO_REVIEW_EXCHANGES = {"MEXC", "Wallet", "CryptoBot"}
+    if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
+        lines.append(f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")
+    elif rev_status == "NO_AUTH":
+        lines.append(f"Reviews: API відгуків потребує автентифікації — тимчасово недоступний. Оцінюй за умовами та поведінкою. НЕ вважай відсутність відгуків фактором ризику.")
+    elif rev_status not in ("OK",):
         if bad_texts:
             lines.append(
                 f"Reviews: API недоступний ({rev_status}), але є {len(bad_texts)} "
                 f"збережених поганих відгуків з минулого оновлення:"
             )
         else:
-            lines.append(f"Reviews: API недоступний ({rev_status}). Репутація невідома.")
+            lines.append(f"Reviews: API тимчасово недоступний ({rev_status}). Оцінюй за умовами та поведінкою. НЕ вважай це фактором ризику.")
     else:
         if total > 0:
             lines.append(f"Reviews: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%")
+            if neg == 0:
+                lines.append("⬆️ ВІДГУКИ ЧИСТІ: жодного негативного відгуку.")
+            elif neg_pct < 3.0:
+                lines.append(f"⬆️ ВІДГУКИ ПЕРЕВАЖНО ЧИСТІ: лише {neg} негативних ({neg_pct:.1f}%).")
         else:
-            lines.append("Reviews: дані відсутні (мерчант новий або API не повернув дані)")
+            lines.append("Reviews: мерчант новий або ще не має відгуків. Оцінюй за умовами та поведінкою.")
+            lines.append("⚠️ ВІДГУКИ НЕВІДОМІ: зазнач це у thought_process як м'який фактор невизначеності (НЕ як ризик).")
 
     # bad_texts завжди — незалежно від статусу
     if bad_texts:
@@ -524,7 +551,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту"}'
     )
     return "\n".join(lines)
 
@@ -587,12 +614,13 @@ def _parse_json(text: str) -> dict:
     if status not in ("OK", "SUSPICIOUS", "BLOCK"):
         status = "UNKNOWN"
     risk = str(data.get("risk", "NONE")).upper()[:32]
-    reason = str(data.get("reason", "")).strip()[:150]
+    reason = str(data.get("reason", "")).strip()[:900]
 
-    # 🚀 Логуємо ланцюжок думок у дебаг
+    # 🚀 Логуємо ланцюжок думок у LLM_LOG (не тільки debug)
     thought = data.get("thought_process", "")
     if thought:
         logger.debug(f"🧠 LLM Thoughts: {thought}")
+        LLM_LOG.info("🧠 THOUGHT | %s", str(thought)[:3000])
 
     return {
         "status": status,

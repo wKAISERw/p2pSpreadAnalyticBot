@@ -433,16 +433,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         for o in b_orders:
                             if merchant_filter.passed(o):
-                                if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
+                                # schedule() прибрано — відгуки тягнуться ТІЛЬКИ
+                                # для мерчантів у реальному спреді (lazy в risk_engine)
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
 
                         for o in s_orders:
                             if merchant_filter.passed(o):
-                                if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
@@ -489,16 +487,24 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     )
 
                     sent_count = 0
+                    # ── Аналіз ризику для всіх ордерів у спреді ─────────────
+                    # analyze_for_spread() ЧЕКАЄ завершення аналізу (await) —
+                    # кешований LLM вердикт буде в алерті, а не тільки в наступному циклі.
+                    _analyzed_ids: set[tuple[str, str]] = set()
+                    _to_analyze: list = []
+                    for opp in opportunities:
+                        for order in [opp["buy_order"], opp["sell_order"]]:
+                            key = (order.exchange, order.merchant_id)
+                            if key not in _analyzed_ids:
+                                _analyzed_ids.add(key)
+                                _to_analyze.append(order)
+                    if _to_analyze:
+                        await risk_engine.analyze_for_spread(_to_analyze)
+
                     for opp in opportunities:
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        if not getattr(buy_o, "_risk_analyzed", False):
-                            risk_engine.analyze(buy_o);
-                            buy_o._risk_analyzed = True
-                        if not getattr(sell_o, "_risk_analyzed", False):
-                            risk_engine.analyze(sell_o);
-                            sell_o._risk_analyzed = True
 
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.

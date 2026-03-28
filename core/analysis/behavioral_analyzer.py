@@ -7,6 +7,7 @@ from config.defaults import (
     LIMIT_EPSILON, STICKY_MIN_CHAIN,
     VELOCITY_MIN_WINDOW_HOURS, VELOCITY_SPIKE_PER_HOUR,
     BEHAVIOR_LLM_THRESHOLD,
+    EXACT_LIMITS_SCORE,
 )
 
 MIN_SNAPSHOTS = 3
@@ -64,6 +65,7 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
     is_exact = _is_exact_limits(min_lim, max_lim)
     if is_exact:
         result.flags.append("EXACT_LIMITS")
+        result.score += EXACT_LIMITS_SCORE   # 20 балів — завжди, навіть без history
 
     # Якщо снапшотів мало, повертаємо тільки результат миттєвої перевірки
     if not snapshots or len(snapshots) < MIN_SNAPSHOTS:

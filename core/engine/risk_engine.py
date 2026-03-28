@@ -133,7 +133,8 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         return[]
 
     status = summary.get("status", "OK")
-    if status == "UNAVAILABLE":
+    # Статуси що не є помилкою — просто немає даних, не штрафуємо
+    if status in ("UNAVAILABLE", "NOT_SUPPORTED", "NO_AUTH", "UNKNOWN"):
         return[]
 
     pos       = int(summary.get("positive",  0) or 0)
@@ -149,7 +150,7 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
             if any(c in CRITICAL_CATEGORIES for c in cats):
                 cat_names = ", ".join(cats)
                 excerpt = str(bad_text_item.get("excerpt", ""))[:100]
-                return[f"BLOCK:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
+                return[f"NEEDS_LLM:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
 
     total = pos + neg + neutral
     if total <= 0:
@@ -170,7 +171,7 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         reason += f" | {sample}"
 
     if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
-        return [f"BLOCK:BADREVIEWS:{reason}"]
+        return [f"NEEDS_LLM:BADREVIEWS:{reason}"]
 
     if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
         return [f"BADREVIEWS:{reason}"]
@@ -198,9 +199,10 @@ def _join_flags(flags: list[str]) -> str:
     return ",".join(clean)
 
 
-def _pick_block_review(flags: list[str]) -> str | None:
+def _pick_llm_review(flags: list[str]) -> str | None:
+    """Знаходить review-флаг що потребує LLM перевірки (поганий відгук)."""
     for f in flags:
-        if f.startswith("BLOCK:BADREVIEWS:"):
+        if f.startswith("NEEDS_LLM:BADREVIEWS:"):
             return f
     return None
 
@@ -220,7 +222,7 @@ def _build_weak_regex_flag(result: RegexResult) -> str:
 async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: MerchantDB) -> str:
     risk_type, reason = await db.get_reason(exchange, merchant_id)
     risk_type = (risk_type or "").strip()
-    reason    = (reason    or "").strip()[:120]
+    reason    = (reason    or "").strip()[:800]
 
     if verdict == "BLOCK":
         if risk_type or reason:
@@ -270,10 +272,11 @@ def _dedupe_flags(flags: list[str]) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RiskEngine:
-    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None, review_fetcher=None):
+    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None, review_fetcher=None, review_ttl: float = 24.0):
         self._db      = db
         self._llm     = llm_pool
-        self._review_fetcher = review_fetcher  # 🚀 ДОДАНО
+        self._review_fetcher = review_fetcher
+        self._review_ttl     = review_ttl   # для lazy fetch
         self._analyzed  = 0
         self._db_hits   = 0
         self._bot_alert_cache = TTLCache(ttl_seconds=BOT_ALERT_COOLDOWN_SEC, max_size=5000)
@@ -302,33 +305,33 @@ class RiskEngine:
 
         # Оригінальні 4
         if has_api and has_ext_link:
-            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Зовнішній лінк")
+            synergies.append("SYNERGY:Бот-автопоповнення + Зовнішній лінк")
         if is_new and has_exact and has_chargeback_warn:
-            synergies.append("BLOCK:SYNERGY:Новий акаунт + Фікс.ліміт + Ризик рефанду")
+            synergies.append("SYNERGY:Новий акаунт + Фікс.ліміт + Ризик рефанду")
         if has_api and has_chat_first and bad_rate:
-            synergies.append("BLOCK:SYNERGY:Бот + Тягне в чат + Низький %")
+            synergies.append("SYNERGY:Бот + Тягне в чат + Низький %")
         if has_cross and has_ext_link:
-            synergies.append("BLOCK:SYNERGY:Кросс-біржовий клон + Зовнішній лінк")
+            synergies.append("SYNERGY:Кросс-біржовий клон + Зовнішній лінк")
 
         # Нові комбо v2.1
         if has_api and has_cross:
             # Бот на кількох біржах одночасно — беззаперечна автоматизація
-            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Крос-біржовий клон")
+            synergies.append("SYNERGY:Бот-автопоповнення + Крос-біржовий клон")
         if has_flicker and has_ext_link:
             # Скрипт блимає і виводить у зовнішній чат — класичний скам-патерн
-            synergies.append("BLOCK:SYNERGY:Flicker-relist + Зовнішній лінк")
+            synergies.append("SYNERGY:Flicker-relist + Зовнішній лінк")
         if has_velocity and has_exact and not order.is_verified:
             # Висока швидкість угод + фікс.ліміт + не верифікований
-            synergies.append("BLOCK:SYNERGY:Velocity spike + Фікс.ліміт + Не верифікований")
+            synergies.append("SYNERGY:Velocity spike + Фікс.ліміт + Не верифікований")
         if is_new and has_api:
             # Новий акаунт вже з ботом — не може бути органіки
-            synergies.append("BLOCK:SYNERGY:Новий акаунт + Бот-автопоповнення")
+            synergies.append("SYNERGY:Новий акаунт + Бот-автопоповнення")
         if has_static and has_anonymous:
             # Стабільний дроп + без KYC = сервіс обналу
-            synergies.append("BLOCK:SYNERGY:Static-drop + Анонімність/без KYC")
+            synergies.append("SYNERGY:Static-drop + Анонімність/без KYC")
         if has_fincrime and (has_api or has_cross):
             # Regex вже бачить fincrime-слова + бот/клон = підтверджена схема
-            synergies.append("BLOCK:SYNERGY:Fincrime-сигнал + Автоматизований аккаунт")
+            synergies.append("SYNERGY:Fincrime-сигнал + Автоматизований аккаунт")
 
         return synergies
 
@@ -399,14 +402,17 @@ class RiskEngine:
                 verdict_ts,
             ) = await asyncio.gather(*coros)
 
-            # ── 🚀 СИНХРОННИЙ ДОКАЧ ВІДГУКІВ ДЛЯ НОВИХ МЕРЧАНТІВ ──────────
-            rev_summary_test = review_summary_raw or {}
-            rev_total_test = int(rev_summary_test.get("positive", 0)) + int(rev_summary_test.get("negative", 0)) + int(
-                rev_summary_test.get("neutral", 0))
-
-            if rev_total_test == 0 and self._review_fetcher and rev_summary_test.get("status") != "UNAVAILABLE":
-                logger.debug(f"⏳ Синхронний fetch відгуків для нового мерчанта {order.merchant_name} [{exchange}]")
-                review_summary_raw = await self._review_fetcher.fetch_now(exchange, mid)
+            # ── Lazy fetch відгуків для кандидата спреду ──────────────
+            # Відгуки тягнуться ТІЛЬКИ тут — для реальних спред-кандидатів.
+            # Якщо є в кеші БД (TTL 24г) → fast. Немає → fetch_now (1 запит).
+            if self._review_fetcher:
+                needs_fetch = await self._db.needs_review_fetch(exchange, mid, self._review_ttl if hasattr(self, '_review_ttl') else 24.0)
+                if needs_fetch:
+                    logger.debug("⏳ Lazy fetch відгуків: %s [%s]", order.merchant_name, exchange)
+                    review_summary_raw = await self._review_fetcher.fetch_now(exchange, mid)
+                elif not review_summary_raw:
+                    # Є в кеші але не завантажено в цьому запиті
+                    review_summary_raw = await self._db.get_reviews_summary(exchange, mid)
 
             # ── Blacklist: найвищий пріоритет ──────────────────────────────
             if is_bl:
@@ -521,7 +527,7 @@ class RiskEngine:
                 self._db_hits += 1
                 cached_flag   = await _build_cached_flag(cached_verdict, exchange, mid, self._db)
 
-                block_review = _pick_block_review(review_flags)
+                block_review = _pick_llm_review(review_flags)
                 if block_review:
                     order.risk_flag = block_review
                     return
@@ -558,47 +564,37 @@ class RiskEngine:
             )
             order.composite_score = composite_score
 
-            # HARD EVIDENCE 1: Regex BLOCK
+            # Regex BLOCK → NEEDS_LLM з підвищеним пріоритетом
+            # Регекс може тільки ПІДОЗРЮВАТИ, фінальне рішення — за LLM
             if regex_result.verdict == "BLOCK":
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", regex_result.risk_type, regex_result.reason, "regex",
+                logger.debug(
+                    "🔍 Regex escalate→LLM: %s [%s] %s",
+                    order.merchant_name, exchange, regex_result.risk_type,
                 )
-                block_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
-                flags      = _dedupe_flags([block_flag] + review_flags + behavior_flags)
-                order.risk_flag = _join_flags(flags) or block_flag
-                logger.warning(
-                    "🚫 Regex BLOCK: %s [%s] %s — %s",
-                    order.merchant_name, exchange, regex_result.risk_type, regex_result.reason,
-                )
-                return
+                regex_result.verdict   = "NEEDS_LLM"
+                regex_result.needs_llm = True
+                # needs_llm=True → LLM буде викликаний нижче
 
-            # HARD EVIDENCE 2: Bad reviews BLOCK
-            block_review = _pick_block_review(review_flags)
-            if block_review:
-                order.risk_flag = block_review
-                logger.warning(
-                    "🚫 Reviews BLOCK: %s [%s] — %s",
-                    order.merchant_name, exchange, block_review,
-                )
-                return
+            # Bad reviews → додаємо до контексту LLM, не блокуємо одразу
+            # LLM побачить відгуки і сам вирішить (BLOCK/SUSPICIOUS/OK)
+            review_llm_flag = _pick_llm_review(review_flags)
+            if review_llm_flag:
+                # Якщо є погані відгуки — обов'язково через LLM
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
+                logger.debug("📋 Bad reviews → escalate to LLM: %s [%s]", order.merchant_name, exchange)
 
-            # v2: Composite BLOCK (без LLM якщо composite >= 80)
+            # Composite >= 80 → обов'язково через LLM (не автобан)
+            # LLM отримає повний контекст: score, відгуки, умови, поведінку
             if composite_score >= 80:
-                composite_reason = f"composite_score={composite_score}/100"
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", "COMPOSITE_HIGH_RISK", composite_reason, "composite",
+                logger.debug(
+                    "📊 Composite high score=%d → escalate to LLM: %s [%s]",
+                    composite_score, order.merchant_name, exchange,
                 )
-                flags = _dedupe_flags(
-                    [f"BLOCK:COMPOSITE_HIGH_RISK:{composite_reason}"] + review_flags + behavior_flags
-                )
-                order.risk_flag = _join_flags(flags)
-                logger.warning(
-                    "🚫 Composite BLOCK: %s [%s] score=%d",
-                    order.merchant_name, exchange, composite_score,
-                )
-                return
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
 
             temp_regex_flags = []
             if regex_result.verdict == "NEEDS_LLM":
@@ -608,19 +604,32 @@ class RiskEngine:
 
             synergy_flags = self._check_synergies(order, temp_regex_flags, behavior_flags)
             if synergy_flags:
-                # Синергія дає миттєвий бан!
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", "SYNERGY", synergy_flags[0], "synergy_engine",
-                )
-                order.risk_flag = _join_flags(_dedupe_flags(synergy_flags + review_flags + behavior_flags))
-                logger.warning(f"🚫 Synergy BLOCK: {order.merchant_name} [{exchange}] — {synergy_flags[0]}")
-                return
+                # Синергія → escalate to LLM з контекстом
+                # LLM бачить синергійні флаги і підтверджує/спростовує
+                logger.debug("🔗 Synergy detected → escalate to LLM: %s [%s] — %s",
+                    order.merchant_name, exchange, synergy_flags[0])
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
+                # Додаємо синергійні флаги до behavior щоб LLM їх бачив
+                behavior_flags = _dedupe_flags(behavior_flags + synergy_flags)
 
             # COMPOSITE EVIDENCE → LLM (якщо немає синергії)
             composite_risk = ""
             if has_cross_bot and has_bad_reviews:
                 composite_risk = "Мережа клонів + Негативні відгуки"
+
+            # EXACT_LIMITS → обов'язково через LLM
+            # min ≈ max — класичний бот-процесинг або трикутна схема
+            if has_exact_limits and not regex_result.needs_llm:
+                logger.debug(
+                    "🎯 Exact limits → LLM: %s [%s] (%s–%s)",
+                    order.merchant_name, exchange, order.min_limit, order.max_limit,
+                )
+                regex_result.needs_llm = True
+                regex_result.verdict   = "NEEDS_LLM"
+                if not regex_result.risk_type:
+                    regex_result.risk_type = "EXACT_LIMITS"
 
             # ── 5. LLM ──────────────────────────────────────────────────────
             if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
@@ -630,10 +639,12 @@ class RiskEngine:
                     logger.debug("🔍 Trusted immunity stripped for %s (anomaly)", order.merchant_name)
                     trusted = False
 
-                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE:
+                # Trusted skip: пропускаємо LLM тільки якщо немає поганих відгуків
+                has_review_concern = any("BADREVIEWS" in f for f in review_flags)
+                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE and not has_review_concern:
                     logger.debug(
-                        "✅ Trusted skip: %s [%s] score=%d < %d",
-                        order.merchant_name, exchange, regex_result.score, TRUSTED_LLM_MIN_SCORE,
+                        "✅ Trusted skip: %s [%s] score=%d, no bad reviews",
+                        order.merchant_name, exchange, regex_result.score,
                     )
                     flags = list(review_flags) + list(behavior_flags)
                     if not flags and regex_result.reason:
@@ -641,6 +652,7 @@ class RiskEngine:
                     order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
                     return
 
+                # Передаємо review_summary в LLM — відгуки є ключовим сигналом
                 scheduled = self._llm.schedule(
                     exchange          = exchange,
                     merchant_id       = mid,
@@ -654,6 +666,7 @@ class RiskEngine:
                     max_limit         = order.max_limit,
                     behavior_flags    = behavior_flags,
                     account_age_days  = getattr(order, "account_age_days", 0),
+                    review_summary    = review_summary_raw or {},  # ← відгуки явно
                 )
 
                 if scheduled:
@@ -684,20 +697,20 @@ class RiskEngine:
     def _behavior(self, order: Order) -> list[str]:
         """
         Швидкий синхронний pre-check до завантаження снапшотів з БД.
-        EXACT_LIMITS тепер виключно в behavioral_analyzer (з контекстом history).
-        Тут залишаємо тільки NARROW_SPREAD — аномально вузький діапазон без
-        точного співпадіння (< 1% spread, сума > 500, не верифікований).
+        EXACT_LIMITS: min ≈ max (diff ≤ 5) — класичний бот/трикутник.
+        NARROW_SPREAD: аномально вузький діапазон (< 1% spread).
         """
         flags = []
         if order.min_limit > 0 and order.max_limit > 0:
             max_f = float(order.max_limit)
             min_f = float(order.min_limit)
             diff  = max_f - min_f
-            # EXACT_LIMITS (diff <= 5) — вже обробляється behavioral_analyzer з history
-            # Тут ловимо тільки non-exact але дуже вузький діапазон
-            if diff > 5:
+            if abs(diff) <= 5.0:
+                # EXACT_LIMITS — min ≈ max, завжди підозріло
+                flags.append("EXACT_LIMITS")
+            elif max_f > 500:
                 spread = diff / max_f
-                if spread < 0.01 and max_f > 500:
+                if spread < 0.01:
                     if not (order.is_verified or order.month_order_count > 1000):
                         flags.append("NARROW_SPREAD")
         return flags
@@ -706,6 +719,52 @@ class RiskEngine:
         for order in orders:
             self.analyze(order)
         return orders
+
+    async def analyze_for_spread(self, orders: list[Order]) -> None:
+        """
+        Аналізує ордери для спреду ПАРАЛЕЛЬНО і ЧЕКАЄ завершення.
+
+        На відміну від analyze() (fire-and-forget), цей метод гарантує що
+        risk_flag встановлено до повернення — кешований LLM вердикт буде
+        у Telegram алерті (а не тільки в наступному циклі).
+
+        LLM scheduling всередині — все ще async (fire and forget).
+        Behavioral sync pre-check виконується синхронно як завжди.
+        """
+        tasks = []
+        for order in orders:
+            self._analyzed += 1
+            behavior_flags = self._behavior(order)
+            if self._db and order.merchant_id:
+                # Встановлюємо початковий прапор (синхронно) — бачимо хоча б behavioral
+                initial_flags = _dedupe_flags(behavior_flags)
+                order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
+                tasks.append(self._async_analyze(order, behavior_flags))
+            else:
+                # fallback: немає DB → sync regex
+                result = regex_analyze(
+                    order.trade_terms,
+                    order.finish_rate_pct,
+                    order.month_order_count,
+                    order.is_verified,
+                )
+                order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+                order.regex_score      = int(getattr(result, "score", 0) or 0)
+                flags: list[str] = []
+                if result.verdict == "BLOCK":
+                    flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
+                elif result.verdict == "NEEDS_LLM":
+                    flags.append(_build_pending_flag(result))
+                elif result.reason:
+                    flags.append(_build_weak_regex_flag(result))
+                flags.extend(behavior_flags)
+                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for exc in results:
+                if isinstance(exc, Exception):
+                    logger.error("analyze_for_spread помилка: %s", exc, exc_info=False)
 
     async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
         """

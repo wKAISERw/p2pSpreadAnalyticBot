@@ -148,7 +148,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
     if flag in ("", "OK", "PENDING"):
         return ""
 
-    # 🚀 ОНОВЛЕНІ КАТЕГОРІЇ ЗГІДНО НОВИХ JSON-ПРАВИЛ
+    # ── Бейджі по типу ризику ──────────────────────────────────────────
     badges = {
         "TRIANGLE": "🚫 ТРИКУТНИК / ДРОП\n" if not short else "🚫",
         "CASINO": "🎰 КАЗИНО / GAMBLING\n" if not short else "🎰",
@@ -177,43 +177,75 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
     }
 
-    # Категорії, для яких обов'язково треба показати уривок тексту в телеграмі
-    show_text_cats = {"TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "FINCRIME", "CHARGEBACK", "NO_COMMENTS",
-                      "MIDDLEMAN"}
+    # Людські назви типів ризику (для LLM_PENDING / REGEX_WEAK)
+    RISK_TYPE_LABELS = {
+        "TRIANGLE": "ТРИКУТНИК", "CASINO": "КАЗИНО", "CHAT_FIRST": "ЧАТ",
+        "EXTERNAL_LINK": "ЗОВН.КОНТАКТ", "FINCRIME": "ФІНМОН",
+        "CHARGEBACK": "РЕФАНД", "ANONYMOUS": "АНОНІМ", "MIDDLEMAN": "ПОСЕРЕДНИК",
+        "SUSPICIOUS_BIZ": "ПІДОЗР.БІЗ", "APPEAL_PRESSURE": "ТИСК",
+        "NO_COMMENTS": "БЕЗ КОМЕНТІВ", "THIRD_PARTY_HINT": "3-ТІ ОСОБИ",
+        "BEHAVIOR": "ПОВЕДІНКА", "SUSPICIOUS": "ПІДОЗРА", "BOT_API": "БОТ",
+        "EXACT_LIMITS": "ФІКС.ЛІМІТИ", "NARROW_SPREAD": "ВУЗЬКИЙ ДІАПАЗОН",
+    }
+
+    # Категорії, для яких обов'язково показувати уривок умов
+    show_text_cats = {"TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "FINCRIME",
+                      "CHARGEBACK", "NO_COMMENTS", "MIDDLEMAN"}
 
     flags = [f.strip() for f in flag.split(",") if f.strip()]
     lines = []
     reasons = []
-    has_text_risk = False
-
-
+    detected_risk_types: set[str] = set()   # для показу trade_terms
 
     for f in flags:
+        # ── Відгуки (NEEDS_LLM:BADREVIEWS: ПЕРЕД BADREVIEWS: !) ────────
+        if f.startswith("NEEDS_LLM:BADREVIEWS:"):
+            lines.append("🗣👎 ПОГАНІ ВІДГУКИ → AI ПЕРЕВІРКА\n" if not short else "🗣")
+            reason_text = f[len("NEEDS_LLM:BADREVIEWS:"):]
+            if reason_text:
+                reasons.append(reason_text)
+            detected_risk_types.add("BADREVIEWS")
+            continue
+
+        if f.startswith("BADREVIEWS_TEXTS:"):
+            lines.append("🗣 ПІДОЗРІЛІ ВІДГУКИ (тексти)\n" if not short else "🗣")
+            reason_text = f[len("BADREVIEWS_TEXTS:"):]
+            if reason_text:
+                reasons.append(reason_text)
+            continue
+
         if f.startswith("BADREVIEWS:"):
             lines.append(badges["BADREVIEWS"])
             reasons.append(f[len("BADREVIEWS:"):])
             continue
-        # 🚀 НОВІ ПОВЕДІНКОВІ МАРКЕРИ (Deep Research)
+
+        # ── Поведінкові маркери (Deep Research) ────────────────────────
         if f.startswith("API_REPLENISH:"):
-            parts = f.split(":", 1)
-            count = parts[1] if len(parts) > 1 else ""
+            count = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"🤖 АВТОПОПОВНЕННЯ БОТОМ ({count} цикл.)\n" if not short else "🤖")
             continue
 
         if f.startswith("STATIC_DROP:"):
-            parts = f.split(":", 1)
-            count = parts[1] if len(parts) > 1 else ""
+            count = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"📏 СТАТИЧНИЙ ДРОП ({count} цикл.)\n" if not short else "📏")
             continue
 
         if f.startswith("VELOCITY_SPIKE:"):
-            parts = f.split(":", 1)
-            vel = parts[1] if len(parts) > 1 else ""
+            vel = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"⚡ АНОМАЛЬНА АКТИВНІСТЬ ({vel})\n" if not short else "⚡")
+            continue
+
+        if f.startswith("FLICKER_RELIST:"):
+            count = f.split(":", 1)[1] if ":" in f else ""
+            lines.append(f"🔄 РІЛІСТИНГ ({count} раз)\n" if not short else "🔄")
             continue
 
         if f == "EXACT_LIMITS":
             lines.append("🎯 ФІКСОВАНА СУМА (min=max)\n" if not short else "🎯")
+            continue
+
+        if f == "NARROW_SPREAD":
+            lines.append("📏 ВУЗЬКИЙ ДІАПАЗОН\n" if not short else "📏")
             continue
 
         if f.startswith("BEHAVIOR_BOTLIKE:"):
@@ -226,6 +258,13 @@ def _risk_badge(order: Order, short: bool = False) -> str:
             lines.append(f"👯 КЛОН НА БІРЖАХ: {ex_names}\n" if not short else "👯")
             continue
 
+        # ── Синергії (раніше BLOCK:SYNERGY → тепер SYNERGY:) ──────────
+        if f.startswith("SYNERGY:"):
+            detail = f[len("SYNERGY:"):]
+            lines.append(f"🔗 КОМБО: {escape(detail[:60])}\n" if not short else "🔗")
+            continue
+
+        # ── Жорсткий блок (blacklist, cached BLOCK verdict) ───────────
         if f.startswith("BLOCK:"):
             parts = f.split(":", 2)
             risk = parts[1] if len(parts) > 1 else "BLOCK"
@@ -236,15 +275,21 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 lines.append(badges.get(risk, badges["BLOCK"]))
             if reason:
                 reasons.append(reason)
-            if risk in show_text_cats:
-                has_text_risk = True
+            detected_risk_types.add(risk)
             continue
 
+        # ── LLM результати ────────────────────────────────────────────
         if f.startswith("LLM_SUSPICIOUS:"):
             parts = f.split(":", 2)
-            lines.append(badges["LLM_SUSPICIOUS"])
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, "")
+            if label and not short:
+                lines.append(f"🧠 AI ПІДОЗРА: {label}\n")
+            else:
+                lines.append(badges["LLM_SUSPICIOUS"])
             if len(parts) > 2 and parts[2]:
                 reasons.append(parts[2])
+            detected_risk_types.add(risk_type)
             continue
 
         if f.startswith("LLM_UNKNOWN:"):
@@ -254,17 +299,33 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 reasons.append(parts[2])
             continue
 
+        # ── Regex (м'який сигнал — тепер з типом ризику) ──────────────
         if f.startswith("REGEX_WEAK:"):
             parts = f.split(":", 2)
-            lines.append(badges["REGEX_WEAK"])
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, risk_type)
+            if label and label != risk_type and not short:
+                lines.append(f"🧩 REGEX: {label}\n")
+            else:
+                lines.append(badges["REGEX_WEAK"])
             if len(parts) > 2 and parts[2]:
                 reasons.append(parts[2])
+            detected_risk_types.add(risk_type)
             continue
 
+        # ── LLM Pending (тепер з типом підозри) ──────────────────────
         if f.startswith("LLM_PENDING:"):
-            lines.append(badges["LLM_PENDING"])
+            parts = f.split(":", 2)
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, "")
+            if label and not short:
+                lines.append(f"⏳ AI ПЕРЕВІРЯЄ: {label}\n")
+            else:
+                lines.append(badges["LLM_PENDING"])
+            detected_risk_types.add(risk_type)
             continue
 
+        # ── Fallback: bare flag in badges dict ────────────────────────
         if f in badges:
             lines.append(badges[f])
 
@@ -273,26 +334,47 @@ def _risk_badge(order: Order, short: bool = False) -> str:
 
     result = "".join(lines)
 
-    if reasons and not short:
-        uniq = []
-        seen = set()
-        for r in reasons:
-            r = (r or "").strip()
-            if r and r not in seen:
-                seen.add(r)
-                uniq.append(r[:140])
+    # ── Спойлер-блок: деталі під тапом (reasons + стата + відгуки + умови) ──
+    if not short:
+        spoiler_parts: list[str] = []
 
-        if uniq:
-            result += "\n"
-            for r in uniq[:3]:
-                result += f"<code>{escape(r)}</code>\n"
+        # 1. LLM reason (причина вердикту) — повна, без обрізання (в expandable blockquote)
+        if reasons:
+            uniq = []
+            seen = set()
+            for r in reasons:
+                r = (r or "").strip()
+                if r and r not in seen:
+                    seen.add(r)
+                    uniq.append(r[:800])   # 800 — безпечний ліміт для Telegram 4096
+            for r in uniq[:2]:
+                spoiler_parts.append(f"💬 {escape(r)}")
 
-    trade_terms = getattr(order, "trade_terms", "")
-    if has_text_risk and trade_terms and not short:
-        safe = trade_terms.replace("\n", " ")[:120]
-        if len(trade_terms) > 120:
-            safe += "…"
-        result += f"Умови:\n<code>{escape(safe)}</code>\n"
+        # 2. Мікро-стата мерчанта
+        rate = getattr(order, "finish_rate_pct", 0.0)
+        orders = getattr(order, "month_order_count", 0)
+        verified = getattr(order, "is_verified", False)
+        if orders > 0:
+            stats = f"📊 {rate:.1f}% | {orders} угод"
+            if verified:
+                stats += " | ✅"
+            # Підрахунок зірваних угод
+            failed = int(orders * (100.0 - rate) / 100.0)
+            if failed > 0:
+                stats += f" | ~{failed} зірваних"
+            spoiler_parts.append(stats)
+
+        # 3. Умови мерчанта (якщо ризиковий тип)
+        trade_terms = getattr(order, "trade_terms", "")
+        if detected_risk_types & show_text_cats and trade_terms:
+            safe = trade_terms.replace("\n", " ")[:100]
+            if len(trade_terms) > 100:
+                safe += "…"
+            spoiler_parts.append(f"📝 {escape(safe)}")
+
+        if spoiler_parts:
+            spoiler_text = "\n".join(spoiler_parts)
+            result += f"<blockquote expandable>{spoiler_text}</blockquote>\n"
 
     return result
 
@@ -526,11 +608,13 @@ class TelegramNotifier:
             f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
             f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>\n\n"
 
+            f"<blockquote expandable>"
             f"🏦 Варіанти зв'язки: {route_variants}\n"
-            f"🛒 Buy-мерчант банки: {buy_all}\n"
-            f"✅ Buy під твій фільтр: {buy_fit}\n"
-            f"💸 Sell-мерчант банки: {sell_all}\n"
-            f"✅ Sell під твій фільтр: {sell_fit}\n\n"
+            f"🛒 Buy банки: {buy_all}\n"
+            f"✅ Buy фільтр: {buy_fit}\n"
+            f"💸 Sell банки: {sell_all}\n"
+            f"✅ Sell фільтр: {sell_fit}"
+            f"</blockquote>\n"
 
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
@@ -577,12 +661,16 @@ class TelegramNotifier:
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
-        await self._send_with_retry(
-            text,
-            keyboard=keyboard,
-            disable_notification=silent,
-            chat_id=chat_id,  # явно передаємо — без підміни self._chat_id
-        )
+        # Розбиваємо якщо повідомлення > 4096 (Telegram ліміт)
+        # Keyboard тільки на першому чанку
+        chunks = self._split_message(text)
+        for i, chunk in enumerate(chunks):
+            await self._send_with_retry(
+                chunk,
+                keyboard=keyboard if i == 0 else None,
+                disable_notification=silent,
+                chat_id=chat_id,
+            )
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         """Підсумок усіх знайдених маршрутів за цикл."""
@@ -654,7 +742,7 @@ class TelegramNotifier:
     def _split_message(text: str, limit: int = 4096) -> list[str]:
         if len(text) <= limit:
             return [text]
-        chunks, current = ""
+        chunks, current = [], ""
         for line in text.split("\n"):
             if len(current) + len(line) + 1 > limit:
                 if current:

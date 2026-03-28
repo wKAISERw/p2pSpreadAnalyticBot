@@ -14,6 +14,8 @@ RISK_BADGES = {
     "VELOCITY_SPIKE":        "⚡",
     "CROSS_EXCHANGE_BOT":    "👥",
     "FLICKER_RELIST":        "🔄",
+    "NARROW_SPREAD":         "📏",
+    "SYNERGY":               "🔗",   # комбо-підозра → LLM
 
     # Класичні (Regex)
     "BLOCK":                 "🚫",
@@ -27,6 +29,7 @@ RISK_BADGES = {
     "CHAT_FIRST":            "💬",
     "APPEAL_PRESSURE":       "📢",
     "BADREVIEWS":            "👎",
+    "BADREVIEWS_TEXTS":      "👎",
     "HIGH_RISK_SCORE":       "📊",
 
     # Статуси
