@@ -1,6 +1,6 @@
 # core/workers/llm_worker.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v2.0
+# БОЙОВА ВЕРСІЯ v2.0 (З підтримкою OpenAI GPT-4o-mini)
 # =============================================================================
 """
 Асинхронний LLM-воркер.
@@ -9,7 +9,7 @@
   - smart_truncate: зберігає початок + кінець trade_terms (scam часто в кінці)
   - bad_texts передаються в LLM навіть при UNAVAILABLE статусі
   - account_age_days в промпті
-  - LLMTask розширено: account_age_days
+  - ДОДАНО: Інтеграція OpenAI (gpt-4o-mini) як основного/надійного fallback
 """
 
 from __future__ import annotations
@@ -36,7 +36,8 @@ from core.analysis.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
-GROQ_MODEL   = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()  # 🚀 ДОДАНО OPENAI
 
 
 def _setup_llm_log() -> logging.Logger:
@@ -70,12 +71,12 @@ class ProviderRateLimitError(RuntimeError):
 
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS          = 3
-LLM_TIMEOUT          = 7.0
-MAX_QUEUE            = 200
-MAX_NORM_TERMS       = 800   # v2: збільшено з 220 — тепер smart truncate
+LLM_WORKERS = 3
+LLM_TIMEOUT = 7.0
+MAX_QUEUE = 200
+MAX_NORM_TERMS = 800
 MAX_MATCHES_IN_PROMPT = 3
-MAX_EXCERPT_LEN      = 90
+MAX_EXCERPT_LEN = 90
 
 SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.2).
 Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
@@ -119,19 +120,19 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 
 @dataclass
 class LLMTask:
-    exchange:          str
-    merchant_id:       str
-    merchant_name:     str
-    trade_terms:       str
-    regex_result:      RegexResult
-    finish_rate:       float
+    exchange: str
+    merchant_id: str
+    merchant_name: str
+    trade_terms: str
+    regex_result: RegexResult
+    finish_rate: float
     month_order_count: int
-    is_verified:       bool
-    min_limit:         float
-    max_limit:         float
-    behavior_flags:    list[str] = field(default_factory=list)
-    account_age_days:  int  = 0       # вік акаунту в днях (0 = невідомо)
-    review_summary:    dict = field(default_factory=dict)  # lazy-fetched відгуки
+    is_verified: bool
+    min_limit: float
+    max_limit: float
+    behavior_flags: list[str] = field(default_factory=list)
+    account_age_days: int = 0
+    review_summary: dict = field(default_factory=dict)
 
 
 class LLMWorkerPool:
@@ -166,20 +167,20 @@ class LLMWorkerPool:
         )
 
     def schedule(
-        self,
-        exchange:          str,
-        merchant_id:       str,
-        merchant_name:     str,
-        trade_terms:       str,
-        regex_result:      RegexResult,
-        finish_rate:       float = 0.0,
-        month_order_count: int   = 0,
-        is_verified:       bool  = False,
-        min_limit:         float = 0.0,
-        max_limit:         float = 0.0,
-        behavior_flags:    list[str] = None,
-        account_age_days:  int = 0,
-        review_summary:    dict = None,
+            self,
+            exchange: str,
+            merchant_id: str,
+            merchant_name: str,
+            trade_terms: str,
+            regex_result: RegexResult,
+            finish_rate: float = 0.0,
+            month_order_count: int = 0,
+            is_verified: bool = False,
+            min_limit: float = 0.0,
+            max_limit: float = 0.0,
+            behavior_flags: list[str] = None,
+            account_age_days: int = 0,
+            review_summary: dict = None,
     ) -> bool:
         cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
@@ -233,19 +234,18 @@ class LLMWorkerPool:
         if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
             return
 
-        # Використовуємо review_summary що вже lazy-fetched в risk_engine
-        # Якщо порожній (старий шлях) — беремо з БД
         if task.review_summary:
             review_summary = task.review_summary
         else:
             review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
+
         result = await self._call_with_fallback(task, review_summary)
         self._stats["processed"] += 1
 
-        verdict   = result.get("status", "UNKNOWN").upper()
+        verdict = result.get("status", "UNKNOWN").upper()
         risk_type = result.get("risk", "") or "NONE"
-        reason    = (result.get("reason", "") or "")[:900]
-        source    = result.get("_source", "unknown")
+        reason = (result.get("reason", "") or "")[:900]
+        source = result.get("_source", "unknown")
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
@@ -255,9 +255,9 @@ class LLMWorkerPool:
             task.trade_terms, verdict, risk_type, reason, source,
         )
 
-        rr    = task.regex_result
+        rr = task.regex_result
         score = getattr(rr, "score", 0)
-        cats  = _regex_categories(rr)
+        cats = _regex_categories(rr)
 
         LLM_LOG.info(
             "%-8s | %-11s | %-10s | %-14s | score=%-3s | cats=%-35s | %-8s | %s | %s",
@@ -273,9 +273,10 @@ class LLMWorkerPool:
 
         self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
-    # ── Groq / Gemini cooldown (class-level) ─────────────────────────────────
-    _groq_cooldown_until:   float = 0.0
-    _groq_consecutive_429:  int   = 0
+    # ── Groq / OpenAI / Gemini cooldown (class-level) ─────────────────────────
+    _groq_cooldown_until: float = 0.0
+    _groq_consecutive_429: int = 0
+    _openai_cooldown_until: float = 0.0  # 🚀 ДОДАНО OPENAI
     _gemini_cooldown_until: float = 0.0
 
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
@@ -284,15 +285,12 @@ class LLMWorkerPool:
 
         user_msg = _build_prompt(task, review_summary)
 
-        now             = _time.monotonic()
-        groq_available  = LLMWorkerPool._groq_cooldown_until   <= now
+        now = _time.monotonic()
+        groq_available = LLMWorkerPool._groq_cooldown_until <= now
+        openai_available = LLMWorkerPool._openai_cooldown_until <= now
         gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
 
-        if not groq_available and not gemini_available:
-            self._stats["timeouts"] += 1
-            logger.warning("⛔ Обидві LLM на паузі. Пропускаємо %s", task.merchant_name)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Both APIs on cooldown", "_source": "cooldown_skip"}
-
+        # 1. Спроба через GROQ (Швидкий і безкоштовний)
         if groq_available:
             try:
                 result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
@@ -301,36 +299,58 @@ class LLMWorkerPool:
                 return result
             except RateLimitError:
                 LLMWorkerPool._groq_consecutive_429 += 1
-                n    = LLMWorkerPool._groq_consecutive_429
+                n = LLMWorkerPool._groq_consecutive_429
                 base = 30.0 * (2 ** min(n - 1, 4))
                 wait = base * random.uniform(0.85, 1.15)
                 LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
-                self._stats["timeouts"] += 1
-                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
+                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Перехід на OpenAI", n, wait)
             except asyncio.TimeoutError:
                 self._stats["timeouts"] += 1
                 logger.warning("⏳ Groq timeout для %s", task.merchant_name)
             except Exception as e:
                 logger.error("❌ Groq помилка: %s", e)
 
-        try:
-            result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
-            result["_source"] = f"gemini:{GEMINI_MODEL}"
-            return result
-        except PermanentModelError as e:
-            logger.error("❌ Gemini config помилка: %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error", "_source": "gemini_404"}
-        except ProviderRateLimitError as e:
-            LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
-            logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
-        except asyncio.TimeoutError:
-            self._stats["timeouts"] += 1
-            logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
-        except Exception as e:
-            logger.error("❌ Gemini помилка: %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
+        # 2. Спроба через OPENAI (Дуже стабільний, великі ліміти)
+        if openai_available:
+            try:
+                result = await asyncio.wait_for(self._call_openai(user_msg), timeout=LLM_TIMEOUT)
+                result["_source"] = f"openai:{OPENAI_MODEL}"
+                return result
+            except PermanentModelError:
+                pass  # Якщо ключ не вказано, просто йдемо далі до Gemini
+            except ProviderRateLimitError:
+                LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
+                logger.warning("⏳ OpenAI 429. Охолодження 30s → Перехід на Gemini")
+            except asyncio.TimeoutError:
+                self._stats["timeouts"] += 1
+                logger.warning("⏳ OpenAI timeout для %s", task.merchant_name)
+            except Exception as e:
+                logger.error("❌ OpenAI помилка: %s", e)
+
+        # 3. Спроба через GEMINI (Останній рубіж)
+        if gemini_available:
+            try:
+                result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
+                result["_source"] = f"gemini:{GEMINI_MODEL}"
+                return result
+            except PermanentModelError as e:
+                logger.error("❌ Gemini config помилка: %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error",
+                        "_source": "gemini_404"}
+            except ProviderRateLimitError as e:
+                LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
+                logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
+            except asyncio.TimeoutError:
+                self._stats["timeouts"] += 1
+                logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
+            except Exception as e:
+                logger.error("❌ Gemini помилка: %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
+
+        self._stats["timeouts"] += 1
+        return {"status": "UNKNOWN", "risk": "NONE", "reason": "All APIs on cooldown", "_source": "cooldown_skip"}
 
     async def _call_groq(self, user_msg: str) -> dict:
         groq_key = os.getenv("GROQ_API_KEY", "")
@@ -340,16 +360,16 @@ class LLMWorkerPool:
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
+                {"role": "user", "content": user_msg},
             ],
             "temperature": 0.1,
             "max_tokens": 1000,
-            "response_format": {"type": "json_object"}  # 🚀 ПРИМУСОВИЙ JSON
+            "response_format": {"type": "json_object"}
         }
         async with self._session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {groq_key}"},
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {groq_key}"},
         ) as resp:
             if resp.status == 429:
                 raise RateLimitError("Groq 429")
@@ -359,17 +379,48 @@ class LLMWorkerPool:
         text = data["choices"][0]["message"]["content"]
         return _parse_json(text)
 
+    async def _call_openai(self, user_msg: str) -> dict:
+        # 🚀 ДОДАНО: Метод виклику OpenAI API
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if not openai_key:
+            raise PermanentModelError("OPENAI_API_KEY не встановлено")
+
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1000,
+            "response_format": {"type": "json_object"}
+        }
+
+        async with self._session.post(
+                "https://api.openai.com/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {openai_key}"},
+        ) as resp:
+            if resp.status == 429:
+                raise ProviderRateLimitError("OpenAI 429")
+            if resp.status >= 500:
+                raise RuntimeError(f"OpenAI server error {resp.status}")
+            data = await resp.json()
+
+        text = data["choices"][0]["message"]["content"]
+        return _parse_json(text)
+
     async def _call_gemini(self, user_msg: str) -> dict:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         if not gemini_key:
             raise PermanentModelError("GEMINI_API_KEY не встановлено")
         full_prompt = f"{SYSTEM_PROMPT}\n\n{user_msg}"
         payload = {
-            "contents":         [{"parts": [{"text": full_prompt}]}],
+            "contents": [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 1200, # 🚀 ЗБІЛЬШЕНО — розгорнутий аналіз
-                "responseMimeType": "application/json" # 🚀 ПРИМУСОВИЙ JSON
+                "maxOutputTokens": 1200,
+                "responseMimeType": "application/json"
             },
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={gemini_key}"
@@ -390,13 +441,6 @@ class LLMWorkerPool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _smart_truncate(text: str, max_len: int = MAX_NORM_TERMS) -> str:
-    """
-    v2: Замість простого обрізання — зберігаємо початок + кінець.
-
-    Scam-фрази часто ховаються в кінці тексту умов. Стара логіка
-    `text[:220]` їх просто втрачала. Тепер беремо 2/3 початку і
-    1/3 кінця — жодна частина не губиться.
-    """
     if not text or len(text) <= max_len:
         return text or "(не вказані)"
     head_len = (max_len * 2) // 3
@@ -407,7 +451,6 @@ def _smart_truncate(text: str, max_len: int = MAX_NORM_TERMS) -> str:
 
 
 def _build_account_age_note(task: LLMTask) -> str:
-    """Формує примітку про вік акаунту для промпту."""
     days = task.account_age_days
     if days <= 0:
         return ""
@@ -421,7 +464,6 @@ def _build_account_age_note(task: LLMTask) -> str:
 
 
 def _build_behavior_block(task: LLMTask) -> list[str]:
-    """Структурований behavioral блок для промпту."""
     flags = task.behavior_flags or []
     if not flags:
         return ["ПОВЕДІНКА: Нормальна"]
@@ -462,25 +504,24 @@ def _build_behavior_block(task: LLMTask) -> list[str]:
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
-    score       = getattr(rr, "score", 0)
-    norm_text   = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
-    # v2: smart truncate замість простого [:220]
-    norm_text   = _smart_truncate(norm_text, MAX_NORM_TERMS)
+    score = getattr(rr, "score", 0)
+    norm_text = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
+    norm_text = _smart_truncate(norm_text, MAX_NORM_TERMS)
 
-    risk_type   = getattr(rr, "risk_type", "") or "NONE"
-    categories  = _regex_categories(rr)
-    excerpts    = _top_excerpts(rr)
+    risk_type = getattr(rr, "risk_type", "") or "NONE"
+    categories = _regex_categories(rr)
+    excerpts = _top_excerpts(rr)
 
-    rev_status  = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
-    pos         = int((review_summary or {}).get("positive", 0) or 0)
-    neg         = int((review_summary or {}).get("negative", 0) or 0)
-    neutral     = int((review_summary or {}).get("neutral",  0) or 0)
-    total       = pos + neg + neutral
-    neg_pct     = (neg / total * 100.0) if total > 0 else 0.0
-    bad_texts   = (review_summary or {}).get("bad_texts", []) or []
+    rev_status = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
+    pos = int((review_summary or {}).get("positive", 0) or 0)
+    neg = int((review_summary or {}).get("negative", 0) or 0)
+    neutral = int((review_summary or {}).get("neutral", 0) or 0)
+    total = pos + neg + neutral
+    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
+    bad_texts = (review_summary or {}).get("bad_texts", []) or []
 
     failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
-    age_note      = _build_account_age_note(task)
+    age_note = _build_account_age_note(task)
 
     lines = [
         f"Біржа: {task.exchange}",
@@ -492,7 +533,6 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
     ]
 
-    # v2: вік акаунту
     if age_note:
         lines.append(f"- Вік акаунту:{age_note}")
 
@@ -512,13 +552,13 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "",
     ]
 
-    # v2: відгуки — передаємо навіть при UNAVAILABLE якщо є збережені bad_texts
-    # v2.1: розрізняємо причини відсутності відгуків
-    _NO_REVIEW_EXCHANGES = {"MEXC", "Wallet", "CryptoBot"}
+    _NO_REVIEW_EXCHANGES = {"Wallet", "CryptoBot"}
     if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
-        lines.append(f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")
+        lines.append(
+            f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")
     elif rev_status == "NO_AUTH":
-        lines.append(f"Reviews: API відгуків потребує автентифікації — тимчасово недоступний. Оцінюй за умовами та поведінкою. НЕ вважай відсутність відгуків фактором ризику.")
+        lines.append(
+            f"Reviews: API відгуків потребує автентифікації — тимчасово недоступний. Оцінюй за умовами та поведінкою. НЕ вважай відсутність відгуків фактором ризику.")
     elif rev_status not in ("OK",):
         if bad_texts:
             lines.append(
@@ -526,7 +566,8 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
                 f"збережених поганих відгуків з минулого оновлення:"
             )
         else:
-            lines.append(f"Reviews: API тимчасово недоступний ({rev_status}). Оцінюй за умовами та поведінкою. НЕ вважай це фактором ризику.")
+            lines.append(
+                f"Reviews: API тимчасово недоступний ({rev_status}). Оцінюй за умовами та поведінкою. НЕ вважай це фактором ризику.")
     else:
         if total > 0:
             lines.append(f"Reviews: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%")
@@ -536,9 +577,9 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
                 lines.append(f"⬆️ ВІДГУКИ ПЕРЕВАЖНО ЧИСТІ: лише {neg} негативних ({neg_pct:.1f}%).")
         else:
             lines.append("Reviews: мерчант новий або ще не має відгуків. Оцінюй за умовами та поведінкою.")
-            lines.append("⚠️ ВІДГУКИ НЕВІДОМІ: зазнач це у thought_process як м'який фактор невизначеності (НЕ як ризик).")
+            lines.append(
+                "⚠️ ВІДГУКИ НЕВІДОМІ: зазнач це у thought_process як м'який фактор невизначеності (НЕ як ризик).")
 
-    # bad_texts завжди — незалежно від статусу
     if bad_texts:
         lines.append("Негативні відгуки:")
         for i, t in enumerate(bad_texts[:4], 1):
@@ -564,7 +605,7 @@ def _regex_categories(regex_result: RegexResult) -> list[str]:
     matches = getattr(regex_result, "matches", []) or []
     seen, out = set(), []
     for m in matches:
-        cat    = getattr(m, "category", "")
+        cat = getattr(m, "category", "")
         weight = getattr(m, "weight", 0)
         if not cat or weight <= 0:
             continue
@@ -604,10 +645,10 @@ def _parse_json(text: str) -> dict:
             try:
                 data = json.loads(clean[start:end + 1])
             except json.JSONDecodeError:
-                logger.error(f"❌ JSON parse error. Сирий текст: {text!r}")  # ДОДАНО
+                logger.error(f"❌ JSON parse error. Сирий текст: {text!r}")
                 return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
         else:
-            logger.error(f"❌ JSON parse error (немає дужок). Сирий текст: {text!r}")  # ДОДАНО
+            logger.error(f"❌ JSON parse error (немає дужок). Сирий текст: {text!r}")
             return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
 
     status = str(data.get("status", "UNKNOWN")).upper()
@@ -616,7 +657,6 @@ def _parse_json(text: str) -> dict:
     risk = str(data.get("risk", "NONE")).upper()[:32]
     reason = str(data.get("reason", "")).strip()[:900]
 
-    # 🚀 Логуємо ланцюжок думок у LLM_LOG (не тільки debug)
     thought = data.get("thought_process", "")
     if thought:
         logger.debug(f"🧠 LLM Thoughts: {thought}")

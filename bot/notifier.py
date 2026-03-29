@@ -346,7 +346,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 r = (r or "").strip()
                 if r and r not in seen:
                     seen.add(r)
-                    uniq.append(r[:800])   # 800 — безпечний ліміт для Telegram 4096
+                    uniq.append(r)  # без обрізання — знаходиться в expandable blockquote
             for r in uniq[:2]:
                 spoiler_parts.append(f"💬 {escape(r)}")
 

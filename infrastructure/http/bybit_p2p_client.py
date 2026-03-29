@@ -110,26 +110,52 @@ class BybitP2PClient(BaseHttpClient):
             logger.debug("Bybit fetch_merchant_profile [%s]: %s", merchant_id, e)
             return {}
 
-    async def fetch_merchant_feedback(self, merchant_id: str) -> list[dict]:
-        """Негативні відгуки про мерчанта."""
-        if not self.is_authenticated:
+    async def fetch_merchant_feedback(self, merchant_id: str, session_headers: dict = None,
+                                      session_cookies: dict = None) -> list[dict]:
+        """
+        Негативні відгуки про мерчанта (через ПЕРЕХОПЛЕНУ веб-сесію).
+        Тепер ми стукаємо на реальний веб-ендпоінт appraiseList.
+        """
+        if not session_headers or not session_cookies:
+            logger.debug("Bybit fetch_merchant_feedback [%s]: Немає перехопленої сесії в БД!", merchant_id)
             return []
 
-        url = "https://api2.bybit.com/fiat/otc/user/feedback/list"
+        url = "https://www.bybit.com/x-api/fiat/otc/order/appraiseList"
         payload = {
             "userId": merchant_id,
-            "evaluateType": "bad",
-            "page": 1,
-            "size": 10,
+            "page": "1",
+            "size": "10",
+            "appraiseType": "2"  # 2 = Bad (Негативні відгуки)
         }
-        query = "&".join(f"{k}={v}" for k, v in payload.items())
-        headers = {**self._sign_headers(query), **self._build_dynamic_headers()}
+
+        # Робимо копію заголовків, щоб не зламати оригінальний словник
+        req_headers = dict(session_headers)
+
+        # Видаляємо статичні поля, які можуть конфліктувати з curl_cffi
+        req_headers.pop("Content-Length", None)
+        req_headers.pop("Accept-Encoding", None)
+
+        # МАГІЯ: Підставляємо правильний Referer під поточного мерчанта (Bybit це перевіряє!)
+        req_headers["Referer"] = f"https://www.bybit.com/en/p2p/profile/{merchant_id}/USDT/UAH/item"
 
         try:
-            data = await self._post(url, json=payload, headers=headers)
+            # Робимо POST запит напряму через curl_cffi сесію, передаючи вкрадені заголовки та кукіси
+            if self._session is None:
+                await self.__aenter__()
+
+            response = await self._session.request(
+                "POST",
+                url,
+                json=payload,
+                headers=req_headers,
+                cookies=session_cookies
+            )
+            data = response.json()
+
+            # Повертаємо масив відгуків
             return data.get("result", {}).get("items", []) or []
         except Exception as e:
-            logger.debug("Bybit fetch_merchant_feedback [%s]: %s", merchant_id, e)
+            logger.debug("Bybit fetch_merchant_feedback [%s] error: %s", merchant_id, e)
             return []
 
     async def fetch_account_balance(self) -> list[dict]:

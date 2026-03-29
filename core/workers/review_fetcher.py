@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from infrastructure.http.binance_client import BinanceClient
     from infrastructure.http.bybit_p2p_client import BybitP2PClient
     from infrastructure.http.okx_client import OkxClient
+    from infrastructure.http.mexc_client import MexcClient
 
 logger = logging.getLogger("ReviewFetcher")
 
@@ -31,6 +32,7 @@ RATE_LIMITS = {
     "Binance": 2.0,
     "Bybit": 1.5,
     "OKX": 1.5,
+    "MEXC": 1.5,  # 🚀 ДОДАНО
 }
 
 # Пороги для автоматичного флагування
@@ -126,6 +128,7 @@ class ReviewFetcher:
             binance_client=None,
             bybit_client=None,
             okx_client=None,
+            mexc_client=None,  # 🚀 ДОДАНО
     ):
         self._db = db
         self._review_ttl = review_ttl_hours
@@ -144,20 +147,21 @@ class ReviewFetcher:
         self._binance: Optional["BinanceClient"] = binance_client
         self._bybit: Optional["BybitP2PClient"] = bybit_client
         self._okx: Optional["OkxClient"] = okx_client
+        self._mexc: Optional["MexcClient"] = None  # 🚀 ДОДАНО
+        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0, "MEXC": 0}
+        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0, "MEXC": 0.0}
 
-        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
-        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
-
-    def bind_clients(self, binance=None, bybit=None, okx=None) -> None:
-        """Прив'язує HTTP клієнти після ініціалізації."""
+    def bind_clients(self, binance=None, bybit=None, okx=None, mexc=None) -> None:
         if binance is not None: self._binance = binance
         if bybit is not None: self._bybit = bybit
         if okx is not None: self._okx = okx
+        if mexc is not None: self._mexc = mexc # 🚀 ДОДАНО
         logger.info(
-            "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s",
-            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
-            "✅" if self._bybit and getattr(self._bybit, "is_authenticated", False) else "❌",
+            "ReviewFetcher clients bound: Binance=%s(session) Bybit=%s(session) OKX=%s(api) MEXC=%s(public)",
+            "✅" if self._binance else "❌",
+            "✅" if self._bybit else "❌",
             "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
+            "✅" if self._mexc else "❌",
         )
 
     async def start(self) -> None:
@@ -221,22 +225,44 @@ class ReviewFetcher:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
 
         if exchange not in RATE_LIMITS:
-            # Біржа не підтримує API відгуків (MEXC, Wallet, CryptoBot)
+            # Біржа не підтримує API відгуків (Wallet, CryptoBot)
             logger.debug("fetch_now: %s не підтримує API відгуків [%s]", exchange, merchant_id[:12])
-            # Зберігаємо щоб needs_review_fetch повертав False і не смикав знову
             try:
                 await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
             except Exception:
                 pass
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NOT_SUPPORTED"}
 
-        # Перевірка автентифікації ПЕРЕД спробою запиту
-        _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx}
+        # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──────
+        _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx, "MEXC": self._mexc}
         client = _client_map.get(exchange)
-        if not client or not getattr(client, "is_authenticated", False):
-            logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", merchant_id[:12], exchange)
-            # НЕ зберігаємо в БД — коли з'являться ключі, треба одразу refetch
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+
+        if exchange == "MEXC":
+            # MEXC: публічне API — тільки перевіряємо що клієнт є
+            if not client:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+
+        elif exchange in ("Bybit", "Binance"):
+            # Bybit/Binance: профіль API мертвий (404).
+            # Тексти відгуків → тільки через перехоплену браузерну сесію.
+            # Клієнт потрібен для HTTP запитів, але API-ключі не обов'язкові.
+            if not client:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+            session_h, _, _ = await self._db.get_auth_session(exchange)
+            if not session_h:
+                logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
+                # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожну годину
+                try:
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                except Exception:
+                    pass
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_SESSION"}
+
+        else:
+            # OKX: класична API-автентифікація
+            if not client or not getattr(client, "is_authenticated", False):
+                logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", exchange, merchant_id[:12])
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
 
         try:
             if exchange == "Binance":
@@ -245,11 +271,20 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            elif exchange == "MEXC":
+                pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
             else:
                 return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
 
-            # Одразу зберігаємо в БД
-            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK")
+            # Bybit/Binance: без сесії → NO_SESSION (не OK!) щоб needs_review_fetch
+            # повернув True через 1h — як тільки сесія з'явиться, всі перефетчаться
+            if exchange in ("Bybit", "Binance"):
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                save_status = "OK" if session_h else "NO_SESSION"
+            else:
+                save_status = "OK"
+
+            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status)
             self._known_merchants.add((exchange, merchant_id))
 
             return {
@@ -257,7 +292,7 @@ class ReviewFetcher:
                 "negative": neg,
                 "neutral": neutral,
                 "bad_texts": bad_texts,
-                "status": "OK"
+                "status": save_status,
             }
         except Exception as e:
             logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
@@ -310,13 +345,34 @@ class ReviewFetcher:
 
     async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
         try:
-            # Перевірка автентифікації ПЕРЕД запитом
-            _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx}
-            client = _client_map.get(exchange)
-            if not client or not getattr(client, "is_authenticated", False):
-                logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
-                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_AUTH")
-                return
+            # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──
+            if exchange == "MEXC":
+                if not self._mexc:
+                    logger.debug("_fetch_and_save: MEXC клієнт не підключений, skip %s", merchant_id[:12])
+                    return
+
+            elif exchange in ("Bybit", "Binance"):
+                # Bybit/Binance: профіль API мертвий (404).
+                # Тексти відгуків → тільки через браузерну сесію.
+                _client_map = {"Bybit": self._bybit, "Binance": self._binance}
+                client = _client_map.get(exchange)
+                if not client:
+                    logger.debug("_fetch_and_save: %s [%s] — клієнт відсутній", exchange, merchant_id[:12])
+                    return
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                if not session_h:
+                    logger.debug("_fetch_and_save: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                    return
+
+            else:
+                # OKX: класична API-автентифікація
+                _client_map = {"OKX": self._okx}
+                client = _client_map.get(exchange)
+                if not client or not getattr(client, "is_authenticated", False):
+                    logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_AUTH")
+                    return
 
             if exchange == "Binance":
                 pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
@@ -324,6 +380,8 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            elif exchange == "MEXC":
+                pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
             else:
                 return
 
@@ -331,12 +389,17 @@ class ReviewFetcher:
             total = pos + neg + neutral
             bad_pct = (neg / total * 100.0) if total > 0 else 0.0
 
-            # Додаємо до in-memory кешу, щоб наступного разу він йшов у фонову чергу
             self._known_merchants.add((exchange, merchant_id))
 
-            # Передаємо bad_texts прямо списком словників (json.dumps в БД впорається)
+            # Bybit/Binance: NO_SESSION якщо сесія не захоплена — перефетч через 1h
+            if exchange in ("Bybit", "Binance"):
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                save_status = "OK" if session_h else "NO_SESSION"
+            else:
+                save_status = "OK"
+
             await self._db.save_reviews(
-                exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK"
+                exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status
             )
             self._processed += 1
 
@@ -360,102 +423,88 @@ class ReviewFetcher:
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
-        Binance: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+        Binance: тексти негативних відгуків через перехоплену браузерну сесію.
 
-        fetch_merchant_profile → поля userAsset.positiveRate, totalFinishOrder
-        fetch_negative_reviews → тексти поганих відгуків
+        ПРИМІТКА: /bapi/c2c/v2/.../profile-and-ads і feedback-list повертають 404.
+        Pos/neg COUNT розраховується в risk_engine через Order.positive_rate
+        (доступний прямо в search response).
+
+        Тексти відгуків (/v1/.../review/list-by-page) потребують повноцінну
+        браузерну сесію (Csrftoken, BNC-Uuid, Device-Info, Fvideo).
         """
         client = self._binance
-        if not client or not getattr(client, "is_authenticated", False):
+        if not client:
+            return 0, 0, 0, []
+
+        # Тексти відгуків — через перехоплену браузерну сесію
+        headers, cookies, _ = await self._db.get_auth_session("Binance")
+        if not headers:
+            logger.debug("Binance [no session] %s: пропускаємо review texts", merchant_id)
             return 0, 0, 0, []
 
         try:
-            # 1. Профіль — отримуємо загальну статистику
-            profile_data = await client.fetch_merchant_profile(merchant_id)
-            user_info = profile_data.get("advertiser", profile_data) or {}
+            raw_neg = await client.fetch_negative_reviews(
+                merchant_id, rows=10,
+                session_headers=headers,
+                session_cookies=cookies,
+            )
+        except Exception as fe:
+            logger.debug("Binance review texts error %s: %s", merchant_id, fe)
+            raw_neg = []
 
-            # Binance profile: positiveRate = "98.50", totalOrderNum, monthFinishRate
-            total = int(user_info.get("totalOrderNum", 0) or user_info.get("monthOrderNum", 0) or 0)
-            pos_rate_str = str(user_info.get("positiveRate", "") or user_info.get("monthFinishRate", "") or "100")
-            try:
-                pos_rate = float(pos_rate_str.replace("%", ""))
-            except ValueError:
-                pos_rate = 100.0
+        bad_texts: list[dict] = []
+        for item in raw_neg:
+            content = str(item.get("content") or item.get("message") or "").strip()
+            if content and _has_bad_keywords(content):
+                bad_texts.append(_enrich_bad_text(content))
 
-            if total > 0:
-                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
-                pos = total - neg
-                neutral = 0
-            else:
-                pos = neg = neutral = 0
+        neg = len(bad_texts) if bad_texts else 0
 
-            # 2. Тексти негативних відгуків
-            raw_neg = await client.fetch_negative_reviews(merchant_id, rows=10)
-            bad_texts: list[dict] = []
-            for item in raw_neg:
-                content = str(item.get("message") or item.get("content") or "").strip()
-                if content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
-
-            logger.debug("Binance [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg,
-                         len(bad_texts))
-            return pos, neg, neutral, bad_texts
-
-        except Exception as e:
-            logger.debug("Binance fetch error %s: %s", merchant_id, e)
-            return 0, 0, 0, []
+        logger.debug("Binance %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        return 0, neg, 0, bad_texts
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
-        Bybit: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+        Bybit: тексти відгуків через перехоплену браузерну сесію.
 
-        fetch_merchant_profile → поля recentRate, totalFinishCount
-        fetch_merchant_feedback → тексти поганих відгуків
+        ПРИМІТКА: api2.bybit.com/fiat/otc/user/public/profile повертає 404.
+        Pos/neg COUNT більше не доступний через API → підрахунок відбувається
+        у risk_engine._async_analyze_inner через fallback з Order.finish_rate_pct.
+
+        Цей метод отримує ТІЛЬКИ тексти негативних відгуків (bad_texts).
         """
         client = self._bybit
-        if not client or not getattr(client, "is_authenticated", False):
+        if not client:
+            return 0, 0, 0, []
+
+        # Тексти відгуків — через перехоплену браузерну сесію
+        headers, cookies, _ = await self._db.get_auth_session("Bybit")
+        if not headers:
+            logger.debug("Bybit [no session] %s: пропускаємо feedback", merchant_id)
             return 0, 0, 0, []
 
         try:
-            # 1. Профіль
-            profile_data = await client.fetch_merchant_profile(merchant_id)
-            # Bybit profile: recentRate="98.5", monthFinishCount, recentExecuteRate
-            total = int(
-                profile_data.get("monthFinishCount", 0)
-                or profile_data.get("recentExecuteCount", 0)
-                or 0
+            raw_neg = await client.fetch_merchant_feedback(
+                merchant_id,
+                session_headers=headers,
+                session_cookies=cookies
             )
-            pos_rate_str = str(
-                profile_data.get("recentRate", "")
-                or profile_data.get("recentExecuteRate", "")
-                or "100"
-            )
-            try:
-                pos_rate = float(pos_rate_str.replace("%", ""))
-            except ValueError:
-                pos_rate = 100.0
+        except Exception as fe:
+            logger.debug("Bybit feedback error %s: %s", merchant_id, fe)
+            raw_neg = []
 
-            if total > 0:
-                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
-                pos = total - neg
-                neutral = 0
-            else:
-                pos = neg = neutral = 0
+        bad_texts: list[dict] = []
+        for item in raw_neg:
+            content = str(item.get("remark") or item.get("content") or "").strip()
+            if content and _has_bad_keywords(content):
+                bad_texts.append(_enrich_bad_text(content))
 
-            # 2. Тексти
-            raw_neg = await client.fetch_merchant_feedback(merchant_id)
-            bad_texts: list[dict] = []
-            for item in raw_neg:
-                content = str(item.get("content") or item.get("message") or "").strip()
-                if content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
+        # Якщо є погані тексти — беремо neg з них (pos/neg з профілю недоступний)
+        neg = len(bad_texts) if bad_texts else 0
 
-            logger.debug("Bybit [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
-            return pos, neg, neutral, bad_texts
+        logger.debug("Bybit %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        return 0, neg, 0, bad_texts
 
-        except Exception as e:
-            logger.debug("Bybit fetch error %s: %s", merchant_id, e)
-            return 0, 0, 0, []
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
@@ -513,3 +562,31 @@ class ReviewFetcher:
             except Exception:
                 break
         return all_items
+
+    async def _fetch_mexc(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        client = self._mexc
+        if not client:
+            return 0, 0, 0, []
+
+        try:
+            # Один запит → і статистика, і тексти
+            data = await client.fetch_merchant_reviews(merchant_id)
+            pos = data.get("good", 0)
+            neg = data.get("bad", 0)
+
+            bad_texts: list[dict] = []
+            for item in data.get("reviews", []):
+                # MEXC поле: "comment"; rating=false → негативний відгук
+                is_bad = item.get("rating") is False
+                content = str(item.get("comment") or "").strip()
+                if is_bad and content:
+                    bad_texts.append(_enrich_bad_text(content))
+                elif content and _has_bad_keywords(content):
+                    bad_texts.append(_enrich_bad_text(content))
+
+            logger.debug("MEXC %s: pos=%d neg=%d bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
+            return pos, neg, 0, bad_texts
+
+        except Exception as e:
+            logger.debug("MEXC fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []

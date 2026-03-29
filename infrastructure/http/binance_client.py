@@ -87,27 +87,43 @@ class BinanceClient(BaseHttpClient):
             logger.debug("fetch_merchant_profile [%s]: %s", merchant_id, e)
             return {}
 
-    async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10) -> list[dict]:
+    async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10, session_headers: dict = None, session_cookies: dict = None) -> list[dict]:
         """
-        Реальні тексти негативних відгуків.
-        Потребує API ключів — без них повертає [].
+        Реальні тексти негативних відгуків (через ПЕРЕХОПЛЕНУ веб-сесію).
+        Використовує новий шлях list-by-page.
         """
-        if not self.is_authenticated:
-            return []
+        if not session_headers or not session_cookies:
+            # Fallback на старий API, якщо сесії немає
+            if not self.is_authenticated: return []
+            url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
+            payload = {"advertiserNo": merchant_id, "type": 2, "page": 1, "rows": rows}
+        else:
+            # Робота через вкрадену сесію (web-шлях)
+            url = "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page"
+            payload = {
+                "advertiserNo": merchant_id,
+                "page": 1,
+                "rows": rows,
+                "reviewType": "NEGATIVE"
+            }
 
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
-        payload = {
-            "advertiserNo": merchant_id,
-            "type": 2,  # 2 = negative
-            "page": 1,
-            "rows": rows,
-        }
+        req_headers = dict(session_headers) if session_headers else {}
+        if req_headers:
+            req_headers.pop("Content-Length", None)
+            req_headers.pop("Accept-Encoding", None)
+            req_headers["Referer"] = f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}"
 
         try:
-            data = await self._post(url, json=payload)
-            return data.get("data", []) or []
+            if self._session is None: await self.__aenter__()
+            response = await self._session.request(
+                "POST", url, json=payload,
+                headers=req_headers if req_headers else self._session.headers,
+                cookies=session_cookies
+            )
+            data = response.json()
+            return data.get("data", {}).get("list", []) or data.get("data", []) or []
         except Exception as e:
-            logger.debug("fetch_negative_reviews [%s]: %s", merchant_id, e)
+            logger.debug("Binance fetch_negative_reviews [%s] error: %s", merchant_id, e)
             return []
 
     async def fetch_account_balance(self) -> list[dict]:

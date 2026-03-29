@@ -1,0 +1,139 @@
+# core/workers/session_manager.py
+import asyncio
+import logging
+import time
+from pathlib import Path
+from typing import Optional
+from playwright.async_api import async_playwright, Request
+from playwright_stealth import Stealth  # 🚀 ДОДАНО ДЛЯ МАСКУВАННЯ
+
+from core.storage.merchant_db import MerchantDB
+
+logger = logging.getLogger("SessionManager")
+
+# Таргети для перехоплення з індивідуальними таймерами "протухання"
+TARGETS = {
+    "Bybit": {
+        "url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
+        "api_pattern": "appraiseList",
+        "ttl": 3600  # 1 година
+    },
+    "Binance": {
+        "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
+        "api_pattern": "review/list-by-page",
+        "ttl": 900  # 15 хвилин
+    },
+    "OKX": {
+        "url": "https://www.okx.com/ru/p2p/ads-merchant?publicUserId=0e37a42aca",
+        "api_pattern": "review/history",
+        "ttl": 3600  # Поки заглушка
+    }
+}
+
+
+class SessionManager:
+    def __init__(self, db: MerchantDB):
+        self._db = db
+        self._worker_task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        if self._worker_task and not self._worker_task.done():
+            logger.debug("SessionManager вже запущено.")
+            return
+        self._worker_task = asyncio.create_task(self._worker_loop(), name="session-manager")
+        logger.info("🤖 SessionManager запущено (Фоновий збір браузерних сесій з маскуванням)")
+
+    async def stop(self) -> None:
+        if self._worker_task:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+            self._worker_task = None
+        logger.info("SessionManager зупинено")
+
+    async def _worker_loop(self):
+        # Даємо сканеру 10 секунд на старт
+        await asyncio.sleep(10)
+
+        while True:
+            try:
+                now = time.time()
+                for exchange, target in TARGETS.items():
+                    _, _, updated_at = await self._db.get_auth_session(exchange)
+
+                    if now - updated_at > target["ttl"]:
+                        logger.info(f"🔄 SessionManager: Оновлення сесії {exchange} у фоні...")
+                        await self._capture_session(exchange, target)
+                        # Робимо паузу 5 секунд між біржами
+                        await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"❌ SessionManager помилка в циклі: {e}", exc_info=True)
+
+            await asyncio.sleep(30)
+
+    async def _capture_session(self, exchange: str, target: dict):
+        user_data_dir = Path(f"data/browser_profiles/{exchange.lower()}")
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        captured_event = asyncio.Event()
+
+        try:
+            async with async_playwright() as p:
+                # 🚀 ДОДАНО АНТИ-ДЕТЕКТ АРГУМЕНТИ
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=str(user_data_dir),
+                    headless=False,  # 🚀 ЗМІНИ НА False (вікно буде з'являтися на 10-15 сек)
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-http2",
+                        "--window-size=1280,720",
+                    ],
+                )
+                page = await context.new_page()
+
+                # 🚀 ДОДАЙ ЦЕ: Блокуємо важкі ресурси для швидкості
+                await page.route("**/*.{png,jpg,jpeg,svg,woff2,css}", lambda route: route.abort())
+
+                # 🚀 НОВИЙ СИНТАКСИС ДЛЯ PLAYWRIGHT-STEALTH 2.0.2+
+                stealth_plugin = Stealth()
+                await stealth_plugin.apply_stealth_async(context)
+
+                page = await context.new_page()
+
+                async def handle_request(request: Request):
+                    if target["api_pattern"] in request.url:
+                        logger.debug(f"🎯 ПЕРЕХОПЛЕНО {exchange}: {request.url}")
+
+                        headers = request.headers
+                        cookies_list = await context.cookies()
+                        cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+
+                        success = await self._db.save_auth_session(exchange, headers, cookies_dict)
+                        if success:
+                            logger.info(f"✅ SessionManager: Сесію {exchange} успішно подовжено!")
+                        captured_event.set()
+
+                page.on("request", handle_request)
+
+                # Даємо браузеру цілих 60 секунд на завантаження важкої сторінки Bybit
+                # Шукай в кінці методу _capture_session (~145)
+                # ТЕПЕР ЦЕЙ БЛОК ВСЕРЕДИНІ 'async with'
+                try:
+                    await page.goto(target["url"], wait_until="commit", timeout=60000)
+                    await asyncio.wait_for(captured_event.wait(), timeout=45.0)
+                except Exception as e:
+                    logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
+
+                await asyncio.sleep(1)
+                await context.close()
+
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ SessionManager: Таймаут {exchange}. Можливо, розлогінило або вилізла капча.")
+            logger.warning(
+                f"👉 Запусти вручну 'python scripts/session_interceptor.py' для відновлення логіну {exchange}.")
+        except Exception as e:
+            logger.error(f"❌ SessionManager помилка для {exchange}: {e}")

@@ -41,6 +41,8 @@ from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from infrastructure.http.mexc_client import MexcClient
 from infrastructure.http.okx_client import OkxClient
 from infrastructure.http.wallet_client import WalletClient
+from core.workers.session_manager import SessionManager
+
 
 logger = logging.getLogger("Scanner")
 
@@ -270,6 +272,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
+    # 🚀 ДОДАНО: Запуск фонового менеджера сесій
+    session_manager = SessionManager(merchant_db)
+    await session_manager.start()
+
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
@@ -317,7 +323,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client)
-            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client)
+            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client, mexc=m_client)
 
             cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
@@ -644,6 +650,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         maintenance_task.cancel()
         if "cb_userbot" in locals():
             await cb_userbot.stop()
+        await session_manager.stop()
         await review_fetcher.stop()
         await llm_pool.stop()
         if _owns_db:

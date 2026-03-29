@@ -34,6 +34,8 @@ class Order:
     review_score: int = 0
     review_neg_pct: float = 0.0
     review_fetched: bool = False
+    # Binance: positiveRate (% позитивних відгуків, 0.0–1.0) — відрізняється від finish_rate_pct!
+    positive_rate: float = 0.0
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""

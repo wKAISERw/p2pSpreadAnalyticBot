@@ -222,7 +222,9 @@ def _build_weak_regex_flag(result: RegexResult) -> str:
 async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: MerchantDB) -> str:
     risk_type, reason = await db.get_reason(exchange, merchant_id)
     risk_type = (risk_type or "").strip()
-    reason    = (reason    or "").strip()[:800]
+    # Замінюємо коми на крапку з комою — reason вбудовується в comma-joined risk_flag,
+    # тому коми в тексті ламають flag.split(",") при парсингу в notifier._risk_badge
+    reason    = (reason or "").strip()[:900].replace(",", ";")
 
     if verdict == "BLOCK":
         if risk_type or reason:
@@ -413,6 +415,39 @@ class RiskEngine:
                 elif not review_summary_raw:
                     # Є в кеші але не завантажено в цьому запиті
                     review_summary_raw = await self._db.get_reviews_summary(exchange, mid)
+
+            # ── Bybit / Binance: fallback pos/neg з Order-статистики ────────
+            # Profile API обох бірж повертає 404 — positive=0 завжди в БД.
+            # Але в search response є month_order_count і:
+            #   - Bybit:   finish_rate_pct (completion rate, ~100%)
+            #   - Binance: positive_rate   (review rate, 0.0–1.0)
+            # Інжектуємо positive коли він нульовий, щоб neg_pct не був 100%:
+            #   - Без сесії (neg=0):  pos=972, neg=0  → neg_pct=0%   ✓
+            #   - З сесією  (neg=3):  pos=969, neg=3  → neg_pct=0.3% ✓
+            if (
+                exchange in ("Bybit", "Binance")
+                and review_summary_raw
+                and review_summary_raw.get("status") in ("OK", "NO_SESSION")
+                and order.month_order_count > 0
+                and review_summary_raw.get("positive", 0) == 0
+            ):
+                neg_known = int(review_summary_raw.get("negative", 0) or 0)
+                total_est = order.month_order_count
+                neg_est = neg_known  # default
+
+                if exchange == "Binance" and getattr(order, "positive_rate", 0) > 0:
+                    # Binance: positive_rate = 0.99310344 → neg = 972 * (1 - 0.993) ≈ 7
+                    neg_est = max(neg_known, int(total_est * (1.0 - order.positive_rate)))
+
+                pos_est = max(0, total_est - neg_est)
+
+                review_summary_raw = dict(review_summary_raw)
+                review_summary_raw["positive"] = pos_est
+                review_summary_raw["negative"] = neg_est
+                logger.debug(
+                    "%s pos fallback (profile 404): %s pos=%d neg=%d (orders=%d)",
+                    exchange, order.merchant_name, pos_est, neg_est, total_est,
+                )
 
             # ── Blacklist: найвищий пріоритет ──────────────────────────────
             if is_bl:

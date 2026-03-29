@@ -317,6 +317,15 @@ class MerchantDB:
                                          is_active        INTEGER DEFAULT 1,
                                          created_at       REAL DEFAULT 0
                                      );
+                                     -- Сесії з браузера (перехоплені Headers та Cookies)
+                                     CREATE TABLE IF NOT EXISTS auth_sessions (
+                                         user_id      INTEGER NOT NULL DEFAULT 0,
+                                         exchange     TEXT NOT NULL,
+                                         headers_json TEXT DEFAULT '{}',
+                                         cookies_json TEXT DEFAULT '{}',
+                                         updated_at   REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, exchange)
+                                     );
                                      """)
         await self._db.commit()
 
@@ -524,7 +533,7 @@ class MerchantDB:
     ) -> bool:
         async with self._db.execute(
                 """
-                SELECT updated_at
+                SELECT updated_at, status
                 FROM merchant_reviews
                 WHERE exchange = ?
                   AND merchant_id = ?
@@ -537,6 +546,17 @@ class MerchantDB:
             return True
 
         updated_at = row["updated_at"] or 0
+        status = row["status"] or "OK"
+
+        # NO_SESSION: re-check кожну годину — як тільки сесія з'явиться,
+        # всі мерчанти підтягнуть відгуки протягом ~1h без ручних дій
+        if status == "NO_SESSION":
+            return (time.time() - updated_at) > 3600.0
+
+        # PENDING / UNAVAILABLE: завжди потребує перефетч
+        if status in ("PENDING", "UNAVAILABLE"):
+            return True
+
         ttl_sec = review_ttl_hours * 3600.0
         return (time.time() - updated_at) > ttl_sec
 
@@ -909,6 +929,66 @@ class MerchantDB:
         except Exception:
             return False
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # Browser Auth Sessions (Interceptor)
+        # ═══════════════════════════════════════════════════════════════════════
+
+    async def save_auth_session(
+            self,
+            exchange: str,
+            headers_dict: dict,
+            cookies_dict: dict,
+            user_id: int = 0
+    ) -> bool:
+        """Зберігає перехоплені браузерні заголовки та кукіси."""
+        if not self._db:
+            return False
+        import json
+        import time
+        try:
+            now = time.time()
+            headers_json = json.dumps(headers_dict, ensure_ascii=False)
+            cookies_json = json.dumps(cookies_dict, ensure_ascii=False)
+
+            await self._db.execute(
+                """INSERT INTO auth_sessions
+                        (user_id, exchange, headers_json, cookies_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, exchange) DO
+                UPDATE SET
+                    headers_json = excluded.headers_json,
+                    cookies_json = excluded.cookies_json,
+                    updated_at = excluded.updated_at""",
+                (user_id, exchange, headers_json, cookies_json, now),
+            )
+            await self._db.commit()
+            logger.info("Auth session saved for %s (user_id=%d)", exchange, user_id)
+            return True
+        except Exception as e:
+            logger.error("save_auth_session [%s]: %s", exchange, e)
+            return False
+
+    async def get_auth_session(self, exchange: str, user_id: int = 0) -> tuple[dict, dict, float]:
+        """Повертає (headers_dict, cookies_dict, updated_at). Якщо немає — ({}, {}, 0.0)"""
+        if not self._db:
+            return {}, {}, 0.0
+        import json
+        try:
+            async with self._db.execute(
+                    "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE user_id=? AND exchange=?",
+                    (user_id, exchange),
+            ) as cur:
+                row = await cur.fetchone()
+
+            if not row:
+                return {}, {}, 0.0
+
+            headers = json.loads(row["headers_json"] or "{}")
+            cookies = json.loads(row["cookies_json"] or "{}")
+            return headers, cookies, float(row["updated_at"])
+
+        except Exception as e:
+            logger.error("get_auth_session [%s]: %s", exchange, e)
+            return {}, {}, 0.0
     # ═══════════════════════════════════════════════════════════════════════
     # Scanner Users (multi-user)
     # ═══════════════════════════════════════════════════════════════════════

@@ -29,6 +29,8 @@ class BinanceExchange(BaseExchange):
 
         finish_rate = float(user.get("monthFinishRate", 0)) * 100
         order_count = int(user.get("monthOrderCount", 0))
+        # positiveRate — це % позитивних ВІДГУКІВ (не completion rate!)
+        positive_rate = float(user.get("positiveRate", 0) or 0)
 
         return Order(
             id=f"bn_{adv.get('advNo', '')}",
@@ -40,6 +42,7 @@ class BinanceExchange(BaseExchange):
             merchant_name=str(user.get("nickName", "Unknown")),
             month_order_count=order_count,
             finish_rate_pct=round(finish_rate, 1),
+            positive_rate=positive_rate,
             exchange="Binance",
             link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo', '')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
