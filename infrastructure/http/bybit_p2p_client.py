@@ -189,3 +189,86 @@ class BybitP2PClient(BaseHttpClient):
         except Exception as e:
             logger.debug("Bybit fetch_account_balance: %s", e)
             return []
+
+    async def get_order_info(self, order_id: str) -> dict:
+        """
+        Отримує інформацію про конкретний P2P ордер за ID.
+        Endpoint: GET /fiat/otc/order/openapi/info
+        Статуси: CREATED, PENDING, PAID, COMPLETED, CANCELLED, APPEAL
+        """
+        if not self.is_authenticated:
+            return {}
+        try:
+            query = f"orderId={order_id}"
+            url = f"https://api2.bybit.com/fiat/otc/order/openapi/info?{query}"
+            headers = self._sign_headers(query)
+
+            async with self:
+                data = await self._get(url, headers=headers)
+
+            if data.get("ret_code") == 0:
+                return data.get("result") or {}
+            logger.warning("[Bybit] get_order_info error: %s", data.get("ret_msg"))
+            return {}
+        except Exception as e:
+            logger.debug("Bybit get_order_info [%s]: %s", order_id, e)
+            return {}
+
+    async def get_pending_orders(self) -> list[dict]:
+        """
+        Список активних P2P ордерів (не завершені).
+        Endpoint: GET /fiat/otc/order/openapi/pending
+        """
+        if not self.is_authenticated:
+            return []
+        try:
+            query = "page=1&size=20"
+            url = f"https://api2.bybit.com/fiat/otc/order/openapi/pending?{query}"
+            headers = self._sign_headers(query)
+
+            async with self:
+                data = await self._get(url, headers=headers)
+
+            if data.get("ret_code") == 0:
+                return data.get("result", {}).get("items") or []
+            return []
+        except Exception as e:
+            logger.debug("Bybit get_pending_orders: %s", e)
+            return []
+
+    async def fetch_p2p_book_top(
+        self,
+        fiat: str = "UAH",
+        asset: str = "USDT",
+        side: int = 1,         # 1=BUY (продавці USDT), 0=SELL (покупці USDT)
+        exclude_ad_id: str = "",
+    ) -> float | None:
+        """
+        Повертає найкращу ціну конкурента у стакані.
+        side=1: шукаємо серед продавців (для Maker-Sell нам важливо бути першими серед продавців).
+        exclude_ad_id: виключаємо власне оголошення щоб не порівнювати самих із собою.
+        """
+        url = "https://api2.bybit.com/fiat/otc/item/online"
+        payload = {
+            "tokenId":    asset,
+            "currencyId": fiat,
+            "side":       side,
+            "page":       1,
+            "size":       5,
+            "payment":    [],
+        }
+        headers = self._build_dynamic_headers()
+        try:
+            data = await self._post(url, json=payload, headers=headers)
+            items = data.get("result", {}).get("items") or []
+            for item in items:
+                item_id = str(item.get("id", ""))
+                if item_id == str(exclude_ad_id):
+                    continue
+                price_str = item.get("price") or item.get("unitPrice")
+                if price_str:
+                    return float(price_str)
+            return None
+        except Exception as e:
+            logger.debug("Bybit fetch_p2p_book_top: %s", e)
+            return None

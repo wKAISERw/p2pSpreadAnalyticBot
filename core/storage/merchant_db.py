@@ -1167,3 +1167,144 @@ class MerchantDB:
         delta = float(rows[-1]["neg_pct"]) - float(rows[0]["neg_pct"])
         trend = "worsening" if delta > 3.0 else "improving" if delta < -3.0 else "stable"
         return {"trend": trend, "delta": delta}
+
+    # ==========================================
+    # ── БЛОК 2: ТОРГОВІ СЕСІЇ (TRADE SESSIONS) ──
+    # ==========================================
+
+    async def create_trade_session(self, strategy: str, route_type: str, network: str, network_fee: float, gross_profit: float) -> int:
+        """Створює нову глобальну торгову сесію і повертає її ID."""
+        if not self._db:
+            return 0
+        
+        cursor = await self._db.execute(
+            """
+            INSERT INTO trade_sessions (strategy, route_type, network, network_fee, gross_profit, session_status)
+            VALUES (?, ?, ?, ?, ?, 'OPEN')
+            """,
+            (strategy, route_type, network, network_fee, gross_profit)
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def update_trade_session(self, session_id: int, status: str, buy_leg_id: Optional[int] = None, sell_leg_id: Optional[int] = None) -> None:
+        """Оновлює стан торгової сесії."""
+        if not self._db:
+            return
+            
+        fields = ["session_status = ?"]
+        values = [status]
+        
+        if buy_leg_id is not None:
+            fields.append("buy_leg_id = ?")
+            values.append(buy_leg_id)
+        if sell_leg_id is not None:
+            fields.append("sell_leg_id = ?")
+            values.append(sell_leg_id)
+            
+        if status in ('COMPLETED', 'CANCELLED', 'FAILED'):
+            fields.append("completed_at = CURRENT_TIMESTAMP")
+            
+        values.append(session_id)
+        
+        query = f"UPDATE trade_sessions SET {', '.join(fields)} WHERE id = ?"
+        await self._db.execute(query, tuple(values))
+        await self._db.commit()
+
+    # ==========================================
+    # ── БЛОК 3: АКТИВНІ ОРДЕРИ (ACTIVE TRADES) ──
+    # ==========================================
+
+    async def create_active_trade(self, session_id: int, strategy: str, leg: str, route_type: str, 
+                                  network: str, network_fee: float, owner_user_id: Optional[int], 
+                                  exchange: str, order_id: str, ad_id: str, asset: str, fiat: str, 
+                                  price: float, amount: float, fiat_amount: float, status: str) -> int:
+        """Записує створений ордер (leg) у базу."""
+        if not self._db:
+            return 0
+            
+        cursor = await self._db.execute(
+            """
+            INSERT INTO active_trades (
+                session_id, strategy, leg, route_type, network, network_fee, owner_user_id,
+                exchange, order_id, ad_id, asset, fiat, price, amount, fiat_amount, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, strategy, leg, route_type, network, network_fee, owner_user_id,
+             exchange, order_id, ad_id, asset, fiat, price, amount, fiat_amount, status)
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def update_active_trade_status(self, trade_id: int, new_status: str) -> None:
+        """Оновлює статус конкретного ордера (FSM)."""
+        if not self._db:
+            return
+            
+        await self._db.execute(
+            "UPDATE active_trades SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (new_status, trade_id)
+        )
+        await self._db.commit()
+
+    async def update_active_trade_order_id(self, trade_id: int, new_order_id: str) -> None:
+        """Оновлює order_id після того як біржа його повернула."""
+        if not self._db:
+            return
+            
+        await self._db.execute(
+            "UPDATE active_trades SET order_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (new_order_id, trade_id)
+        )
+        await self._db.commit()
+
+    async def get_active_trades_by_status(self, *statuses: str) -> list[dict]:
+        """
+        Блок 6: Повертає усі активні угоди за списком статусів.
+        Використовується при старті для відновлення незавершених торгів.
+        Приклад: get_active_trades_by_status('PENDING_PAYMENT', 'PAID_PENDING_RELEASE', 'SELL_PENDING')
+        """
+        if not self._db or not statuses:
+            return []
+
+        placeholders = ", ".join("?" for _ in statuses)
+        query = f"""
+            SELECT at.*, ts.strategy as session_strategy, ts.route_type as session_route_type,
+                   ts.network as session_network, ts.network_fee as session_network_fee,
+                   ts.gross_profit as session_gross_profit
+            FROM active_trades at
+            LEFT JOIN trade_sessions ts ON at.session_id = ts.id
+            WHERE at.status IN ({placeholders})
+            ORDER BY at.created_at ASC
+        """
+        try:
+            async with self._db.execute(query, tuple(statuses)) as cur:
+                rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("get_active_trades_by_status: %s", e)
+            return []
+
+    async def get_active_repricer_sessions(self) -> list[dict]:
+        """
+        Блок 6: Повертає всі торгові сесії в статусі SELL_IN_PROGRESS.
+        Використовується при старті для відновлення AdRepricer.
+        """
+        if not self._db:
+            return []
+        try:
+            async with self._db.execute(
+                """
+                SELECT ts.*, at.exchange, at.ad_id, at.price as buy_price,
+                       at.amount, at.network_fee
+                FROM trade_sessions ts
+                JOIN active_trades at ON ts.buy_leg_id = at.id
+                WHERE ts.session_status = 'SELL_IN_PROGRESS'
+                ORDER BY ts.created_at ASC
+                """
+            ) as cur:
+                rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("get_active_repricer_sessions: %s", e)
+            return []
