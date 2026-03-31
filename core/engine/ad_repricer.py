@@ -28,7 +28,7 @@ class AdRepricer:
         network_fee — вже сплачена комісія за переказ (USDT)
         amount      — кількість USDT для продажу
 
-    Якщо топ стакану нижче min_sell_price → сповіщаємо і НЕ оновлюємо ціну.
+    Якщо топ стакану нижче min_sell_price → сповіщаємо ОДИН РАЗ і НЕ оновлюємо ціну.
     """
 
     POLL_INTERVAL = 10.0   # секунди між перевірками стакану
@@ -42,8 +42,8 @@ class AdRepricer:
         buy_price: float,       # ціна купівлі Ноги 1
         amount_usdt: float,     # кількість USDT для продажу
         network_fee: float,     # вже сплачена мережева комісія в USDT
-        min_margin: float = 0.003,  # мінімальна маржа (0.3%)
-        step: float = 0.01,    # крок зниження ціни (UAH)
+        min_margin: float = 0.003,   # мінімальна маржа (0.3%)
+        step: float = 0.01,          # крок зниження ціни (UAH)
         rate_limiter: Optional[RateLimiter] = None,
         notify_cb: NotifyCallback = None,
     ):
@@ -59,10 +59,14 @@ class AdRepricer:
         self._notify_cb   = notify_cb
 
         self._current_price: Optional[float] = None
-        self._started_at  = time.time()
-        self._running     = False
+        self._started_at    = time.time()
+        self._running       = False
 
-    # ─── Публічний API ─────────────────────────────────────────────────────
+        # ФІКС #6: прапорці одноразових сповіщень — без них бот спамив кожні 10 сек
+        self._idle_notified: bool        = False
+        self._below_min_notified: bool   = False
+
+    # ─── Публічний API ──────────────────────────────────────────────────────
 
     @property
     def min_sell_price(self) -> float:
@@ -78,10 +82,10 @@ class AdRepricer:
         """
         Основний цикл AdRepricer.
 
-        :param fetch_book_top: async fn(exchange, ad_id) -> float | None
-                               Повертає поточну топ-ціну стакану (найкращий конкурент).
-        :param update_ad_price: async fn(exchange, ad_id, new_price) -> bool
-                               Відправляє запит на біржу для оновлення ціни оголошення.
+        :param fetch_book_top:   async fn(exchange, ad_id) -> float | None
+                                 Повертає поточну топ-ціну стакану (найкращий конкурент).
+        :param update_ad_price:  async fn(exchange, ad_id, new_price) -> bool
+                                 Відправляє запит на біржу для оновлення ціни оголошення.
         :param db: MerchantDB для оновлення FSM-статусів.
         """
         self._running = True
@@ -92,14 +96,15 @@ class AdRepricer:
 
         while self._running:
             try:
-                # Перевірка таймауту бездіяльності
-                if time.time() - self._started_at > self.MAX_IDLE_SEC:
+                # ФІКС #6: таймаут сповіщається ОДИН раз (idle_notified guard)
+                if time.time() - self._started_at > self.MAX_IDLE_SEC and not self._idle_notified:
+                    self._idle_notified = True
                     await self._notify(
                         f"⏰ [AdRepricer #{self._session_id}] Оголошення {self._sell_ad_id} "
                         f"на {self._exchange} не закрите вже 15 хвилин! Перевірте вручну."
                     )
 
-                # 1. Отримуємо топ стакану (найдешевший конкурент вище нас)
+                # 1. Отримуємо топ стакану
                 book_top = await fetch_book_top(self._exchange, self._sell_ad_id)
 
                 if book_top is None:
@@ -107,23 +112,31 @@ class AdRepricer:
                     await asyncio.sleep(self.POLL_INTERVAL)
                     continue
 
-                # 2. Розраховуємо нашу цільову ціну (бити конкурента на 1 крок)
+                # 2. Розраховуємо цільову ціну (бити конкурента на 1 крок)
                 target_price = round(book_top - self._step, 4)
 
                 # 3. Перевіряємо рентабельність
                 if target_price < self.min_sell_price:
-                    logger.warning(
-                        f"[AdRepricer #{self._session_id}] 📉 Нижче мінімальної маржі! "
-                        f"BookTop={book_top:.4f} Target={target_price:.4f} Min={self.min_sell_price:.4f}. "
-                        f"Ціну НЕ оновлюємо."
-                    )
-                    await self._notify(
-                        f"📉 [AdRepricer] Сесія #{self._session_id}: Неможливо бути першим без збитку!\n"
-                        f"Конкурент: {book_top:.2f} UAH | Ваш мінімум: {self.min_sell_price:.2f} UAH\n"
-                        f"Оголошення #{self._sell_ad_id} на {self._exchange} — перевірте вручну."
-                    )
+                    # ФІКС #6: below_min_notified — сповіщаємо ОДИН раз, не кожні 10 сек
+                    if not self._below_min_notified:
+                        self._below_min_notified = True
+                        logger.warning(
+                            f"[AdRepricer #{self._session_id}] 📉 Нижче мінімальної маржі! "
+                            f"BookTop={book_top:.4f} Target={target_price:.4f} Min={self.min_sell_price:.4f}. "
+                            f"Ціну НЕ оновлюємо."
+                        )
+                        await self._notify(
+                            f"📉 [AdRepricer] Сесія #{self._session_id}: Неможливо бути першим без збитку!\n"
+                            f"Конкурент: {book_top:.2f} UAH | Ваш мінімум: {self.min_sell_price:.2f} UAH\n"
+                            f"Оголошення #{self._sell_ad_id} на {self._exchange} — перевірте вручну."
+                        )
                     await asyncio.sleep(self.POLL_INTERVAL)
                     continue
+
+                # Якщо ринок виправився — скидаємо прапорець щоб можна було сповістити знову
+                if self._below_min_notified:
+                    self._below_min_notified = False
+                    logger.info(f"[AdRepricer #{self._session_id}] Ринок виправився, репрайсинг відновлено.")
 
                 # 4. Порівнюємо з поточною ціною — оновлюємо тільки якщо змінилась
                 if self._current_price is not None and abs(target_price - self._current_price) < 0.001:
@@ -159,7 +172,7 @@ class AdRepricer:
         """Зупиняє цикл repricera."""
         self._running = False
 
-    # ─── Допоміжні ─────────────────────────────────────────────────────────
+    # ─── Допоміжні ──────────────────────────────────────────────────────────
 
     async def _notify(self, message: str) -> None:
         if self._notify_cb:

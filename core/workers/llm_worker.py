@@ -114,8 +114,14 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - Якщо є негативні тексти — проаналізуй їх зміст (скам, дроп, кинув — це BLOCK; повільно, не відповідає — це м'який сигнал).
 - Якщо мерчант підозрілий за поведінкою, але відгуки повністю чисті — це пом'якшуючий фактор, зазнач це.
 
-ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
-{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт"}"""
+ВІДПОВІДАЙ ВИКЛЮЧНО JSON (без жодного тексту поза ним):
+{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт","trade_recommendation":"APPROVE"|"CONDITIONAL"|"REJECT"}
+
+ПОЛЕ trade_recommendation — ОБОВ'ЯЗКОВЕ. Пряма відповідь: чи варто проводити P2P-угоду з цим мерчантом ЗАРАЗ?
+APPROVE     — торгувати можна. Ризиків немає або вони мінімальні.
+CONDITIONAL — можна, але з застереженням (новий акаунт, м'який SUSPICIOUS, мало угод). Бот знизить суму або буде обережнішим.
+REJECT      — НЕ торгувати. Чіткі ознаки скаму, бот-процесингу або небезпеки для коштів.
+Правило відповідності: status=OK → APPROVE; status=SUSPICIOUS → CONDITIONAL; status=BLOCK → ЗАВЖДИ REJECT."""
 
 
 @dataclass
@@ -250,9 +256,12 @@ class LLMWorkerPool:
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
 
+        trade_recommendation = result.get("trade_recommendation", "CONDITIONAL")  # ← НОВЕ v2.1
+
         await self._db.save_verdict(
             task.exchange, task.merchant_id, task.merchant_name,
             task.trade_terms, verdict, risk_type, reason, source,
+            trade_recommendation=trade_recommendation,  # ← НОВЕ v2.1
         )
 
         rr = task.regex_result
@@ -340,17 +349,17 @@ class LLMWorkerPool:
             except ProviderRateLimitError as e:
                 LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
                 logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429", "trade_recommendation": "CONDITIONAL"}
             except asyncio.TimeoutError:
                 self._stats["timeouts"] += 1
                 logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout", "trade_recommendation": "CONDITIONAL"}
             except Exception as e:
                 logger.error("❌ Gemini помилка: %s", e)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error", "trade_recommendation": "CONDITIONAL"}
 
         self._stats["timeouts"] += 1
-        return {"status": "UNKNOWN", "risk": "NONE", "reason": "All APIs on cooldown", "_source": "cooldown_skip"}
+        return {"status": "UNKNOWN", "risk": "NONE", "reason": "All APIs on cooldown", "_source": "cooldown_skip", "trade_recommendation": "CONDITIONAL"}
 
     async def _call_groq(self, user_msg: str) -> dict:
         groq_key = os.getenv("GROQ_API_KEY", "")
@@ -592,7 +601,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту"}'
+        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту","trade_recommendation":"APPROVE|CONDITIONAL|REJECT"}'
     )
     return "\n".join(lines)
 
@@ -662,8 +671,27 @@ def _parse_json(text: str) -> dict:
         logger.debug(f"🧠 LLM Thoughts: {thought}")
         LLM_LOG.info("🧠 THOUGHT | %s", str(thought)[:3000])
 
+    # ── trade_recommendation ─────────────────────────────────────────────────
+    _raw_rec = str(data.get("trade_recommendation", "")).strip().upper()
+    _VALID_RECS = ("APPROVE", "CONDITIONAL", "REJECT")
+    if _raw_rec not in _VALID_RECS:
+        _fallback = {"OK": "APPROVE", "SUSPICIOUS": "CONDITIONAL", "BLOCK": "REJECT"}
+        trade_recommendation = _fallback.get(status, "CONDITIONAL")
+        if _raw_rec:
+            logger.warning(
+                "[LLM] Невідомий trade_recommendation=%r, fallback→%s (status=%s)",
+                _raw_rec, trade_recommendation, status,
+            )
+    else:
+        trade_recommendation = _raw_rec
+    # BLOCK завжди → REJECT (безпека)
+    if status == "BLOCK" and trade_recommendation != "REJECT":
+        logger.warning("[LLM] trade_recommendation конфліктує зі status=BLOCK → примусово REJECT")
+        trade_recommendation = "REJECT"
+
     return {
         "status": status,
         "risk": risk or "NONE",
         "reason": reason or "Без пояснення",
+        "trade_recommendation": trade_recommendation,
     }

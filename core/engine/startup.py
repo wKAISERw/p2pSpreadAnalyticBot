@@ -1,15 +1,14 @@
 """
 startup.py — Блок 6: Відновлення роботи після рестарту.
 
-При старті бота викликайте `await recover_all(db, trade_worker, executor, notify_cb)`.
+При старті бота викликайте `await recover_all(db, executor, notify_cb)`.
 Бот автоматично:
-  1. Відновить усі незавершені торгові угоди (PENDING_PAYMENT, PAID_PENDING_RELEASE, SELL_PENDING).
-  2. Перезапустить AdRepricer для всіх сесій зі статусом SELL_IN_PROGRESS.
-  3. Сповістить у Telegram про кількість відновлених процесів.
+    1. Відновить усі незавершені торгові угоди (PENDING_PAYMENT, PAID_PENDING_RELEASE, SELL_PENDING).
+    2. Перезапустить AdRepricer для всіх сесій зі статусом SELL_IN_PROGRESS.
+    3. Сповістить у Telegram про кількість відновлених процесів.
 """
 import asyncio
 import logging
-import time
 from typing import Callable, Awaitable, Optional
 
 from core.storage.merchant_db import MerchantDB
@@ -20,7 +19,6 @@ from infrastructure.http.bybit_p2p_client import BybitP2PClient
 
 logger = logging.getLogger("Startup")
 
-# Типізація callback для Telegram
 NotifyCallback = Optional[Callable[[str], Awaitable[None]]]
 
 
@@ -32,9 +30,9 @@ async def recover_pending_trades(
     Блок 6.1: Відновлення незавершених угод після рестарту.
 
     Шукає активні угоди в статусах:
-    - PENDING_PAYMENT      — очікують оплати від юзера
-    - PAID_PENDING_RELEASE — оплачено, очікуємо надходження крипти
-    - SELL_PENDING         — чекають запуску другої ноги
+        - PENDING_PAYMENT     — очікують оплати від юзера
+        - PAID_PENDING_RELEASE — оплачено, очікуємо надходження крипти
+        - SELL_PENDING        — чекають запуску другої ноги
 
     Для кожної такої угоди — логуємо і (майбутнє) відновлюємо FSM-обробник.
     """
@@ -51,19 +49,12 @@ async def recover_pending_trades(
     )
 
     for trade in trades:
-        trade_id  = trade.get("id")
-        exchange  = trade.get("exchange")
-        status    = trade.get("status")
-        order_id  = trade.get("order_id")
-        session_id = trade.get("session_id")
-
         logger.info(
-            f"[Startup] Угода #{trade_id} | Exchange={exchange} | "
-            f"Status={status} | OrderId={order_id} | Session={session_id}"
+            f"[Startup] Угода #{trade.get('id')} | Exchange={trade.get('exchange')} | "
+            f"Status={trade.get('status')} | OrderId={trade.get('order_id')} | "
+            f"Session={trade.get('session_id')}"
         )
-
-        # TODO (Phase 2): Тут буде логіка переприв'язки FSM-обробника до відновленої угоди.
-        # Наразі — тільки логуємо. Юзер матиме змогу завершити угоду через TG-бот вручну.
+        # TODO (Phase 2): Переприв'язати FSM-обробник до відновленої угоди.
 
     if notify_cb:
         await notify_cb(
@@ -98,12 +89,13 @@ async def recover_active_repricers(
     )
 
     repricers_started = 0
+
     for session in sessions:
-        session_id = session.get("id")
-        sell_ad_id = session.get("ad_id")
-        exchange   = session.get("exchange")
-        buy_price  = float(session.get("buy_price") or 0)
-        amount     = float(session.get("amount") or 100)
+        session_id  = session.get("id")
+        sell_ad_id  = session.get("ad_id")
+        exchange    = session.get("exchange")
+        buy_price   = float(session.get("buy_price")   or 0)
+        amount      = float(session.get("amount")       or 100)
         network_fee = float(session.get("network_fee") or 0)
 
         if not sell_ad_id or not exchange:
@@ -115,7 +107,6 @@ async def recover_active_repricers(
             f"Exchange={exchange}, Ad={sell_ad_id}, BuyPrice={buy_price}"
         )
 
-        # Отримуємо credentials для виконавця
         owner_user_id = session.get("owner_user_id") or 0
         creds = await db.get_credentials(exchange=exchange, user_id=owner_user_id) or {}
 
@@ -129,10 +120,14 @@ async def recover_active_repricers(
             notify_cb=notify_cb,
         )
 
-        async def make_fetch_book_top(exc: str, ad: str) -> Optional[float]:
-            """Реальний запит топу стакану через анонімний API."""
+        # ─────────────────────────────────────────────────────────────────────
+        # ФІКС #2: Closure Bug — дефолтний аргумент фіксує поточне значення
+        # змінних у кожній ітерації циклу, а не захоплює останнє.
+        # БЕЗ фіксу: всі 5 репрайсерів отримають API-ключі від ОСТАННЬОЇ сесії.
+        # ─────────────────────────────────────────────────────────────────────
+        async def _make_fetch_book_top(exc: str, ad: str, _exc=exchange) -> Optional[float]:
             try:
-                if exc == "Bybit":
+                if _exc == "Bybit":
                     client = BybitP2PClient()
                     async with client:
                         return await client.fetch_p2p_book_top(
@@ -142,17 +137,17 @@ async def recover_active_repricers(
                 logger.debug(f"[Startup] fetch_book_top error: {e}")
             return None
 
-        async def make_update_ad_price(exc: str, ad: str, price: float) -> bool:
-            return await executor.update_maker_ad_price(exc, ad, price, creds)
+        async def _make_update_ad_price(exc: str, ad: str, price: float, _creds=creds) -> bool:
+            # ФІКС #2: _creds=creds захоплює поточне значення creds (не останнє з циклу)
+            return await executor.update_maker_ad_price(exc, ad, price, _creds)
 
-        # Запускаємо repricer у фоні (asyncio.Task)
         asyncio.create_task(
             repricer.watch(
-                fetch_book_top=make_fetch_book_top,
-                update_ad_price=make_update_ad_price,
+                fetch_book_top=_make_fetch_book_top,
+                update_ad_price=_make_update_ad_price,
                 db=db,
             ),
-            name=f"repricer_session_{session_id}"
+            name=f"repricer_session_{session_id}",
         )
 
         repricers_started += 1
@@ -183,7 +178,6 @@ async def recover_all(
     pending   = await recover_pending_trades(db, notify_cb=notify_cb)
     repricers = await recover_active_repricers(db, executor, notify_cb=notify_cb)
 
-    # Відновлення OrderMonitor
     monitors = 0
     if order_monitor:
         monitors = await order_monitor.restore_from_db(

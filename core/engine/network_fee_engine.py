@@ -15,34 +15,53 @@ NetworkFeeEngine — Блок 1: Розрахунок комісій мереж.
 from typing import Optional
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Довідник комісій мереж (USDT)
-# Значення: типова комісія за вихідний переказ (withdrawal fee)
+# Довідник комісій мереж (USDT).
+# ВАЖЛИВО: кожна мережа має лише ОДИН канонічний ключ.
+# Аліаси (BSC, ARBITRUM тощо) перетворюються функцією _normalize_network()
+# і ніколи не потрапляють у EXCHANGE_NETWORKS як окремі записи.
 # ──────────────────────────────────────────────────────────────────────────────
 NETWORK_FEES: dict[str, float] = {
     # Ультра-дешеві
-    "SOL":           0.01,
-    "TON":           0.01,
+    "SOL":      0.01,
+    "TON":      0.01,
     # Дешеві Layer-2 та альтернативні
-    "BEP20":         0.10,
-    "BSC":           0.10,
-    "ARB":           0.10,
-    "ARBITRUM":      0.10,
-    "POLYGON":       0.10,
-    "MATIC":         0.10,
-    "OP":            0.10,
-    "OPTIMISM":      0.10,
-    "AVAX":          0.10,
-    "CELO":          0.10,
+    "BEP20":    0.10,   # BSC — канонічна назва
+    "ARB":      0.10,   # Arbitrum — канонічна назва
+    "POLYGON":  0.10,   # MATIC — канонічна назва
+    "OP":       0.10,   # Optimism — канонічна назва
+    "AVAX":     0.10,
+    "CELO":     0.10,
     # Середні
-    "TRC20":         1.00,
-    "TRON":          1.00,
+    "TRC20":    1.00,   # Tron — канонічна назва
     # Дорогі
-    "ERC20":        15.00,   # Known limitation: хардкод до Фази 2+
-    "ETH":          15.00,
+    "ERC20":    15.00,  # Known limitation: хардкод до Фази 2+
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Підтримувані мережі для кожної біржі (USDT withdrawal)
+# ФІКС #10: Таблиця нормалізації аліасів → канонічна назва.
+# get_fee("BSC") тепер коректно поверне 0.10, а не 999.0.
+# ──────────────────────────────────────────────────────────────────────────────
+_ALIASES: dict[str, str] = {
+    "BSC":       "BEP20",
+    "ARBITRUM":  "ARB",
+    "MATIC":     "POLYGON",
+    "OPTIMISM":  "OP",
+    "TRON":      "TRC20",
+    "ETH":       "ERC20",
+    "ETHEREUM":  "ERC20",
+    "SOLANA":    "SOL",
+    "TONCHAIN":  "TON",
+}
+
+def _normalize_network(name: str) -> str:
+    """Перетворює аліас мережі в канонічну назву. Регістр нечутливий."""
+    upper = name.upper()
+    return _ALIASES.get(upper, upper)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Підтримувані мережі для кожної біржі (USDT withdrawal).
+# Використовуємо лише КАНОНІЧНІ назви — без дублів BSC/BEP20 тощо.
 # ──────────────────────────────────────────────────────────────────────────────
 EXCHANGE_NETWORKS: dict[str, list[str]] = {
     "Bybit":     ["TRC20", "ERC20", "BEP20", "SOL", "ARB", "POLYGON", "OP", "TON"],
@@ -80,7 +99,6 @@ class NetworkFeeEngine:
         if not common_nets:
             return ("UNKNOWN", 999.0)
 
-        # Сортуємо за ціною і беремо найдешевшу
         best = min(common_nets, key=lambda n: NETWORK_FEES.get(n, 999.0))
         return (best, NETWORK_FEES.get(best, 999.0))
 
@@ -123,5 +141,9 @@ class NetworkFeeEngine:
 
     @staticmethod
     def get_fee(network: str) -> float:
-        """Повертає комісію за мережею з fallback 999.0."""
-        return NETWORK_FEES.get(network.upper(), NETWORK_FEES.get(network, 999.0))
+        """
+        Повертає комісію за мережею з нормалізацією аліасів та fallback 999.0.
+        ФІКС #10: get_fee("BSC") тепер повертає 0.10 замість 999.0.
+        """
+        canonical = _normalize_network(network)
+        return NETWORK_FEES.get(canonical, 999.0)

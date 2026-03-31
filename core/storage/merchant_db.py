@@ -332,6 +332,7 @@ class MerchantDB:
                                          id              INTEGER PRIMARY KEY AUTOINCREMENT,
                                          strategy        TEXT NOT NULL,
                                          route_type      TEXT NOT NULL,
+                                         buy_exchange    TEXT,           -- 🚀 ДОДАНО
                                          buy_leg_id      INTEGER,
                                          sell_leg_id     INTEGER,
                                          session_status  TEXT NOT NULL DEFAULT 'OPEN',
@@ -372,6 +373,7 @@ class MerchantDB:
 
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
         await self._ensure_column("merchant_verdict", "llm_decision", "TEXT DEFAULT 'UNKNOWN'")
+        await self._ensure_column("merchant_verdict", "trade_recommendation", "TEXT DEFAULT 'PENDING'")
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
         # Міграція колонок scanner_users
         await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
@@ -379,6 +381,8 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
         # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
+        # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ
+        await self._ensure_column("trade_sessions", "buy_exchange", "TEXT")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -503,6 +507,29 @@ class MerchantDB:
             return row["risk_type"] or "", row["reason"] or ""
         return "", ""
 
+    async def get_trade_recommendation(
+        self, exchange: str, merchant_id: str
+    ) -> str:
+        """
+        Повертає пряму рекомендацію LLM щодо проведення угоди:
+            "APPROVE"     — торгувати можна
+            "CONDITIONAL" — з обережністю
+            "REJECT"      — не торгувати
+            "PENDING"     — LLM ще не аналізував
+        """
+        if not self._db:
+            return "PENDING"
+        async with self._db.execute(
+            "SELECT trade_recommendation FROM merchant_verdict "
+            "WHERE exchange = ? AND merchant_id = ?",
+            (exchange, merchant_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return "PENDING"
+        rec = (row["trade_recommendation"] or "PENDING").strip().upper()
+        return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING") else "PENDING"
+
     async def save_verdict(
             self,
             exchange: str,
@@ -513,19 +540,26 @@ class MerchantDB:
             risk_type: str = "",
             reason: str = "",
             source: str = "",
+            trade_recommendation: str = "CONDITIONAL",  # ← НОВЕ
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
         score_delta = VERDICT_SCORE.get(verdict, 0)
         llm_inc = 1 if (source or "").lower() in LLM_SOURCES else 0
 
+        # Валідація trade_recommendation
+        if trade_recommendation not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING"):
+            trade_recommendation = "CONDITIONAL"
+        if verdict == "BLOCK":
+            trade_recommendation = "REJECT"  # примусово
+
         await self._db.execute(
             """
             INSERT INTO merchant_verdict
             (exchange, merchant_id, merchant_name, terms_hash,
              verdict, risk_type, reason, risk_score,
-             llm_calls_count, save_count, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             llm_calls_count, save_count, updated_at, trade_recommendation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 merchant_name = excluded.merchant_name,
                 terms_hash = excluded.terms_hash,
@@ -535,7 +569,8 @@ class MerchantDB:
                 risk_score = MIN (merchant_verdict.risk_score + excluded.risk_score, 200),
                 llm_calls_count = merchant_verdict.llm_calls_count + ?,
                 save_count = merchant_verdict.save_count + 1,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                trade_recommendation = excluded.trade_recommendation
             """,
             (
                 exchange,
@@ -549,6 +584,7 @@ class MerchantDB:
                 llm_inc,
                 1,
                 now,
+                trade_recommendation,  # ← НОВЕ
                 llm_inc,
             ),
         )
@@ -1172,17 +1208,19 @@ class MerchantDB:
     # ── БЛОК 2: ТОРГОВІ СЕСІЇ (TRADE SESSIONS) ──
     # ==========================================
 
-    async def create_trade_session(self, strategy: str, route_type: str, network: str, network_fee: float, gross_profit: float) -> int:
+    async def create_trade_session(self, strategy: str, route_type: str, network: str, network_fee: float,
+                                   gross_profit: float, buy_exchange: str = "") -> int:
         """Створює нову глобальну торгову сесію і повертає її ID."""
         if not self._db:
             return 0
-        
+
         cursor = await self._db.execute(
             """
-            INSERT INTO trade_sessions (strategy, route_type, network, network_fee, gross_profit, session_status)
-            VALUES (?, ?, ?, ?, ?, 'OPEN')
+            INSERT INTO trade_sessions (strategy, route_type, network, network_fee, gross_profit, session_status,
+                                        buy_exchange)
+            VALUES (?, ?, ?, ?, ?, 'OPEN', ?)
             """,
-            (strategy, route_type, network, network_fee, gross_profit)
+            (strategy, route_type, network, network_fee, gross_profit, buy_exchange)
         )
         await self._db.commit()
         return cursor.lastrowid
@@ -1211,6 +1249,13 @@ class MerchantDB:
         await self._db.execute(query, tuple(values))
         await self._db.commit()
 
+    async def get_trade_session(self, session_id: int) -> dict | None:
+        """Отримує дані торгової сесії по ID."""
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM trade_sessions WHERE id = ?", (session_id,)) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
     # ==========================================
     # ── БЛОК 3: АКТИВНІ ОРДЕРИ (ACTIVE TRADES) ──
     # ==========================================

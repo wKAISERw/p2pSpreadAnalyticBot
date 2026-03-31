@@ -93,7 +93,6 @@ class SessionManager:
                         "--window-size=1280,720",
                     ],
                 )
-                page = await context.new_page()
 
                 # 🚀 ДОДАЙ ЦЕ: Блокуємо важкі ресурси для швидкості
                 await page.route("**/*.{png,jpg,jpeg,svg,woff2,css}", lambda route: route.abort())

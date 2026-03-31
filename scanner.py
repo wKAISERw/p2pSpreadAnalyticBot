@@ -540,7 +540,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
                         frontend_opp = {
-                            "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}-{int(time.time())}",
+                            "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}",  # ← ФІКС flickering
                             "timestamp": int(time.time() * 1000),
                             "buyOrder": {
                                 "id": getattr(buy_o, "id", "b1"),
