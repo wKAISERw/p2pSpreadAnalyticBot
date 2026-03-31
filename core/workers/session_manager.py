@@ -21,7 +21,7 @@ TARGETS = {
     "Binance": {
         "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
         "api_pattern": "review/list-by-page",
-        "ttl": 900  # 15 хвилин
+        "ttl": 14400  # 4 години (було 15 хв). Тепер ми покладаємось на AuthError!
     },
     "OKX": {
         "url": "https://www.okx.com/ru/p2p/ads-merchant?publicUserId=0e37a42aca",
@@ -124,7 +124,38 @@ class SessionManager:
                 # ТЕПЕР ЦЕЙ БЛОК ВСЕРЕДИНІ 'async with'
                 try:
                     await page.goto(target["url"], wait_until="commit", timeout=60000)
-                    await asyncio.wait_for(captured_event.wait(), timeout=45.0)
+                    
+                    # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
+                    if exchange == "Binance":
+                        await page.wait_for_timeout(7000)
+                    else:
+                        await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
+                    
+                    # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' – 
+                    # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
+                    success = await page.evaluate('''() => {
+                        const keywords = ["відгуки", "отзывы", "review", "feedback"];
+                        const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
+                        let clicked = false;
+                        for (let el of els) {
+                            if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
+                                // Фільтруємо за наявністю розміру екрану і чи не є він занадто великим (щоб не клікати весь body/header)
+                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
+                                    el.click();
+                                    clicked = true;
+                                }
+                            }
+                        }
+                        return clicked;
+                    }''')
+                    
+                    if success:
+                        logger.info(f"👉 SessionManager: Автоматично натиснуто вкладку відгуків для {exchange} (через JS-масив)")
+                    else:
+                        logger.error(f"❌ SessionManager: Жодного елемента 'Відгуки' не знайдено на екрані {exchange}!")
+
+                    # Чекаємо поки перехопиться API запит
+                    await asyncio.wait_for(captured_event.wait(), timeout=30.0)
                 except Exception as e:
                     logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
 

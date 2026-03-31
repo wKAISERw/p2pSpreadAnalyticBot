@@ -44,8 +44,9 @@ class Settings(BaseSettings):
     anomaly_threshold_multiplier: float = 2.5
     anomaly_method: Literal["mean", "median", "mad"] = "mean"
 
-    # ── Risk Engine ───────────────────────────────────────────────────────
+    # ── Risk Engine та Безпека ──────────────────────────────────────────────
     risk_mode: str = "WARNING"
+    dry_run_mode: bool = False  # Блокує реальні POST/PUT запити на біржі
 
     # ── Логування ─────────────────────────────────────────────────────────
     log_level: str = "INFO"

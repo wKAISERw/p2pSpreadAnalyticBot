@@ -52,6 +52,7 @@ PRIORITY_FILES = [
     "core/analysis/rules.py",
     "core/workers/llm_worker.py",
     "core/workers/review_fetcher.py",
+   "core/workers/session_manager.py",
     "core/engine/cross_matcher.py",
     "core/engine/stability.py",
     "core/utils/circuit_breaker.py",

@@ -120,9 +120,20 @@ class BinanceClient(BaseHttpClient):
                 headers=req_headers if req_headers else self._session.headers,
                 cookies=session_cookies
             )
+            if response.status_code in (401, 403):
+                raise RuntimeError(f"AuthError: HTTP {response.status_code}")
+                
             data = response.json()
+            
+            # Перевірка на внутрішню помилку авторизації Binance (часто код 000004 або 000008)
+            code = str(data.get("code", ""))
+            if code in ("000004", "000008", "401") or "Unauthorized" in str(data):
+                raise RuntimeError(f"AuthError: Token expired. {data}")
+                
             return data.get("data", {}).get("list", []) or data.get("data", []) or []
         except Exception as e:
+            if "AuthError" in str(e):
+                raise  # Прокидаємо вище для перехоплення у ReviewFetcher
             logger.debug("Binance fetch_negative_reviews [%s] error: %s", merchant_id, e)
             return []
 

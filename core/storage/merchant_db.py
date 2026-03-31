@@ -326,15 +326,59 @@ class MerchantDB:
                                          updated_at   REAL DEFAULT 0,
                                          PRIMARY KEY (user_id, exchange)
                                      );
+                                     
+                                     -- Таблиця: trade_sessions
+                                     CREATE TABLE IF NOT EXISTS trade_sessions (
+                                         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         strategy        TEXT NOT NULL,
+                                         route_type      TEXT NOT NULL,
+                                         buy_leg_id      INTEGER,
+                                         sell_leg_id     INTEGER,
+                                         session_status  TEXT NOT NULL DEFAULT 'OPEN',
+                                         network         TEXT,
+                                         network_fee     REAL DEFAULT 0,
+                                         gross_profit    REAL,
+                                         created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                         completed_at    DATETIME
+                                     );
+
+                                     -- Таблиця: active_trades
+                                     CREATE TABLE IF NOT EXISTS active_trades (
+                                         id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         session_id       INTEGER REFERENCES trade_sessions(id),
+                                         strategy         TEXT,
+                                         leg              TEXT,
+                                         route_type       TEXT,
+                                         network          TEXT,
+                                         network_fee      REAL DEFAULT 0,
+                                         expires_at       DATETIME,
+                                         owner_user_id    INTEGER DEFAULT NULL,
+                                         exchange         TEXT,
+                                         order_id         TEXT UNIQUE,
+                                         ad_id            TEXT,
+                                         asset            TEXT,
+                                         fiat             TEXT,
+                                         price            REAL,
+                                         amount           REAL,
+                                         fiat_amount      REAL,
+                                         counterparty_id  TEXT,
+                                         counterparty_name TEXT,
+                                         status           TEXT NOT NULL,
+                                         created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                         updated_at       DATETIME
+                                     );
                                      """)
         await self._db.commit()
 
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
+        await self._ensure_column("merchant_verdict", "llm_decision", "TEXT DEFAULT 'UNKNOWN'")
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
         # Міграція колонок scanner_users
         await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
         await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
+        # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
+        await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -952,12 +996,13 @@ class MerchantDB:
 
             await self._db.execute(
                 """INSERT INTO auth_sessions
-                        (user_id, exchange, headers_json, cookies_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, exchange) DO
-                UPDATE SET
-                    headers_json = excluded.headers_json,
-                    cookies_json = excluded.cookies_json,
-                    updated_at = excluded.updated_at""",
+                        (user_id, exchange, headers_json, cookies_json, updated_at, is_active)
+                    VALUES (?, ?, ?, ?, ?, 1) 
+                    ON CONFLICT(user_id, exchange) DO UPDATE SET
+                        headers_json = excluded.headers_json,
+                        cookies_json = excluded.cookies_json,
+                        updated_at = excluded.updated_at,
+                        is_active = 1""",
                 (user_id, exchange, headers_json, cookies_json, now),
             )
             await self._db.commit()
@@ -974,7 +1019,7 @@ class MerchantDB:
         import json
         try:
             async with self._db.execute(
-                    "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE user_id=? AND exchange=?",
+                    "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE user_id=? AND exchange=? AND is_active=1",
                     (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
@@ -989,6 +1034,22 @@ class MerchantDB:
         except Exception as e:
             logger.error("get_auth_session [%s]: %s", exchange, e)
             return {}, {}, 0.0
+
+    async def invalidate_auth_session(self, exchange: str, user_id: int = 0) -> bool:
+        """Позначає сесію як протухшу (is_active=0)."""
+        if not self._db:
+            return False
+        try:
+            await self._db.execute(
+                "UPDATE auth_sessions SET is_active=0 WHERE user_id=? AND exchange=?",
+                (user_id, exchange)
+            )
+            await self._db.commit()
+            logger.warning("Auth session invalidated (burnt out) for %s (user_id=%d)", exchange, user_id)
+            return True
+        except Exception as e:
+            logger.error("invalidate_auth_session [%s]: %s", exchange, e)
+            return False
     # ═══════════════════════════════════════════════════════════════════════
     # Scanner Users (multi-user)
     # ═══════════════════════════════════════════════════════════════════════

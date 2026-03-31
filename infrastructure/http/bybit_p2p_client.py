@@ -150,11 +150,22 @@ class BybitP2PClient(BaseHttpClient):
                 headers=req_headers,
                 cookies=session_cookies
             )
+            
+            if response.status_code in (401, 403):
+                raise RuntimeError(f"AuthError: HTTP {response.status_code}")
+                
             data = response.json()
+
+            # Bybit auth error codes (10001-10005, 33004) or string match
+            ret_code = data.get("ret_code", data.get("retCode", 0))
+            if ret_code in (10001, 10002, 10003, 10004, 10005, 33004) or "unauthorized" in str(data).lower() or "not login" in str(data).lower():
+                raise RuntimeError(f"AuthError: Token expired. {data}")
 
             # Повертаємо масив відгуків
             return data.get("result", {}).get("items", []) or []
         except Exception as e:
+            if "AuthError" in str(e):
+                raise  # Прокидаємо вище для перехоплення у ReviewFetcher
             logger.debug("Bybit fetch_merchant_feedback [%s] error: %s", merchant_id, e)
             return []
 

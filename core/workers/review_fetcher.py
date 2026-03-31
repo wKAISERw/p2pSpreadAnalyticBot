@@ -419,6 +419,28 @@ class ReviewFetcher:
 
             await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
 
+    def _send_burnout_alert(self, exchange: str):
+        """Надсилає миттєве Telegram-сповіщення (і пише в лог) про згоряння сесії."""
+        msg = f"❌ Ваша сесія <b>{exchange}</b> для парсингу відгуків згоріла.\n👉 Будь ласка, залогіньтесь знову (відскануйте QR-код)."
+        logger.error(f"SESSION_BURNOUT:{exchange}: {msg}")
+        
+        # Відправляємо напряму через Telegram API, щоб не створювати циклічних імпортів з notifier
+        try:
+            from config import settings
+            import aiohttp
+            if settings.telegram_bot_token and settings.telegram_chat_id:
+                async def _push():
+                    url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+                    payload = {"chat_id": settings.telegram_chat_id, "text": msg, "parse_mode": "HTML"}
+                    try:
+                        async with aiohttp.ClientSession() as s:
+                            await s.post(url, json=payload, timeout=5)
+                    except Exception as e:
+                        logger.debug("burnout_alert push failed: %s", e)
+                asyncio.create_task(_push())
+        except Exception:
+            pass
+
     # ─── Exchange fetchers ───────────────────────────────────────────────────
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
@@ -449,7 +471,12 @@ class ReviewFetcher:
                 session_cookies=cookies,
             )
         except Exception as fe:
-            logger.debug("Binance review texts error %s: %s", merchant_id, fe)
+            if "AuthError" in str(fe):
+                logger.error("🚨 Binance session burnout detected! %s", fe)
+                asyncio.create_task(self._db.invalidate_auth_session("Binance", user_id=0))
+                self._send_burnout_alert("Binance")
+            else:
+                logger.debug("Binance review texts error %s: %s", merchant_id, fe)
             raw_neg = []
 
         bad_texts: list[dict] = []
@@ -490,7 +517,12 @@ class ReviewFetcher:
                 session_cookies=cookies
             )
         except Exception as fe:
-            logger.debug("Bybit feedback error %s: %s", merchant_id, fe)
+            if "AuthError" in str(fe):
+                logger.error("🚨 Bybit session burnout detected! %s", fe)
+                asyncio.create_task(self._db.invalidate_auth_session("Bybit", user_id=0))
+                self._send_burnout_alert("Bybit")
+            else:
+                logger.debug("Bybit feedback error %s: %s", merchant_id, fe)
             raw_neg = []
 
         bad_texts: list[dict] = []

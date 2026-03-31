@@ -1,6 +1,6 @@
 # PROJECT DUMP: p2p_scanner
-# Generated: 2026-03-27 22:38
-# Files: 77
+# Generated: 2026-03-29 19:27
+# Files: 82
 #
 # STRUCTURE:
 #   config\settings.py
@@ -15,6 +15,7 @@
 #   core\analysis\identity_analyzer.py
 #   core\workers\llm_worker.py
 #   core\workers\review_fetcher.py
+#   core\workers\session_manager.py
 #   core\engine\cross_matcher.py
 #   core\engine\stability.py
 #   core\utils\circuit_breaker.py
@@ -49,6 +50,7 @@
 #   filters\anomaly_filter.py
 #   tools\migrate_multiuser.py
 #   tools\cleanup_settings.py
+#   _check_logs.py
 #   bot\__init__.py
 #   config\__init__.py
 #   config.py
@@ -61,6 +63,8 @@
 #   core\utils\__init__.py
 #   core\workers\__init__.py
 #   infrastructure\api\__init__.py
+#   script\__init__.py
+#   script\session_interceptor.py
 #   state.py
 #   tests\core\__init__.py
 #   tests\core\test_cb.py
@@ -80,6 +84,7 @@
 #   tools\build_rules.py
 #   tools\cryptobot_inspector.py
 #   tools\dashboard.py
+#   tools\invalidate_recent.py
 
 
 ============================================================
@@ -632,6 +637,8 @@ from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from infrastructure.http.mexc_client import MexcClient
 from infrastructure.http.okx_client import OkxClient
 from infrastructure.http.wallet_client import WalletClient
+from core.workers.session_manager import SessionManager
+
 
 logger = logging.getLogger("Scanner")
 
@@ -861,6 +868,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
     )
     await review_fetcher.start()
+    # 🚀 ДОДАНО: Запуск фонового менеджера сесій
+    session_manager = SessionManager(merchant_db)
+    await session_manager.start()
+
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
     stability_filter = SpreadStabilityFilter(
@@ -908,7 +919,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client)
-            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client)
+            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client, mexc=m_client)
 
             cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
@@ -1024,16 +1035,14 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         for o in b_orders:
                             if merchant_filter.passed(o):
-                                if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
+                                # schedule() прибрано — відгуки тягнуться ТІЛЬКИ
+                                # для мерчантів у реальному спреді (lazy в risk_engine)
                                 for bank_code in o.bank_codes:
                                     if bank_code in buy_grouped:
                                         buy_grouped[bank_code].append(o)
 
                         for o in s_orders:
                             if merchant_filter.passed(o):
-                                if o.merchant_id:
-                                    review_fetcher.schedule(o.exchange, o.merchant_id)  # Швидкий виклик
                                 for bank_code in o.bank_codes:
                                     if bank_code in sell_grouped:
                                         sell_grouped[bank_code].append(o)
@@ -1080,16 +1089,24 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     )
 
                     sent_count = 0
+                    # ── Аналіз ризику для всіх ордерів у спреді ─────────────
+                    # analyze_for_spread() ЧЕКАЄ завершення аналізу (await) —
+                    # кешований LLM вердикт буде в алерті, а не тільки в наступному циклі.
+                    _analyzed_ids: set[tuple[str, str]] = set()
+                    _to_analyze: list = []
+                    for opp in opportunities:
+                        for order in [opp["buy_order"], opp["sell_order"]]:
+                            key = (order.exchange, order.merchant_id)
+                            if key not in _analyzed_ids:
+                                _analyzed_ids.add(key)
+                                _to_analyze.append(order)
+                    if _to_analyze:
+                        await risk_engine.analyze_for_spread(_to_analyze)
+
                     for opp in opportunities:
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        if not getattr(buy_o, "_risk_analyzed", False):
-                            risk_engine.analyze(buy_o);
-                            buy_o._risk_analyzed = True
-                        if not getattr(sell_o, "_risk_analyzed", False):
-                            risk_engine.analyze(sell_o);
-                            sell_o._risk_analyzed = True
 
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
@@ -1229,6 +1246,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         maintenance_task.cancel()
         if "cb_userbot" in locals():
             await cb_userbot.stop()
+        await session_manager.stop()
         await review_fetcher.stop()
         await llm_pool.stop()
         if _owns_db:
@@ -1253,7 +1271,10 @@ import uvicorn
 from pydantic import BaseModel
 from core.storage.merchant_db import MerchantDB
 from bot.commands import _is_admin
-
+from infrastructure.api.binance_account import BinanceAccountClient
+from infrastructure.api.bybit_account import BybitAccountClient
+from infrastructure.api.okx_account import OKXAccountClient
+from infrastructure.api.mexc_account import MEXCAccountClient
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
 from state import state
@@ -1530,6 +1551,100 @@ async def update_telegram_settings(settings: dict): # Змінено ім'я ф�
         state.user_settings.update(snake_settings)
 
     return {"status": "success"}
+
+
+@app.get("/api/v1/accounts/{telegram_id}")
+async def get_real_exchange_accounts(telegram_id: int):
+    # Отримуємо ключі з БД
+    creds = await db.get_all_credentials(user_id=telegram_id)
+
+    if not creds:
+        return []
+
+    accounts = []
+
+    for exchange_name, keys in creds.items():
+        api_key = keys.get("api_key", "")
+        api_secret = keys.get("api_secret", "")
+        passphrase = keys.get("passphrase", "")
+
+        # Базова модель (буде перезаписана реальними даними)
+        account_data = {
+            "id": exchange_name.lower(),
+            "exchange": exchange_name.capitalize(),
+            "balanceUAH": 0.0,
+            "balanceUSDT": 0.0,
+            "kycLevel": "Verified",
+            "merchantStatus": "None",
+            "tradingVolume30d": 0,
+            "volumeLimit": 100000  # Залишаємо базовий ліміт для візуалізації прогрес-бару
+        }
+
+        try:
+            balances = []
+
+            if exchange_name.lower() == "binance":
+                client = BinanceAccountClient(api_key, api_secret)
+                balances = await client.get_balance()
+                info = await client.get_account_info()
+
+                # Реальний KYC: якщо біржа дозволяє торгувати, значить KYC пройдено
+                account_data["kycLevel"] = "Verified Plus" if info.get("canTrade") else "Unverified"
+
+                # Реальний об'єм та статус: тягнемо останні 100 угод (50 на покупку, 50 на продаж)
+                p2p_buy = await client.get_my_p2p_orders("BUY", rows=50)
+                p2p_sell = await client.get_my_p2p_orders("SELL", rows=50)
+                all_p2p = p2p_buy + p2p_sell
+
+                account_data["merchantStatus"] = "Active" if len(all_p2p) > 0 else "None"
+                # Рахуємо реальний об'єм за останні угоди (приблизно за 30 днів)
+                account_data["tradingVolume30d"] = sum(float(o.get("amount", 0)) for o in all_p2p)
+
+
+            elif exchange_name.lower() == "bybit":
+
+                client = BybitAccountClient(api_key, api_secret)
+
+                balances = await client.get_balance()
+
+                # Для Bybit залишаємо заглушки на відгуки/ордери, щоб не було 403
+
+            elif exchange_name.lower() == "okx":
+                client = OKXAccountClient(api_key, api_secret, passphrase)
+                balances = await client.get_funding_balance()
+
+                # Реальні дані OKX
+                info = await client.get_account_info()
+                p2p_orders = await client.get_my_p2p_orders(limit=50)
+
+                # Парсимо рівень акаунта з відповіді OKX
+                acct_data = info.get("data", [{}])[0]
+                account_data["kycLevel"] = f"Level {acct_data.get('acctLv', '1')}"
+                account_data["merchantStatus"] = "Active" if len(p2p_orders) > 0 else "None"
+                account_data["tradingVolume30d"] = sum(float(o.get("amount", 0)) for o in p2p_orders)
+
+            elif exchange_name.lower() == "mexc":
+                client = MEXCAccountClient(api_key, api_secret)
+                balances = await client.get_balance()
+                info = await client.get_account_info()
+                account_data["kycLevel"] = "Verified"  # MEXC вимагає KYC для API
+
+            # Парсимо знайдений баланс
+            for b in balances:
+                if b["coin"] == "USDT":
+                    account_data["balanceUSDT"] = b["total"]
+                elif b["coin"] == "UAH":
+                    account_data["balanceUAH"] = b["total"]
+
+        except Exception as e:
+            logging.getLogger("Main").error(f"Помилка даних акаунта {exchange_name}: {e}")
+            account_data["kycLevel"] = "API Error"
+            account_data["merchantStatus"] = "API Error"
+
+        accounts.append(account_data)
+
+    return dict_to_camel(accounts)
+
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
@@ -1857,6 +1972,15 @@ class MerchantDB:
                                          is_active        INTEGER DEFAULT 1,
                                          created_at       REAL DEFAULT 0
                                      );
+                                     -- Сесії з браузера (перехоплені Headers та Cookies)
+                                     CREATE TABLE IF NOT EXISTS auth_sessions (
+                                         user_id      INTEGER NOT NULL DEFAULT 0,
+                                         exchange     TEXT NOT NULL,
+                                         headers_json TEXT DEFAULT '{}',
+                                         cookies_json TEXT DEFAULT '{}',
+                                         updated_at   REAL DEFAULT 0,
+                                         PRIMARY KEY (user_id, exchange)
+                                     );
                                      """)
         await self._db.commit()
 
@@ -2064,7 +2188,7 @@ class MerchantDB:
     ) -> bool:
         async with self._db.execute(
                 """
-                SELECT updated_at
+                SELECT updated_at, status
                 FROM merchant_reviews
                 WHERE exchange = ?
                   AND merchant_id = ?
@@ -2077,6 +2201,17 @@ class MerchantDB:
             return True
 
         updated_at = row["updated_at"] or 0
+        status = row["status"] or "OK"
+
+        # NO_SESSION: re-check кожну годину — як тільки сесія з'явиться,
+        # всі мерчанти підтягнуть відгуки протягом ~1h без ручних дій
+        if status == "NO_SESSION":
+            return (time.time() - updated_at) > 3600.0
+
+        # PENDING / UNAVAILABLE: завжди потребує перефетч
+        if status in ("PENDING", "UNAVAILABLE"):
+            return True
+
         ttl_sec = review_ttl_hours * 3600.0
         return (time.time() - updated_at) > ttl_sec
 
@@ -2449,6 +2584,66 @@ class MerchantDB:
         except Exception:
             return False
 
+        # ═══════════════════════════════════════════════════════════════════════
+        # Browser Auth Sessions (Interceptor)
+        # ═══════════════════════════════════════════════════════════════════════
+
+    async def save_auth_session(
+            self,
+            exchange: str,
+            headers_dict: dict,
+            cookies_dict: dict,
+            user_id: int = 0
+    ) -> bool:
+        """Зберігає перехоплені браузерні заголовки та кукіси."""
+        if not self._db:
+            return False
+        import json
+        import time
+        try:
+            now = time.time()
+            headers_json = json.dumps(headers_dict, ensure_ascii=False)
+            cookies_json = json.dumps(cookies_dict, ensure_ascii=False)
+
+            await self._db.execute(
+                """INSERT INTO auth_sessions
+                        (user_id, exchange, headers_json, cookies_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, exchange) DO
+                UPDATE SET
+                    headers_json = excluded.headers_json,
+                    cookies_json = excluded.cookies_json,
+                    updated_at = excluded.updated_at""",
+                (user_id, exchange, headers_json, cookies_json, now),
+            )
+            await self._db.commit()
+            logger.info("Auth session saved for %s (user_id=%d)", exchange, user_id)
+            return True
+        except Exception as e:
+            logger.error("save_auth_session [%s]: %s", exchange, e)
+            return False
+
+    async def get_auth_session(self, exchange: str, user_id: int = 0) -> tuple[dict, dict, float]:
+        """Повертає (headers_dict, cookies_dict, updated_at). Якщо немає — ({}, {}, 0.0)"""
+        if not self._db:
+            return {}, {}, 0.0
+        import json
+        try:
+            async with self._db.execute(
+                    "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE user_id=? AND exchange=?",
+                    (user_id, exchange),
+            ) as cur:
+                row = await cur.fetchone()
+
+            if not row:
+                return {}, {}, 0.0
+
+            headers = json.loads(row["headers_json"] or "{}")
+            cookies = json.loads(row["cookies_json"] or "{}")
+            return headers, cookies, float(row["updated_at"])
+
+        except Exception as e:
+            logger.error("get_auth_session [%s]: %s", exchange, e)
+            return {}, {}, 0.0
     # ═══════════════════════════════════════════════════════════════════════
     # Scanner Users (multi-user)
     # ═══════════════════════════════════════════════════════════════════════
@@ -2828,6 +3023,7 @@ from config.defaults import (
     LIMIT_EPSILON, STICKY_MIN_CHAIN,
     VELOCITY_MIN_WINDOW_HOURS, VELOCITY_SPIKE_PER_HOUR,
     BEHAVIOR_LLM_THRESHOLD,
+    EXACT_LIMITS_SCORE,
 )
 
 MIN_SNAPSHOTS = 3
@@ -2885,6 +3081,7 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
     is_exact = _is_exact_limits(min_lim, max_lim)
     if is_exact:
         result.flags.append("EXACT_LIMITS")
+        result.score += EXACT_LIMITS_SCORE   # 20 балів — завжди, навіть без history
 
     # Якщо снапшотів мало, повертаємо тільки результат миттєвої перевірки
     if not snapshots or len(snapshots) < MIN_SNAPSHOTS:
@@ -3059,7 +3256,7 @@ FILE: core/workers/llm_worker.py
 
 # core/workers/llm_worker.py
 # =============================================================================
-# БОЙОВА ВЕРСІЯ v2.0
+# БОЙОВА ВЕРСІЯ v2.0 (З підтримкою OpenAI GPT-4o-mini)
 # =============================================================================
 """
 Асинхронний LLM-воркер.
@@ -3068,7 +3265,7 @@ FILE: core/workers/llm_worker.py
   - smart_truncate: зберігає початок + кінець trade_terms (scam часто в кінці)
   - bad_texts передаються в LLM навіть при UNAVAILABLE статусі
   - account_age_days в промпті
-  - LLMTask розширено: account_age_days
+  - ДОДАНО: Інтеграція OpenAI (gpt-4o-mini) як основного/надійного fallback
 """
 
 from __future__ import annotations
@@ -3095,7 +3292,8 @@ from core.analysis.regex_analyzer import RegexResult
 
 logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
-GROQ_MODEL   = os.getenv("GROQ_MODEL",   "llama-3.3-70b-versatile").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()  # 🚀 ДОДАНО OPENAI
 
 
 def _setup_llm_log() -> logging.Logger:
@@ -3129,14 +3327,14 @@ class ProviderRateLimitError(RuntimeError):
 
 LLM_LOG = _setup_llm_log()
 
-LLM_WORKERS          = 3
-LLM_TIMEOUT          = 7.0
-MAX_QUEUE            = 200
-MAX_NORM_TERMS       = 800   # v2: збільшено з 220 — тепер smart truncate
+LLM_WORKERS = 3
+LLM_TIMEOUT = 7.0
+MAX_QUEUE = 200
+MAX_NORM_TERMS = 800
 MAX_MATCHES_IN_PROMPT = 3
-MAX_EXCERPT_LEN      = 90
+MAX_EXCERPT_LEN = 90
 
-SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.1).
+SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.2).
 Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
 
 ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
@@ -3161,27 +3359,36 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - 👨‍👩‍👦 ОДНОФАМІЛЬЦІ: Якщо мерчант допускає оплату від родичів ВИКЛЮЧНО з ТИМ САМИМ ПРІЗВИЩЕМ — БЕЗПЕЧНО.
 - ПОВЕДІНКА СТАКАНУ: Якщо є прапори "API_REPLENISH" або "CROSS_EXCHANGE_BOT" — це 100% бот-процесинг. ПОВИНЕН ставити verdict: BLOCK, risk: BOT_API.
 - НОВИЙ АКАУНТ: Якщо акаунт молодший 14 днів, а кількість угод підозріло велика — підвищуй ризик.
+- ФІКСОВАНІ ЛІМІТИ: Якщо min_limit ≈ max_limit (фіксована сума) — це РІДКІСТЬ серед звичайних продавців. Разом з 100% рейтингом і великою кількістю угод = бот-процесинг (BOT_API). Разом з підозрілими умовами = трикутна схема (TRIANGLE). Один факт фіксованих лімітів без інших сигналів — verdict: SUSPICIOUS.
 - ВІДГУКИ: Негативні відгуки зі словами "шахрай", "кинув", "дроп" — сильний сигнал BLOCK навіть без тексту умов.
 - Враховуй СТАТИСТИКУ! Верифікований мерчант з >500 угодами і >95% — його жорсткі вимоги щодо безпеки є нормою.
 
+🔍 ОБОВ'ЯЗКОВО АНАЛІЗУЙ ВІДГУКИ:
+- ЗАВЖДИ коментуй стан відгуків у thought_process: скільки позитивних/негативних, чи є тексти поганих відгуків, що саме там написано.
+- Якщо відгуки чисті (neg=0 або дуже низький %) — напиши це явно: "Відгуки чисті, neg=X/Y, загроз не виявлено".
+- Якщо відгуки відсутні — зазнач це як фактор невизначеності.
+- Якщо є негативні тексти — проаналізуй їх зміст (скам, дроп, кинув — це BLOCK; повільно, не відповідає — це м'який сигнал).
+- Якщо мерчант підозрілий за поведінкою, але відгуки повністю чисті — це пом'якшуючий фактор, зазнач це.
+
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON:
-{"thought_process":"твій логічний ланцюжок роздумів перед вердиктом","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"короткий підсумок"}"""
+{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт"}"""
 
 
 @dataclass
 class LLMTask:
-    exchange:          str
-    merchant_id:       str
-    merchant_name:     str
-    trade_terms:       str
-    regex_result:      RegexResult
-    finish_rate:       float
+    exchange: str
+    merchant_id: str
+    merchant_name: str
+    trade_terms: str
+    regex_result: RegexResult
+    finish_rate: float
     month_order_count: int
-    is_verified:       bool
-    min_limit:         float
-    max_limit:         float
-    behavior_flags:    list[str] = field(default_factory=list)
-    account_age_days:  int = 0       # v2: вік акаунту в днях (0 = невідомо)
+    is_verified: bool
+    min_limit: float
+    max_limit: float
+    behavior_flags: list[str] = field(default_factory=list)
+    account_age_days: int = 0
+    review_summary: dict = field(default_factory=dict)
 
 
 class LLMWorkerPool:
@@ -3216,19 +3423,20 @@ class LLMWorkerPool:
         )
 
     def schedule(
-        self,
-        exchange:          str,
-        merchant_id:       str,
-        merchant_name:     str,
-        trade_terms:       str,
-        regex_result:      RegexResult,
-        finish_rate:       float = 0.0,
-        month_order_count: int   = 0,
-        is_verified:       bool  = False,
-        min_limit:         float = 0.0,
-        max_limit:         float = 0.0,
-        behavior_flags:    list[str] = None,
-        account_age_days:  int = 0,
+            self,
+            exchange: str,
+            merchant_id: str,
+            merchant_name: str,
+            trade_terms: str,
+            regex_result: RegexResult,
+            finish_rate: float = 0.0,
+            month_order_count: int = 0,
+            is_verified: bool = False,
+            min_limit: float = 0.0,
+            max_limit: float = 0.0,
+            behavior_flags: list[str] = None,
+            account_age_days: int = 0,
+            review_summary: dict = None,
     ) -> bool:
         cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
@@ -3247,6 +3455,7 @@ class LLMWorkerPool:
             max_limit=max_limit,
             behavior_flags=behavior_flags or [],
             account_age_days=account_age_days,
+            review_summary=review_summary or {},
         )
         try:
             self._queue.put_nowait(task)
@@ -3281,14 +3490,18 @@ class LLMWorkerPool:
         if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
             return
 
-        review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
+        if task.review_summary:
+            review_summary = task.review_summary
+        else:
+            review_summary = await self._db.get_reviews_summary(task.exchange, task.merchant_id)
+
         result = await self._call_with_fallback(task, review_summary)
         self._stats["processed"] += 1
 
-        verdict   = result.get("status", "UNKNOWN").upper()
+        verdict = result.get("status", "UNKNOWN").upper()
         risk_type = result.get("risk", "") or "NONE"
-        reason    = (result.get("reason", "") or "")[:150]
-        source    = result.get("_source", "unknown")
+        reason = (result.get("reason", "") or "")[:900]
+        source = result.get("_source", "unknown")
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
@@ -3298,14 +3511,14 @@ class LLMWorkerPool:
             task.trade_terms, verdict, risk_type, reason, source,
         )
 
-        rr    = task.regex_result
+        rr = task.regex_result
         score = getattr(rr, "score", 0)
-        cats  = _regex_categories(rr)
+        cats = _regex_categories(rr)
 
         LLM_LOG.info(
-            "%-8s | %-10s | %-10s | %-14s | score=%-3s | cats=%-30s | %-8s | %s | %s",
-            task.exchange, task.merchant_id[:10], verdict, risk_type, score,
-            ",".join(cats)[:30] or "NONE", source, task.merchant_name[:20], reason[:80],
+            "%-8s | %-11s | %-10s | %-14s | score=%-3s | cats=%-35s | %-8s | %s | %s",
+            task.exchange, task.merchant_id[:11], verdict, risk_type, score,
+            ",".join(cats)[:35] or "NONE", source, task.merchant_name[:40], reason[:900],
         )
 
         if verdict == "BLOCK":
@@ -3316,9 +3529,10 @@ class LLMWorkerPool:
 
         self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
-    # ── Groq / Gemini cooldown (class-level) ─────────────────────────────────
-    _groq_cooldown_until:   float = 0.0
-    _groq_consecutive_429:  int   = 0
+    # ── Groq / OpenAI / Gemini cooldown (class-level) ─────────────────────────
+    _groq_cooldown_until: float = 0.0
+    _groq_consecutive_429: int = 0
+    _openai_cooldown_until: float = 0.0  # 🚀 ДОДАНО OPENAI
     _gemini_cooldown_until: float = 0.0
 
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
@@ -3327,15 +3541,12 @@ class LLMWorkerPool:
 
         user_msg = _build_prompt(task, review_summary)
 
-        now             = _time.monotonic()
-        groq_available  = LLMWorkerPool._groq_cooldown_until   <= now
+        now = _time.monotonic()
+        groq_available = LLMWorkerPool._groq_cooldown_until <= now
+        openai_available = LLMWorkerPool._openai_cooldown_until <= now
         gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
 
-        if not groq_available and not gemini_available:
-            self._stats["timeouts"] += 1
-            logger.warning("⛔ Обидві LLM на паузі. Пропускаємо %s", task.merchant_name)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Both APIs on cooldown", "_source": "cooldown_skip"}
-
+        # 1. Спроба через GROQ (Швидкий і безкоштовний)
         if groq_available:
             try:
                 result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
@@ -3344,36 +3555,58 @@ class LLMWorkerPool:
                 return result
             except RateLimitError:
                 LLMWorkerPool._groq_consecutive_429 += 1
-                n    = LLMWorkerPool._groq_consecutive_429
+                n = LLMWorkerPool._groq_consecutive_429
                 base = 30.0 * (2 ** min(n - 1, 4))
                 wait = base * random.uniform(0.85, 1.15)
                 LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
-                self._stats["timeouts"] += 1
-                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
+                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Перехід на OpenAI", n, wait)
             except asyncio.TimeoutError:
                 self._stats["timeouts"] += 1
                 logger.warning("⏳ Groq timeout для %s", task.merchant_name)
             except Exception as e:
                 logger.error("❌ Groq помилка: %s", e)
 
-        try:
-            result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
-            result["_source"] = f"gemini:{GEMINI_MODEL}"
-            return result
-        except PermanentModelError as e:
-            logger.error("❌ Gemini config помилка: %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error", "_source": "gemini_404"}
-        except ProviderRateLimitError as e:
-            LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
-            logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
-        except asyncio.TimeoutError:
-            self._stats["timeouts"] += 1
-            logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
-        except Exception as e:
-            logger.error("❌ Gemini помилка: %s", e)
-            return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
+        # 2. Спроба через OPENAI (Дуже стабільний, великі ліміти)
+        if openai_available:
+            try:
+                result = await asyncio.wait_for(self._call_openai(user_msg), timeout=LLM_TIMEOUT)
+                result["_source"] = f"openai:{OPENAI_MODEL}"
+                return result
+            except PermanentModelError:
+                pass  # Якщо ключ не вказано, просто йдемо далі до Gemini
+            except ProviderRateLimitError:
+                LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
+                logger.warning("⏳ OpenAI 429. Охолодження 30s → Перехід на Gemini")
+            except asyncio.TimeoutError:
+                self._stats["timeouts"] += 1
+                logger.warning("⏳ OpenAI timeout для %s", task.merchant_name)
+            except Exception as e:
+                logger.error("❌ OpenAI помилка: %s", e)
+
+        # 3. Спроба через GEMINI (Останній рубіж)
+        if gemini_available:
+            try:
+                result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
+                result["_source"] = f"gemini:{GEMINI_MODEL}"
+                return result
+            except PermanentModelError as e:
+                logger.error("❌ Gemini config помилка: %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error",
+                        "_source": "gemini_404"}
+            except ProviderRateLimitError as e:
+                LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
+                logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429"}
+            except asyncio.TimeoutError:
+                self._stats["timeouts"] += 1
+                logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout"}
+            except Exception as e:
+                logger.error("❌ Gemini помилка: %s", e)
+                return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error"}
+
+        self._stats["timeouts"] += 1
+        return {"status": "UNKNOWN", "risk": "NONE", "reason": "All APIs on cooldown", "_source": "cooldown_skip"}
 
     async def _call_groq(self, user_msg: str) -> dict:
         groq_key = os.getenv("GROQ_API_KEY", "")
@@ -3383,16 +3616,16 @@ class LLMWorkerPool:
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_msg},
+                {"role": "user", "content": user_msg},
             ],
             "temperature": 0.1,
-            "max_tokens": 600,
-            "response_format": {"type": "json_object"}  # 🚀 ПРИМУСОВИЙ JSON
+            "max_tokens": 1000,
+            "response_format": {"type": "json_object"}
         }
         async with self._session.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            json=payload,
-            headers={"Authorization": f"Bearer {groq_key}"},
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {groq_key}"},
         ) as resp:
             if resp.status == 429:
                 raise RateLimitError("Groq 429")
@@ -3402,17 +3635,48 @@ class LLMWorkerPool:
         text = data["choices"][0]["message"]["content"]
         return _parse_json(text)
 
+    async def _call_openai(self, user_msg: str) -> dict:
+        # 🚀 ДОДАНО: Метод виклику OpenAI API
+        openai_key = os.getenv("OPENAI_API_KEY", "")
+        if not openai_key:
+            raise PermanentModelError("OPENAI_API_KEY не встановлено")
+
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 1000,
+            "response_format": {"type": "json_object"}
+        }
+
+        async with self._session.post(
+                "https://api.openai.com/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": f"Bearer {openai_key}"},
+        ) as resp:
+            if resp.status == 429:
+                raise ProviderRateLimitError("OpenAI 429")
+            if resp.status >= 500:
+                raise RuntimeError(f"OpenAI server error {resp.status}")
+            data = await resp.json()
+
+        text = data["choices"][0]["message"]["content"]
+        return _parse_json(text)
+
     async def _call_gemini(self, user_msg: str) -> dict:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         if not gemini_key:
             raise PermanentModelError("GEMINI_API_KEY не встановлено")
         full_prompt = f"{SYSTEM_PROMPT}\n\n{user_msg}"
         payload = {
-            "contents":         [{"parts": [{"text": full_prompt}]}],
+            "contents": [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
-                "maxOutputTokens": 800, # 🚀 ЗБІЛЬШЕНО З 200
-                "responseMimeType": "application/json" # 🚀 ПРИМУСОВИЙ JSON
+                "maxOutputTokens": 1200,
+                "responseMimeType": "application/json"
             },
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={gemini_key}"
@@ -3433,13 +3697,6 @@ class LLMWorkerPool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _smart_truncate(text: str, max_len: int = MAX_NORM_TERMS) -> str:
-    """
-    v2: Замість простого обрізання — зберігаємо початок + кінець.
-
-    Scam-фрази часто ховаються в кінці тексту умов. Стара логіка
-    `text[:220]` їх просто втрачала. Тепер беремо 2/3 початку і
-    1/3 кінця — жодна частина не губиться.
-    """
     if not text or len(text) <= max_len:
         return text or "(не вказані)"
     head_len = (max_len * 2) // 3
@@ -3450,7 +3707,6 @@ def _smart_truncate(text: str, max_len: int = MAX_NORM_TERMS) -> str:
 
 
 def _build_account_age_note(task: LLMTask) -> str:
-    """Формує примітку про вік акаунту для промпту."""
     days = task.account_age_days
     if days <= 0:
         return ""
@@ -3464,7 +3720,6 @@ def _build_account_age_note(task: LLMTask) -> str:
 
 
 def _build_behavior_block(task: LLMTask) -> list[str]:
-    """Структурований behavioral блок для промпту."""
     flags = task.behavior_flags or []
     if not flags:
         return ["ПОВЕДІНКА: Нормальна"]
@@ -3505,25 +3760,24 @@ def _build_behavior_block(task: LLMTask) -> list[str]:
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
-    score       = getattr(rr, "score", 0)
-    norm_text   = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
-    # v2: smart truncate замість простого [:220]
-    norm_text   = _smart_truncate(norm_text, MAX_NORM_TERMS)
+    score = getattr(rr, "score", 0)
+    norm_text = getattr(rr, "normalized_text", "") or (task.trade_terms or "").strip().lower()
+    norm_text = _smart_truncate(norm_text, MAX_NORM_TERMS)
 
-    risk_type   = getattr(rr, "risk_type", "") or "NONE"
-    categories  = _regex_categories(rr)
-    excerpts    = _top_excerpts(rr)
+    risk_type = getattr(rr, "risk_type", "") or "NONE"
+    categories = _regex_categories(rr)
+    excerpts = _top_excerpts(rr)
 
-    rev_status  = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
-    pos         = int((review_summary or {}).get("positive", 0) or 0)
-    neg         = int((review_summary or {}).get("negative", 0) or 0)
-    neutral     = int((review_summary or {}).get("neutral",  0) or 0)
-    total       = pos + neg + neutral
-    neg_pct     = (neg / total * 100.0) if total > 0 else 0.0
-    bad_texts   = (review_summary or {}).get("bad_texts", []) or []
+    rev_status = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
+    pos = int((review_summary or {}).get("positive", 0) or 0)
+    neg = int((review_summary or {}).get("negative", 0) or 0)
+    neutral = int((review_summary or {}).get("neutral", 0) or 0)
+    total = pos + neg + neutral
+    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
+    bad_texts = (review_summary or {}).get("bad_texts", []) or []
 
     failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
-    age_note      = _build_account_age_note(task)
+    age_note = _build_account_age_note(task)
 
     lines = [
         f"Біржа: {task.exchange}",
@@ -3535,7 +3789,6 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         f"- Поточні ліміти: {task.min_limit} - {task.max_limit} UAH",
     ]
 
-    # v2: вік акаунту
     if age_note:
         lines.append(f"- Вік акаунту:{age_note}")
 
@@ -3555,22 +3808,34 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "",
     ]
 
-    # v2: відгуки — передаємо навіть при UNAVAILABLE якщо є збережені bad_texts
-    if rev_status not in ("OK",):
+    _NO_REVIEW_EXCHANGES = {"Wallet", "CryptoBot"}
+    if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
+        lines.append(
+            f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")
+    elif rev_status == "NO_AUTH":
+        lines.append(
+            f"Reviews: API відгуків потребує автентифікації — тимчасово недоступний. Оцінюй за умовами та поведінкою. НЕ вважай відсутність відгуків фактором ризику.")
+    elif rev_status not in ("OK",):
         if bad_texts:
             lines.append(
                 f"Reviews: API недоступний ({rev_status}), але є {len(bad_texts)} "
                 f"збережених поганих відгуків з минулого оновлення:"
             )
         else:
-            lines.append(f"Reviews: API недоступний ({rev_status}). Репутація невідома.")
+            lines.append(
+                f"Reviews: API тимчасово недоступний ({rev_status}). Оцінюй за умовами та поведінкою. НЕ вважай це фактором ризику.")
     else:
         if total > 0:
             lines.append(f"Reviews: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%")
+            if neg == 0:
+                lines.append("⬆️ ВІДГУКИ ЧИСТІ: жодного негативного відгуку.")
+            elif neg_pct < 3.0:
+                lines.append(f"⬆️ ВІДГУКИ ПЕРЕВАЖНО ЧИСТІ: лише {neg} негативних ({neg_pct:.1f}%).")
         else:
-            lines.append("Reviews: дані відсутні (мерчант новий або API не повернув дані)")
+            lines.append("Reviews: мерчант новий або ще не має відгуків. Оцінюй за умовами та поведінкою.")
+            lines.append(
+                "⚠️ ВІДГУКИ НЕВІДОМІ: зазнач це у thought_process як м'який фактор невизначеності (НЕ як ризик).")
 
-    # bad_texts завжди — незалежно від статусу
     if bad_texts:
         lines.append("Негативні відгуки:")
         for i, t in enumerate(bad_texts[:4], 1):
@@ -3583,7 +3848,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"чітко і коротко, що саме не так"}'
+        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту"}'
     )
     return "\n".join(lines)
 
@@ -3596,7 +3861,7 @@ def _regex_categories(regex_result: RegexResult) -> list[str]:
     matches = getattr(regex_result, "matches", []) or []
     seen, out = set(), []
     for m in matches:
-        cat    = getattr(m, "category", "")
+        cat = getattr(m, "category", "")
         weight = getattr(m, "weight", 0)
         if not cat or weight <= 0:
             continue
@@ -3636,22 +3901,22 @@ def _parse_json(text: str) -> dict:
             try:
                 data = json.loads(clean[start:end + 1])
             except json.JSONDecodeError:
-                logger.error(f"❌ JSON parse error. Сирий текст: {text!r}")  # ДОДАНО
+                logger.error(f"❌ JSON parse error. Сирий текст: {text!r}")
                 return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
         else:
-            logger.error(f"❌ JSON parse error (немає дужок). Сирий текст: {text!r}")  # ДОДАНО
+            logger.error(f"❌ JSON parse error (немає дужок). Сирий текст: {text!r}")
             return {"status": "UNKNOWN", "risk": "NONE", "reason": "JSON parse error"}
 
     status = str(data.get("status", "UNKNOWN")).upper()
     if status not in ("OK", "SUSPICIOUS", "BLOCK"):
         status = "UNKNOWN"
     risk = str(data.get("risk", "NONE")).upper()[:32]
-    reason = str(data.get("reason", "")).strip()[:150]
+    reason = str(data.get("reason", "")).strip()[:900]
 
-    # 🚀 Логуємо ланцюжок думок у дебаг
     thought = data.get("thought_process", "")
     if thought:
         logger.debug(f"🧠 LLM Thoughts: {thought}")
+        LLM_LOG.info("🧠 THOUGHT | %s", str(thought)[:3000])
 
     return {
         "status": status,
@@ -3688,6 +3953,7 @@ if TYPE_CHECKING:
     from infrastructure.http.binance_client import BinanceClient
     from infrastructure.http.bybit_p2p_client import BybitP2PClient
     from infrastructure.http.okx_client import OkxClient
+    from infrastructure.http.mexc_client import MexcClient
 
 logger = logging.getLogger("ReviewFetcher")
 
@@ -3696,6 +3962,7 @@ RATE_LIMITS = {
     "Binance": 2.0,
     "Bybit": 1.5,
     "OKX": 1.5,
+    "MEXC": 1.5,  # 🚀 ДОДАНО
 }
 
 # Пороги для автоматичного флагування
@@ -3791,6 +4058,7 @@ class ReviewFetcher:
             binance_client=None,
             bybit_client=None,
             okx_client=None,
+            mexc_client=None,  # 🚀 ДОДАНО
     ):
         self._db = db
         self._review_ttl = review_ttl_hours
@@ -3809,20 +4077,21 @@ class ReviewFetcher:
         self._binance: Optional["BinanceClient"] = binance_client
         self._bybit: Optional["BybitP2PClient"] = bybit_client
         self._okx: Optional["OkxClient"] = okx_client
+        self._mexc: Optional["MexcClient"] = None  # 🚀 ДОДАНО
+        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0, "MEXC": 0}
+        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0, "MEXC": 0.0}
 
-        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0}
-        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0}
-
-    def bind_clients(self, binance=None, bybit=None, okx=None) -> None:
-        """Прив'язує HTTP клієнти після ініціалізації."""
+    def bind_clients(self, binance=None, bybit=None, okx=None, mexc=None) -> None:
         if binance is not None: self._binance = binance
         if bybit is not None: self._bybit = bybit
         if okx is not None: self._okx = okx
+        if mexc is not None: self._mexc = mexc # 🚀 ДОДАНО
         logger.info(
-            "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s",
-            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
-            "✅" if self._bybit and getattr(self._bybit, "is_authenticated", False) else "❌",
+            "ReviewFetcher clients bound: Binance=%s(session) Bybit=%s(session) OKX=%s(api) MEXC=%s(public)",
+            "✅" if self._binance else "❌",
+            "✅" if self._bybit else "❌",
             "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
+            "✅" if self._mexc else "❌",
         )
 
     async def start(self) -> None:
@@ -3882,8 +4151,48 @@ class ReviewFetcher:
         щоб уникнути 'стану перегонів' (Race Condition), коли ордер аналізується швидше,
         ніж завантажаться його відгуки.
         """
-        if exchange not in RATE_LIMITS or not merchant_id:
+        if not merchant_id:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+
+        if exchange not in RATE_LIMITS:
+            # Біржа не підтримує API відгуків (Wallet, CryptoBot)
+            logger.debug("fetch_now: %s не підтримує API відгуків [%s]", exchange, merchant_id[:12])
+            try:
+                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
+            except Exception:
+                pass
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NOT_SUPPORTED"}
+
+        # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──────
+        _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx, "MEXC": self._mexc}
+        client = _client_map.get(exchange)
+
+        if exchange == "MEXC":
+            # MEXC: публічне API — тільки перевіряємо що клієнт є
+            if not client:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+
+        elif exchange in ("Bybit", "Binance"):
+            # Bybit/Binance: профіль API мертвий (404).
+            # Тексти відгуків → тільки через перехоплену браузерну сесію.
+            # Клієнт потрібен для HTTP запитів, але API-ключі не обов'язкові.
+            if not client:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+            session_h, _, _ = await self._db.get_auth_session(exchange)
+            if not session_h:
+                logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
+                # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожну годину
+                try:
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                except Exception:
+                    pass
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_SESSION"}
+
+        else:
+            # OKX: класична API-автентифікація
+            if not client or not getattr(client, "is_authenticated", False):
+                logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", exchange, merchant_id[:12])
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
 
         try:
             if exchange == "Binance":
@@ -3892,11 +4201,20 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            elif exchange == "MEXC":
+                pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
             else:
                 return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
 
-            # Одразу зберігаємо в БД
-            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK")
+            # Bybit/Binance: без сесії → NO_SESSION (не OK!) щоб needs_review_fetch
+            # повернув True через 1h — як тільки сесія з'явиться, всі перефетчаться
+            if exchange in ("Bybit", "Binance"):
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                save_status = "OK" if session_h else "NO_SESSION"
+            else:
+                save_status = "OK"
+
+            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status)
             self._known_merchants.add((exchange, merchant_id))
 
             return {
@@ -3904,7 +4222,7 @@ class ReviewFetcher:
                 "negative": neg,
                 "neutral": neutral,
                 "bad_texts": bad_texts,
-                "status": "OK"
+                "status": save_status,
             }
         except Exception as e:
             logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
@@ -3957,12 +4275,43 @@ class ReviewFetcher:
 
     async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
         try:
+            # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──
+            if exchange == "MEXC":
+                if not self._mexc:
+                    logger.debug("_fetch_and_save: MEXC клієнт не підключений, skip %s", merchant_id[:12])
+                    return
+
+            elif exchange in ("Bybit", "Binance"):
+                # Bybit/Binance: профіль API мертвий (404).
+                # Тексти відгуків → тільки через браузерну сесію.
+                _client_map = {"Bybit": self._bybit, "Binance": self._binance}
+                client = _client_map.get(exchange)
+                if not client:
+                    logger.debug("_fetch_and_save: %s [%s] — клієнт відсутній", exchange, merchant_id[:12])
+                    return
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                if not session_h:
+                    logger.debug("_fetch_and_save: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                    return
+
+            else:
+                # OKX: класична API-автентифікація
+                _client_map = {"OKX": self._okx}
+                client = _client_map.get(exchange)
+                if not client or not getattr(client, "is_authenticated", False):
+                    logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
+                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_AUTH")
+                    return
+
             if exchange == "Binance":
                 pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
             elif exchange == "Bybit":
                 pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
             elif exchange == "OKX":
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
+            elif exchange == "MEXC":
+                pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
             else:
                 return
 
@@ -3970,12 +4319,17 @@ class ReviewFetcher:
             total = pos + neg + neutral
             bad_pct = (neg / total * 100.0) if total > 0 else 0.0
 
-            # Додаємо до in-memory кешу, щоб наступного разу він йшов у фонову чергу
             self._known_merchants.add((exchange, merchant_id))
 
-            # Передаємо bad_texts прямо списком словників (json.dumps в БД впорається)
+            # Bybit/Binance: NO_SESSION якщо сесія не захоплена — перефетч через 1h
+            if exchange in ("Bybit", "Binance"):
+                session_h, _, _ = await self._db.get_auth_session(exchange)
+                save_status = "OK" if session_h else "NO_SESSION"
+            else:
+                save_status = "OK"
+
             await self._db.save_reviews(
-                exchange, merchant_id, pos, neg, neutral, bad_texts, status="OK"
+                exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status
             )
             self._processed += 1
 
@@ -3999,102 +4353,88 @@ class ReviewFetcher:
 
     async def _fetch_binance(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
-        Binance: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+        Binance: тексти негативних відгуків через перехоплену браузерну сесію.
 
-        fetch_merchant_profile → поля userAsset.positiveRate, totalFinishOrder
-        fetch_negative_reviews → тексти поганих відгуків
+        ПРИМІТКА: /bapi/c2c/v2/.../profile-and-ads і feedback-list повертають 404.
+        Pos/neg COUNT розраховується в risk_engine через Order.positive_rate
+        (доступний прямо в search response).
+
+        Тексти відгуків (/v1/.../review/list-by-page) потребують повноцінну
+        браузерну сесію (Csrftoken, BNC-Uuid, Device-Info, Fvideo).
         """
         client = self._binance
-        if not client or not getattr(client, "is_authenticated", False):
+        if not client:
+            return 0, 0, 0, []
+
+        # Тексти відгуків — через перехоплену браузерну сесію
+        headers, cookies, _ = await self._db.get_auth_session("Binance")
+        if not headers:
+            logger.debug("Binance [no session] %s: пропускаємо review texts", merchant_id)
             return 0, 0, 0, []
 
         try:
-            # 1. Профіль — отримуємо загальну статистику
-            profile_data = await client.fetch_merchant_profile(merchant_id)
-            user_info = profile_data.get("advertiser", profile_data) or {}
+            raw_neg = await client.fetch_negative_reviews(
+                merchant_id, rows=10,
+                session_headers=headers,
+                session_cookies=cookies,
+            )
+        except Exception as fe:
+            logger.debug("Binance review texts error %s: %s", merchant_id, fe)
+            raw_neg = []
 
-            # Binance profile: positiveRate = "98.50", totalOrderNum, monthFinishRate
-            total = int(user_info.get("totalOrderNum", 0) or user_info.get("monthOrderNum", 0) or 0)
-            pos_rate_str = str(user_info.get("positiveRate", "") or user_info.get("monthFinishRate", "") or "100")
-            try:
-                pos_rate = float(pos_rate_str.replace("%", ""))
-            except ValueError:
-                pos_rate = 100.0
+        bad_texts: list[dict] = []
+        for item in raw_neg:
+            content = str(item.get("content") or item.get("message") or "").strip()
+            if content and _has_bad_keywords(content):
+                bad_texts.append(_enrich_bad_text(content))
 
-            if total > 0:
-                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
-                pos = total - neg
-                neutral = 0
-            else:
-                pos = neg = neutral = 0
+        neg = len(bad_texts) if bad_texts else 0
 
-            # 2. Тексти негативних відгуків
-            raw_neg = await client.fetch_negative_reviews(merchant_id, rows=10)
-            bad_texts: list[dict] = []
-            for item in raw_neg:
-                content = str(item.get("message") or item.get("content") or "").strip()
-                if content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
-
-            logger.debug("Binance [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg,
-                         len(bad_texts))
-            return pos, neg, neutral, bad_texts
-
-        except Exception as e:
-            logger.debug("Binance fetch error %s: %s", merchant_id, e)
-            return 0, 0, 0, []
+        logger.debug("Binance %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        return 0, neg, 0, bad_texts
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
-        Bybit: профіль мерчанта → реальні pos/neg + тексти негативних відгуків.
+        Bybit: тексти відгуків через перехоплену браузерну сесію.
 
-        fetch_merchant_profile → поля recentRate, totalFinishCount
-        fetch_merchant_feedback → тексти поганих відгуків
+        ПРИМІТКА: api2.bybit.com/fiat/otc/user/public/profile повертає 404.
+        Pos/neg COUNT більше не доступний через API → підрахунок відбувається
+        у risk_engine._async_analyze_inner через fallback з Order.finish_rate_pct.
+
+        Цей метод отримує ТІЛЬКИ тексти негативних відгуків (bad_texts).
         """
         client = self._bybit
-        if not client or not getattr(client, "is_authenticated", False):
+        if not client:
+            return 0, 0, 0, []
+
+        # Тексти відгуків — через перехоплену браузерну сесію
+        headers, cookies, _ = await self._db.get_auth_session("Bybit")
+        if not headers:
+            logger.debug("Bybit [no session] %s: пропускаємо feedback", merchant_id)
             return 0, 0, 0, []
 
         try:
-            # 1. Профіль
-            profile_data = await client.fetch_merchant_profile(merchant_id)
-            # Bybit profile: recentRate="98.5", monthFinishCount, recentExecuteRate
-            total = int(
-                profile_data.get("monthFinishCount", 0)
-                or profile_data.get("recentExecuteCount", 0)
-                or 0
+            raw_neg = await client.fetch_merchant_feedback(
+                merchant_id,
+                session_headers=headers,
+                session_cookies=cookies
             )
-            pos_rate_str = str(
-                profile_data.get("recentRate", "")
-                or profile_data.get("recentExecuteRate", "")
-                or "100"
-            )
-            try:
-                pos_rate = float(pos_rate_str.replace("%", ""))
-            except ValueError:
-                pos_rate = 100.0
+        except Exception as fe:
+            logger.debug("Bybit feedback error %s: %s", merchant_id, fe)
+            raw_neg = []
 
-            if total > 0:
-                neg = max(0, int(total * (100.0 - pos_rate) / 100.0))
-                pos = total - neg
-                neutral = 0
-            else:
-                pos = neg = neutral = 0
+        bad_texts: list[dict] = []
+        for item in raw_neg:
+            content = str(item.get("remark") or item.get("content") or "").strip()
+            if content and _has_bad_keywords(content):
+                bad_texts.append(_enrich_bad_text(content))
 
-            # 2. Тексти
-            raw_neg = await client.fetch_merchant_feedback(merchant_id)
-            bad_texts: list[dict] = []
-            for item in raw_neg:
-                content = str(item.get("content") or item.get("message") or "").strip()
-                if content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
+        # Якщо є погані тексти — беремо neg з них (pos/neg з профілю недоступний)
+        neg = len(bad_texts) if bad_texts else 0
 
-            logger.debug("Bybit [auth] %s: profile pos=%d neg=%d | bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
-            return pos, neg, neutral, bad_texts
+        logger.debug("Bybit %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        return 0, neg, 0, bad_texts
 
-        except Exception as e:
-            logger.debug("Bybit fetch error %s: %s", merchant_id, e)
-            return 0, 0, 0, []
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
@@ -4152,6 +4492,178 @@ class ReviewFetcher:
             except Exception:
                 break
         return all_items
+
+    async def _fetch_mexc(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        client = self._mexc
+        if not client:
+            return 0, 0, 0, []
+
+        try:
+            # Один запит → і статистика, і тексти
+            data = await client.fetch_merchant_reviews(merchant_id)
+            pos = data.get("good", 0)
+            neg = data.get("bad", 0)
+
+            bad_texts: list[dict] = []
+            for item in data.get("reviews", []):
+                # MEXC поле: "comment"; rating=false → негативний відгук
+                is_bad = item.get("rating") is False
+                content = str(item.get("comment") or "").strip()
+                if is_bad and content:
+                    bad_texts.append(_enrich_bad_text(content))
+                elif content and _has_bad_keywords(content):
+                    bad_texts.append(_enrich_bad_text(content))
+
+            logger.debug("MEXC %s: pos=%d neg=%d bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
+            return pos, neg, 0, bad_texts
+
+        except Exception as e:
+            logger.debug("MEXC fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
+
+============================================================
+FILE: core/workers/session_manager.py
+============================================================
+
+# core/workers/session_manager.py
+import asyncio
+import logging
+import time
+from pathlib import Path
+from typing import Optional
+from playwright.async_api import async_playwright, Request
+from playwright_stealth import Stealth  # 🚀 ДОДАНО ДЛЯ МАСКУВАННЯ
+
+from core.storage.merchant_db import MerchantDB
+
+logger = logging.getLogger("SessionManager")
+
+# Таргети для перехоплення з індивідуальними таймерами "протухання"
+TARGETS = {
+    "Bybit": {
+        "url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
+        "api_pattern": "appraiseList",
+        "ttl": 3600  # 1 година
+    },
+    "Binance": {
+        "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
+        "api_pattern": "review/list-by-page",
+        "ttl": 900  # 15 хвилин
+    },
+    "OKX": {
+        "url": "https://www.okx.com/ru/p2p/ads-merchant?publicUserId=0e37a42aca",
+        "api_pattern": "review/history",
+        "ttl": 3600  # Поки заглушка
+    }
+}
+
+
+class SessionManager:
+    def __init__(self, db: MerchantDB):
+        self._db = db
+        self._worker_task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        if self._worker_task and not self._worker_task.done():
+            logger.debug("SessionManager вже запущено.")
+            return
+        self._worker_task = asyncio.create_task(self._worker_loop(), name="session-manager")
+        logger.info("🤖 SessionManager запущено (Фоновий збір браузерних сесій з маскуванням)")
+
+    async def stop(self) -> None:
+        if self._worker_task:
+            self._worker_task.cancel()
+            try:
+                await self._worker_task
+            except asyncio.CancelledError:
+                pass
+            self._worker_task = None
+        logger.info("SessionManager зупинено")
+
+    async def _worker_loop(self):
+        # Даємо сканеру 10 секунд на старт
+        await asyncio.sleep(10)
+
+        while True:
+            try:
+                now = time.time()
+                for exchange, target in TARGETS.items():
+                    _, _, updated_at = await self._db.get_auth_session(exchange)
+
+                    if now - updated_at > target["ttl"]:
+                        logger.info(f"🔄 SessionManager: Оновлення сесії {exchange} у фоні...")
+                        await self._capture_session(exchange, target)
+                        # Робимо паузу 5 секунд між біржами
+                        await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"❌ SessionManager помилка в циклі: {e}", exc_info=True)
+
+            await asyncio.sleep(30)
+
+    async def _capture_session(self, exchange: str, target: dict):
+        user_data_dir = Path(f"data/browser_profiles/{exchange.lower()}")
+        user_data_dir.mkdir(parents=True, exist_ok=True)
+        captured_event = asyncio.Event()
+
+        try:
+            async with async_playwright() as p:
+                # 🚀 ДОДАНО АНТИ-ДЕТЕКТ АРГУМЕНТИ
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=str(user_data_dir),
+                    headless=False,  # 🚀 ЗМІНИ НА False (вікно буде з'являтися на 10-15 сек)
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-http2",
+                        "--window-size=1280,720",
+                    ],
+                )
+                page = await context.new_page()
+
+                # 🚀 ДОДАЙ ЦЕ: Блокуємо важкі ресурси для швидкості
+                await page.route("**/*.{png,jpg,jpeg,svg,woff2,css}", lambda route: route.abort())
+
+                # 🚀 НОВИЙ СИНТАКСИС ДЛЯ PLAYWRIGHT-STEALTH 2.0.2+
+                stealth_plugin = Stealth()
+                await stealth_plugin.apply_stealth_async(context)
+
+                page = await context.new_page()
+
+                async def handle_request(request: Request):
+                    if target["api_pattern"] in request.url:
+                        logger.debug(f"🎯 ПЕРЕХОПЛЕНО {exchange}: {request.url}")
+
+                        headers = request.headers
+                        cookies_list = await context.cookies()
+                        cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+
+                        success = await self._db.save_auth_session(exchange, headers, cookies_dict)
+                        if success:
+                            logger.info(f"✅ SessionManager: Сесію {exchange} успішно подовжено!")
+                        captured_event.set()
+
+                page.on("request", handle_request)
+
+                # Даємо браузеру цілих 60 секунд на завантаження важкої сторінки Bybit
+                # Шукай в кінці методу _capture_session (~145)
+                # ТЕПЕР ЦЕЙ БЛОК ВСЕРЕДИНІ 'async with'
+                try:
+                    await page.goto(target["url"], wait_until="commit", timeout=60000)
+                    await asyncio.wait_for(captured_event.wait(), timeout=45.0)
+                except Exception as e:
+                    logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
+
+                await asyncio.sleep(1)
+                await context.close()
+
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ SessionManager: Таймаут {exchange}. Можливо, розлогінило або вилізла капча.")
+            logger.warning(
+                f"👉 Запусти вручну 'python scripts/session_interceptor.py' для відновлення логіну {exchange}.")
+        except Exception as e:
+            logger.error(f"❌ SessionManager помилка для {exchange}: {e}")
 
 ============================================================
 FILE: core/engine/cross_matcher.py
@@ -5042,7 +5554,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
     if flag in ("", "OK", "PENDING"):
         return ""
 
-    # 🚀 ОНОВЛЕНІ КАТЕГОРІЇ ЗГІДНО НОВИХ JSON-ПРАВИЛ
+    # ── Бейджі по типу ризику ──────────────────────────────────────────
     badges = {
         "TRIANGLE": "🚫 ТРИКУТНИК / ДРОП\n" if not short else "🚫",
         "CASINO": "🎰 КАЗИНО / GAMBLING\n" if not short else "🎰",
@@ -5071,43 +5583,75 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
     }
 
-    # Категорії, для яких обов'язково треба показати уривок тексту в телеграмі
-    show_text_cats = {"TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "FINCRIME", "CHARGEBACK", "NO_COMMENTS",
-                      "MIDDLEMAN"}
+    # Людські назви типів ризику (для LLM_PENDING / REGEX_WEAK)
+    RISK_TYPE_LABELS = {
+        "TRIANGLE": "ТРИКУТНИК", "CASINO": "КАЗИНО", "CHAT_FIRST": "ЧАТ",
+        "EXTERNAL_LINK": "ЗОВН.КОНТАКТ", "FINCRIME": "ФІНМОН",
+        "CHARGEBACK": "РЕФАНД", "ANONYMOUS": "АНОНІМ", "MIDDLEMAN": "ПОСЕРЕДНИК",
+        "SUSPICIOUS_BIZ": "ПІДОЗР.БІЗ", "APPEAL_PRESSURE": "ТИСК",
+        "NO_COMMENTS": "БЕЗ КОМЕНТІВ", "THIRD_PARTY_HINT": "3-ТІ ОСОБИ",
+        "BEHAVIOR": "ПОВЕДІНКА", "SUSPICIOUS": "ПІДОЗРА", "BOT_API": "БОТ",
+        "EXACT_LIMITS": "ФІКС.ЛІМІТИ", "NARROW_SPREAD": "ВУЗЬКИЙ ДІАПАЗОН",
+    }
+
+    # Категорії, для яких обов'язково показувати уривок умов
+    show_text_cats = {"TRIANGLE", "CASINO", "CHAT_FIRST", "EXTERNAL_LINK", "FINCRIME",
+                      "CHARGEBACK", "NO_COMMENTS", "MIDDLEMAN"}
 
     flags = [f.strip() for f in flag.split(",") if f.strip()]
     lines = []
     reasons = []
-    has_text_risk = False
-
-
+    detected_risk_types: set[str] = set()   # для показу trade_terms
 
     for f in flags:
+        # ── Відгуки (NEEDS_LLM:BADREVIEWS: ПЕРЕД BADREVIEWS: !) ────────
+        if f.startswith("NEEDS_LLM:BADREVIEWS:"):
+            lines.append("🗣👎 ПОГАНІ ВІДГУКИ → AI ПЕРЕВІРКА\n" if not short else "🗣")
+            reason_text = f[len("NEEDS_LLM:BADREVIEWS:"):]
+            if reason_text:
+                reasons.append(reason_text)
+            detected_risk_types.add("BADREVIEWS")
+            continue
+
+        if f.startswith("BADREVIEWS_TEXTS:"):
+            lines.append("🗣 ПІДОЗРІЛІ ВІДГУКИ (тексти)\n" if not short else "🗣")
+            reason_text = f[len("BADREVIEWS_TEXTS:"):]
+            if reason_text:
+                reasons.append(reason_text)
+            continue
+
         if f.startswith("BADREVIEWS:"):
             lines.append(badges["BADREVIEWS"])
             reasons.append(f[len("BADREVIEWS:"):])
             continue
-        # 🚀 НОВІ ПОВЕДІНКОВІ МАРКЕРИ (Deep Research)
+
+        # ── Поведінкові маркери (Deep Research) ────────────────────────
         if f.startswith("API_REPLENISH:"):
-            parts = f.split(":", 1)
-            count = parts[1] if len(parts) > 1 else ""
+            count = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"🤖 АВТОПОПОВНЕННЯ БОТОМ ({count} цикл.)\n" if not short else "🤖")
             continue
 
         if f.startswith("STATIC_DROP:"):
-            parts = f.split(":", 1)
-            count = parts[1] if len(parts) > 1 else ""
+            count = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"📏 СТАТИЧНИЙ ДРОП ({count} цикл.)\n" if not short else "📏")
             continue
 
         if f.startswith("VELOCITY_SPIKE:"):
-            parts = f.split(":", 1)
-            vel = parts[1] if len(parts) > 1 else ""
+            vel = f.split(":", 1)[1] if ":" in f else ""
             lines.append(f"⚡ АНОМАЛЬНА АКТИВНІСТЬ ({vel})\n" if not short else "⚡")
+            continue
+
+        if f.startswith("FLICKER_RELIST:"):
+            count = f.split(":", 1)[1] if ":" in f else ""
+            lines.append(f"🔄 РІЛІСТИНГ ({count} раз)\n" if not short else "🔄")
             continue
 
         if f == "EXACT_LIMITS":
             lines.append("🎯 ФІКСОВАНА СУМА (min=max)\n" if not short else "🎯")
+            continue
+
+        if f == "NARROW_SPREAD":
+            lines.append("📏 ВУЗЬКИЙ ДІАПАЗОН\n" if not short else "📏")
             continue
 
         if f.startswith("BEHAVIOR_BOTLIKE:"):
@@ -5120,6 +5664,13 @@ def _risk_badge(order: Order, short: bool = False) -> str:
             lines.append(f"👯 КЛОН НА БІРЖАХ: {ex_names}\n" if not short else "👯")
             continue
 
+        # ── Синергії (раніше BLOCK:SYNERGY → тепер SYNERGY:) ──────────
+        if f.startswith("SYNERGY:"):
+            detail = f[len("SYNERGY:"):]
+            lines.append(f"🔗 КОМБО: {escape(detail[:60])}\n" if not short else "🔗")
+            continue
+
+        # ── Жорсткий блок (blacklist, cached BLOCK verdict) ───────────
         if f.startswith("BLOCK:"):
             parts = f.split(":", 2)
             risk = parts[1] if len(parts) > 1 else "BLOCK"
@@ -5130,15 +5681,21 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 lines.append(badges.get(risk, badges["BLOCK"]))
             if reason:
                 reasons.append(reason)
-            if risk in show_text_cats:
-                has_text_risk = True
+            detected_risk_types.add(risk)
             continue
 
+        # ── LLM результати ────────────────────────────────────────────
         if f.startswith("LLM_SUSPICIOUS:"):
             parts = f.split(":", 2)
-            lines.append(badges["LLM_SUSPICIOUS"])
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, "")
+            if label and not short:
+                lines.append(f"🧠 AI ПІДОЗРА: {label}\n")
+            else:
+                lines.append(badges["LLM_SUSPICIOUS"])
             if len(parts) > 2 and parts[2]:
                 reasons.append(parts[2])
+            detected_risk_types.add(risk_type)
             continue
 
         if f.startswith("LLM_UNKNOWN:"):
@@ -5148,17 +5705,33 @@ def _risk_badge(order: Order, short: bool = False) -> str:
                 reasons.append(parts[2])
             continue
 
+        # ── Regex (м'який сигнал — тепер з типом ризику) ──────────────
         if f.startswith("REGEX_WEAK:"):
             parts = f.split(":", 2)
-            lines.append(badges["REGEX_WEAK"])
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, risk_type)
+            if label and label != risk_type and not short:
+                lines.append(f"🧩 REGEX: {label}\n")
+            else:
+                lines.append(badges["REGEX_WEAK"])
             if len(parts) > 2 and parts[2]:
                 reasons.append(parts[2])
+            detected_risk_types.add(risk_type)
             continue
 
+        # ── LLM Pending (тепер з типом підозри) ──────────────────────
         if f.startswith("LLM_PENDING:"):
-            lines.append(badges["LLM_PENDING"])
+            parts = f.split(":", 2)
+            risk_type = parts[1] if len(parts) > 1 else ""
+            label = RISK_TYPE_LABELS.get(risk_type, "")
+            if label and not short:
+                lines.append(f"⏳ AI ПЕРЕВІРЯЄ: {label}\n")
+            else:
+                lines.append(badges["LLM_PENDING"])
+            detected_risk_types.add(risk_type)
             continue
 
+        # ── Fallback: bare flag in badges dict ────────────────────────
         if f in badges:
             lines.append(badges[f])
 
@@ -5167,26 +5740,47 @@ def _risk_badge(order: Order, short: bool = False) -> str:
 
     result = "".join(lines)
 
-    if reasons and not short:
-        uniq = []
-        seen = set()
-        for r in reasons:
-            r = (r or "").strip()
-            if r and r not in seen:
-                seen.add(r)
-                uniq.append(r[:140])
+    # ── Спойлер-блок: деталі під тапом (reasons + стата + відгуки + умови) ──
+    if not short:
+        spoiler_parts: list[str] = []
 
-        if uniq:
-            result += "\n"
-            for r in uniq[:3]:
-                result += f"<code>{escape(r)}</code>\n"
+        # 1. LLM reason (причина вердикту) — повна, без обрізання (в expandable blockquote)
+        if reasons:
+            uniq = []
+            seen = set()
+            for r in reasons:
+                r = (r or "").strip()
+                if r and r not in seen:
+                    seen.add(r)
+                    uniq.append(r)  # без обрізання — знаходиться в expandable blockquote
+            for r in uniq[:2]:
+                spoiler_parts.append(f"💬 {escape(r)}")
 
-    trade_terms = getattr(order, "trade_terms", "")
-    if has_text_risk and trade_terms and not short:
-        safe = trade_terms.replace("\n", " ")[:120]
-        if len(trade_terms) > 120:
-            safe += "…"
-        result += f"Умови:\n<code>{escape(safe)}</code>\n"
+        # 2. Мікро-стата мерчанта
+        rate = getattr(order, "finish_rate_pct", 0.0)
+        orders = getattr(order, "month_order_count", 0)
+        verified = getattr(order, "is_verified", False)
+        if orders > 0:
+            stats = f"📊 {rate:.1f}% | {orders} угод"
+            if verified:
+                stats += " | ✅"
+            # Підрахунок зірваних угод
+            failed = int(orders * (100.0 - rate) / 100.0)
+            if failed > 0:
+                stats += f" | ~{failed} зірваних"
+            spoiler_parts.append(stats)
+
+        # 3. Умови мерчанта (якщо ризиковий тип)
+        trade_terms = getattr(order, "trade_terms", "")
+        if detected_risk_types & show_text_cats and trade_terms:
+            safe = trade_terms.replace("\n", " ")[:100]
+            if len(trade_terms) > 100:
+                safe += "…"
+            spoiler_parts.append(f"📝 {escape(safe)}")
+
+        if spoiler_parts:
+            spoiler_text = "\n".join(spoiler_parts)
+            result += f"<blockquote expandable>{spoiler_text}</blockquote>\n"
 
     return result
 
@@ -5420,11 +6014,13 @@ class TelegramNotifier:
             f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
             f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>\n\n"
 
+            f"<blockquote expandable>"
             f"🏦 Варіанти зв'язки: {route_variants}\n"
-            f"🛒 Buy-мерчант банки: {buy_all}\n"
-            f"✅ Buy під твій фільтр: {buy_fit}\n"
-            f"💸 Sell-мерчант банки: {sell_all}\n"
-            f"✅ Sell під твій фільтр: {sell_fit}\n\n"
+            f"🛒 Buy банки: {buy_all}\n"
+            f"✅ Buy фільтр: {buy_fit}\n"
+            f"💸 Sell банки: {sell_all}\n"
+            f"✅ Sell фільтр: {sell_fit}"
+            f"</blockquote>\n"
 
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
@@ -5471,12 +6067,16 @@ class TelegramNotifier:
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
-        await self._send_with_retry(
-            text,
-            keyboard=keyboard,
-            disable_notification=silent,
-            chat_id=chat_id,  # явно передаємо — без підміни self._chat_id
-        )
+        # Розбиваємо якщо повідомлення > 4096 (Telegram ліміт)
+        # Keyboard тільки на першому чанку
+        chunks = self._split_message(text)
+        for i, chunk in enumerate(chunks):
+            await self._send_with_retry(
+                chunk,
+                keyboard=keyboard if i == 0 else None,
+                disable_notification=silent,
+                chat_id=chat_id,
+            )
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         """Підсумок усіх знайдених маршрутів за цикл."""
@@ -5548,7 +6148,7 @@ class TelegramNotifier:
     def _split_message(text: str, limit: int = 4096) -> list[str]:
         if len(text) <= limit:
             return [text]
-        chunks, current = ""
+        chunks, current = [], ""
         for line in text.split("\n"):
             if len(current) + len(line) + 1 > limit:
                 if current:
@@ -5580,6 +6180,8 @@ RISK_BADGES = {
     "VELOCITY_SPIKE":        "⚡",
     "CROSS_EXCHANGE_BOT":    "👥",
     "FLICKER_RELIST":        "🔄",
+    "NARROW_SPREAD":         "📏",
+    "SYNERGY":               "🔗",   # комбо-підозра → LLM
 
     # Класичні (Regex)
     "BLOCK":                 "🚫",
@@ -5593,6 +6195,7 @@ RISK_BADGES = {
     "CHAT_FIRST":            "💬",
     "APPEAL_PRESSURE":       "📢",
     "BADREVIEWS":            "👎",
+    "BADREVIEWS_TEXTS":      "👎",
     "HIGH_RISK_SCORE":       "📊",
 
     # Статуси
@@ -6941,6 +7544,8 @@ class Order:
     review_score: int = 0
     review_neg_pct: float = 0.0
     review_fetched: bool = False
+    # Binance: positiveRate (% позитивних відгуків, 0.0–1.0) — відрізняється від finish_rate_pct!
+    positive_rate: float = 0.0
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""
@@ -7009,6 +7614,8 @@ class BinanceExchange(BaseExchange):
 
         finish_rate = float(user.get("monthFinishRate", 0)) * 100
         order_count = int(user.get("monthOrderCount", 0))
+        # positiveRate — це % позитивних ВІДГУКІВ (не completion rate!)
+        positive_rate = float(user.get("positiveRate", 0) or 0)
 
         return Order(
             id=f"bn_{adv.get('advNo', '')}",
@@ -7020,6 +7627,7 @@ class BinanceExchange(BaseExchange):
             merchant_name=str(user.get("nickName", "Unknown")),
             month_order_count=order_count,
             finish_rate_pct=round(finish_rate, 1),
+            positive_rate=positive_rate,
             exchange="Binance",
             link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo', '')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
@@ -8099,27 +8707,43 @@ class BinanceClient(BaseHttpClient):
             logger.debug("fetch_merchant_profile [%s]: %s", merchant_id, e)
             return {}
 
-    async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10) -> list[dict]:
+    async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10, session_headers: dict = None, session_cookies: dict = None) -> list[dict]:
         """
-        Реальні тексти негативних відгуків.
-        Потребує API ключів — без них повертає [].
+        Реальні тексти негативних відгуків (через ПЕРЕХОПЛЕНУ веб-сесію).
+        Використовує новий шлях list-by-page.
         """
-        if not self.is_authenticated:
-            return []
+        if not session_headers or not session_cookies:
+            # Fallback на старий API, якщо сесії немає
+            if not self.is_authenticated: return []
+            url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
+            payload = {"advertiserNo": merchant_id, "type": 2, "page": 1, "rows": rows}
+        else:
+            # Робота через вкрадену сесію (web-шлях)
+            url = "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page"
+            payload = {
+                "advertiserNo": merchant_id,
+                "page": 1,
+                "rows": rows,
+                "reviewType": "NEGATIVE"
+            }
 
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list"
-        payload = {
-            "advertiserNo": merchant_id,
-            "type": 2,  # 2 = negative
-            "page": 1,
-            "rows": rows,
-        }
+        req_headers = dict(session_headers) if session_headers else {}
+        if req_headers:
+            req_headers.pop("Content-Length", None)
+            req_headers.pop("Accept-Encoding", None)
+            req_headers["Referer"] = f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}"
 
         try:
-            data = await self._post(url, json=payload)
-            return data.get("data", []) or []
+            if self._session is None: await self.__aenter__()
+            response = await self._session.request(
+                "POST", url, json=payload,
+                headers=req_headers if req_headers else self._session.headers,
+                cookies=session_cookies
+            )
+            data = response.json()
+            return data.get("data", {}).get("list", []) or data.get("data", []) or []
         except Exception as e:
-            logger.debug("fetch_negative_reviews [%s]: %s", merchant_id, e)
+            logger.debug("Binance fetch_negative_reviews [%s] error: %s", merchant_id, e)
             return []
 
     async def fetch_account_balance(self) -> list[dict]:
@@ -8261,26 +8885,52 @@ class BybitP2PClient(BaseHttpClient):
             logger.debug("Bybit fetch_merchant_profile [%s]: %s", merchant_id, e)
             return {}
 
-    async def fetch_merchant_feedback(self, merchant_id: str) -> list[dict]:
-        """Негативні відгуки про мерчанта."""
-        if not self.is_authenticated:
+    async def fetch_merchant_feedback(self, merchant_id: str, session_headers: dict = None,
+                                      session_cookies: dict = None) -> list[dict]:
+        """
+        Негативні відгуки про мерчанта (через ПЕРЕХОПЛЕНУ веб-сесію).
+        Тепер ми стукаємо на реальний веб-ендпоінт appraiseList.
+        """
+        if not session_headers or not session_cookies:
+            logger.debug("Bybit fetch_merchant_feedback [%s]: Немає перехопленої сесії в БД!", merchant_id)
             return []
 
-        url = "https://api2.bybit.com/fiat/otc/user/feedback/list"
+        url = "https://www.bybit.com/x-api/fiat/otc/order/appraiseList"
         payload = {
             "userId": merchant_id,
-            "evaluateType": "bad",
-            "page": 1,
-            "size": 10,
+            "page": "1",
+            "size": "10",
+            "appraiseType": "2"  # 2 = Bad (Негативні відгуки)
         }
-        query = "&".join(f"{k}={v}" for k, v in payload.items())
-        headers = {**self._sign_headers(query), **self._build_dynamic_headers()}
+
+        # Робимо копію заголовків, щоб не зламати оригінальний словник
+        req_headers = dict(session_headers)
+
+        # Видаляємо статичні поля, які можуть конфліктувати з curl_cffi
+        req_headers.pop("Content-Length", None)
+        req_headers.pop("Accept-Encoding", None)
+
+        # МАГІЯ: Підставляємо правильний Referer під поточного мерчанта (Bybit це перевіряє!)
+        req_headers["Referer"] = f"https://www.bybit.com/en/p2p/profile/{merchant_id}/USDT/UAH/item"
 
         try:
-            data = await self._post(url, json=payload, headers=headers)
+            # Робимо POST запит напряму через curl_cffi сесію, передаючи вкрадені заголовки та кукіси
+            if self._session is None:
+                await self.__aenter__()
+
+            response = await self._session.request(
+                "POST",
+                url,
+                json=payload,
+                headers=req_headers,
+                cookies=session_cookies
+            )
+            data = response.json()
+
+            # Повертаємо масив відгуків
             return data.get("result", {}).get("items", []) or []
         except Exception as e:
-            logger.debug("Bybit fetch_merchant_feedback [%s]: %s", merchant_id, e)
+            logger.debug("Bybit fetch_merchant_feedback [%s] error: %s", merchant_id, e)
             return []
 
     async def fetch_account_balance(self) -> list[dict]:
@@ -8464,6 +9114,39 @@ class MexcClient(BaseHttpClient):
 
     async def fetch(self, payload: dict) -> Any:
         return await self._get(BASE_URL, params=payload)
+
+    async def fetch_merchant_reviews(self, member_id: str, page: int = 1) -> dict:
+        """
+        Один запит → і статистика, і тексти відгуків.
+        Повертає: {good: int, bad: int, total: int, good_rating: str, reviews: list[dict]}
+        """
+        url = "https://www.mexc.com/api/platform/p2p/api/order/review/out/list"
+
+        params = {
+            "pageNum": page,
+            "memberId": member_id
+        }
+
+        headers = {
+            "X-Device-Id": "unknowndeviceid",
+            "X-Platform-Type": "web",
+            "Language": "uk-UA",
+            "Referer": f"https://www.mexc.com/uk-UA/buy-crypto/merchant?id={member_id}"
+        }
+
+        try:
+            data = await self._get(url, params=params, headers=headers)
+            d = data.get("data", {})
+            return {
+                "total": int(d.get("totalCount", 0) or 0),
+                "good": int(d.get("goodCount", 0) or 0),
+                "bad": int(d.get("badCount", 0) or 0),
+                "good_rating": d.get("goodRating", "0"),
+                "reviews": d.get("result", []) or [],
+            }
+        except Exception as e:
+            logger.debug("MEXC fetch_merchant_reviews [%s]: %s", member_id, e)
+            return {"total": 0, "good": 0, "bad": 0, "good_rating": "0", "reviews": []}
 
 ============================================================
 FILE: infrastructure/http/wallet_client.py
@@ -8727,24 +9410,12 @@ class BybitAccountClient(BaseHttpClient):
         return await self.get_balance("FUND")
 
     async def get_my_ads(self, status: str = "ONLINE") -> list[dict]:
-        """Мої активні P2P оголошення. status: ONLINE | OFFLINE | CANCELED"""
-        if not self.is_authenticated: return []
-        query = f"status={status}&tokenId=USDT&currencyId=UAH&limit=20"
-        try:
-            data = await self._get(f"{BASE_URL}/v5/p2p/item/personal/list?{query}", headers=self._sign_headers(query))
-            return data.get("result", {}).get("items", []) or []
-        except Exception as e:
-            logger.warning("get_my_ads: %s", e); return []
+        """Заглушка: Bybit не віддає P2P дані через звичайний API (повертає 404)"""
+        return []
 
     async def get_my_orders(self, status: str = "TRADING", limit: int = 20) -> list[dict]:
-        """Мої P2P угоди. status: PENDING | TRADING | SOLD | FINISHED | CANCELLED"""
-        if not self.is_authenticated: return []
-        query = f"status={status}&tokenId=USDT&limit={limit}"
-        try:
-            data = await self._get(f"{BASE_URL}/v5/p2p/order/simplifyList?{query}", headers=self._sign_headers(query))
-            return data.get("result", {}).get("items", []) or []
-        except Exception as e:
-            logger.warning("get_my_orders: %s", e); return []
+        """Заглушка: Bybit не віддає P2P дані через звичайний API"""
+        return []
 
     async def get_account_info(self) -> dict:
         """Базова інформація акаунта (UID, рівень, статус верифікації)."""
@@ -8831,17 +9502,8 @@ class OKXAccountClient(BaseHttpClient):
             logger.warning("get_funding_balance: %s", e); return []
 
     async def get_my_p2p_orders(self, state: str = "ongoing", limit: int = 20) -> list[dict]:
-        """
-        Мої P2P угоди.
-        state: ongoing | end | all
-        """
-        if not self.is_authenticated: return []
-        path = f"/api/v5/c2c/order/list?state={state}&limit={limit}"
-        try:
-            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
-            return data.get("data", []) or []
-        except Exception as e:
-            logger.warning("get_my_p2p_orders: %s", e); return []
+        """Заглушка: OKX не віддає приватні P2P дані без спеціальних дозволів (повертає 404)"""
+        return []
 
     async def get_account_info(self) -> dict:
         """Інформація акаунта (UID, рівень)."""
@@ -9229,6 +9891,12 @@ for r in rows:
 
 conn.close()
 print("Done")
+
+============================================================
+FILE: _check_logs.py
+============================================================
+
+
 
 ============================================================
 FILE: bot/__init__.py
@@ -9962,7 +10630,8 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         return[]
 
     status = summary.get("status", "OK")
-    if status == "UNAVAILABLE":
+    # Статуси що не є помилкою — просто немає даних, не штрафуємо
+    if status in ("UNAVAILABLE", "NOT_SUPPORTED", "NO_AUTH", "UNKNOWN"):
         return[]
 
     pos       = int(summary.get("positive",  0) or 0)
@@ -9978,7 +10647,7 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
             if any(c in CRITICAL_CATEGORIES for c in cats):
                 cat_names = ", ".join(cats)
                 excerpt = str(bad_text_item.get("excerpt", ""))[:100]
-                return[f"BLOCK:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
+                return[f"NEEDS_LLM:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
 
     total = pos + neg + neutral
     if total <= 0:
@@ -9999,7 +10668,7 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         reason += f" | {sample}"
 
     if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
-        return [f"BLOCK:BADREVIEWS:{reason}"]
+        return [f"NEEDS_LLM:BADREVIEWS:{reason}"]
 
     if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
         return [f"BADREVIEWS:{reason}"]
@@ -10027,9 +10696,10 @@ def _join_flags(flags: list[str]) -> str:
     return ",".join(clean)
 
 
-def _pick_block_review(flags: list[str]) -> str | None:
+def _pick_llm_review(flags: list[str]) -> str | None:
+    """Знаходить review-флаг що потребує LLM перевірки (поганий відгук)."""
     for f in flags:
-        if f.startswith("BLOCK:BADREVIEWS:"):
+        if f.startswith("NEEDS_LLM:BADREVIEWS:"):
             return f
     return None
 
@@ -10049,7 +10719,9 @@ def _build_weak_regex_flag(result: RegexResult) -> str:
 async def _build_cached_flag(verdict: str, exchange: str, merchant_id: str, db: MerchantDB) -> str:
     risk_type, reason = await db.get_reason(exchange, merchant_id)
     risk_type = (risk_type or "").strip()
-    reason    = (reason    or "").strip()[:120]
+    # Замінюємо коми на крапку з комою — reason вбудовується в comma-joined risk_flag,
+    # тому коми в тексті ламають flag.split(",") при парсингу в notifier._risk_badge
+    reason    = (reason or "").strip()[:900].replace(",", ";")
 
     if verdict == "BLOCK":
         if risk_type or reason:
@@ -10099,10 +10771,11 @@ def _dedupe_flags(flags: list[str]) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RiskEngine:
-    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None, review_fetcher=None):
+    def __init__(self, db: Optional[MerchantDB] = None, llm_pool=None, review_fetcher=None, review_ttl: float = 24.0):
         self._db      = db
         self._llm     = llm_pool
-        self._review_fetcher = review_fetcher  # 🚀 ДОДАНО
+        self._review_fetcher = review_fetcher
+        self._review_ttl     = review_ttl   # для lazy fetch
         self._analyzed  = 0
         self._db_hits   = 0
         self._bot_alert_cache = TTLCache(ttl_seconds=BOT_ALERT_COOLDOWN_SEC, max_size=5000)
@@ -10131,33 +10804,33 @@ class RiskEngine:
 
         # Оригінальні 4
         if has_api and has_ext_link:
-            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Зовнішній лінк")
+            synergies.append("SYNERGY:Бот-автопоповнення + Зовнішній лінк")
         if is_new and has_exact and has_chargeback_warn:
-            synergies.append("BLOCK:SYNERGY:Новий акаунт + Фікс.ліміт + Ризик рефанду")
+            synergies.append("SYNERGY:Новий акаунт + Фікс.ліміт + Ризик рефанду")
         if has_api and has_chat_first and bad_rate:
-            synergies.append("BLOCK:SYNERGY:Бот + Тягне в чат + Низький %")
+            synergies.append("SYNERGY:Бот + Тягне в чат + Низький %")
         if has_cross and has_ext_link:
-            synergies.append("BLOCK:SYNERGY:Кросс-біржовий клон + Зовнішній лінк")
+            synergies.append("SYNERGY:Кросс-біржовий клон + Зовнішній лінк")
 
         # Нові комбо v2.1
         if has_api and has_cross:
             # Бот на кількох біржах одночасно — беззаперечна автоматизація
-            synergies.append("BLOCK:SYNERGY:Бот-автопоповнення + Крос-біржовий клон")
+            synergies.append("SYNERGY:Бот-автопоповнення + Крос-біржовий клон")
         if has_flicker and has_ext_link:
             # Скрипт блимає і виводить у зовнішній чат — класичний скам-патерн
-            synergies.append("BLOCK:SYNERGY:Flicker-relist + Зовнішній лінк")
+            synergies.append("SYNERGY:Flicker-relist + Зовнішній лінк")
         if has_velocity and has_exact and not order.is_verified:
             # Висока швидкість угод + фікс.ліміт + не верифікований
-            synergies.append("BLOCK:SYNERGY:Velocity spike + Фікс.ліміт + Не верифікований")
+            synergies.append("SYNERGY:Velocity spike + Фікс.ліміт + Не верифікований")
         if is_new and has_api:
             # Новий акаунт вже з ботом — не може бути органіки
-            synergies.append("BLOCK:SYNERGY:Новий акаунт + Бот-автопоповнення")
+            synergies.append("SYNERGY:Новий акаунт + Бот-автопоповнення")
         if has_static and has_anonymous:
             # Стабільний дроп + без KYC = сервіс обналу
-            synergies.append("BLOCK:SYNERGY:Static-drop + Анонімність/без KYC")
+            synergies.append("SYNERGY:Static-drop + Анонімність/без KYC")
         if has_fincrime and (has_api or has_cross):
             # Regex вже бачить fincrime-слова + бот/клон = підтверджена схема
-            synergies.append("BLOCK:SYNERGY:Fincrime-сигнал + Автоматизований аккаунт")
+            synergies.append("SYNERGY:Fincrime-сигнал + Автоматизований аккаунт")
 
         return synergies
 
@@ -10228,14 +10901,50 @@ class RiskEngine:
                 verdict_ts,
             ) = await asyncio.gather(*coros)
 
-            # ── 🚀 СИНХРОННИЙ ДОКАЧ ВІДГУКІВ ДЛЯ НОВИХ МЕРЧАНТІВ ──────────
-            rev_summary_test = review_summary_raw or {}
-            rev_total_test = int(rev_summary_test.get("positive", 0)) + int(rev_summary_test.get("negative", 0)) + int(
-                rev_summary_test.get("neutral", 0))
+            # ── Lazy fetch відгуків для кандидата спреду ──────────────
+            # Відгуки тягнуться ТІЛЬКИ тут — для реальних спред-кандидатів.
+            # Якщо є в кеші БД (TTL 24г) → fast. Немає → fetch_now (1 запит).
+            if self._review_fetcher:
+                needs_fetch = await self._db.needs_review_fetch(exchange, mid, self._review_ttl if hasattr(self, '_review_ttl') else 24.0)
+                if needs_fetch:
+                    logger.debug("⏳ Lazy fetch відгуків: %s [%s]", order.merchant_name, exchange)
+                    review_summary_raw = await self._review_fetcher.fetch_now(exchange, mid)
+                elif not review_summary_raw:
+                    # Є в кеші але не завантажено в цьому запиті
+                    review_summary_raw = await self._db.get_reviews_summary(exchange, mid)
 
-            if rev_total_test == 0 and self._review_fetcher and rev_summary_test.get("status") != "UNAVAILABLE":
-                logger.debug(f"⏳ Синхронний fetch відгуків для нового мерчанта {order.merchant_name} [{exchange}]")
-                review_summary_raw = await self._review_fetcher.fetch_now(exchange, mid)
+            # ── Bybit / Binance: fallback pos/neg з Order-статистики ────────
+            # Profile API обох бірж повертає 404 — positive=0 завжди в БД.
+            # Але в search response є month_order_count і:
+            #   - Bybit:   finish_rate_pct (completion rate, ~100%)
+            #   - Binance: positive_rate   (review rate, 0.0–1.0)
+            # Інжектуємо positive коли він нульовий, щоб neg_pct не був 100%:
+            #   - Без сесії (neg=0):  pos=972, neg=0  → neg_pct=0%   ✓
+            #   - З сесією  (neg=3):  pos=969, neg=3  → neg_pct=0.3% ✓
+            if (
+                exchange in ("Bybit", "Binance")
+                and review_summary_raw
+                and review_summary_raw.get("status") in ("OK", "NO_SESSION")
+                and order.month_order_count > 0
+                and review_summary_raw.get("positive", 0) == 0
+            ):
+                neg_known = int(review_summary_raw.get("negative", 0) or 0)
+                total_est = order.month_order_count
+                neg_est = neg_known  # default
+
+                if exchange == "Binance" and getattr(order, "positive_rate", 0) > 0:
+                    # Binance: positive_rate = 0.99310344 → neg = 972 * (1 - 0.993) ≈ 7
+                    neg_est = max(neg_known, int(total_est * (1.0 - order.positive_rate)))
+
+                pos_est = max(0, total_est - neg_est)
+
+                review_summary_raw = dict(review_summary_raw)
+                review_summary_raw["positive"] = pos_est
+                review_summary_raw["negative"] = neg_est
+                logger.debug(
+                    "%s pos fallback (profile 404): %s pos=%d neg=%d (orders=%d)",
+                    exchange, order.merchant_name, pos_est, neg_est, total_est,
+                )
 
             # ── Blacklist: найвищий пріоритет ──────────────────────────────
             if is_bl:
@@ -10350,7 +11059,7 @@ class RiskEngine:
                 self._db_hits += 1
                 cached_flag   = await _build_cached_flag(cached_verdict, exchange, mid, self._db)
 
-                block_review = _pick_block_review(review_flags)
+                block_review = _pick_llm_review(review_flags)
                 if block_review:
                     order.risk_flag = block_review
                     return
@@ -10387,47 +11096,37 @@ class RiskEngine:
             )
             order.composite_score = composite_score
 
-            # HARD EVIDENCE 1: Regex BLOCK
+            # Regex BLOCK → NEEDS_LLM з підвищеним пріоритетом
+            # Регекс може тільки ПІДОЗРЮВАТИ, фінальне рішення — за LLM
             if regex_result.verdict == "BLOCK":
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", regex_result.risk_type, regex_result.reason, "regex",
+                logger.debug(
+                    "🔍 Regex escalate→LLM: %s [%s] %s",
+                    order.merchant_name, exchange, regex_result.risk_type,
                 )
-                block_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
-                flags      = _dedupe_flags([block_flag] + review_flags + behavior_flags)
-                order.risk_flag = _join_flags(flags) or block_flag
-                logger.warning(
-                    "🚫 Regex BLOCK: %s [%s] %s — %s",
-                    order.merchant_name, exchange, regex_result.risk_type, regex_result.reason,
-                )
-                return
+                regex_result.verdict   = "NEEDS_LLM"
+                regex_result.needs_llm = True
+                # needs_llm=True → LLM буде викликаний нижче
 
-            # HARD EVIDENCE 2: Bad reviews BLOCK
-            block_review = _pick_block_review(review_flags)
-            if block_review:
-                order.risk_flag = block_review
-                logger.warning(
-                    "🚫 Reviews BLOCK: %s [%s] — %s",
-                    order.merchant_name, exchange, block_review,
-                )
-                return
+            # Bad reviews → додаємо до контексту LLM, не блокуємо одразу
+            # LLM побачить відгуки і сам вирішить (BLOCK/SUSPICIOUS/OK)
+            review_llm_flag = _pick_llm_review(review_flags)
+            if review_llm_flag:
+                # Якщо є погані відгуки — обов'язково через LLM
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
+                logger.debug("📋 Bad reviews → escalate to LLM: %s [%s]", order.merchant_name, exchange)
 
-            # v2: Composite BLOCK (без LLM якщо composite >= 80)
+            # Composite >= 80 → обов'язково через LLM (не автобан)
+            # LLM отримає повний контекст: score, відгуки, умови, поведінку
             if composite_score >= 80:
-                composite_reason = f"composite_score={composite_score}/100"
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", "COMPOSITE_HIGH_RISK", composite_reason, "composite",
+                logger.debug(
+                    "📊 Composite high score=%d → escalate to LLM: %s [%s]",
+                    composite_score, order.merchant_name, exchange,
                 )
-                flags = _dedupe_flags(
-                    [f"BLOCK:COMPOSITE_HIGH_RISK:{composite_reason}"] + review_flags + behavior_flags
-                )
-                order.risk_flag = _join_flags(flags)
-                logger.warning(
-                    "🚫 Composite BLOCK: %s [%s] score=%d",
-                    order.merchant_name, exchange, composite_score,
-                )
-                return
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
 
             temp_regex_flags = []
             if regex_result.verdict == "NEEDS_LLM":
@@ -10437,19 +11136,32 @@ class RiskEngine:
 
             synergy_flags = self._check_synergies(order, temp_regex_flags, behavior_flags)
             if synergy_flags:
-                # Синергія дає миттєвий бан!
-                await self._db.save_verdict(
-                    exchange, mid, order.merchant_name, terms,
-                    "BLOCK", "SYNERGY", synergy_flags[0], "synergy_engine",
-                )
-                order.risk_flag = _join_flags(_dedupe_flags(synergy_flags + review_flags + behavior_flags))
-                logger.warning(f"🚫 Synergy BLOCK: {order.merchant_name} [{exchange}] — {synergy_flags[0]}")
-                return
+                # Синергія → escalate to LLM з контекстом
+                # LLM бачить синергійні флаги і підтверджує/спростовує
+                logger.debug("🔗 Synergy detected → escalate to LLM: %s [%s] — %s",
+                    order.merchant_name, exchange, synergy_flags[0])
+                if not regex_result.needs_llm:
+                    regex_result.needs_llm = True
+                    regex_result.verdict   = "NEEDS_LLM"
+                # Додаємо синергійні флаги до behavior щоб LLM їх бачив
+                behavior_flags = _dedupe_flags(behavior_flags + synergy_flags)
 
             # COMPOSITE EVIDENCE → LLM (якщо немає синергії)
             composite_risk = ""
             if has_cross_bot and has_bad_reviews:
                 composite_risk = "Мережа клонів + Негативні відгуки"
+
+            # EXACT_LIMITS → обов'язково через LLM
+            # min ≈ max — класичний бот-процесинг або трикутна схема
+            if has_exact_limits and not regex_result.needs_llm:
+                logger.debug(
+                    "🎯 Exact limits → LLM: %s [%s] (%s–%s)",
+                    order.merchant_name, exchange, order.min_limit, order.max_limit,
+                )
+                regex_result.needs_llm = True
+                regex_result.verdict   = "NEEDS_LLM"
+                if not regex_result.risk_type:
+                    regex_result.risk_type = "EXACT_LIMITS"
 
             # ── 5. LLM ──────────────────────────────────────────────────────
             if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
@@ -10459,10 +11171,12 @@ class RiskEngine:
                     logger.debug("🔍 Trusted immunity stripped for %s (anomaly)", order.merchant_name)
                     trusted = False
 
-                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE:
+                # Trusted skip: пропускаємо LLM тільки якщо немає поганих відгуків
+                has_review_concern = any("BADREVIEWS" in f for f in review_flags)
+                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE and not has_review_concern:
                     logger.debug(
-                        "✅ Trusted skip: %s [%s] score=%d < %d",
-                        order.merchant_name, exchange, regex_result.score, TRUSTED_LLM_MIN_SCORE,
+                        "✅ Trusted skip: %s [%s] score=%d, no bad reviews",
+                        order.merchant_name, exchange, regex_result.score,
                     )
                     flags = list(review_flags) + list(behavior_flags)
                     if not flags and regex_result.reason:
@@ -10470,6 +11184,7 @@ class RiskEngine:
                     order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
                     return
 
+                # Передаємо review_summary в LLM — відгуки є ключовим сигналом
                 scheduled = self._llm.schedule(
                     exchange          = exchange,
                     merchant_id       = mid,
@@ -10483,6 +11198,7 @@ class RiskEngine:
                     max_limit         = order.max_limit,
                     behavior_flags    = behavior_flags,
                     account_age_days  = getattr(order, "account_age_days", 0),
+                    review_summary    = review_summary_raw or {},  # ← відгуки явно
                 )
 
                 if scheduled:
@@ -10513,20 +11229,20 @@ class RiskEngine:
     def _behavior(self, order: Order) -> list[str]:
         """
         Швидкий синхронний pre-check до завантаження снапшотів з БД.
-        EXACT_LIMITS тепер виключно в behavioral_analyzer (з контекстом history).
-        Тут залишаємо тільки NARROW_SPREAD — аномально вузький діапазон без
-        точного співпадіння (< 1% spread, сума > 500, не верифікований).
+        EXACT_LIMITS: min ≈ max (diff ≤ 5) — класичний бот/трикутник.
+        NARROW_SPREAD: аномально вузький діапазон (< 1% spread).
         """
         flags = []
         if order.min_limit > 0 and order.max_limit > 0:
             max_f = float(order.max_limit)
             min_f = float(order.min_limit)
             diff  = max_f - min_f
-            # EXACT_LIMITS (diff <= 5) — вже обробляється behavioral_analyzer з history
-            # Тут ловимо тільки non-exact але дуже вузький діапазон
-            if diff > 5:
+            if abs(diff) <= 5.0:
+                # EXACT_LIMITS — min ≈ max, завжди підозріло
+                flags.append("EXACT_LIMITS")
+            elif max_f > 500:
                 spread = diff / max_f
-                if spread < 0.01 and max_f > 500:
+                if spread < 0.01:
                     if not (order.is_verified or order.month_order_count > 1000):
                         flags.append("NARROW_SPREAD")
         return flags
@@ -10535,6 +11251,52 @@ class RiskEngine:
         for order in orders:
             self.analyze(order)
         return orders
+
+    async def analyze_for_spread(self, orders: list[Order]) -> None:
+        """
+        Аналізує ордери для спреду ПАРАЛЕЛЬНО і ЧЕКАЄ завершення.
+
+        На відміну від analyze() (fire-and-forget), цей метод гарантує що
+        risk_flag встановлено до повернення — кешований LLM вердикт буде
+        у Telegram алерті (а не тільки в наступному циклі).
+
+        LLM scheduling всередині — все ще async (fire and forget).
+        Behavioral sync pre-check виконується синхронно як завжди.
+        """
+        tasks = []
+        for order in orders:
+            self._analyzed += 1
+            behavior_flags = self._behavior(order)
+            if self._db and order.merchant_id:
+                # Встановлюємо початковий прапор (синхронно) — бачимо хоча б behavioral
+                initial_flags = _dedupe_flags(behavior_flags)
+                order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
+                tasks.append(self._async_analyze(order, behavior_flags))
+            else:
+                # fallback: немає DB → sync regex
+                result = regex_analyze(
+                    order.trade_terms,
+                    order.finish_rate_pct,
+                    order.month_order_count,
+                    order.is_verified,
+                )
+                order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+                order.regex_score      = int(getattr(result, "score", 0) or 0)
+                flags: list[str] = []
+                if result.verdict == "BLOCK":
+                    flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
+                elif result.verdict == "NEEDS_LLM":
+                    flags.append(_build_pending_flag(result))
+                elif result.reason:
+                    flags.append(_build_weak_regex_flag(result))
+                flags.extend(behavior_flags)
+                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for exc in results:
+                if isinstance(exc, Exception):
+                    logger.error("analyze_for_spread помилка: %s", exc, exc_info=False)
 
     async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
         """
@@ -10602,6 +11364,134 @@ FILE: infrastructure/api/__init__.py
 ============================================================
 
 # Офіційні SDK бірж (майбутнє)
+
+============================================================
+FILE: script/__init__.py
+============================================================
+
+
+
+============================================================
+FILE: script/session_interceptor.py
+============================================================
+
+import asyncio
+import logging
+from pathlib import Path
+from playwright.async_api import async_playwright, Request
+from core.storage.merchant_db import MerchantDB
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logger = logging.getLogger("Interceptor")
+
+# Таргети для перехоплення.
+# Ми використовуємо реальні лінки на профілі мерчантів, щоб змусити фронтенд біржі завантажити відгуки.
+TARGETS = {
+    "Bybit": {
+        "url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
+        "api_pattern": "appraiseList",  # 🚀 ВИПРАВЛЕНО ТУТ
+    },
+    "Binance": {
+        "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
+        "api_pattern": "review/list-by-page", # 🚀 Твій точний ендпоінт
+    },
+    "OKX": {
+        "url": "https://www.okx.com/ru/p2p/ads-merchant?publicUserId=0e37a42aca",
+        "api_pattern": "review/history",
+    }
+}
+
+
+async def run_interceptor(exchange: str):
+    target = TARGETS.get(exchange)
+    if not target:
+        logger.error(f"Невідома біржа {exchange}")
+        return
+
+    db = MerchantDB()
+    await db.start()
+
+    # Створюємо папку для збереження профілю браузера (щоб не логінитись щоразу)
+    user_data_dir = Path(f"data/browser_profiles/{exchange.lower()}")
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    captured_event = asyncio.Event()
+
+    async with async_playwright() as p:
+        logger.info(f"🚀 Запуск браузера для {exchange}...")
+
+        # Запускаємо Persistent Context.
+        # headless=False робить браузер видимим, щоб ти міг пройти логін.
+        # Шукай цей рядок (~120)
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=str(user_data_dir),
+            headless=False,  # 🚀 ЗМІНИ НА False (вікно буде з'являтися на 10-15 сек)
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-http2",
+                "--window-size=1280,720",
+            ],
+        )
+        page = await context.new_page()
+
+        # 🚀 ДОДАЙ ЦЕ: Блокуємо важкі ресурси для швидкості
+        await page.route("**/*.{png,jpg,jpeg,svg,woff2,css}", lambda route: route.abort())
+
+        # Далі йде твій stealth...
+        stealth_plugin = Stealth()
+        await stealth_plugin.apply_stealth_async(context)
+
+        async def handle_request(request: Request):
+            # Якщо запит йде до нашого P2P-ендпоінту з відгуками
+            if target["api_pattern"] in request.url:
+                logger.info(f"🎯 ПЕРЕХОПЛЕНО ЗАПИТ: {request.url}")
+
+                # Забираємо всі секретні заголовки (Risktoken, X-Client-Signature, Csrftoken)
+                headers = request.headers
+
+                # Забираємо всі кукіси з сесії браузера
+                cookies_list = await context.cookies()
+                cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+
+                # Зберігаємо у твою нову таблицю auth_sessions
+                success = await db.save_auth_session(exchange, headers, cookies_dict)
+                if success:
+                    logger.info(f"✅ Сесію {exchange} успішно збережено в БД!")
+                else:
+                    logger.error("❌ Помилка збереження в БД.")
+
+                # Даємо сигнал, що місію виконано
+                captured_event.set()
+
+        # Підключаємо нашого "шпигуна" до всіх мережевих запитів сторінки
+        page.on("request", handle_request)
+
+        logger.info(f"🌐 Перехід на профіль мерчанта {exchange}...")
+        await page.goto(target["url"], wait_until="domcontentloaded")
+
+        logger.info("⏳ Очікування завантаження JS та відправки запиту до відгуків...")
+
+        try:
+            # Чекаємо 60 секунд. Якщо ти залогінений — запит полетить миттєво.
+            await asyncio.wait_for(captured_event.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ Таймаут 60с. Можливо, потрібно залогінитись вручну або пройти капчу.")
+            logger.warning(
+                "Браузер залишається відкритим. Авторизуйся, клікни на вкладку 'Відгуки', і скрипт зловить запит.")
+            # Чекаємо нескінченно, поки ти не пройдеш перевірку ручками
+            await captured_event.wait()
+
+        logger.info("🛑 Перехоплення успішне. Закриваємо браузер за 3 секунди...")
+        await asyncio.sleep(3)
+        await context.close()
+
+    await db.stop()
+
+
+if __name__ == "__main__":
+    # Почнемо з Bybit як з найоптимальнішого кандидата
+    asyncio.run(run_interceptor("Binance"))
+    asyncio.run(run_interceptor("Bybit"))
 
 ============================================================
 FILE: state.py
@@ -14534,3 +15424,9 @@ def generate_report():
 
 if __name__ == "__main__":
     generate_report()
+
+============================================================
+FILE: tools/invalidate_recent.py
+============================================================
+
+
