@@ -261,8 +261,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     all_creds = await merchant_db.get_all_credentials()
     account_clients = await _load_credentials(merchant_db)
 
+    # 🚀 ДОДАНО ІНІЦІАЛІЗАЦІЮ ТОРГОВОГО ДВИГУНА
+    from core.engine.trade_worker import TradeWorker
+    trade_worker = TradeWorker(merchant_db)
+
     notifier.bind_db(merchant_db)
-    notifier.bind_commands(merchant_db, account_clients.as_dict())
+    notifier.bind_commands(merchant_db, account_clients.as_dict(), trade_worker)
 
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
@@ -483,6 +487,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                     # 1. Створюємо новий пустий список для актуальних ордерів
                     current_frontend_opps = []
+                    current_cycle_alerts = []
                     # ----------------------------
 
                     logger.info(
@@ -511,7 +516,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-
+                        b_rec, _, b_reason = await merchant_db.get_trade_recommendation_full(buy_o.exchange, buy_o.merchant_id)
+                        s_rec, _, s_reason = await merchant_db.get_trade_recommendation_full(sell_o.exchange, sell_o.merchant_id)
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
                         logger.warning(
@@ -536,6 +542,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             sell_banks_fit=opp.get("sell_banks_fit"),
                             route_variants=opp.get("route_variants"),
                             route_type=opp.get("route_type", "UNKNOWN"),
+                            buy_rec=b_rec,
+                            sell_rec=s_rec,
+                            buy_reason=b_reason,
+                            sell_reason=s_reason,
                         )
 
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
@@ -611,16 +621,21 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             "routeType": opp.get("route_type", "UNKNOWN")
                         }
                         current_frontend_opps.append(frontend_opp)
+                        current_cycle_alerts.append(alert)
                         if sent_count >= current_max_alerts:
+                            logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)
                             continue
 
                         if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
+                            logger.debug("⏭ Скіп: buy BLOCK [%s]", buy_o.merchant_name)
                             continue
                         if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
+                            logger.debug("⏭ Скіп: sell BLOCK [%s]", sell_o.merchant_name)
                             continue
 
                         dedup_key = f"spread:{matcher._merge_key(opp)}"
                         if dedup_cache.seen(dedup_key):
+                            logger.debug("⏭ Скіп: dedup [%s→%s]", buy_o.merchant_name, sell_o.merchant_name)
                             continue
 
                         if not stability_filter.check(
@@ -628,15 +643,20 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                 str(buy_o.price), str(sell_o.price),
                                 buy_o.merchant_name, sell_o.merchant_name,
                         ):
+                            logger.debug("⏭ Скіп: stability [%s→%s]", buy_o.merchant_name, sell_o.merchant_name)
                             continue
 
                         dedup_cache.mark(dedup_key)
                         sent_count += 1
 
                         if not is_muted():
+                            logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
                             # Fire-and-forget: не блокуємо сканер чекаючи Telegram API
                             asyncio.create_task(dispatcher.dispatch(alert, opp))
+                        else:
+                            logger.debug("⏭ Скіп: muted")
                     state.opportunities = current_frontend_opps[:50]
+                    state.current_alerts = current_cycle_alerts[:50]
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)

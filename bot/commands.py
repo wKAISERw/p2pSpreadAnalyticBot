@@ -27,7 +27,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from config import settings
-
+_trade_worker = None
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -104,6 +104,7 @@ _KEY_LABELS = {
 
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
 _db: Optional["MerchantDB"] = None
+_notifier = None
 _account_clients: dict = {}
 _scanner_stats: dict = {
     "cycles": 0,
@@ -123,10 +124,15 @@ def is_muted() -> bool:
     return time.monotonic() < _mute_until
 
 
-def setup(db, account_clients: dict) -> None:
-    global _db, _account_clients
+def setup(db, account_clients: dict, trade_worker=None, notifier=None) -> None:
+    global _db, _account_clients, _trade_worker, _notifier
+    if _trade_worker and trade_worker and _trade_worker is not trade_worker:
+        logger.warning("setup(): TradeWorker перезаписується!")
     _db = db
     _account_clients = account_clients
+    _trade_worker = trade_worker
+    if notifier is not None:
+        _notifier = notifier
 
 
 def update_stats(**kwargs) -> None:
@@ -209,13 +215,72 @@ async def cmd_stop(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     text = (
         "📖 <b>Детальна допомога</b>\n\n"
+        "<b>/start</b>\nЗапустити персональний сканер.\n\n"
+        "<b>/stop</b>\nЗупинити алерти.\n\n"
+        "<b>/active</b>\nВсі активні спреди прямо зараз.\n\n"
         "<b>/connect [біржа]</b>\nПідключити персональні API ключі.\n\n"
+        "<b>/disconnect</b>\nВідключити біржу.\n\n"
         "<b>/balance</b>\nПоказує баланс на твоїх біржах.\n\n"
+        "<b>/keys</b>\nСписок підключених API ключів.\n\n"
         "<b>/settings</b>\nЗмінити глобальні налаштування сканера.\n\n"
         "<b>/ban [exchange] [merchant_id]</b>\nРучний бан мерчанта.\n\n"
         "<b>/status</b>\nПоточний стан сканера."
     )
     await message.answer(text)
+
+
+# ── /active (ПОКАЗАТИ ВСІ ПОТОЧНІ СПРЕДИ) ──────────────────────────────────
+@router.message(Command("active"))
+async def cmd_active(message: Message) -> None:
+    from state import state as app_state
+    from copy import copy
+
+    alerts = getattr(app_state, "current_alerts", [])
+    if not alerts:
+        return await message.answer(
+            "📭 <b>Зараз активних спредів немає</b>\n\n"
+            "Сканер працює, але поки не знайшов підходящих зв'язок.\n"
+            "Спробуй пізніше або перевір /status"
+        )
+
+    if not _notifier:
+        return await message.answer("❌ Нотифікатор не ініціалізований.")
+
+    # Сортуємо по спреду (найвигідніші першими)
+    sorted_alerts = sorted(alerts, key=lambda a: a.spread_pct, reverse=True)
+    chat_id = message.chat.id
+    count = min(len(sorted_alerts), 10)
+
+    await message.answer(
+        f"📡 <b>АКТИВНІ СПРЕДИ: {len(sorted_alerts)} шт.</b>\n"
+        f"Відправляю топ-{count} зв'язок…"
+    )
+
+    sent = 0
+    for a in sorted_alerts[:count]:
+        try:
+            # 🔄 Re-fetch LLM verdicts from DB (можуть бути оновлені після створення алерту)
+            fresh = copy(a)
+            if _db:
+                b_rec, _, b_reason = await _db.get_trade_recommendation_full(
+                    a.buy_order.exchange, a.buy_order.merchant_id
+                )
+                s_rec, _, s_reason = await _db.get_trade_recommendation_full(
+                    a.sell_order.exchange, a.sell_order.merchant_id
+                )
+                fresh.buy_rec = b_rec
+                fresh.sell_rec = s_rec
+                fresh.buy_reason = b_reason
+                fresh.sell_reason = s_reason
+
+            await _notifier.send_to_user(chat_id, fresh)
+            sent += 1
+        except Exception as e:
+            logger.error("cmd_active send error: %s", e)
+            break
+
+    if sent < count:
+        await message.answer(f"⚠️ Відправлено {sent}/{count} (помилка при відправці)")
 
 
 # ── /status ────────────────────────────────────────────────────────────────
@@ -1063,3 +1128,191 @@ async def _save_merchant_filter(user_id: int, key: str, value) -> None:
         (json.dumps(mf), user_id),
     )
     await conn.commit()
+
+
+# =========================================================================
+# 🚀 АВТО-ТРЕЙД (Вдосконалена версія)
+# =========================================================================
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+import time
+from core.engine.network_fee_engine import NetworkFeeEngine
+
+_spread_cache: dict[str, tuple] = {}  # cache_key -> (SpreadAlert, timestamp)
+
+
+class AutoTradeStates(StatesGroup):
+    waiting_amount = State()
+    waiting_confirm = State()
+
+
+# 🚀 ФІКС #1: Винесено дублювання лімітів
+def _calc_usdt_limits(alert) -> tuple[float, float]:
+    min_usdt = max(
+        float(alert.buy_order.min_limit) / float(alert.buy_order.price),
+        float(alert.sell_order.min_limit) / float(alert.sell_order.price)
+    )
+    max_usdt = min(
+        float(alert.buy_order.max_limit) / float(alert.buy_order.price),
+        float(alert.sell_order.max_limit) / float(alert.sell_order.price),
+        alert.deal_amount_uah / float(alert.buy_order.price)
+    )
+    return min_usdt, max_usdt
+
+
+@router.callback_query(F.data.startswith("trade:tt:"))
+async def on_auto_trade_start(call: CallbackQuery, state: FSMContext) -> None:
+    if not _trade_worker:
+        return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
+
+    cache_key = call.data.replace("trade:tt:", "")
+    entry = _spread_cache.get(cache_key)
+
+    # 🚀 ФІКС #6: TTL Кешу (5 хвилин)
+    if not entry:
+        return await call.answer("❌ Спред застарів.", show_alert=True)
+
+    alert, ts = entry
+    if time.time() - ts > 300:
+        _spread_cache.pop(cache_key, None)
+        return await call.answer("❌ Спред застарів (таймаут 5 хв).", show_alert=True)
+
+    await state.update_data(cache_key=cache_key)
+    await state.set_state(AutoTradeStates.waiting_amount)
+
+    min_usdt, max_usdt = _calc_usdt_limits(alert)
+
+    text = (
+        f"⚡ <b>Авто-Трейд: Taker → Taker</b>\n\n"
+        f"🛒 Купівля: {alert.buy_order.exchange} по {alert.buy_order.price}\n"
+        f"💸 Продаж: {alert.sell_order.exchange} по {alert.sell_order.price}\n\n"
+        f"Доступні ліміти: <b>від {min_usdt:.1f} до {max_usdt:.1f} USDT</b>\n\n"
+        f"👇 Введи суму в <b>USDT</b> (або напиши <code>max</code>):"
+    )
+    await call.message.answer(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.message(AutoTradeStates.waiting_amount)
+async def on_auto_trade_amount(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    entry = _spread_cache.get(data.get("cache_key"))
+
+    if not entry:
+        await state.clear()
+        return await message.answer("❌ Спред застарів.", reply_markup=back_to_main_kb())
+
+    alert, _ = entry
+    min_usdt, max_usdt = _calc_usdt_limits(alert)
+    raw_input = message.text.strip().lower()
+
+    try:
+        amount_usdt = max_usdt if raw_input == "max" else float(raw_input.replace(",", "."))
+        # 🚀 ФІКС #4: Жорсткі межі (+- 0.001 для компенсації похибки float у Python)
+        if not (min_usdt - 0.001 <= amount_usdt <= max_usdt + 0.001):
+            raise ValueError
+    except ValueError:
+        return await message.answer(
+            f"❌ Невірна сума. Введи число від <b>{min_usdt:.1f}</b> до <b>{max_usdt:.1f}</b> (або 'max'):")
+
+    # 🚀 ФІКС #2: Чесний розрахунок профіту з врахуванням комісій
+    network, network_fee_usdt = NetworkFeeEngine.get_optimal_network(alert.buy_order.exchange,
+                                                                      alert.sell_order.exchange)
+    expected_profit = NetworkFeeEngine.calc_profit(
+        amount_usdt,
+        float(alert.buy_order.price),
+        float(alert.sell_order.price),
+        network_fee_usdt
+    )
+
+    await state.update_data(amount_usdt=amount_usdt)
+    await state.set_state(AutoTradeStates.waiting_confirm)
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Підтвердити", callback_data="trade:confirm"),
+        InlineKeyboardButton(text="❌ Скасувати", callback_data="trade:cancel"),
+    )
+
+    fee_text = f"(Комісія мережі: {network_fee_usdt}$) " if network_fee_usdt > 0 else ""
+
+    await message.answer(
+        f"📋 <b>Підтвердження угоди</b>\n\n"
+        f"💰 Об'єм:   <code>{amount_usdt:.2f} USDT</code>\n"
+        f"🛒 Купівля: {alert.buy_order.exchange} по {alert.buy_order.price}\n"
+        f"💸 Продаж: {alert.sell_order.exchange} по {alert.sell_order.price}\n"
+        f"✨ Профіт:  ~<b>{expected_profit:.0f} ₴</b> {fee_text}\n\n"
+        f"⚠️ <i>Натисни ✅ для запуску TradeWorker (DRY_RUN_MODE).</i>",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.in_({"trade:confirm", "trade:cancel"}))
+async def on_auto_trade_confirm(call: CallbackQuery, state: FSMContext) -> None:
+    if call.data == "trade:cancel":
+        await state.clear()
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("🚫 Авто-трейд скасовано.", reply_markup=back_to_main_kb())
+        return await call.answer("Скасовано.")
+
+    data = await state.get_data()
+    await state.clear()
+
+    cache_key = data.get("cache_key")
+    amount_usdt = data.get("amount_usdt")
+    entry = _spread_cache.pop(cache_key, None)
+
+    if not entry or not amount_usdt or not _trade_worker:
+        return await call.answer("❌ Дані недоступні або застаріли.", show_alert=True)
+
+    alert = entry[0]
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("⏳ <b>Виконується T→T угода…</b>\nПеревіряю LLM та створюю сесії в БД.",
+                                     reply_markup=None)
+
+    buy_leg = {
+        "exchange": alert.buy_order.exchange,
+        "ad_id": getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", "")),
+        "price": float(alert.buy_order.price),
+        "merchant_id": getattr(alert.buy_order, "merchant_id", "")
+    }
+    sell_leg = {
+        "exchange": alert.sell_order.exchange,
+        "ad_id": getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", "")),
+        "price": float(alert.sell_order.price),
+        "merchant_id": getattr(alert.sell_order, "merchant_id", "")
+    }
+
+    try:
+        success = await _trade_worker.execute_tt_route(
+            buy_leg=buy_leg,
+            sell_leg=sell_leg,
+            amount_usdt=amount_usdt,
+            owner_user_id=call.from_user.id
+        )
+        result = "✅ <b>Угода успішно виконана!</b>\nПеревірте статус через /trades" if success else "❌ <b>Помилка.</b> Спред втік або LLM заблокувала."
+    except Exception as e:
+        logger.error("trade:confirm error: %s", e, exc_info=True)
+        result = f"❌ <b>Критична помилка:</b> <code>{str(e)[:200]}</code>"
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(result, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.message(Command("trades"))
+async def cmd_trades(message: Message) -> None:
+    if not getattr(_trade_worker, "_db", None):
+        return await message.answer("❌ БД не підключена.")
+
+    # 🚀 ФІКС #3: Використовуємо метод БД замість прямого SQL
+    rows = await _trade_worker._db.get_recent_trade_sessions(limit=5)
+
+    if not rows:
+        return await message.answer("📭 Немає активних сесій.")
+
+    lines = ["📊 <b>Твої активні сесії:</b>\n"]
+    for row in rows:
+        lines.append(
+            f"🔹 <b>#{row['id']}</b> | <code>{row['strategy']}</code> | Статус: <b>{row['session_status']}</b> (Fee: {row['network_fee']}$, Профіт: {row['gross_profit']:.0f} ₴)")
+    await message.answer("\n".join(lines))

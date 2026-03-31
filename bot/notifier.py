@@ -52,20 +52,50 @@ class SpreadAlert:
     spread_pct: float
     profit_uah: float
     deal_amount_uah: float
-    buy_bank: str = ""
-    sell_bank: str = ""
+    buy_bank: str
+    sell_bank: str
     buy_banks_all: list[str] | None = None
     sell_banks_all: list[str] | None = None
     buy_banks_fit: list[str] | None = None
     sell_banks_fit: list[str] | None = None
     route_variants: list[str] | None = None
-    route_type: str = ""
-    timestamp: datetime | None = None
+    route_type: str = "UNKNOWN"
+    # 🚀 ДОДАНО ПОЛЯ ДЛЯ LLM
+    buy_rec: str = "PENDING"
+    sell_rec: str = "PENDING"
+    buy_reason: str = ""
+    sell_reason: str = ""
+    timestamp: datetime = None
 
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
 
+# 🚀 ДОДАНО ФУНКЦІЮ БЕЙДЖІВ
+def rec_badge(rec: str) -> str:
+    return {
+        "APPROVE":     "✅",
+        "CONDITIONAL": "⚡",
+        "REJECT":      "🚫",
+        "PENDING":     "🔍",
+    }.get((rec or "PENDING").upper(), "🔍")
+
+
+REC_LABELS = {
+    "APPROVE":     "✅ БЕЗПЕЧНО",
+    "CONDITIONAL": "⚡ З ОБЕРЕЖНІСТЮ",
+    "REJECT":      "🚫 НЕ ТОРГУВАТИ",
+    "PENDING":     "🔍 AI АНАЛІЗУЄ…",
+}
+
+
+def _llm_verdict_block(label: str, rec: str, reason: str) -> str:
+    """Форматує однорядковий вердикт AI для buy/sell мерчанта.
+    Деталі (reason, stats) вже виводяться в _risk_badge — тут лише лейбл.
+    """
+    rec_upper = (rec or "PENDING").upper()
+    rec_text = REC_LABELS.get(rec_upper, f"🔍 {rec_upper}")
+    return f"🧠 <b>{label}:</b> {rec_text}\n"
 
 def _format_bank_list(codes: list[str] | None) -> str:
     if not codes:
@@ -350,21 +380,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
             for r in uniq[:2]:
                 spoiler_parts.append(f"💬 {escape(r)}")
 
-        # 2. Мікро-стата мерчанта
-        rate = getattr(order, "finish_rate_pct", 0.0)
-        orders = getattr(order, "month_order_count", 0)
-        verified = getattr(order, "is_verified", False)
-        if orders > 0:
-            stats = f"📊 {rate:.1f}% | {orders} угод"
-            if verified:
-                stats += " | ✅"
-            # Підрахунок зірваних угод
-            failed = int(orders * (100.0 - rate) / 100.0)
-            if failed > 0:
-                stats += f" | ~{failed} зірваних"
-            spoiler_parts.append(stats)
-
-        # 3. Умови мерчанта (якщо ризиковий тип)
+        # 2. Умови мерчанта (якщо ризиковий тип)
         trade_terms = getattr(order, "trade_terms", "")
         if detected_risk_types & show_text_cats and trade_terms:
             safe = trade_terms.replace("\n", " ")[:100]
@@ -386,6 +402,7 @@ class TelegramNotifier:
             group_window: float = 1.5,
             batch_size: int = 5,
             max_queue_size: int = 100,
+
     ):
         self._bot = Bot(
             token=settings.telegram_bot_token,
@@ -398,6 +415,7 @@ class TelegramNotifier:
         self._dp.include_router(self._router)
         self._dp.include_router(bot_commands.router)
         self._db: MerchantDB | None = None
+
         self._setup_handlers()
 
         # Single-user: глобальний chat_id з settings
@@ -414,9 +432,10 @@ class TelegramNotifier:
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
 
-    def bind_commands(self, db, account_clients: dict) -> None:
-        """Ініціалізує command center з посиланнями на компоненти."""
-        bot_commands.setup(db, account_clients)
+    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None) -> None:
+        """Оновлює змінні модуля. Router вже підключений в __init__."""
+        bot_commands.setup(db, account_clients, trade_worker, notifier=self)
+        # ← більше нічого не треба
 
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
         """
@@ -476,12 +495,15 @@ class TelegramNotifier:
         commands =[
             BotCommand(command="start", description="▶️ Запустити мій сканер (Дашборд)"),
             BotCommand(command="stop", description="🛑 Зупинити мій сканер"),
+            BotCommand(command="active", description="📡 Активні спреди зараз"),
             BotCommand(command="balance", description="💰 Перевірити баланси"),
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),
             BotCommand(command="disconnect", description="❌ Відключити біржу"),
             BotCommand(command="status", description="📊 Системний статус сканера"),
             BotCommand(command="settings", description="⚙️ Глобальні налаштування"),
+            BotCommand(command="ban", description="🚫 Ручний бан мерчанта"),
+            BotCommand(command="users", description="👥 Користувачі (адмін)"),
             BotCommand(command="help", description="📖 Довідка"),
         ]
         await self._bot.set_my_commands(commands)
@@ -563,6 +585,22 @@ class TelegramNotifier:
         return batch
 
     async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None) -> None:
+        # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
+        if self._db:
+            try:
+                b_rec, _, b_reason = await self._db.get_trade_recommendation_full(
+                    alert.buy_order.exchange, alert.buy_order.merchant_id
+                )
+                s_rec, _, s_reason = await self._db.get_trade_recommendation_full(
+                    alert.sell_order.exchange, alert.sell_order.merchant_id
+                )
+                alert.buy_rec = b_rec
+                alert.sell_rec = s_rec
+                alert.buy_reason = b_reason
+                alert.sell_reason = s_reason
+            except Exception:
+                pass  # fallback: використовуємо значення з алерту
+
         title, silent = _alert_grade(alert.spread_pct)
 
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
@@ -597,6 +635,14 @@ class TelegramNotifier:
         sell_fit = _format_bank_list(getattr(alert, "sell_banks_fit", None))
         buy_warn = _regex_warn_block(alert.buy_order)
         sell_warn = _regex_warn_block(alert.sell_order)
+        buy_name = escape(alert.buy_order.merchant_name or alert.buy_order.merchant_id or "Unknown")
+        buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}"
+        sell_name = escape(alert.sell_order.merchant_name or alert.sell_order.merchant_id or "Unknown")
+        sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
+
+        # 🧠 LLM Verdict блоки
+        buy_llm = _llm_verdict_block("Buy", alert.buy_rec, alert.buy_reason)
+        sell_llm = _llm_verdict_block("Sell", alert.sell_rec, alert.sell_reason)
 
         text = (
             f"{title}\n\n"
@@ -618,19 +664,21 @@ class TelegramNotifier:
 
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
-            f"Мерчант: {buy_name}{_verified_badge(alert.buy_order)} "
+            f"Мерчант: {buy_name_str} "
             f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
             f"{buy_risk if buy_risk else ''}"
-            f"{buy_warn if buy_warn else ''}\n"
+            f"{buy_warn if buy_warn else ''}"
+            f"\n{buy_llm}\n"
 
             f"💸 <b>ПРОДАЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
-            f"Мерчант: {sell_name}{_verified_badge(alert.sell_order)} "
+            f"Мерчант: {sell_name_str} "
             f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
             f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
             f"{sell_risk if sell_risk else ''}"
             f"{sell_warn if sell_warn else ''}"
+            f"\n{sell_llm}"
         )
 
         # 🚀 НОВІ ІНТЕРАКТИВНІ КНОПКИ
@@ -640,6 +688,22 @@ class TelegramNotifier:
                 InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link or "https://google.com"),
             ]
         ]
+
+        # 🚀 ІНТЕГРАЦІЯ АВТО-ТРЕЙДУ
+        b_ad = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
+        s_ad = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
+
+        if b_ad and s_ad and alert.buy_rec != "REJECT" and alert.sell_rec != "REJECT":
+            cache_key = f"{b_ad[:12]}_{s_ad[:12]}"
+
+            import time
+            # 🚀 ФІКС: Зберігаємо алерт разом із міткою часу для TTL
+            bot_commands._spread_cache[cache_key] = (alert, time.time())
+
+            kb.insert(0, [
+                InlineKeyboardButton(text=f"⚡ Авто-Трейд (T→T) {alert.spread_pct:.2f}%",
+                                     callback_data=f"trade:tt:{cache_key}")
+            ])
 
         b_mid = alert.buy_order.merchant_id
         if b_mid:
@@ -729,6 +793,7 @@ class TelegramNotifier:
                     disable_web_page_preview=True,
                     disable_notification=disable_notification,
                 )
+                logger.debug("✅ TG sent → chat_id=%s (len=%d)", target_chat, len(text))
                 return
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after + 0.5)

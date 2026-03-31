@@ -666,6 +666,25 @@ class RiskEngine:
                 if not regex_result.risk_type:
                     regex_result.risk_type = "EXACT_LIMITS"
 
+            # WARN flags без вердикту → через LLM
+            # Мерчанти з regex warn (квитанція, 3-ті особи тощо) мають пройти AI аналіз
+            if (
+                not regex_result.needs_llm
+                and not behavior_needs_llm
+                and cached_verdict is None
+                and (regex_result.reason or behavior_flags)
+                and self._llm
+            ):
+                logger.debug(
+                    "🔎 No verdict + warn signals → LLM: %s [%s] flags=%s",
+                    order.merchant_name, exchange,
+                    ",".join(behavior_flags[:3]) or regex_result.risk_type or "WARN",
+                )
+                regex_result.needs_llm = True
+                regex_result.verdict   = "NEEDS_LLM"
+                if not regex_result.risk_type:
+                    regex_result.risk_type = "SUSPICIOUS"
+
             # ── 5. LLM ──────────────────────────────────────────────────────
             if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
                 trusted = _is_trusted_merchant(order, score)

@@ -520,7 +520,7 @@ class MerchantDB:
         if not self._db:
             return "PENDING"
         async with self._db.execute(
-            "SELECT trade_recommendation FROM merchant_verdict "
+            "SELECT trade_recommendation, verdict FROM merchant_verdict "
             "WHERE exchange = ? AND merchant_id = ?",
             (exchange, merchant_id),
         ) as cur:
@@ -528,7 +528,44 @@ class MerchantDB:
         if row is None:
             return "PENDING"
         rec = (row["trade_recommendation"] or "PENDING").strip().upper()
+        # Derive from verdict if trade_recommendation was never set
+        if rec == "PENDING":
+            verdict = (row["verdict"] or "").strip().upper()
+            if verdict and verdict != "UNKNOWN":
+                _derive = {"OK": "APPROVE", "SUSPICIOUS": "CONDITIONAL", "BLOCK": "REJECT"}
+                rec = _derive.get(verdict, "PENDING")
         return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING") else "PENDING"
+
+    async def get_trade_recommendation_full(
+        self, exchange: str, merchant_id: str
+    ) -> tuple[str, str, str]:
+        """
+        Повертає (recommendation, verdict, reason) — повну інфу від LLM.
+        Якщо trade_recommendation ще PENDING, але verdict вже є —
+        автоматично виводимо рекомендацію з verdict.
+        """
+        if not self._db:
+            return "PENDING", "", ""
+        async with self._db.execute(
+            "SELECT trade_recommendation, verdict, reason FROM merchant_verdict "
+            "WHERE exchange = ? AND merchant_id = ?",
+            (exchange, merchant_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return "PENDING", "", ""
+        rec = (row["trade_recommendation"] or "PENDING").strip().upper()
+        verdict = (row["verdict"] or "").strip().upper()
+        reason = (row["reason"] or "").strip()
+
+        # Якщо trade_recommendation ще PENDING але verdict вже є — derive
+        if rec == "PENDING" and verdict and verdict != "UNKNOWN":
+            _derive = {"OK": "APPROVE", "SUSPICIOUS": "CONDITIONAL", "BLOCK": "REJECT"}
+            rec = _derive.get(verdict, "PENDING")
+
+        if rec not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING"):
+            rec = "PENDING"
+        return rec, verdict, reason
 
     async def save_verdict(
             self,
@@ -1353,3 +1390,17 @@ class MerchantDB:
         except Exception as e:
             logger.error("get_active_repricer_sessions: %s", e)
             return []
+
+    async def get_recent_trade_sessions(self, limit: int = 5) -> list[dict]:
+        """Повертає останні активні торгові сесії для команди /trades."""
+        if not self._db:
+            return []
+        async with self._db.execute(
+                "SELECT id, strategy, session_status, network_fee, gross_profit "
+                "FROM trade_sessions "
+                "WHERE session_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]

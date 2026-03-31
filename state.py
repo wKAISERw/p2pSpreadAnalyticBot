@@ -23,6 +23,7 @@ class AppState:
         }
 
         self.opportunities = []
+        self.current_alerts = []      # SpreadAlert objects for /active command
         self.logs = []
         self.blacklist = []
 
