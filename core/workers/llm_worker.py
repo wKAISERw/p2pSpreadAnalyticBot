@@ -72,7 +72,7 @@ class ProviderRateLimitError(RuntimeError):
 LLM_LOG = _setup_llm_log()
 
 LLM_WORKERS = 3
-LLM_TIMEOUT = 7.0
+LLM_TIMEOUT = 12
 MAX_QUEUE = 200
 MAX_NORM_TERMS = 800
 MAX_MATCHES_IN_PROMPT = 3
@@ -296,70 +296,78 @@ class LLMWorkerPool:
 
         now = _time.monotonic()
         groq_available = LLMWorkerPool._groq_cooldown_until <= now
-        openai_available = LLMWorkerPool._openai_cooldown_until <= now
         gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
+        openai_available = LLMWorkerPool._openai_cooldown_until <= now
 
-        # 1. Спроба через GROQ (Швидкий і безкоштовний)
+        # В callwithfallback — для кожного провайдера:
+
+        # Groq
         if groq_available:
             try:
-                result = await asyncio.wait_for(self._call_groq(user_msg), timeout=LLM_TIMEOUT)
-                result["_source"] = "groq"
-                LLMWorkerPool._groq_consecutive_429 = 0
+                result = await asyncio.wait_for(
+                    self._call_groq(user_msg), timeout=LLM_TIMEOUT
+                )
+                result["source"] = "groq"
+                LLMWorkerPool.groq_consecutive_429 = 0
                 return result
             except RateLimitError:
-                LLMWorkerPool._groq_consecutive_429 += 1
-                n = LLMWorkerPool._groq_consecutive_429
-                base = 30.0 * (2 ** min(n - 1, 4))
-                wait = base * random.uniform(0.85, 1.15)
-                LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
-                logger.warning("⛔ Groq 429 (серія=%d) cooldown=%.0fs → Перехід на OpenAI", n, wait)
+                n = LLMWorkerPool.groq_consecutive_429 + 1
+                LLMWorkerPool.groq_consecutive_429 = n
+                wait = min(30.0 * (2 ** min(n - 1, 4)), 300.0)
+                LLMWorkerPool.groq_cooldown_until = time.monotonic() + wait
+                logger.warning("Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
             except asyncio.TimeoutError:
-                self._stats["timeouts"] += 1
-                logger.warning("⏳ Groq timeout для %s", task.merchant_name)
+                self.stats["timeouts"] += 1
+                logger.warning("Groq timeout: %s", task.merchant_name)
             except Exception as e:
-                logger.error("❌ Groq помилка: %s", e)
+                logger.error("Groq помилка: %s", e)
 
-        # 2. Спроба через OPENAI (Дуже стабільний, великі ліміти)
-        if openai_available:
-            try:
-                result = await asyncio.wait_for(self._call_openai(user_msg), timeout=LLM_TIMEOUT)
-                result["_source"] = f"openai:{OPENAI_MODEL}"
-                return result
-            except PermanentModelError:
-                pass  # Якщо ключ не вказано, просто йдемо далі до Gemini
-            except ProviderRateLimitError:
-                LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
-                logger.warning("⏳ OpenAI 429. Охолодження 30s → Перехід на Gemini")
-            except asyncio.TimeoutError:
-                self._stats["timeouts"] += 1
-                logger.warning("⏳ OpenAI timeout для %s", task.merchant_name)
-            except Exception as e:
-                logger.error("❌ OpenAI помилка: %s", e)
-
-        # 3. Спроба через GEMINI (Останній рубіж)
+        # Gemini
         if gemini_available:
             try:
-                result = await asyncio.wait_for(self._call_gemini(user_msg), timeout=LLM_TIMEOUT)
-                result["_source"] = f"gemini:{GEMINI_MODEL}"
+                result = await asyncio.wait_for(
+                    self._call_gemini(user_msg), timeout=LLM_TIMEOUT
+                )
+                result["source"] = f"gemini_{GEMINI_MODEL}"
                 return result
             except PermanentModelError as e:
-                logger.error("❌ Gemini config помилка: %s", e)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini model config error",
-                        "_source": "gemini_404"}
-            except ProviderRateLimitError as e:
-                LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
-                logger.warning("⏳ Gemini 429. Охолодження 60s. %s", e)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini rate limit", "_source": "gemini_429", "trade_recommendation": "CONDITIONAL"}
+                logger.error("Gemini 404: %s → OpenAI", e)
+                # НЕ return — падаємо на OpenAI
+            except ProviderRateLimitError:
+                LLMWorkerPool.gemini_cooldown_until = time.monotonic() + 60.0
+                logger.warning("Gemini 429 → OpenAI")
             except asyncio.TimeoutError:
-                self._stats["timeouts"] += 1
-                logger.warning("⏳ Gemini timeout для %s", task.merchant_name)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": "Gemini timeout", "_source": "gemini_timeout", "trade_recommendation": "CONDITIONAL"}
+                self.stats["timeouts"] += 1
+                logger.warning("Gemini timeout: %s", task.merchant_name)
             except Exception as e:
-                logger.error("❌ Gemini помилка: %s", e)
-                return {"status": "UNKNOWN", "risk": "NONE", "reason": str(e)[:80], "_source": "gemini_error", "trade_recommendation": "CONDITIONAL"}
+                logger.error("Gemini помилка: %s", e)
 
-        self._stats["timeouts"] += 1
-        return {"status": "UNKNOWN", "risk": "NONE", "reason": "All APIs on cooldown", "_source": "cooldown_skip", "trade_recommendation": "CONDITIONAL"}
+        # OpenAI — останній резерв
+        if openai_available:
+            try:
+                result = await asyncio.wait_for(
+                    self._call_openai(user_msg), timeout=LLM_TIMEOUT
+                )
+                result["source"] = f"openai_{OPENAI_MODEL}"
+                return result
+            except PermanentModelError:
+                pass
+            except ProviderRateLimitError:
+                LLMWorkerPool.openai_cooldown_until = time.monotonic() + 30.0
+                logger.warning("OpenAI 429")
+            except asyncio.TimeoutError:
+                self.stats["timeouts"] += 1
+                logger.warning("OpenAI timeout: %s", task.merchant_name)
+            except Exception as e:
+                logger.error("OpenAI помилка: %s", e)
+
+        self.stats["timeouts"] += 1
+        return {
+            "status": "UNKNOWN", "risk": "NONE",
+            "reason": "All APIs unavailable",
+            "source": "cooldown_skip",
+            "trade_recommendation": "CONDITIONAL"
+        }
 
     async def _call_groq(self, user_msg: str) -> dict:
         groq_key = os.getenv("GROQ_API_KEY", "")
@@ -422,18 +430,20 @@ class LLMWorkerPool:
     async def _call_gemini(self, user_msg: str) -> dict:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         if not gemini_key:
-            raise PermanentModelError("GEMINI_API_KEY не встановлено")
+            raise PermanentModelError("GEMINI_API_KEY")
+
         full_prompt = f"{SYSTEM_PROMPT}\n\n{user_msg}"
         payload = {
             "contents": [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {
                 "temperature": 0.1,
                 "maxOutputTokens": 1200,
-                "responseMimeType": "application/json"
+                "responseMimeType": "application/json",
             },
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={gemini_key}"
-        async with self._session.post(url, json=payload) as resp:
+
+        async with self.session.post(url, json=payload) as resp:
             if resp.status == 429:
                 raise ProviderRateLimitError("Gemini 429")
             if resp.status == 404:
@@ -441,7 +451,19 @@ class LLMWorkerPool:
             if resp.status >= 500:
                 raise RuntimeError(f"Gemini server error {resp.status}")
             data = await resp.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+        # ← Захист від thinking моделей (можуть мати кілька parts)
+        try:
+            candidates = data.get("candidates", [])
+            parts = candidates[0]["content"]["parts"]
+            # Шукаємо part де є text (не thinking)
+            text = next(
+                (p["text"] for p in parts if "text" in p and not p.get("thought")),
+                parts[-1].get("text", "")  # fallback
+            )
+        except (IndexError, KeyError) as e:
+            raise RuntimeError(f"Gemini response parse error: {e}, data={data}")
+
         return _parse_json(text)
 
 
