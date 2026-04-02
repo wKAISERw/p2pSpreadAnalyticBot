@@ -608,8 +608,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
 
-                        b_rec, _, b_reason = await merchant_db.get_trade_recommendation_full(buy_o.exchange, buy_o.merchant_id)
-                        s_rec, _, s_reason = await merchant_db.get_trade_recommendation_full(sell_o.exchange, sell_o.merchant_id)
+                        b_rec, _, b_reason, _ = await merchant_db.get_trade_recommendation_full(buy_o.exchange, buy_o.merchant_id)
+                        s_rec, _, s_reason, _ = await merchant_db.get_trade_recommendation_full(sell_o.exchange, sell_o.merchant_id)
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
                         logger.warning(

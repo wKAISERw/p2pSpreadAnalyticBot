@@ -306,7 +306,7 @@ class SingleLegExecutor:
         if not merchant_id:
             return amount, ""
 
-        rec, verdict, reason = await self._db.get_trade_recommendation_full(
+        rec, verdict, reason, _ = await self._db.get_trade_recommendation_full(
             exchange, merchant_id
         )
 

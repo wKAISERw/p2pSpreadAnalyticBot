@@ -404,7 +404,15 @@ class MerchantDB:
         # 🚀 ДОДАНО: Персональні фільтри мерчантів per-exchange
         await self._ensure_column("scanner_users", "exchange_merchant_filters_json", "TEXT DEFAULT '{}'")
         # 🚀 ДОДАНО: Галочка показу вижимки ЛЛМ в алерті
-        await self._ensure_column("scanner_users", "show_llm_summary", "INTEGER DEFAULT 1")        # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
+        await self._ensure_column("scanner_users", "show_llm_summary", "INTEGER DEFAULT 1")
+        # 🔘 Налаштування виводу повідомлень (per-user)
+        await self._ensure_column("scanner_users", "show_ai_terms_summary", "INTEGER DEFAULT 1")   # AI вижимка умов (inline)
+        await self._ensure_column("scanner_users", "show_full_terms", "INTEGER DEFAULT 1")          # Повні умови (спойлер)
+        await self._ensure_column("scanner_users", "show_ai_logic", "INTEGER DEFAULT 1")            # Логіка AI (спойлер)
+        await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")        # Деталі банків (спойлер)
+        # 🚀 AI вижимка умов мерчанта
+        await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
+        # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
         # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ
         await self._ensure_column("trade_sessions", "buy_exchange", "TEXT")
@@ -565,25 +573,26 @@ class MerchantDB:
 
     async def get_trade_recommendation_full(
         self, exchange: str, merchant_id: str
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str, str, str]:
         """
-        Повертає (recommendation, verdict, reason) — повну інфу від LLM.
+        Повертає (recommendation, verdict, reason, terms_summary) — повну інфу від LLM.
         Якщо trade_recommendation ще PENDING, але verdict вже є —
         автоматично виводимо рекомендацію з verdict.
         """
         if not self._db:
-            return "PENDING", "", ""
+            return "PENDING", "", "", ""
         async with self._db.execute(
-            "SELECT trade_recommendation, verdict, reason FROM merchant_verdict "
+            "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary FROM merchant_verdict "
             "WHERE exchange = ? AND merchant_id = ?",
             (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
-            return "PENDING", "", ""
+            return "PENDING", "", "", ""
         rec = (row["trade_recommendation"] or "PENDING").strip().upper()
         verdict = (row["verdict"] or "").strip().upper()
         reason = (row["reason"] or "").strip()
+        terms_summary = (row["terms_summary"] or "").strip()
 
         # Якщо trade_recommendation ще PENDING але verdict вже є — derive
         if rec == "PENDING" and verdict and verdict != "UNKNOWN":
@@ -592,7 +601,7 @@ class MerchantDB:
 
         if rec not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING"):
             rec = "PENDING"
-        return rec, verdict, reason
+        return rec, verdict, reason, terms_summary
 
     async def save_verdict(
             self,
@@ -605,6 +614,7 @@ class MerchantDB:
             reason: str = "",
             source: str = "",
             trade_recommendation: str = "CONDITIONAL",  # ← НОВЕ
+            terms_summary: str = "",  # 🔘 AI вижимка умов
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
@@ -622,8 +632,8 @@ class MerchantDB:
             INSERT INTO merchant_verdict
             (exchange, merchant_id, merchant_name, terms_hash,
              verdict, risk_type, reason, risk_score,
-             llm_calls_count, save_count, updated_at, trade_recommendation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 merchant_name = excluded.merchant_name,
                 terms_hash = excluded.terms_hash,
@@ -634,7 +644,8 @@ class MerchantDB:
                 llm_calls_count = merchant_verdict.llm_calls_count + ?,
                 save_count = merchant_verdict.save_count + 1,
                 updated_at = excluded.updated_at,
-                trade_recommendation = excluded.trade_recommendation
+                trade_recommendation = excluded.trade_recommendation,
+                terms_summary = excluded.terms_summary
             """,
             (
                 exchange,
@@ -649,6 +660,7 @@ class MerchantDB:
                 1,
                 now,
                 trade_recommendation,  # ← НОВЕ
+                terms_summary,
                 llm_inc,
             ),
         )
@@ -1226,6 +1238,39 @@ class MerchantDB:
             logger.error("get_active_users: %s", e)
             return []
 
+    async def get_user_display_settings(self, chat_id: int) -> dict:
+        """
+        Повертає per-user налаштування виводу повідомлень.
+        Ключі: show_ai_terms_summary, show_full_terms, show_ai_logic,
+               show_bank_details, show_llm_summary
+        """
+        defaults = {
+            "show_ai_terms_summary": True,
+            "show_full_terms": True,
+            "show_ai_logic": True,
+            "show_bank_details": True,
+            "show_llm_summary": True,
+        }
+        if not self._db:
+            return defaults
+        try:
+            async with self._db.execute(
+                """SELECT
+                    COALESCE(show_ai_terms_summary, 1) as show_ai_terms_summary,
+                    COALESCE(show_full_terms, 1) as show_full_terms,
+                    COALESCE(show_ai_logic, 1) as show_ai_logic,
+                    COALESCE(show_bank_details, 1) as show_bank_details,
+                    COALESCE(show_llm_summary, 1) as show_llm_summary
+                FROM scanner_users WHERE telegram_chat_id=?""",
+                (chat_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return defaults
+            return {k: bool(row[k]) for k in defaults}
+        except Exception:
+            return defaults
+
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""
         if not self._db or not merchant_name:
@@ -1626,6 +1671,7 @@ class MerchantDB:
                 (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
+
             if not row or not row["updated_at"]:
                 return float("inf")
             return time.time() - float(row["updated_at"])

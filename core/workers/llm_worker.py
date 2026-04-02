@@ -118,13 +118,20 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - Якщо мерчант підозрілий за поведінкою, але відгуки повністю чисті — це пом'якшуючий фактор, зазнач це.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON (без жодного тексту поза ним):
-{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт","trade_recommendation":"APPROVE"|"CONDITIONAL"|"REJECT"}
+{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт","trade_recommendation":"APPROVE"|"CONDITIONAL"|"REJECT","terms_summary":"коротка вижимка умов мерчанта (1-2 речення): ключові вимоги, ліміти, особливості, нюанси. Без оцінки ризику — лише факти з умов."}
 
 ПОЛЕ trade_recommendation — ОБОВ'ЯЗКОВЕ. Пряма відповідь: чи варто проводити P2P-угоду з цим мерчантом ЗАРАЗ?
 APPROVE     — торгувати можна. Ризиків немає або вони мінімальні.
 CONDITIONAL — можна, але з застереженням (новий акаунт, м'який SUSPICIOUS, мало угод). Бот знизить суму або буде обережнішим.
 REJECT      — НЕ торгувати. Чіткі ознаки скаму, бот-процесингу або небезпеки для коштів.
-Правило відповідності: status=OK → APPROVE; status=SUSPICIOUS → CONDITIONAL; status=BLOCK → ЗАВЖДИ REJECT."""
+Правило відповідності: status=OK → APPROVE; status=SUSPICIOUS → CONDITIONAL; status=BLOCK → ЗАВЖДИ REJECT.
+
+ПОЛЕ terms_summary — ОБОВ'ЯЗКОВЕ. Коротка вижимка умов мерчанта БЕЗ оцінки ризику:
+- Тільки факти: які банки приймає, вимоги до оплати, ліміти часу, обмеження, особливості.
+- НЕ дублюй reason — terms_summary це ПРО УМОВИ, reason це ПРО РИЗИК.
+- Якщо умов немає — "Умови не вказані."
+- Приклад: "Тільки Моно/Приват, оплата протягом 15 хв, ПІБ має збігатися, без 3-х осіб."
+- Максимум 2 короткі речення."""
 
 
 @dataclass
@@ -255,6 +262,7 @@ class LLMWorkerPool:
         risk_type = result.get("risk", "") or "NONE"
         reason = (result.get("reason", "") or "")[:900]
         source = result.get("source", "unknown")
+        terms_summary = (result.get("terms_summary", "") or "")[:300]
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
@@ -265,6 +273,7 @@ class LLMWorkerPool:
             task.exchange, task.merchant_id, task.merchant_name,
             task.trade_terms, verdict, risk_type, reason, source,
             trade_recommendation=trade_recommendation,  # ← НОВЕ v2.1
+            terms_summary=terms_summary,  # 🔘 AI вижимка умов
         )
 
         rr = task.regex_result
@@ -645,7 +654,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту","trade_recommendation":"APPROVE|CONDITIONAL|REJECT"}'
+        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту","trade_recommendation":"APPROVE|CONDITIONAL|REJECT","terms_summary":"коротка вижимка умов мерчанта (факти, без оцінки ризику)"}'
     )
     return "\n".join(lines)
 
@@ -733,9 +742,12 @@ def _parse_json(text: str) -> dict:
         logger.warning("[LLM] trade_recommendation конфліктує зі status=BLOCK → примусово REJECT")
         trade_recommendation = "REJECT"
 
+    terms_summary = str(data.get("terms_summary", "")).strip()[:300]
+
     return {
         "status": status,
         "risk": risk or "NONE",
         "reason": reason or "Без пояснення",
         "trade_recommendation": trade_recommendation,
+        "terms_summary": terms_summary,
     }

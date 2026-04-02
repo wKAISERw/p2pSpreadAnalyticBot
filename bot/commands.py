@@ -26,6 +26,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
+from bot import keyboards
 from config import settings
 _trade_worker = None
 _single_leg_executor = None
@@ -44,7 +45,7 @@ from bot.keyboards import (
     banks_selection_kb, back_to_keys_kb, exchange_connect_kb,
     stats_overview_kb, back_to_stats_kb,
     exchanges_status_kb, exchange_toggle_kb, exchange_cooldown_kb,
-    exchange_down_kb, back_to_status_kb,
+    exchange_down_kb, back_to_status_kb, display_settings_kb,
 )
 from config.banks import BANK_NAMES, DEFAULT_BANK_CODES
 
@@ -196,7 +197,10 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
             (message.from_user.id,)
         )
         await conn.commit()
-
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть, яку саме статистику ви хочете переглянути:"
+    # Відправляємо нову стартову клавіатуру
     text, is_active = await _generate_dashboard_text(message.from_user.id)
     await message.answer(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(message.from_user.id)))
 
@@ -277,10 +281,10 @@ async def cmd_active(message: Message) -> None:
             # 🔄 Re-fetch LLM verdicts from DB (можуть бути оновлені після створення алерту)
             fresh = copy(a)
             if _db:
-                b_rec, _, b_reason = await _db.get_trade_recommendation_full(
+                b_rec, _, b_reason, _ = await _db.get_trade_recommendation_full(
                     a.buy_order.exchange, a.buy_order.merchant_id
                 )
-                s_rec, _, s_reason = await _db.get_trade_recommendation_full(
+                s_rec, _, s_reason, _ = await _db.get_trade_recommendation_full(
                     a.sell_order.exchange, a.sell_order.merchant_id
                 )
                 fresh.buy_rec = b_rec
@@ -1176,112 +1180,115 @@ async def on_balance_button(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "menu:stats")
-async def on_stats_button(call: CallbackQuery) -> None:
-    if not _db:
-        with suppress(TelegramBadRequest):
-            await call.message.edit_text("❌ БД не підключена.", reply_markup=back_to_main_kb())
-        return await call.answer()
-
-    from core.analytics.stats_engine import StatsEngine
-    stats = StatsEngine(_db)
-    text = await stats.format_stats_message(period_days=30)
-
-    # Додаємо підказку про деталі
-    text += "\n\n👇 *Оберіть розділ для деталей:*"
-
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=stats_overview_kb(), parse_mode="Markdown")
-    await call.answer()
-
-
-# ─── DRILL-DOWN: Детальна статистика ─────────────────────────────────
-
-@router.callback_query(F.data == "stats:daily")
-async def on_stats_daily(call: CallbackQuery) -> None:
+async def on_stats_menu(call: CallbackQuery) -> None:
+    """Кнопка '📈 Статистика' з головного меню → 1-й рівень (вибір джерела)."""
     if not _db:
         return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_daily_report(period_days=30)
+    text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть, яку саме статистику ви хочете переглянути:"
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+        await call.message.edit_text(text, reply_markup=keyboards.stats_source_kb(), parse_mode="HTML")
     await call.answer()
 
 
-@router.callback_query(F.data == "stats:exchanges")
-async def on_stats_exchanges(call: CallbackQuery) -> None:
+@router.callback_query(F.data.startswith("stats:"))
+async def on_stats_callback(call: CallbackQuery):
+    """Універсальний роутер для всіх кнопок статистики."""
+    # Відповідаємо Telegram ПЕРШИМ — без цього кнопка вічно крутиться незалежно від результату
+    await call.answer()
+
     if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
+        return
+
+    parts = call.data.split(":")
+    action = parts[1]   # main | menu | daily | exchanges | heatmap | routes
+    source = parts[2] if len(parts) > 2 else "my"  # my | scanner
+
     from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_exchanges_report(period_days=30)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
+    engine = StatsEngine(_db)
 
+    try:
+        if action == "main":
+            text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть джерело даних:"
+            await call.message.edit_text(text, reply_markup=keyboards.stats_source_kb(), parse_mode="HTML")
 
-@router.callback_query(F.data == "stats:banks")
-async def on_stats_banks(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_banks_report(period_days=30)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
+        elif action == "menu":
+            if source == "my":
+                summary = await engine.get_summary(30)
+                text = (
+                    f"💼 <b>Моя статистика (За 30 днів)</b>\n\n"
+                    f"📈 Успішних угод: <b>{summary.get('total_trades', 0)}</b>\n"
+                    f"💰 Зароблено: <b>{summary.get('total_profit', 0):.2f} ₴</b>\n"
+                    f"📉 Середній профіт: <b>{summary.get('avg_profit', 0):.2f} ₴</b>\n"
+                    f"🏆 Найкращий день: <b>{summary.get('best_day', 'N/A')}</b>"
+                )
+            else:
+                props = await engine.get_proposals_summary(7)
+                text = (
+                    f"📡 <b>Аналітика ринку (За 7 днів)</b>\n\n"
+                    f"🎯 Знайдено спредів: <b>{props.get('total', 0)}</b>\n"
+                    f"📤 Надіслано алертів: <b>{props.get('sent', 0)}</b>\n"
+                    f"📈 Середній спред: <b>{props.get('avg_spread', 0):.2f}%</b>\n"
+                    f"🔝 Макс. спред: <b>{props.get('max_spread', 0):.2f}%</b>"
+                )
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
 
+        elif action == "daily":
+            if source == "my":
+                data = await engine.get_profit_by_day(14)
+                body = "\n".join(
+                    f"▫️ {d['date']}: <b>+{d['profit']:.0f} ₴</b> ({d['trades']} угод)"
+                    for d in data
+                ) if data else "Немає даних."
+                text = "📅 <b>Мій профіт по днях (14д):</b>\n\n" + body
+            else:
+                text = await engine.format_proposals_report(14)
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
 
-@router.callback_query(F.data == "stats:heatmap")
-async def on_stats_heatmap(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_heatmap_report(period_days=14)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
+        elif action == "exchanges":
+            if source == "my":
+                data = await engine.get_top_exchanges(30)
+                body = "\n".join(
+                    f"🥇 {d.get('exchange', '?')}: <b>{d.get('volume_uah', 0):.0f} ₴</b> ({d.get('trades', 0)} угод)"
+                    for d in data
+                ) if data else "Немає даних."
+                text = "🏦 <b>Мої топ біржі (За 30д):</b>\n\n" + body
+            else:
+                data = await engine.get_proposals_top_exchanges(14)
+                body = "\n".join(
+                    f"🔸 {d['exchange']}: <b>{d['count']} спредів</b> (avg {d['avg_spread']:.2f}%)"
+                    for d in data
+                ) if data else "Немає даних."
+                text = "🏦 <b>Топ бірж сканера (За 14д):</b>\n\n" + body
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
 
+        elif action == "heatmap":
+            heatmap_data = (
+                await engine.get_my_hourly_heatmap(30)
+                if source == "my"
+                else await engine.get_proposals_hourly_heatmap(14)
+            )
+            DAYS = {"1": "Пн", "2": "Вт", "3": "Ср", "4": "Чт", "5": "Пт", "6": "Сб", "0": "Нд"}
+            title = "Мої угоди" if source == "my" else "Ринок"
+            lines = [f"🔥 <b>Теплова карта ({title}):</b>\n"]
+            for d_idx, d_name in DAYS.items():
+                hours = heatmap_data.get(d_idx, {})
+                active = [f"{h}:00({c})" for h, c in sorted(hours.items()) if c > 0]
+                if active:
+                    lines.append(f"📅 <b>{d_name}:</b> " + ", ".join(active[:4]) + ("..." if len(active) > 4 else ""))
+            text = "\n".join(lines) if len(lines) > 1 else "📭 Недостатньо даних для теплової карти."
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
 
-@router.callback_query(F.data == "stats:weekly")
-async def on_stats_weekly(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_weekly_report(period_days=30)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
+        elif action == "routes":
+            if source == "my":
+                text = "🗺 <b>Мої маршрути:</b>\n\n<i>Функція в розробці. Для маршрутів сканера — оберіть «Аналітику ринку».</i>"
+            else:
+                text = await engine.format_proposals_routes(14)
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
 
-
-@router.callback_query(F.data == "stats:history")
-async def on_stats_history(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_history_report(limit=15)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
-
-
-@router.callback_query(F.data == "stats:proposals")
-async def on_stats_proposals(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_proposals_report(period_days=7)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
-
-
-@router.callback_query(F.data == "stats:routes")
-async def on_stats_routes(call: CallbackQuery) -> None:
-    if not _db:
-        return await call.answer("❌ БД не підключена.", show_alert=True)
-    from core.analytics.stats_engine import StatsEngine
-    text = await StatsEngine(_db).format_proposals_routes(period_days=7)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
-    await call.answer()
+    except TelegramBadRequest:
+        pass  # Повідомлення не змінилось — ігноруємо
+    except Exception as e:
+        logger.error("on_stats_callback [%s/%s]: %s", action, source, e, exc_info=True)
 
 
 @router.callback_query(F.data == "menu:sessions")
@@ -1569,36 +1576,81 @@ async def on_mute(call: CallbackQuery) -> None:
         )
     await call.answer(f"🔕 Пауза на {hours:.0f} год")
 
-# ── Вижимка AI (toggle) ───────────────────────────────────────────────────
+# ── Налаштування виводу (display settings menu + toggles) ──────────────────
 
-@router.callback_query(F.data == "set:llm_summary")
-async def on_toggle_llm_summary(call: CallbackQuery) -> None:
-    """Перемикає показ вижимки LLM (reason) в алерті."""
+_DISPLAY_LABELS = {
+    "show_ai_terms_summary": "🔘 Вижимка умов (AI)",
+    "show_full_terms":       "🔘 Повні умови (спойлер)",
+    "show_ai_logic":         "🔘 Логіка AI (спойлер)",
+    "show_bank_details":     "🔘 Деталі банків (спойлер)",
+    "show_llm_summary":      "🔘 Вердикт AI в алерті",
+}
+
+_DISPLAY_DESCRIPTIONS = {
+    "show_ai_terms_summary": "ШІ генерує коротку вижимку умов мерчанта (ключові вимоги, нюанси). Показується прямо в тілі повідомлення.",
+    "show_full_terms":       "Сирий текст умов мерчанта ховається під спойлер. Завжди можна розгорнути і прочитати оригінал.",
+    "show_ai_logic":         "Думки нейромережі (reason) ховаються під розгортання. Якщо вимкнено — лише бейдж (✅/⚡/🚫).",
+    "show_bank_details":     "Деталі банків, фільтрів та варіантів зв'язки показуються у спойлері.",
+    "show_llm_summary":      "Повний блок вердикту AI (рекомендація + причина) показується в алерті.",
+}
+
+
+@router.callback_query(F.data == "set:display_menu")
+async def on_display_menu(call: CallbackQuery) -> None:
+    """Показує меню налаштувань виводу повідомлень."""
     if not _db:
         return await call.answer("БД не підключена", show_alert=True)
+    display = await _db.get_user_display_settings(call.message.chat.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🖥 <b>Налаштування виводу повідомлень</b>\n\n"
+            "Обери, що показувати в алертах.\n"
+            "✅ = увімкнено, ❌ = вимкнено\n\n"
+            "<i>Налаштування зберігаються індивідуально.</i>",
+            reply_markup=display_settings_kb(display),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("disp:toggle:"))
+async def on_display_toggle(call: CallbackQuery) -> None:
+    """Перемикає одне з налаштувань виводу."""
+    if not _db:
+        return await call.answer("БД не підключена", show_alert=True)
+
+    key = call.data.split(":", 2)[2]  # e.g. "show_ai_terms_summary"
+    valid_keys = {"show_ai_terms_summary", "show_full_terms", "show_ai_logic", "show_bank_details", "show_llm_summary"}
+    if key not in valid_keys:
+        return await call.answer("Невідома опція", show_alert=True)
+
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        "SELECT COALESCE(show_llm_summary, 1) FROM scanner_users WHERE user_id=?",
+        f"SELECT COALESCE({key}, 1) FROM scanner_users WHERE user_id=?",
         (call.from_user.id,)
     ) as cur:
         row = await cur.fetchone()
     current = int(row[0]) if row else 1
     new_val = 0 if current else 1
     await conn.execute(
-        "UPDATE scanner_users SET show_llm_summary = ? WHERE user_id = ?",
+        f"UPDATE scanner_users SET {key} = ? WHERE user_id = ?",
         (new_val, call.from_user.id),
     )
     await conn.commit()
-    label = "увімкнено ✅" if new_val else "вимкнено ❌"
+
+    label = _DISPLAY_LABELS.get(key, key)
+    status = "увімкнено ✅" if new_val else "вимкнено ❌"
+
+    # Перечитуємо всі налаштування і оновлюємо клавіатуру
+    display = await _db.get_user_display_settings(call.message.chat.id)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"🧠 <b>Вижимка AI в алерті: {label}</b>\n\n"
-            "Якщо увімкнено — в алерті під вердиктом AI буде\n"
-            "коротка вижимка: що перевірено, стан відгуків, висновок.\n\n"
-            "Якщо вимкнено — лише бейдж (✅/⚡/🚫).",
-            reply_markup=back_to_main_kb(),
+            "🖥 <b>Налаштування виводу повідомлень</b>\n\n"
+            f"{label}: <b>{status}</b>\n"
+            f"<i>{_DISPLAY_DESCRIPTIONS.get(key, '')}</i>\n\n"
+            "✅ = увімкнено, ❌ = вимкнено",
+            reply_markup=display_settings_kb(display),
         )
-    await call.answer(f"🧠 Вижимка AI: {label}")
+    await call.answer(f"{label}: {status}")
 
 # ── Фільтри мерчантів ─────────────────────────────────────────────────────
 _MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet"]
@@ -2300,14 +2352,12 @@ async def on_single_leg_confirm(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Command("stats"))
 async def cmd_stats(message: Message) -> None:
+    """Вхід у статистику через команду /stats (1-й рівень)"""
     if not _db:
         return await message.answer("❌ БД не підключена.")
 
-    from core.analytics.stats_engine import StatsEngine
-    stats = StatsEngine(_db)
-    text = await stats.format_stats_message(period_days=30)
-    text += "\n\n👇 *Оберіть розділ для деталей:*"
-    await message.answer(text, parse_mode="Markdown", reply_markup=stats_overview_kb())
+    text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть джерело даних:"
+    await message.answer(text, reply_markup=keyboards.stats_source_kb(), parse_mode="HTML")
 
 
 # =========================================================================
@@ -2348,4 +2398,3 @@ async def cmd_sessions(message: Message) -> None:
         )
 
     await message.answer("\n".join(lines))
-

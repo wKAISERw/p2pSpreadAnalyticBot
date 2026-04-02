@@ -67,6 +67,8 @@ class SpreadAlert:
     sell_rec: str = "PENDING"
     buy_reason: str = ""
     sell_reason: str = ""
+    buy_terms_summary: str = ""
+    sell_terms_summary: str = ""
     timestamp: datetime = None
 
     def __post_init__(self):
@@ -91,16 +93,58 @@ REC_LABELS = {
 }
 
 
-def _llm_verdict_block(label: str, rec: str, reason: str) -> str:
-    """Форматує вердикт AI для buy/sell мерчанта з короткою вижимкою."""
+def _llm_verdict_block(
+    label: str, rec: str, reason: str,
+    terms_summary: str = "",        # залишаємо для сумісності — тепер у _terms_block
+    show_ai_logic: bool = True,
+    show_ai_terms_summary: bool = True,  # залишаємо для сумісності
+) -> str:
+    """Форматує вердикт AI для buy/sell мерчанта (лише вердикт + логіка)."""
     rec_upper = (rec or "PENDING").upper()
     rec_text = REC_LABELS.get(rec_upper, f"🔍 {rec_upper}")
     line = f"🧠 <b>{label}:</b> {rec_text}\n"
-    # Показуємо стислу вижимку від ЛЛМ (reason) — умови + відгуки
-    if reason and rec_upper != "PENDING":
-        safe_reason = escape(str(reason).strip()[:200])
+
+    # 🔘 Логіка AI (reason під спойлером)
+    if show_ai_logic and reason and rec_upper != "PENDING":
+        safe_reason = escape(str(reason).strip()[:300])
         line += f"<blockquote expandable>💬 {safe_reason}</blockquote>\n"
     return line
+
+
+def _terms_block(
+    terms_raw: str,
+    terms_summary: str = "",
+    show_ai_terms_summary: bool = True,
+    show_full_terms: bool = True,
+) -> str:
+    """
+    Розділ «📋 Умови» між ризиками та вердиктом LLM.
+    Весь контент — в одному <blockquote expandable>.
+
+    Конфігурація (що потрапляє всередину blockquote):
+      🔘 show_ai_terms_summary: AI вижимка 1-2 речення (коротко, основне)
+      🔘 show_full_terms:       повний raw текст умов мерчанта
+
+    Комбінації:
+      обидва True  → вижимка + роздільник + повний текст в одному спойлері
+      тільки вижимка → тільки AI summary в спойлері
+      тільки повні   → тільки raw текст в спойлері
+      обидва False   → розділ «Умови» не показується взагалі
+    """
+    has_summary = show_ai_terms_summary and bool(terms_summary and str(terms_summary).strip())
+    has_full    = show_full_terms and bool(terms_raw and str(terms_raw).strip())
+    if not has_summary and not has_full:
+        return ""
+
+    # Заголовок завжди один, але кожен блок — окремий expandable blockquote
+    block = "📋 <b>Умови</b>\n"
+    if has_summary:
+        safe_s = escape(str(terms_summary).strip()[:250])
+        block += f"<blockquote expandable>🤖 {safe_s}</blockquote>\n"
+    if has_full:
+        safe_t = escape(str(terms_raw).strip()[:500])
+        block += f"<blockquote expandable>📝 {safe_t}</blockquote>\n"
+    return block
 
 def _format_bank_list(codes: list[str] | None) -> str:
     if not codes:
@@ -364,23 +408,12 @@ def _risk_badge(order: Order, short: bool = False) -> str:
 
     result = "".join(lines)
 
-    # ── Спойлер-блок: деталі під тапом (reasons + стата + відгуки + умови) ──
+    # ── Спойлер-блок: тільки уривок умов (якщо ризиковий тип) ──
     if not short:
         spoiler_parts: list[str] = []
 
-        # 1. LLM reason (причина вердикту) — повна, без обрізання (в expandable blockquote)
-        if reasons:
-            uniq = []
-            seen = set()
-            for r in reasons:
-                r = (r or "").strip()
-                if r and r not in seen:
-                    seen.add(r)
-                    uniq.append(r)  # без обрізання — знаходиться в expandable blockquote
-            for r in uniq[:2]:
-                spoiler_parts.append(f"💬 {escape(r)}")
-
-        # 2. Умови мерчанта (якщо ризиковий тип)
+        # Умови мерчанта (якщо ризиковий тип — короткий уривок прямо під ризиком)
+        # Повний текст і AI-вижимка — в окремому розділі _terms_block() нижче в повідомленні
         trade_terms = getattr(order, "trade_terms", "")
         if detected_risk_types & show_text_cats and trade_terms:
             safe = trade_terms.replace("\n", " ")[:100]
@@ -437,20 +470,26 @@ class TelegramNotifier:
         bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor)
         # ← більше нічого не треба
 
-    async def _get_user_show_llm_summary(self, chat_id: int) -> bool:
-        """Перевіряє чи юзер хоче бачити вижимку AI в алерті."""
+    async def _get_display_settings(self, chat_id: int) -> dict:
+        """Повертає per-user налаштування виводу повідомлень."""
         if not self._db:
-            return True  # default: показувати
+            return {
+                "show_ai_terms_summary": True,
+                "show_full_terms": True,
+                "show_ai_logic": True,
+                "show_bank_details": True,
+                "show_llm_summary": True,
+            }
         try:
-            conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
-            async with conn.execute(
-                "SELECT COALESCE(show_llm_summary, 1) FROM scanner_users WHERE telegram_chat_id=?",
-                (chat_id,)
-            ) as cur:
-                row = await cur.fetchone()
-            return bool(row[0]) if row else True
+            return await self._db.get_user_display_settings(chat_id)
         except Exception:
-            return True
+            return {
+                "show_ai_terms_summary": True,
+                "show_full_terms": True,
+                "show_ai_logic": True,
+                "show_bank_details": True,
+                "show_llm_summary": True,
+            }
 
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
         """
@@ -459,8 +498,8 @@ class TelegramNotifier:
         Повністю concurrency-safe: кожен виклик незалежний.
         """
         try:
-            show_llm = await self._get_user_show_llm_summary(chat_id)
-            await self._send_single(alert, chat_id=chat_id, show_llm_summary=show_llm)
+            display = await self._get_display_settings(chat_id)
+            await self._send_single(alert, chat_id=chat_id, display_settings=display)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
 
@@ -603,20 +642,28 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, show_llm_summary: bool = True) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None) -> None:
+        # Display settings (per-user)
+        ds = display_settings or {
+            "show_ai_terms_summary": True, "show_full_terms": True,
+            "show_ai_logic": True, "show_bank_details": True, "show_llm_summary": True,
+        }
+
         # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
         if self._db:
             try:
-                b_rec, _, b_reason = await self._db.get_trade_recommendation_full(
+                b_rec, _, b_reason, b_terms = await self._db.get_trade_recommendation_full(
                     alert.buy_order.exchange, alert.buy_order.merchant_id
                 )
-                s_rec, _, s_reason = await self._db.get_trade_recommendation_full(
+                s_rec, _, s_reason, s_terms = await self._db.get_trade_recommendation_full(
                     alert.sell_order.exchange, alert.sell_order.merchant_id
                 )
                 alert.buy_rec = b_rec
                 alert.sell_rec = s_rec
                 alert.buy_reason = b_reason
                 alert.sell_reason = s_reason
+                alert.buy_terms_summary = b_terms
+                alert.sell_terms_summary = s_terms
             except Exception:
                 pass  # fallback: використовуємо значення з алерту
 
@@ -659,14 +706,24 @@ class TelegramNotifier:
         sell_name = escape(alert.sell_order.merchant_name or alert.sell_order.merchant_id or "Unknown")
         sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
 
-        # 🧠 LLM Verdict блоки (повна вижимка або тільки бейдж)
-        if show_llm_summary:
-            buy_llm = _llm_verdict_block("Buy", alert.buy_rec, alert.buy_reason)
-            sell_llm = _llm_verdict_block("Sell", alert.sell_rec, alert.sell_reason)
+        # 🧠 LLM Verdict блоки (конфігуровані per-user)
+        if ds.get("show_llm_summary", True):
+            buy_llm = _llm_verdict_block(
+                "Buy", alert.buy_rec, alert.buy_reason,
+                terms_summary=alert.buy_terms_summary,
+                show_ai_logic=ds.get("show_ai_logic", True),
+                show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+            )
+            sell_llm = _llm_verdict_block(
+                "Sell", alert.sell_rec, alert.sell_reason,
+                terms_summary=alert.sell_terms_summary,
+                show_ai_logic=ds.get("show_ai_logic", True),
+                show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+            )
         else:
-            # Тільки бейдж без expandable reason
-            buy_llm = _llm_verdict_block("Buy", alert.buy_rec, "")
-            sell_llm = _llm_verdict_block("Sell", alert.sell_rec, "")
+            # Тільки бейдж без деталей
+            buy_llm = _llm_verdict_block("Buy", alert.buy_rec, "", show_ai_logic=False, show_ai_terms_summary=False)
+            sell_llm = _llm_verdict_block("Sell", alert.sell_rec, "", show_ai_logic=False, show_ai_terms_summary=False)
 
         # 🚀 Блок D: Мережі переказу
         buy_ex = alert.buy_order.exchange
@@ -687,15 +744,23 @@ class TelegramNotifier:
             f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
             f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>"
             f"{net_block_html}\n"
+        )
 
-            f"<blockquote expandable>"
-            f"🏦 Варіанти зв'язки: {route_variants}\n"
-            f"🛒 Buy банки: {buy_all}\n"
-            f"✅ Buy фільтр: {buy_fit}\n"
-            f"💸 Sell банки: {sell_all}\n"
-            f"✅ Sell фільтр: {sell_fit}"
-            f"</blockquote>\n"
+        # 🔘 Деталі банків (під спойлером, конфігуровано)
+        if ds.get("show_bank_details", True):
+            text += (
+                f"<blockquote expandable>"
+                f"🏦 Варіанти зв'язки: {route_variants}\n"
+                f"🛒 Buy банки: {buy_all}\n"
+                f"✅ Buy фільтр: {buy_fit}\n"
+                f"💸 Sell банки: {sell_all}\n"
+                f"✅ Sell фільтр: {sell_fit}"
+                f"</blockquote>\n"
+            )
 
+        # ── КУПУЄМО ──
+        buy_terms_raw = getattr(alert.buy_order, "trade_terms", "") or ""
+        text += (
             f"🛒 <b>КУПУЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
             f"Мерчант: {buy_name_str} "
@@ -703,8 +768,21 @@ class TelegramNotifier:
             f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
             f"{buy_risk if buy_risk else ''}"
             f"{buy_warn if buy_warn else ''}"
-            f"\n{buy_llm}\n"
+        )
+        # 🔘 Окремий розділ умов (AI-вижимка + повний текст під спойлером)
+        buy_terms_blk = _terms_block(
+            buy_terms_raw,
+            terms_summary=alert.buy_terms_summary,
+            show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+            show_full_terms=ds.get("show_full_terms", True),
+        )
+        if buy_terms_blk:
+            text += buy_terms_blk
+        text += f"\n{buy_llm}\n"
 
+        # ── ПРОДАЄМО ──
+        sell_terms_raw = getattr(alert.sell_order, "trade_terms", "") or ""
+        text += (
             f"💸 <b>ПРОДАЄМО</b>\n"
             f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
             f"Мерчант: {sell_name_str} "
@@ -712,8 +790,17 @@ class TelegramNotifier:
             f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
             f"{sell_risk if sell_risk else ''}"
             f"{sell_warn if sell_warn else ''}"
-            f"\n{sell_llm}"
         )
+        # 🔘 Окремий розділ умов (AI-вижимка + повний текст під спойлером)
+        sell_terms_blk = _terms_block(
+            sell_terms_raw,
+            terms_summary=alert.sell_terms_summary,
+            show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+            show_full_terms=ds.get("show_full_terms", True),
+        )
+        if sell_terms_blk:
+            text += sell_terms_blk
+        text += f"\n{sell_llm}"
 
         # 🚀 НОВІ ІНТЕРАКТИВНІ КНОПКИ
         kb = []

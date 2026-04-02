@@ -143,41 +143,76 @@ class StatsEngine:
             logger.error("get_weekly_comparison: %s", e)
             return {}
 
-    async def get_summary(self, period_days: int = 30, owner_user_id: int = 0) -> dict:
-        """
-        Загальна статистика.
-        → {"total_trades": 45, "total_profit": 1250.00, "avg_profit": 27.78, "best_day": "2026-04-01"}
-        """
-        if not self._db._db:
-            return {}
-        try:
-            query = """
-                SELECT
-                    COUNT(*) as total_trades,
-                    COALESCE(SUM(gross_profit), 0) as total_profit,
-                    COALESCE(AVG(gross_profit), 0) as avg_profit,
-                    (SELECT DATE(completed_at) FROM trade_sessions
-                     WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)
-                     GROUP BY DATE(completed_at) ORDER BY SUM(gross_profit) DESC LIMIT 1
-                    ) as best_day
-                FROM trade_sessions
-                WHERE session_status = 'COMPLETED'
-                  AND completed_at >= datetime('now', ?)
-            """
-            async with self._db._db.execute(query, (f"-{period_days} days", f"-{period_days} days")) as cur:
-                row = await cur.fetchone()
+    async def get_summary(self, period_days: int = 30) -> dict:
+        """Особиста статистика (Мої угоди)."""
+        if not getattr(self._db, "_db", None): return {}
 
-            if not row:
-                return {}
-            return {
-                "total_trades": row["total_trades"],
-                "total_profit": round(row["total_profit"], 2),
-                "avg_profit": round(row["avg_profit"], 2),
-                "best_day": row["best_day"] or "N/A",
-            }
-        except Exception as e:
-            logger.error("get_summary: %s", e)
-            return {}
+        async with self._db._db.execute(
+                """SELECT COUNT(*), SUM(gross_profit), AVG(gross_profit)
+                   FROM trade_sessions
+                   WHERE session_status = 'COMPLETED'
+                     AND completed_at >= datetime('now', ?)""",
+                (f"-{period_days} days",)
+        ) as cur:
+            row = await cur.fetchone()
+
+        # Найкращий день
+        async with self._db._db.execute(
+                """SELECT DATE (completed_at) as d, SUM (gross_profit) as p
+                   FROM trade_sessions
+                   WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)
+                   GROUP BY d
+                   ORDER BY p DESC LIMIT 1""",
+                (f"-{period_days} days",)
+        ) as cur:
+            best_day = await cur.fetchone()
+
+        return {
+            "total_trades": row[0] if row else 0,
+            "total_profit": row[1] if row and row[1] else 0.0,
+            "avg_profit": row[2] if row and row[2] else 0.0,
+            "best_day": best_day[0] if best_day else "N/A"
+        }
+
+    async def get_proposals_summary(self, period_days: int = 7) -> dict:
+        """Статистика знайдених сканером спредів (Аналітика ринку)."""
+        if not getattr(self._db, "_db", None): return {}
+
+        try:
+            # Якщо є колонка was_sent, рахуємо її теж
+            query = """
+                    SELECT COUNT(*)                                      as total,
+                           SUM(CASE WHEN was_sent = 1 THEN 1 ELSE 0 END) as sent,
+                           AVG(spread_pct)                               as avg_spread,
+                           MAX(spread_pct)                               as max_spread
+                    FROM scanner_proposals
+                    WHERE created_at >= datetime('now', ?) \
+                    """
+            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+                row = await cur.fetchone()
+                return {
+                    "total": row[0] if row else 0,
+                    "sent": row[1] if row else 0,
+                    "avg_spread": row[2] if row and row[2] else 0.0,
+                    "max_spread": row[3] if row and row[3] else 0.0
+                }
+        except Exception:
+            # Fallback, якщо колонки was_sent ще немає в таблиці
+            query = """
+                    SELECT COUNT(*)        as total,
+                           AVG(spread_pct) as avg_spread,
+                           MAX(spread_pct) as max_spread
+                    FROM scanner_proposals
+                    WHERE created_at >= datetime('now', ?) \
+                    """
+            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+                row = await cur.fetchone()
+                return {
+                    "total": row[0] if row else 0,
+                    "sent": 0,
+                    "avg_spread": row[1] if row and row[1] else 0.0,
+                    "max_spread": row[2] if row and row[2] else 0.0
+                }
 
     # ─── Форматування для Telegram ──────────────────────────────────────
 
@@ -605,3 +640,57 @@ class StatsEngine:
 
         return "\n".join(lines)
 
+    async def get_proposals_top_exchanges(self, period_days: int = 14) -> list[dict]:
+        """Топ бірж, які сканер знаходив найчастіше."""
+        if not getattr(self._db, "_db", None): return []
+        async with self._db._db.execute(
+                """
+                SELECT buy_exchange as exchange, COUNT(*) as count, AVG(spread_pct) as avg_spread
+                FROM scanner_proposals
+                WHERE created_at >= datetime('now', ?)
+                GROUP BY buy_exchange
+                ORDER BY count DESC LIMIT 5
+                """, (f"-{period_days} days",)
+        ) as cur:
+            rows = await cur.fetchall()
+            return [{"exchange": r[0], "count": r[1], "avg_spread": r[2]} for r in rows]
+
+    async def get_proposals_hourly_heatmap(self, period_days: int = 14) -> dict:
+        """Теплова карта активності ринку (коли з'являються спреди)."""
+        if not getattr(self._db, "_db", None): return {}
+        async with self._db._db.execute(
+                """
+                SELECT strftime('%w', created_at) as weekday,
+                       strftime('%H', created_at) as hour,
+                   COUNT(*) as count
+                FROM scanner_proposals
+                WHERE created_at >= datetime('now', ?)
+                GROUP BY weekday, hour
+                """, (f"-{period_days} days",)
+        ) as cur:
+            rows = await cur.fetchall()
+
+        heatmap = {str(d): {f"{h:02d}": 0 for h in range(24)} for d in range(7)}
+        for r in rows:
+            heatmap[r[0]][r[1]] = r[2]
+        return heatmap
+
+    async def get_my_hourly_heatmap(self, period_days: int = 30) -> dict:
+        """Теплова карта МОЇХ успішних угод."""
+        if not getattr(self._db, "_db", None): return {}
+        async with self._db._db.execute(
+                """
+                SELECT strftime('%w', completed_at) as weekday,
+                       strftime('%H', completed_at) as hour,
+                   COUNT(*) as count
+                FROM trade_sessions
+                WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)
+                GROUP BY weekday, hour
+                """, (f"-{period_days} days",)
+        ) as cur:
+            rows = await cur.fetchall()
+
+        heatmap = {str(d): {f"{h:02d}": 0 for h in range(24)} for d in range(7)}
+        for r in rows:
+            heatmap[r[0]][r[1]] = r[2]
+        return heatmap

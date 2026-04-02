@@ -65,7 +65,7 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📊 Фільтри мерчантів", callback_data="set:merchant_filters"),
     )
     builder.row(
-        InlineKeyboardButton(text="🧠 Вижимка AI в алерті", callback_data="set:llm_summary"),
+        InlineKeyboardButton(text="🖥 Налаштування виводу", callback_data="set:display_menu"),
     )
     builder.row(
         InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="user:alerts:on"),
@@ -88,6 +88,40 @@ def keys_menu_kb(has_keys: bool = False) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main")
     )
+    return builder.as_markup()
+
+
+def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
+    """
+    Меню налаштувань виводу повідомлень (per-user).
+    current: dict з bool-ключами show_ai_terms_summary, show_full_terms, show_ai_logic, show_bank_details, show_llm_summary
+    """
+    builder = InlineKeyboardBuilder()
+
+    def _icon(key: str) -> str:
+        return "✅" if current.get(key, True) else "❌"
+
+    builder.row(InlineKeyboardButton(
+        text=f"{_icon('show_ai_terms_summary')} Вижимка умов (AI)",
+        callback_data="disp:toggle:show_ai_terms_summary",
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"{_icon('show_full_terms')} Повні умови (спойлер)",
+        callback_data="disp:toggle:show_full_terms",
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"{_icon('show_ai_logic')} Логіка AI (спойлер)",
+        callback_data="disp:toggle:show_ai_logic",
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"{_icon('show_bank_details')} Деталі банків (спойлер)",
+        callback_data="disp:toggle:show_bank_details",
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"{_icon('show_llm_summary')} Вердикт AI в алерті",
+        callback_data="disp:toggle:show_llm_summary",
+    ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
     return builder.as_markup()
 
 def back_to_main_kb() -> InlineKeyboardMarkup:
@@ -179,8 +213,27 @@ def stats_overview_kb() -> InlineKeyboardMarkup:
     )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main"))
     return builder.as_markup()
+def stats_source_kb() -> InlineKeyboardMarkup:
+    """Перший рівень: Вибір джерела даних."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💼 Моя статистика (Реальні угоди)", callback_data="stats:menu:my"))
+    builder.row(InlineKeyboardButton(text="📡 Аналітика ринку (Знайдено сканером)", callback_data="stats:menu:scanner"))
+    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
+    return builder.as_markup()
 
-
+def stats_metrics_kb(source: str) -> InlineKeyboardMarkup:
+    """Другий рівень: Вибір метрики (однаковий для обох джерел)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📅 По днях", callback_data=f"stats:daily:{source}"),
+        InlineKeyboardButton(text="🏦 Топ бірж", callback_data=f"stats:exchanges:{source}")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔥 Теплова карта", callback_data=f"stats:heatmap:{source}"),
+        InlineKeyboardButton(text="🗺 Маршрути", callback_data=f"stats:routes:{source}")
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Назад до вибору", callback_data="stats:main:none")) # Повернення на 1-й рівень
+    return builder.as_markup()
 def back_to_stats_kb() -> InlineKeyboardMarkup:
     """Кнопка повернення до зведення статистики."""
     builder = InlineKeyboardBuilder()
