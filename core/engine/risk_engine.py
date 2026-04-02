@@ -685,6 +685,28 @@ class RiskEngine:
                 if not regex_result.risk_type:
                     regex_result.risk_type = "SUSPICIOUS"
 
+            # ── Проактивний скринінг: чистий мерчант без вердикту → LLM ──────
+            # Якщо regex нічого не знайшов і поведінка чиста — це НЕ означає що
+            # мерчант безпечний. LLM має проаналізувати trade_terms + відгуки
+            # і дати явний verdict/trade_recommendation (APPROVE/CONDITIONAL/REJECT).
+            # Без цього блоку мерчант отримує "OK" без перевірки, і trade_recommendation
+            # залишається "PENDING" навічно.
+            if (
+                not regex_result.needs_llm
+                and not behavior_needs_llm
+                and cached_verdict is None
+                and not regex_result.reason
+                and not behavior_flags
+                and self._llm
+            ):
+                logger.debug(
+                    "🛡 Proactive screening → LLM: %s [%s] (no signals, no verdict)",
+                    order.merchant_name, exchange,
+                )
+                regex_result.needs_llm = True
+                regex_result.verdict   = "NEEDS_LLM"
+                regex_result.risk_type = "PROACTIVE"
+
             # ── 5. LLM ──────────────────────────────────────────────────────
             if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
                 trusted = _is_trusted_merchant(order, score)
@@ -694,8 +716,10 @@ class RiskEngine:
                     trusted = False
 
                 # Trusted skip: пропускаємо LLM тільки якщо немає поганих відгуків
+                # і це НЕ проактивний скринінг (перша перевірка — завжди потрібна)
+                is_proactive = regex_result.risk_type == "PROACTIVE"
                 has_review_concern = any("BADREVIEWS" in f for f in review_flags)
-                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE and not has_review_concern:
+                if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE and not has_review_concern and not is_proactive:
                     logger.debug(
                         "✅ Trusted skip: %s [%s] score=%d, no bad reviews",
                         order.merchant_name, exchange, regex_result.score,

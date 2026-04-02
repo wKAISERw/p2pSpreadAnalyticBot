@@ -144,6 +144,20 @@ class ApiKeyPayload(BaseModel):
 async def get_stats():
     return dict_to_camel(jsonable_encoder(state.stats))
 
+@app.get("/api/v1/exchanges")
+async def get_exchanges():
+    """Стан доступності бірж (enabled/disabled/cooldown)."""
+    from core.engine.exchange_manager import exchange_manager
+    return dict_to_camel(jsonable_encoder(exchange_manager.get_status_all()))
+
+@app.get("/api/v1/stats/detailed")
+async def get_detailed_stats(period: int = 30):
+    """Детальна статистика: daily, exchanges, banks, heatmap, weekly."""
+    from core.analytics.stats_engine import StatsEngine
+    engine = StatsEngine(db)
+    data = await engine.get_full_stats(period_days=period)
+    return dict_to_camel(jsonable_encoder(data))
+
 @app.get("/api/v1/opportunities")
 async def get_opportunities():
     return dict_to_camel(jsonable_encoder(state.opportunities))

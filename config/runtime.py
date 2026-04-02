@@ -19,6 +19,7 @@ ALLOWED_KEYS = frozenset({
     "review_ttl_hours",
     "max_alerts_per_cycle",
     "is_scanner_active",
+    "disabled_exchanges",
 })
 
 

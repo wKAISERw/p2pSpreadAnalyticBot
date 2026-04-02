@@ -15,6 +15,8 @@ from config import settings
 from bot import commands as bot_commands
 from exchanges.base import Order
 from core.storage.merchant_db import MerchantDB
+from core.engine.network_fee_engine import NetworkFeeEngine
+from core.analytics.merchant_profile import build_profile_url
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +119,7 @@ def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
     if not merchant_id:
         return safe_name
 
-    links = {
-        "Binance": f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}",
-        "Bybit": f"https://www.bybit.com/fiat/trade/otc/profile/{merchant_id}",
-        "OKX": f"https://www.okx.com/p2p/profile/{merchant_id}",
-        "MEXC": f"https://www.mexc.com/uk-UA/p2p/merchant/{merchant_id}",
-    }
-    url = links.get(exchange)
+    url = build_profile_url(exchange, merchant_id, merchant_name)
     if url:
         return f'<a href="{escape(url, quote=True)}">{safe_name}</a>'
     return f"<b>{safe_name}</b>"
@@ -216,6 +212,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "NO_COMMENTS": "БЕЗ КОМЕНТІВ", "THIRD_PARTY_HINT": "3-ТІ ОСОБИ",
         "BEHAVIOR": "ПОВЕДІНКА", "SUSPICIOUS": "ПІДОЗРА", "BOT_API": "БОТ",
         "EXACT_LIMITS": "ФІКС.ЛІМІТИ", "NARROW_SPREAD": "ВУЗЬКИЙ ДІАПАЗОН",
+        "PROACTIVE": "СКРИНІНГ",
     }
 
     # Категорії, для яких обов'язково показувати уривок умов
@@ -432,9 +429,9 @@ class TelegramNotifier:
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
 
-    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None) -> None:
+    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None) -> None:
         """Оновлює змінні модуля. Router вже підключений в __init__."""
-        bot_commands.setup(db, account_clients, trade_worker, notifier=self)
+        bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor)
         # ← більше нічого не треба
 
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
@@ -500,6 +497,9 @@ class TelegramNotifier:
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),
             BotCommand(command="disconnect", description="❌ Відключити біржу"),
+            BotCommand(command="stats", description="📊 Статистика торгівлі"),
+            BotCommand(command="sessions", description="🩺 Стан auth-сесій"),
+            BotCommand(command="trades", description="📋 Активні торгові сесії"),
             BotCommand(command="status", description="📊 Системний статус сканера"),
             BotCommand(command="settings", description="⚙️ Глобальні налаштування"),
             BotCommand(command="ban", description="🚫 Ручний бан мерчанта"),
@@ -644,6 +644,15 @@ class TelegramNotifier:
         buy_llm = _llm_verdict_block("Buy", alert.buy_rec, alert.buy_reason)
         sell_llm = _llm_verdict_block("Sell", alert.sell_rec, alert.sell_reason)
 
+        # 🚀 Блок D: Мережі переказу
+        buy_ex = alert.buy_order.exchange
+        sell_ex = alert.sell_order.exchange
+        if buy_ex != sell_ex:
+            net_block = NetworkFeeEngine.format_for_alert(buy_ex, sell_ex)
+            net_block_html = "\n" + escape(net_block) + "\n"
+        else:
+            net_block_html = ""
+
         text = (
             f"{title}\n\n"
             f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
@@ -652,7 +661,8 @@ class TelegramNotifier:
             f"{b_icon}{escape(alert.buy_order.exchange)} → "
             f"{s_icon}{escape(alert.sell_order.exchange)}\n"
             f"⏱ {alert.timestamp.strftime('%H:%M:%S')}\n"
-            f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>\n\n"
+            f"📈 Спред: <b>{alert.spread_pct:.2f}%</b>"
+            f"{net_block_html}\n"
 
             f"<blockquote expandable>"
             f"🏦 Варіанти зв'язки: {route_variants}\n"
@@ -682,14 +692,9 @@ class TelegramNotifier:
         )
 
         # 🚀 НОВІ ІНТЕРАКТИВНІ КНОПКИ
-        kb = [
-            [
-                InlineKeyboardButton(text="🛒 Купити", url=alert.buy_order.link or "https://google.com"),
-                InlineKeyboardButton(text="💸 Продати", url=alert.sell_order.link or "https://google.com"),
-            ]
-        ]
+        kb = []
 
-        # 🚀 ІНТЕГРАЦІЯ АВТО-ТРЕЙДУ
+        # 🚀 Блок A: Single-Leg кнопки "Купити" / "Продати"
         b_ad = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
         s_ad = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
 
@@ -700,10 +705,65 @@ class TelegramNotifier:
             # 🚀 ФІКС: Зберігаємо алерт разом із міткою часу для TTL
             bot_commands._spread_cache[cache_key] = (alert, time.time())
 
-            kb.insert(0, [
+            kb.append([
                 InlineKeyboardButton(text=f"⚡ Авто-Трейд (T→T) {alert.spread_pct:.2f}%",
                                      callback_data=f"trade:tt:{cache_key}")
             ])
+
+        # Кнопки Single-Leg (незалежні від пари)
+        single_leg_row = []
+        if b_ad and alert.buy_rec != "REJECT":
+            buy_bank = alert.buy_bank or ""
+            # Telegram callback_data max 64 bytes — скорочуємо
+            sl_buy_key = f"{b_ad[:10]}|{alert.buy_order.exchange[:3]}|{buy_bank[:4]}"
+            bot_commands._single_leg_cache[f"b:{sl_buy_key}"] = {
+                "ad_id": str(b_ad), "exchange": alert.buy_order.exchange,
+                "price": float(alert.buy_order.price),
+                "merchant_id": alert.buy_order.merchant_id,
+                "min_limit": float(alert.buy_order.min_limit),
+                "max_limit": float(alert.buy_order.max_limit),
+                "bank": buy_bank, "ts": time.time(),
+            }
+            single_leg_row.append(
+                InlineKeyboardButton(
+                    text=f"🛒 Купити ({alert.buy_order.exchange})",
+                    callback_data=f"sl:b:{sl_buy_key}"
+                )
+            )
+        if s_ad and alert.sell_rec != "REJECT":
+            sell_bank = alert.sell_bank or ""
+            sl_sell_key = f"{s_ad[:10]}|{alert.sell_order.exchange[:3]}|{sell_bank[:4]}"
+            bot_commands._single_leg_cache[f"s:{sl_sell_key}"] = {
+                "ad_id": str(s_ad), "exchange": alert.sell_order.exchange,
+                "price": float(alert.sell_order.price),
+                "merchant_id": alert.sell_order.merchant_id,
+                "min_limit": float(alert.sell_order.min_limit),
+                "max_limit": float(alert.sell_order.max_limit),
+                "bank": sell_bank, "ts": time.time(),
+            }
+            single_leg_row.append(
+                InlineKeyboardButton(
+                    text=f"💸 Продати ({alert.sell_order.exchange})",
+                    callback_data=f"sl:s:{sl_sell_key}"
+                )
+            )
+        if single_leg_row:
+            kb.append(single_leg_row)
+
+        # URL-кнопки (відкрити на біржі)
+        url_row = []
+        buy_url = getattr(alert.buy_order, "link", "") or build_profile_url(
+            alert.buy_order.exchange, alert.buy_order.merchant_id
+        )
+        sell_url = getattr(alert.sell_order, "link", "") or build_profile_url(
+            alert.sell_order.exchange, alert.sell_order.merchant_id
+        )
+        if buy_url:
+            url_row.append(InlineKeyboardButton(text="🔗 Buy на біржі", url=buy_url))
+        if sell_url:
+            url_row.append(InlineKeyboardButton(text="🔗 Sell на біржі", url=sell_url))
+        if url_row:
+            kb.append(url_row)
 
         b_mid = alert.buy_order.merchant_id
         if b_mid:

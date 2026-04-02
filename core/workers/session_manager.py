@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 from playwright.async_api import async_playwright, Request
 from playwright_stealth import Stealth  # 🚀 ДОДАНО ДЛЯ МАСКУВАННЯ
 
@@ -30,27 +30,54 @@ TARGETS = {
     }
 }
 
+# ─── Блок C: TTL сесій (секунди) ──────────────────────────────────────────
+SESSION_TTL = {
+    "Bybit":   72 * 3600,    # ~3 дні
+    "Binance": 120 * 3600,   # ~5 днів
+    "OKX":     96 * 3600,    # ~4 дні
+}
+
+# За скільки секунд до закінчення TTL надсилати попередження
+SESSION_WARNING_BEFORE = 2 * 3600  # 2 години
+
+# Інтервал перевірки health (секунди)
+HEALTH_CHECK_INTERVAL = 30 * 60  # 30 хв
+
 
 class SessionManager:
     def __init__(self, db: MerchantDB):
         self._db = db
         self._worker_task: Optional[asyncio.Task] = None
+        self._health_task: Optional[asyncio.Task] = None
+        # Callback для сповіщень (підключається з notifier)
+        self._notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        # Трекінг вже надісланих попереджень (щоб не спамити)
+        self._warned_sessions: set[str] = set()
+        self._expired_sessions: set[str] = set()
+
+    def set_notify_callback(self, callback: Callable[[str], Awaitable[None]]) -> None:
+        """Встановлює callback для TG-сповіщень (async fn(message))."""
+        self._notify_callback = callback
 
     async def start(self) -> None:
         if self._worker_task and not self._worker_task.done():
             logger.debug("SessionManager вже запущено.")
             return
         self._worker_task = asyncio.create_task(self._worker_loop(), name="session-manager")
+        self._health_task = asyncio.create_task(self._health_check_loop(), name="session-health")
         logger.info("🤖 SessionManager запущено (Фоновий збір браузерних сесій з маскуванням)")
+        logger.info("🩺 Session Health Monitor запущено (інтервал=%dхв)", HEALTH_CHECK_INTERVAL // 60)
 
     async def stop(self) -> None:
-        if self._worker_task:
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except asyncio.CancelledError:
-                pass
-            self._worker_task = None
+        for task in [self._worker_task, self._health_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._worker_task = None
+        self._health_task = None
         logger.info("SessionManager зупинено")
 
     async def _worker_loop(self):
@@ -168,3 +195,126 @@ class SessionManager:
                 f"👉 Запусти вручну 'python scripts/session_interceptor.py' для відновлення логіну {exchange}.")
         except Exception as e:
             logger.error(f"❌ SessionManager помилка для {exchange}: {e}")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Блок C: Session Health Monitor
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def _health_check_loop(self):
+        """
+        Фоновий цикл перевірки живості сесій:
+        - Перевіряє вік кожної сесії vs SESSION_TTL
+        - За 2 години до закінчення → TG-попередження
+        - Після закінчення → TG-повідомлення "протухла"
+        - Bybit auto-refresh: легкий API запит для продовження
+        """
+        await asyncio.sleep(30)  # Даємо системі прогрітися
+
+        while True:
+            try:
+                await self._check_all_sessions()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"❌ Session Health Check помилка: {e}", exc_info=True)
+
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+
+    async def _check_all_sessions(self):
+        """Перевіряє всі активні сесії та їхні TTL."""
+        sessions = await self._db.get_all_auth_sessions()
+
+        for session in sessions:
+            exchange = session.get("exchange", "")
+            user_id = session.get("user_id", 0)
+            updated_at = float(session.get("updated_at", 0))
+            is_active = session.get("is_active", 1)
+
+            if not is_active or not exchange:
+                continue
+
+            ttl = SESSION_TTL.get(exchange, 96 * 3600)  # fallback 4 дні
+            age = time.time() - updated_at
+            remaining = ttl - age
+            session_key = f"{user_id}:{exchange}"
+
+            # Bybit auto-refresh: спробувати продовжити сесію легким запитом
+            if exchange == "Bybit" and 0 < remaining < SESSION_WARNING_BEFORE:
+                refreshed = await self._try_bybit_refresh(user_id)
+                if refreshed:
+                    # Скидаємо попередження
+                    self._warned_sessions.discard(session_key)
+                    self._expired_sessions.discard(session_key)
+                    continue
+
+            # Сесія протухла
+            if remaining <= 0:
+                if session_key not in self._expired_sessions:
+                    self._expired_sessions.add(session_key)
+                    msg = (
+                        f"❌ Сесія {exchange} протухла!\n"
+                        f"Вік: {age / 3600:.1f}г (TTL: {ttl / 3600:.0f}г)\n"
+                        f"Запустіть SessionManager або scripts/session_interceptor.py"
+                    )
+                    logger.warning(msg)
+                    await self._send_notification(msg)
+
+                    # Інвалідуємо сесію в БД
+                    await self._db.invalidate_auth_session(exchange, user_id)
+
+            # Попередження за 2 години до закінчення
+            elif remaining < SESSION_WARNING_BEFORE:
+                if session_key not in self._warned_sessions:
+                    self._warned_sessions.add(session_key)
+                    hours_left = remaining / 3600
+                    msg = (
+                        f"⚠️ Сесія {exchange} спливає через {hours_left:.1f} години!\n"
+                        f"Вік: {age / 3600:.1f}г з {ttl / 3600:.0f}г"
+                    )
+                    logger.warning(msg)
+                    await self._send_notification(msg)
+
+            else:
+                # Сесія OK — скидаємо трекери
+                self._warned_sessions.discard(session_key)
+                self._expired_sessions.discard(session_key)
+
+    async def _try_bybit_refresh(self, user_id: int = 0) -> bool:
+        """
+        Bybit auto-refresh: робимо легкий API запит (get_pending_orders).
+        Якщо OK — оновлюємо updated_at в auth_sessions.
+        """
+        try:
+            from infrastructure.http.bybit_p2p_client import BybitP2PClient
+
+            creds = await self._db.get_credentials("Bybit", user_id)
+            if not creds:
+                return False
+
+            client = BybitP2PClient()
+            client.set_credentials(creds.get("api_key", ""), creds.get("api_secret", ""))
+
+            # Легкий запит — якщо проходить, сесія жива
+            orders = await client.get_pending_orders()
+            # orders може бути [] — це нормально (немає активних ордерів)
+
+            # Оновлюємо updated_at — сесія продовжена
+            headers, cookies, _ = await self._db.get_auth_session("Bybit", user_id)
+            if headers or cookies:
+                await self._db.save_auth_session("Bybit", headers, cookies, user_id)
+                logger.info(f"🔄 Bybit сесія авто-оновлена через API ping (user_id={user_id})")
+                return True
+
+            return False
+        except Exception as e:
+            logger.debug(f"Bybit auto-refresh failed: {e}")
+            return False
+
+    async def _send_notification(self, message: str) -> None:
+        """Відправляє сповіщення через callback (якщо встановлено)."""
+        if self._notify_callback:
+            try:
+                await self._notify_callback(message)
+            except Exception as e:
+                logger.error(f"Session health notification error: {e}")
+

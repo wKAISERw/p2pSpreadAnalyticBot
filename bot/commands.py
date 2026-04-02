@@ -28,6 +28,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 from config import settings
 _trade_worker = None
+_single_leg_executor = None
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -41,6 +42,9 @@ from bot.keyboards import (
     main_menu_kb, settings_menu_kb, keys_menu_kb,
     back_to_main_kb, global_settings_kb, back_to_settings_kb,
     banks_selection_kb, back_to_keys_kb, exchange_connect_kb,
+    stats_overview_kb, back_to_stats_kb,
+    exchanges_status_kb, exchange_toggle_kb, exchange_cooldown_kb,
+    exchange_down_kb, back_to_status_kb,
 )
 from config.banks import BANK_NAMES, DEFAULT_BANK_CODES
 
@@ -79,6 +83,10 @@ class GlobalSettingStates(StatesGroup):
 class MerchantFilterStates(StatesGroup):
     waiting_min_orders = State()
     waiting_min_rate   = State()
+
+
+class ExchangeCooldownStates(StatesGroup):
+    waiting_hours = State()
 
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
@@ -124,8 +132,8 @@ def is_muted() -> bool:
     return time.monotonic() < _mute_until
 
 
-def setup(db, account_clients: dict, trade_worker=None, notifier=None) -> None:
-    global _db, _account_clients, _trade_worker, _notifier
+def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None) -> None:
+    global _db, _account_clients, _trade_worker, _notifier, _single_leg_executor
     if _trade_worker and trade_worker and _trade_worker is not trade_worker:
         logger.warning("setup(): TradeWorker перезаписується!")
     _db = db
@@ -133,6 +141,8 @@ def setup(db, account_clients: dict, trade_worker=None, notifier=None) -> None:
     _trade_worker = trade_worker
     if notifier is not None:
         _notifier = notifier
+    if single_leg_executor is not None:
+        _single_leg_executor = single_leg_executor
 
 
 def update_stats(**kwargs) -> None:
@@ -218,6 +228,9 @@ async def cmd_help(message: Message) -> None:
         "<b>/start</b>\nЗапустити персональний сканер.\n\n"
         "<b>/stop</b>\nЗупинити алерти.\n\n"
         "<b>/active</b>\nВсі активні спреди прямо зараз.\n\n"
+        "<b>/stats</b>\nСтатистика торгівлі (прибуток, банки, дні).\n\n"
+        "<b>/sessions</b>\nСтан auth-сесій (TTL, здоров'я).\n\n"
+        "<b>/trades</b>\nАктивні торгові сесії.\n\n"
         "<b>/connect [біржа]</b>\nПідключити персональні API ключі.\n\n"
         "<b>/disconnect</b>\nВідключити біржу.\n\n"
         "<b>/balance</b>\nПоказує баланс на твоїх біржах.\n\n"
@@ -292,7 +305,7 @@ async def cmd_status(message: Message) -> None:
     # 🚀 ФІКС: Перевіряємо ОСОБИСТІ ключі юзера з БД
     my_creds = await _db.get_all_credentials(user_id=message.from_user.id)
     connected = []
-    for ex in ["Binance", "Bybit", "OKX", "MEXC"]:
+    for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]:
         if ex in my_creds:
             connected.append(f"✅ {ex}")
         else:
@@ -319,7 +332,8 @@ async def cmd_status(message: Message) -> None:
     llm_q = _scanner_stats.get("llm_queue", 0)
     rev_q = _scanner_stats.get("review_queue", 0)
     cb_st = _scanner_stats.get("cb_status", {})
-    cb_lines = [f"  {'🟢' if v == 'CLOSED' else '🔴'} {k}: {v}" for k, v in cb_st.items()]
+    _cb_icons = {"CLOSED": "🟢", "OPEN": "🔴", "HALF_OPEN": "🟡", "DISABLED": "⏸"}
+    cb_lines = [f"  {_cb_icons.get(v, '⚪')} {k}: {v}" for k, v in cb_st.items()]
     import time as _t
     mute_left = max(0, _mute_until - _t.monotonic())
     mute_line = f"\n🔕 Пауза: <b>{mute_left/3600:.1f} год</b>" if mute_left > 0 else ""
@@ -405,7 +419,7 @@ async def cmd_keys(message: Message) -> None:
 
 
 # ── /connect & /disconnect ─────────────────────────────────────────────────
-SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC"]
+SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]
 
 
 @router.message(Command("connect"))
@@ -420,8 +434,16 @@ async def cmd_connect(message: Message, state: FSMContext) -> None:
 async def on_connect_exchange(call: CallbackQuery, state: FSMContext) -> None:
     exchange = call.data.split(":")[1]
     await state.update_data(exchange=exchange)
-    await state.set_state(ConnectStates.waiting_api_key)
-    await call.message.edit_text(f"🔑 <b>Підключення {exchange}</b>\n\nВведи API Key:")
+    if exchange == "Wallet":
+        await state.set_state(ConnectStates.waiting_api_key)
+        await call.message.edit_text(
+            f"🔑 <b>Підключення {exchange}</b>\n\n"
+            f"Введи <b>X-API-Key</b> від Wallet P2P:\n"
+            f"<i>(Отримати: @wallet → P2P → Settings → API)</i>"
+        )
+    else:
+        await state.set_state(ConnectStates.waiting_api_key)
+        await call.message.edit_text(f"🔑 <b>Підключення {exchange}</b>\n\nВведи API Key:")
     await call.answer()
 
 
@@ -431,6 +453,14 @@ async def on_api_key(message: Message, state: FSMContext) -> None:
     with suppress(Exception): await message.delete()
     if len(api_key) < 10:
         return await message.answer("❌ API Key занадто короткий. Спробуй ще раз:")
+    data = await state.get_data()
+    exchange = data.get("exchange", "")
+
+    # Wallet: тільки API Key, без Secret
+    if exchange == "Wallet":
+        await _save_credentials(message, state, exchange, api_key, api_secret="", passphrase="")
+        return
+
     await state.update_data(api_key=api_key)
     await state.set_state(ConnectStates.waiting_api_secret)
     await message.answer("✅ API Key отримано.\n\nТепер введи <b>Secret Key</b>:")
@@ -764,10 +794,312 @@ async def on_scanner_toggle(call: CallbackQuery) -> None:
     await runtime_config.set("is_scanner_active", new_state)
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        # 🚀 ВИПРАВЛЕНО: Додано _is_admin(call.from_user.id)
         await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     action = "ЗАПУЩЕНО! Парсинг почався" if is_active else "ЗУПИНЕНО! Парсинг на паузі"
     await call.answer(f"✅ Сканер {action}!", show_alert=True)
+
+
+# ── menu:status (СТАТУС СИСТЕМИ) ──────────────────────────────────────────
+
+async def _build_status_text(user_id: int) -> str:
+    """Формує текст статусу системи (аналог /status, але для inline callback)."""
+    from core.engine.exchange_manager import exchange_manager
+
+    connected = []
+    if _db:
+        my_creds = await _db.get_all_credentials(user_id=user_id)
+        for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]:
+            connected.append(f"✅ {ex}" if ex in my_creds else f"❌ {ex}")
+    else:
+        connected = ["❌ БД недоступна"]
+
+    _my_capital = settings.working_capital_uah
+    _my_spread = settings.min_spread_pct
+    _my_min_amount = 0.0
+    if _db:
+        active_users = await _db.get_active_users()
+        for u in active_users:
+            if u["user_id"] == user_id:
+                _my_capital = float(u["capital"])
+                _my_spread = float(u["min_spread"])
+                _my_min_amount = float(u.get("min_amount", 0.0))
+                break
+
+    risk = runtime_config.get("risk_mode", settings.risk_mode)
+    min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
+
+    llm_q = _scanner_stats.get("llm_queue", 0)
+    rev_q = _scanner_stats.get("review_queue", 0)
+    cb_st = _scanner_stats.get("cb_status", {})
+
+    import time as _t
+    mute_left = max(0, _mute_until - _t.monotonic())
+    mute_line = f"\n🔕 Пауза: <b>{mute_left / 3600:.1f} год</b>" if mute_left > 0 else ""
+
+    # Біржі: стан з exchange_manager
+    ex_lines = []
+    for name, cb_state_val in cb_st.items():
+        if cb_state_val == "DISABLED":
+            st_list = exchange_manager.get_status_all()
+            st_info = next((s for s in st_list if s["name"] == name), None)
+            if st_info and st_info.get("cooldown_remaining_h", 0) > 0:
+                ex_lines.append(f"  ⏱ {name}: COOLDOWN ({st_info['cooldown_remaining_h']:.1f}г)")
+            else:
+                ex_lines.append(f"  🔴 {name}: ВИМКНЕНО")
+        elif cb_state_val == "CLOSED":
+            ex_lines.append(f"  🟢 {name}: OK")
+        elif cb_state_val == "OPEN":
+            ex_lines.append(f"  🔴 {name}: CB OPEN")
+        elif cb_state_val == "HALF_OPEN":
+            ex_lines.append(f"  🟡 {name}: ВІДНОВЛЕННЯ")
+        else:
+            ex_lines.append(f"  ⚪ {name}: {cb_state_val}")
+
+    text = (
+        "📊 <b>Стан системи</b>\n\n"
+        f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
+        f"🔄 Циклів: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
+        f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
+        f"{mute_line}\n\n"
+        f"💼 Капітал: <code>{_my_capital} ₴</code>\n"
+        f"📉 Спред: <code>{_my_spread}%</code>"
+        f"{min_amount_line}\n"
+        f"🛡 Ризик: <code>{risk}</code>\n\n"
+        "🔌 <b>API:</b>\n" + "\n".join(connected) + "\n\n"
+        "⚡ <b>Біржі:</b>\n" + "\n".join(ex_lines)
+    )
+    return text
+
+
+def _status_kb() -> InlineKeyboardMarkup:
+    """Клавіатура статусу з кнопкою управління біржами."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🔌 Управління біржами", callback_data="exch:list"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main"),
+    )
+    return builder.as_markup()
+
+
+@router.callback_query(F.data == "menu:status")
+async def on_status_menu(call: CallbackQuery, state: FSMContext) -> None:
+    """Показує статус системи з кнопкою управління біржами."""
+    await state.clear()
+    text = await _build_status_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=_status_kb())
+    await call.answer()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Exchange Management — Telegram обробники
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "exch:list")
+async def on_exchange_list(call: CallbackQuery) -> None:
+    """Список всіх бірж з їхнім статусом."""
+    from core.engine.exchange_manager import exchange_manager
+    statuses = exchange_manager.get_status_all()
+    text = "🔌 <b>Управління біржами</b>\n\n<i>Тисни на біржу для керування:</i>"
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=exchanges_status_kb(statuses))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("exch:toggle_menu:"))
+async def on_exchange_toggle_menu(call: CallbackQuery) -> None:
+    """Меню конкретної біржі."""
+    from core.engine.exchange_manager import exchange_manager
+    name = call.data.split(":")[2]
+    statuses = exchange_manager.get_status_all()
+    st = next((s for s in statuses if s["name"] == name), None)
+    if not st:
+        await call.answer("Біржу не знайдено", show_alert=True)
+        return
+
+    if st["enabled"]:
+        text = f"🟢 <b>{name}</b> — активна\n\nОберіть дію:"
+    else:
+        reason = st.get("disabled_reason", "")
+        remaining = st.get("cooldown_remaining_h", 0)
+        text = f"🔴 <b>{name}</b> — вимкнена"
+        if reason:
+            text += f"\nПричина: {reason}"
+        if remaining > 0:
+            text += f"\n⏱ Автоввімкнення через: {remaining:.1f} год"
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            text,
+            reply_markup=exchange_toggle_kb(name, st["enabled"], st.get("is_cooldown", False)),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("exch:disable:"))
+async def on_exchange_disable(call: CallbackQuery) -> None:
+    """Повністю вимикає біржу (до ручного ввімкнення)."""
+    from core.engine.exchange_manager import exchange_manager
+    name = call.data.split(":")[2]
+    await exchange_manager.disable(name, reason="manual", runtime_config=runtime_config)
+    await call.answer(f"🔴 {name} вимкнено!", show_alert=True)
+    # Повертаємо до списку бірж
+    statuses = exchange_manager.get_status_all()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"🔴 <b>{name}</b> вимкнено до ручного ввімкнення.",
+            reply_markup=exchanges_status_kb(statuses),
+        )
+
+
+@router.callback_query(F.data.startswith("exch:enable:"))
+async def on_exchange_enable(call: CallbackQuery) -> None:
+    """Вмикає біржу."""
+    from core.engine.exchange_manager import exchange_manager
+    name = call.data.split(":")[2]
+    await exchange_manager.enable(name, runtime_config=runtime_config)
+    await call.answer(f"🟢 {name} ввімкнено!", show_alert=True)
+    statuses = exchange_manager.get_status_all()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"🟢 <b>{name}</b> ввімкнено і повернено в пошук.",
+            reply_markup=exchanges_status_kb(statuses),
+        )
+
+
+@router.callback_query(F.data.startswith("exch:cooldown_pick:"))
+async def on_exchange_cooldown_pick(call: CallbackQuery) -> None:
+    """Показує вибір часу cooldown."""
+    name = call.data.split(":")[2]
+    text = f"⏱ <b>Cooldown для {name}</b>\n\nОберіть на скільки вимкнути:"
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=exchange_cooldown_kb(name))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("exch:cooldown:"))
+async def on_exchange_cooldown(call: CallbackQuery) -> None:
+    """Вимикає біржу з cooldown на N годин."""
+    from core.engine.exchange_manager import exchange_manager
+    parts = call.data.split(":")
+    name = parts[2]
+    hours = float(parts[3])
+    await exchange_manager.disable(
+        name, reason=f"cooldown {hours:.0f}г",
+        cooldown_hours=hours, runtime_config=runtime_config,
+    )
+
+    labels = {1: "1 годину", 2: "2 години", 3: "3 години", 4: "4 години",
+              6: "6 годин", 8: "8 годин", 12: "12 годин",
+              24: "1 день", 48: "2 дні", 168: "1 тиждень"}
+    label = labels.get(int(hours), f"{hours:.0f} годин")
+
+    await call.answer(f"⏱ {name} вимкнено на {label}", show_alert=True)
+    statuses = exchange_manager.get_status_all()
+    st = next((s for s in statuses if s["name"] == name), {})
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⏱ <b>{name}</b> вимкнено на <b>{label}</b>\n"
+            f"Автоматично ввімкнеться через {st.get('cooldown_remaining_h', hours):.1f} год.\n\n"
+            f"Можеш увімкнути достроково нижче 👇",
+            reply_markup=exchange_toggle_kb(name, is_enabled=False, is_cooldown=True),
+        )
+
+
+@router.callback_query(F.data.startswith("exch:cooldown_custom:"))
+async def on_exchange_cooldown_custom(call: CallbackQuery, state: FSMContext) -> None:
+    """Запитує ввід кількості годин вручну."""
+    name = call.data.split(":")[2]
+    await state.set_state(ExchangeCooldownStates.waiting_hours)
+    await state.update_data(exchange_name=name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⌨️ <b>Введіть кількість годин</b> для cooldown {name}:\n\n"
+            f"Наприклад: <code>5</code> або <code>72</code>",
+            reply_markup=back_to_status_kb(),
+        )
+    await call.answer()
+
+
+@router.message(ExchangeCooldownStates.waiting_hours)
+async def on_exchange_cooldown_hours_input(message: Message, state: FSMContext) -> None:
+    """Обробляє ввід годин для cooldown."""
+    from core.engine.exchange_manager import exchange_manager
+    data = await state.get_data()
+    name = data.get("exchange_name", "")
+    try:
+        hours = float(message.text.strip().replace(",", "."))
+        if hours <= 0 or hours > 720:  # макс 30 днів
+            await message.answer("⚠️ Введіть число від 1 до 720 (годин)")
+            return
+    except (ValueError, TypeError):
+        await message.answer("⚠️ Введіть число (наприклад: 5)")
+        return
+
+    await state.clear()
+    await exchange_manager.disable(
+        name, reason=f"cooldown {hours:.0f}г",
+        cooldown_hours=hours, runtime_config=runtime_config,
+    )
+    statuses = exchange_manager.get_status_all()
+    await message.answer(
+        f"⏱ <b>{name}</b> вимкнено на <b>{hours:.0f} годин</b>",
+        reply_markup=exchanges_status_kb(statuses),
+    )
+
+
+@router.callback_query(F.data.startswith("exch:healthcheck:"))
+async def on_exchange_healthcheck(call: CallbackQuery) -> None:
+    """Health-check: 3 спроби → ввімкнути або повідомити."""
+    from core.engine.exchange_manager import exchange_manager
+    name = call.data.split(":")[2]
+
+    await call.answer(f"🔍 Перевіряю {name}...", show_alert=False)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(f"🔍 Перевіряю <b>{name}</b>...\n\n⏳ 3 спроби з інтервалом 2с")
+
+    ok, msg = await exchange_manager.health_check(name)
+
+    if ok:
+        await exchange_manager.enable(name, runtime_config=runtime_config)
+        statuses = exchange_manager.get_status_all()
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                f"✅ <b>{name}</b> відповідає! Біржу ввімкнено.",
+                reply_markup=exchanges_status_kb(statuses),
+            )
+    else:
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                f"{msg}\n\n"
+                f"💡 Біржа все ще не відповідає. Залишаємо вимкненою.",
+                reply_markup=exchange_down_kb(name),
+            )
+
+
+@router.callback_query(F.data.startswith("exch:back_to_down:"))
+async def on_back_to_down(call: CallbackQuery) -> None:
+    """Повернення до меню 'біржа впала'."""
+    name = call.data.split(":")[3]
+    text = (
+        f"⚠️ <b>{name} API не відповідає</b>\n\n"
+        f"Оберіть дію:"
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=exchange_down_kb(name))
+    await call.answer()
+
+
+@router.callback_query(F.data == "exch:ignore")
+async def on_exchange_ignore(call: CallbackQuery) -> None:
+    """Ігноруємо проблему — залишаємо як є."""
+    text, is_active = await _generate_dashboard_text(call.from_user.id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+    await call.answer("👌 OK, залишаємо як є")
 
 
 # ── Локальна пауза алертів юзера (не глобальна зупинка ядра) ───────────────
@@ -838,6 +1170,135 @@ async def on_balance_button(call: CallbackQuery) -> None:
     text = await _generate_balance_text(call.from_user.id)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:stats")
+async def on_stats_button(call: CallbackQuery) -> None:
+    if not _db:
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("❌ БД не підключена.", reply_markup=back_to_main_kb())
+        return await call.answer()
+
+    from core.analytics.stats_engine import StatsEngine
+    stats = StatsEngine(_db)
+    text = await stats.format_stats_message(period_days=30)
+
+    # Додаємо підказку про деталі
+    text += "\n\n👇 *Оберіть розділ для деталей:*"
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=stats_overview_kb(), parse_mode="Markdown")
+    await call.answer()
+
+
+# ─── DRILL-DOWN: Детальна статистика ─────────────────────────────────
+
+@router.callback_query(F.data == "stats:daily")
+async def on_stats_daily(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_daily_report(period_days=30)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:exchanges")
+async def on_stats_exchanges(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_exchanges_report(period_days=30)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:banks")
+async def on_stats_banks(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_banks_report(period_days=30)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:heatmap")
+async def on_stats_heatmap(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_heatmap_report(period_days=14)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:weekly")
+async def on_stats_weekly(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_weekly_report(period_days=30)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:history")
+async def on_stats_history(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_history_report(limit=15)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:sessions")
+async def on_sessions_button(call: CallbackQuery) -> None:
+    if not _db:
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("❌ БД не підключена.", reply_markup=back_to_main_kb())
+        return await call.answer()
+
+    from core.workers.session_manager import SESSION_TTL
+    import time as _time
+    sessions = await _db.get_all_auth_sessions()
+
+    if not sessions:
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("📭 Жодних auth-сесій не знайдено.", reply_markup=back_to_main_kb())
+        return await call.answer()
+
+    lines = ["🩺 <b>Auth-сесії:</b>\n"]
+    for s in sessions:
+        exchange = s.get("exchange", "?")
+        updated_at = float(s.get("updated_at", 0))
+        is_active = s.get("is_active", 0)
+        age_h = (_time.time() - updated_at) / 3600 if updated_at else 0
+        ttl_h = SESSION_TTL.get(exchange, 96 * 3600) / 3600
+        remaining_h = ttl_h - age_h
+
+        if not is_active:
+            status = "❌ Протухла"
+        elif remaining_h < 2:
+            status = f"⚠️ Спливає ({remaining_h:.1f}г)"
+        else:
+            status = f"🟢 OK ({remaining_h:.0f}г)"
+
+        lines.append(
+            f"{'🟢' if is_active else '🔴'} <b>{exchange}</b>: {status}\n"
+            f"  Вік: {age_h:.1f}г / TTL: {ttl_h:.0f}г"
+        )
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("\n".join(lines), reply_markup=back_to_main_kb())
     await call.answer()
 
 
@@ -1316,3 +1777,255 @@ async def cmd_trades(message: Message) -> None:
         lines.append(
             f"🔹 <b>#{row['id']}</b> | <code>{row['strategy']}</code> | Статус: <b>{row['session_status']}</b> (Fee: {row['network_fee']}$, Профіт: {row['gross_profit']:.0f} ₴)")
     await message.answer("\n".join(lines))
+
+
+# =========================================================================
+# 🚀 БЛОК A: SINGLE-LEG TRADING (Купити / Продати окремо)
+# =========================================================================
+
+# Кеш для single-leg (cache_key → order data dict)
+_single_leg_cache: dict[str, dict] = {}
+
+
+class SingleLegStates(StatesGroup):
+    waiting_amount = State()
+    waiting_confirm = State()
+
+
+@router.callback_query(F.data.startswith("sl:b:"))
+async def on_single_buy_start(call: CallbackQuery, state: FSMContext) -> None:
+    if not _single_leg_executor:
+        return await call.answer("❌ SingleLegExecutor не підключено!", show_alert=True)
+
+    cache_key = call.data[3:]  # "b:{sl_buy_key}"
+    data = _single_leg_cache.get(cache_key)
+    if not data or time.time() - data.get("ts", 0) > 300:
+        return await call.answer("❌ Алерт застарів (>5 хв).", show_alert=True)
+
+    price = data["price"]
+    min_usdt = data["min_limit"] / price if price > 0 else 0
+    max_usdt = data["max_limit"] / price if price > 0 else 0
+
+    await state.update_data(
+        single_action="BUY",
+        ad_id=data["ad_id"],
+        exchange=data["exchange"],
+        price=price,
+        merchant_id=data["merchant_id"],
+        payment_method=data.get("bank", ""),
+        min_usdt=min_usdt,
+        max_usdt=max_usdt,
+    )
+    await state.set_state(SingleLegStates.waiting_amount)
+
+    text = (
+        f"🛒 <b>Купівля (Single-Leg)</b>\n\n"
+        f"Біржа: <b>{data['exchange']}</b>\n"
+        f"Ціна: <code>{price:.4f}</code> UAH\n"
+        f"Ліміти: <b>{min_usdt:.1f} — {max_usdt:.1f} USDT</b>\n\n"
+        f"👇 Введи суму в <b>USDT</b> (або <code>max</code>):"
+    )
+    await call.message.answer(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("sl:s:"))
+async def on_single_sell_start(call: CallbackQuery, state: FSMContext) -> None:
+    if not _single_leg_executor:
+        return await call.answer("❌ SingleLegExecutor не підключено!", show_alert=True)
+
+    cache_key = call.data[3:]  # "s:{sl_sell_key}"
+    data = _single_leg_cache.get(cache_key)
+    if not data or time.time() - data.get("ts", 0) > 300:
+        return await call.answer("❌ Алерт застарів (>5 хв).", show_alert=True)
+
+    price = data["price"]
+    min_usdt = data["min_limit"] / price if price > 0 else 0
+    max_usdt = data["max_limit"] / price if price > 0 else 0
+
+    await state.update_data(
+        single_action="SELL",
+        ad_id=data["ad_id"],
+        exchange=data["exchange"],
+        price=price,
+        merchant_id=data["merchant_id"],
+        payment_method=data.get("bank", ""),
+        min_usdt=min_usdt,
+        max_usdt=max_usdt,
+    )
+    await state.set_state(SingleLegStates.waiting_amount)
+
+    text = (
+        f"💸 <b>Продаж (Single-Leg)</b>\n\n"
+        f"Біржа: <b>{data['exchange']}</b>\n"
+        f"Ціна: <code>{price:.4f}</code> UAH\n"
+        f"Ліміти: <b>{min_usdt:.1f} — {max_usdt:.1f} USDT</b>\n\n"
+        f"👇 Введи суму в <b>USDT</b> (або <code>max</code>):"
+    )
+    await call.message.answer(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.message(SingleLegStates.waiting_amount)
+async def on_single_leg_amount(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    min_usdt = data.get("min_usdt", 0)
+    max_usdt = data.get("max_usdt", 0)
+    raw = message.text.strip().lower()
+
+    try:
+        amount = max_usdt if raw == "max" else float(raw.replace(",", "."))
+        if not (min_usdt - 0.001 <= amount <= max_usdt + 0.001):
+            raise ValueError
+    except ValueError:
+        return await message.answer(
+            f"❌ Невірна сума. Введи число від <b>{min_usdt:.1f}</b> до <b>{max_usdt:.1f}</b> (або 'max'):"
+        )
+
+    await state.update_data(amount_usdt=amount)
+    await state.set_state(SingleLegStates.waiting_confirm)
+
+    action = data.get("single_action", "BUY")
+    icon = "🛒" if action == "BUY" else "💸"
+    label = "Купівля" if action == "BUY" else "Продаж"
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Підтвердити", callback_data="single:confirm"),
+        InlineKeyboardButton(text="❌ Скасувати", callback_data="single:cancel"),
+    )
+
+    fiat_amount = amount * data.get("price", 0)
+    await message.answer(
+        f"{icon} <b>Підтвердження {label}</b>\n\n"
+        f"Біржа: <b>{data.get('exchange')}</b>\n"
+        f"Об'єм: <code>{amount:.2f} USDT</code> (~{fiat_amount:.0f} ₴)\n"
+        f"Ціна: <code>{data.get('price', 0):.4f}</code>\n\n"
+        f"⚠️ <i>Натисни ✅ для виконання.</i>",
+        reply_markup=builder.as_markup(),
+    )
+
+
+@router.callback_query(F.data.in_({"single:confirm", "single:cancel"}))
+async def on_single_leg_confirm(call: CallbackQuery, state: FSMContext) -> None:
+    if call.data == "single:cancel":
+        await state.clear()
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("🚫 Single-Leg скасовано.", reply_markup=back_to_main_kb())
+        return await call.answer("Скасовано.")
+
+    data = await state.get_data()
+    await state.clear()
+
+    if not _single_leg_executor:
+        return await call.answer("❌ SingleLegExecutor не підключено!", show_alert=True)
+
+    action = data.get("single_action", "BUY")
+    amount_usdt = data.get("amount_usdt", 0)
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⏳ <b>Виконується {action}…</b>\nПеревіряю LLM, створюю ордер.",
+            reply_markup=None,
+        )
+
+    try:
+        if action == "BUY":
+            result = await _single_leg_executor.execute_single_buy(
+                exchange=data.get("exchange", ""),
+                ad_id=data.get("ad_id", ""),
+                price=data.get("price", 0),
+                amount_usdt=amount_usdt,
+                merchant_id=data.get("merchant_id", ""),
+                owner_user_id=call.from_user.id,
+                payment_method=data.get("payment_method", ""),
+            )
+        else:
+            result = await _single_leg_executor.execute_single_sell(
+                exchange=data.get("exchange", ""),
+                ad_id=data.get("ad_id", ""),
+                price=data.get("price", 0),
+                amount_usdt=amount_usdt,
+                merchant_id=data.get("merchant_id", ""),
+                owner_user_id=call.from_user.id,
+                payment_method=data.get("payment_method", ""),
+            )
+
+        if result["success"]:
+            text = (
+                f"✅ <b>{action} виконано!</b>\n"
+                f"Ордер: <code>{result['order_id']}</code>\n"
+                f"Trade ID: #{result['trade_id']}"
+            )
+            if result.get("warning"):
+                text += f"\n\n⚠️ {result['warning']}"
+        else:
+            text = f"❌ <b>Помилка {action}:</b> {result.get('error', 'Unknown')}"
+            if result.get("warning"):
+                text += f"\n\n⚠️ {result['warning']}"
+
+    except Exception as e:
+        logger.error("single_leg confirm error: %s", e, exc_info=True)
+        text = f"❌ <b>Критична помилка:</b> <code>{str(e)[:200]}</code>"
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+# =========================================================================
+# 📊 /stats — Статистика торгівлі
+# =========================================================================
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    from core.analytics.stats_engine import StatsEngine
+    stats = StatsEngine(_db)
+    text = await stats.format_stats_message(period_days=30)
+    text += "\n\n👇 *Оберіть розділ для деталей:*"
+    await message.answer(text, parse_mode="Markdown", reply_markup=stats_overview_kb())
+
+
+# =========================================================================
+# 🩺 /sessions — Стан auth-сесій
+# =========================================================================
+
+@router.message(Command("sessions"))
+async def cmd_sessions(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    from core.workers.session_manager import SESSION_TTL
+    sessions = await _db.get_all_auth_sessions()
+
+    if not sessions:
+        return await message.answer("📭 Жодних auth-сесій не знайдено.")
+
+    lines = ["🩺 <b>Auth-сесії (Browser Sessions):</b>\n"]
+    import time as _time
+    for s in sessions:
+        exchange = s.get("exchange", "?")
+        updated_at = float(s.get("updated_at", 0))
+        is_active = s.get("is_active", 0)
+        age_h = (_time.time() - updated_at) / 3600 if updated_at else 0
+        ttl_h = SESSION_TTL.get(exchange, 96 * 3600) / 3600
+        remaining_h = ttl_h - age_h
+
+        if not is_active:
+            status = "❌ Протухла"
+        elif remaining_h < 2:
+            status = f"⚠️ Спливає ({remaining_h:.1f}г)"
+        else:
+            status = f"🟢 OK ({remaining_h:.0f}г лишилось)"
+
+        lines.append(
+            f"{'🟢' if is_active else '🔴'} <b>{exchange}</b>: {status}\n"
+            f"  Вік: {age_h:.1f}г / TTL: {ttl_h:.0f}г"
+        )
+
+    await message.answer("\n".join(lines))
+
+

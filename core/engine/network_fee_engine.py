@@ -147,3 +147,37 @@ class NetworkFeeEngine:
         """
         canonical = _normalize_network(network)
         return NETWORK_FEES.get(canonical, 999.0)
+
+    @staticmethod
+    def format_for_alert(source_exchange: str, dest_exchange: str) -> str:
+        """
+        Блок D: Форматований блок мереж для Telegram-алерту.
+
+        Приклад виводу:
+            🏆 Мережа: TON (0.01 USDT)
+            💱 Інші мережі:
+            ├ SOL — 0.01 USDT
+            ├ BEP20 — 0.10 USDT
+            ├ TRC20 — 1.00 USDT
+            └ ERC20 — 15.00 USDT
+        """
+        if source_exchange == dest_exchange:
+            return "🏆 Мережа: INTRA (0.00 USDT) — внутрішній переказ"
+
+        all_options = NetworkFeeEngine.get_all_options(source_exchange, dest_exchange)
+        if not all_options:
+            return "⚠️ Немає спільних мереж для переказу"
+
+        best_net, best_fee = all_options[0]
+        lines = [f"🏆 Мережа: {best_net} ({best_fee:.2f} USDT)"]
+
+        others = all_options[1:]
+        if others:
+            lines.append("")
+            lines.append("💱 Інші мережі:")
+            for i, (net, fee) in enumerate(others):
+                prefix = "└" if i == len(others) - 1 else "├"
+                lines.append(f"{prefix} {net} — {fee:.2f} USDT")
+
+        return "\n".join(lines)
+

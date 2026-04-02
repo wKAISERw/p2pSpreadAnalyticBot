@@ -18,6 +18,7 @@ from bot.notifier import TelegramNotifier, SpreadAlert
 from core.engine.cross_matcher import CrossMatchingEngine
 from core.engine.risk_engine import RiskEngine
 from core.engine.stability import SpreadStabilityFilter
+from core.engine.exchange_manager import exchange_manager
 from core.storage.merchant_db import MerchantDB
 from core.utils.circuit_breaker import CircuitBreaker
 from core.utils.dedup_cache import TTLCache
@@ -195,6 +196,7 @@ def _bind_http_credentials(
         b_client: BybitP2PClient,
         bn_client: BinanceClient,
         o_client: OkxClient,
+        w_client: WalletClient = None,
 ) -> None:
     """Прив'язує ті самі credentials до HTTP клієнтів (для ReviewFetcher)."""
     if "Bybit" in creds:
@@ -206,6 +208,8 @@ def _bind_http_credentials(
             creds["OKX"]["api_key"], creds["OKX"]["api_secret"],
             creds["OKX"].get("passphrase", ""),
         )
+    if "Wallet" in creds and w_client:
+        w_client.set_credentials(creds["Wallet"]["api_key"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -265,8 +269,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     from core.engine.trade_worker import TradeWorker
     trade_worker = TradeWorker(merchant_db)
 
+    # 🚀 Блок A: Single-Leg Executor
+    from core.engine.single_leg_executor import SingleLegExecutor
+    single_leg_executor = SingleLegExecutor(merchant_db)
+
     notifier.bind_db(merchant_db)
-    notifier.bind_commands(merchant_db, account_clients.as_dict(), trade_worker)
+    notifier.bind_commands(merchant_db, account_clients.as_dict(), trade_worker, single_leg_executor)
 
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
@@ -278,7 +286,36 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     await review_fetcher.start()
     # 🚀 ДОДАНО: Запуск фонового менеджера сесій
     session_manager = SessionManager(merchant_db)
+
+    # 🚀 Блок C: Підключаємо TG-сповіщення для session health
+    async def _session_notify(msg: str) -> None:
+        try:
+            await notifier._send_with_retry(msg)
+        except Exception as e:
+            logger.error("Session notify error: %s", e)
+
+    session_manager.set_notify_callback(_session_notify)
     await session_manager.start()
+
+    # 🚀 ExchangeManager — управління доступністю бірж
+    await exchange_manager.load_from_config(runtime_config)
+
+    async def _exchange_down_notify(exchange_name: str) -> None:
+        """Сповіщення юзеру коли біржа впала (CircuitBreaker → OPEN)."""
+        try:
+            from bot.keyboards import exchange_down_kb
+            text = (
+                f"⚠️ <b>{exchange_name} API не відповідає!</b>\n\n"
+                f"CircuitBreaker спрацював — біржа тимчасово недоступна.\n"
+                f"Поки вона в пошуку — сканер гальмує на таймаутах.\n\n"
+                f"💡 <b>Рекомендація:</b> вимкнути біржу з пошуку"
+            )
+            kb = exchange_down_kb(exchange_name)
+            await notifier._send_with_retry(text, keyboard=kb)
+        except Exception as e:
+            logger.error("Exchange notify error: %s", e)
+
+    exchange_manager.set_notify_callback(_exchange_down_notify)
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
@@ -326,7 +363,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             MexcClient() as m_client,
         ):
             # Прив'язуємо credentials до HTTP клієнтів
-            _bind_http_credentials(all_creds, b_client, bn_client, o_client)
+            _bind_http_credentials(all_creds, b_client, bn_client, o_client, w_client)
             review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client, mexc=m_client)
 
             cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
@@ -353,20 +390,52 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             await cb_userbot.start()
 
             async def safe_fetch(cfg: dict, amounts: list, banks: list):
-                timeout = 3.0 if cfg["name"] == "Wallet" else 7.0
+                name = cfg["name"]
+
+                # 🚀 Пропускаємо вимкнені біржі — нульовий overhead
+                if not exchange_manager.is_enabled(name):
+                    return ([], [])
+
+                timeout = 3.0 if name == "Wallet" else 7.0
                 try:
-                    return await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         cfg["cb"].call(cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)),
                         timeout=timeout,
                     )
+                    exchange_manager.reset_failures(name)
+                    return result
                 except asyncio.TimeoutError:
-                    logger.warning("🐌 %s занадто довго відповідає!", cfg["name"])
+                    logger.warning("🐌 %s занадто довго відповідає!", name)
                     cfg["cb"].record_failure()
                     raise
                 except Exception as e:
-                    if type(e).__name__ == "CircuitBreakerOpenException":
-                        logger.warning("📉 Degraded Mode: %s ВІДКЛЮЧЕНА", cfg["name"])
+                    if "Circuit is OPEN" in str(e):
+                        logger.warning("📉 Degraded Mode: %s ВІДКЛЮЧЕНА", name)
+                        # Сповіщуємо юзера з пропозицією вимкнути
+                        asyncio.create_task(
+                            exchange_manager.on_circuit_open(name, runtime_config)
+                        )
                     raise
+
+            # Health-check функція для ExchangeManager
+            async def _health_check(exchange_name: str) -> bool:
+                """Пробний запит до біржі — повертає True якщо відповідає."""
+                cfg_map = {c["name"]: c for c in ex_configs}
+                cfg = cfg_map.get(exchange_name)
+                if not cfg:
+                    return False
+                try:
+                    result = await asyncio.wait_for(
+                        cfg["instance"].fetch_both_multi(
+                            amounts=[1000.0], banks=list(target_banks.keys())
+                        ),
+                        timeout=5.0,
+                    )
+                    return bool(result and (result[0] or result[1]))
+                except Exception:
+                    return False
+
+            exchange_manager.set_health_check(_health_check)
 
             # ── Головний цикл ──────────────────────────────────────────────
             _runtime_last_load: float = 0.0
@@ -471,7 +540,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         llm_queue=llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0,
                         review_queue=review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0,
                         cb_status={
-                            cfg["name"]: cfg["cb"].state.value
+                            cfg["name"]: "DISABLED" if not exchange_manager.is_enabled(cfg["name"])
+                            else cfg["cb"].state.value
                             for cfg in ex_configs
                         },
                     )
@@ -490,10 +560,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     current_cycle_alerts = []
                     # ----------------------------
 
+                    active_ex_count = sum(
+                        1 for cfg in ex_configs if exchange_manager.is_enabled(cfg["name"])
+                    )
                     logger.info(
                         "🔄 Цикл: %.2fs | Бірж: %d | Маршрутів: %d | Сирих: %d | Згруповано: %d",
-                        latency, len(ex_configs),
-                        len(ex_configs) * len(target_banks),
+                        latency, active_ex_count,
+                        active_ex_count * len(target_banks),
                         len(raw_opportunities), len(opportunities),
                     )
 

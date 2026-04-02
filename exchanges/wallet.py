@@ -55,27 +55,24 @@ class WalletExchange(BaseExchange):
             "pageSize": 50
         }
 
-        try:
-            data = await self.client.fetch(self.url, payload)
+        # НЕ ловимо RuntimeError — нехай підніметься до CircuitBreaker
+        data = await self.client.fetch(self.url, payload)
 
-            if data.get("status") != "SUCCESS":
-                logger.error("Wallet API error: %s", data)
-                return []
-
-            items = data.get("data", [])
-            orders = []
-            for item in items:
-                try:
-                    order = self._parse_order(item)
-                    if not banks or any(b.lower() in [pb.lower() for pb in order.bank_codes] for b in banks):
-                        orders.append(order)
-                except Exception as e:
-                    logger.warning("Не вдалося розпарсити Wallet ордер: %s", e)
-            return orders
-
-        except Exception as e:
-            logger.error("Помилка Wallet (side=%s): %s", side, e)
+        if data.get("status") != "SUCCESS":
+            logger.error("Wallet API error: %s", data)
             return []
+
+        items = data.get("data", [])
+        orders = []
+        for item in items:
+            try:
+                order = self._parse_order(item)
+                if not banks or any(b.lower() in [pb.lower() for pb in order.bank_codes] for b in banks):
+                    orders.append(order)
+            except Exception as e:
+                logger.warning("Не вдалося розпарсити Wallet ордер: %s", e)
+        return orders
+
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
         return await self._fetch_orders("SELL", banks)
@@ -84,8 +81,20 @@ class WalletExchange(BaseExchange):
         return await self._fetch_orders("BUY", banks)
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
-        buy_orders, sell_orders = await asyncio.gather(
+        results = await asyncio.gather(
             self.get_buy_orders(0, banks),
             self.get_sell_orders(0, banks),
+            return_exceptions=True,
         )
+        buy_orders = results[0] if not isinstance(results[0], Exception) else []
+        sell_orders = results[1] if not isinstance(results[1], Exception) else []
+
+        # Якщо обидві сторони впали — прокидаємо помилку до CircuitBreaker
+        if isinstance(results[0], Exception) and isinstance(results[1], Exception):
+            raise results[0]
+        # Якщо одна сторона впала — логуємо, але повертаємо те що є
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Wallet partial failure: %s", r)
+
         return self.dedup(buy_orders), self.dedup(sell_orders)

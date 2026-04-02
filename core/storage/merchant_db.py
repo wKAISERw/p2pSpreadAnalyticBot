@@ -383,6 +383,8 @@ class MerchantDB:
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
         # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ
         await self._ensure_column("trade_sessions", "buy_exchange", "TEXT")
+        # 🚀 BLOCK D: payment_method для аналітики банків
+        await self._ensure_column("active_trades", "payment_method", "TEXT DEFAULT ''")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -1404,3 +1406,103 @@ class MerchantDB:
         ) as cur:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # BLOCK D: Аналітика + Session Health
+    # ═══════════════════════════════════════════════════════════════════════
+
+    async def get_all_blacklist(self) -> list[dict]:
+        """Повертає весь чорний список для API та бота."""
+        if not self._db:
+            return []
+        try:
+            async with self._db.execute(
+                "SELECT exchange, merchant_id, merchant_name, reason, source, added_at "
+                "FROM global_blacklist ORDER BY added_at DESC"
+            ) as cur:
+                rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("get_all_blacklist: %s", e)
+            return []
+
+    async def get_all_auth_sessions(self) -> list[dict]:
+        """Повертає всі активні auth-сесії з updated_at для health-check."""
+        if not self._db:
+            return []
+        try:
+            async with self._db.execute(
+                "SELECT user_id, exchange, updated_at, is_active "
+                "FROM auth_sessions ORDER BY exchange"
+            ) as cur:
+                rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("get_all_auth_sessions: %s", e)
+            return []
+
+    async def get_session_age(self, exchange: str, user_id: int = 0) -> float:
+        """
+        Повертає вік сесії в секундах (time.time() - updated_at).
+        Якщо сесії немає — повертає float('inf').
+        """
+        if not self._db:
+            return float("inf")
+        try:
+            async with self._db.execute(
+                "SELECT updated_at FROM auth_sessions "
+                "WHERE user_id=? AND exchange=? AND is_active=1",
+                (user_id, exchange),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row or not row["updated_at"]:
+                return float("inf")
+            return time.time() - float(row["updated_at"])
+        except Exception as e:
+            logger.error("get_session_age [%s]: %s", exchange, e)
+            return float("inf")
+
+    async def get_completed_trades(
+        self, period_days: int = 30, owner_user_id: int = 0
+    ) -> list[dict]:
+        """
+        Повертає завершені угоди за період — для StatsEngine.
+        Включає payment_method для аналітики банків.
+        """
+        if not self._db:
+            return []
+        try:
+            query = """
+                SELECT at.id, at.session_id, at.strategy, at.leg, at.exchange,
+                       at.price, at.amount, at.fiat_amount, at.payment_method,
+                       at.counterparty_id, at.counterparty_name,
+                       at.created_at, at.updated_at,
+                       ts.gross_profit, ts.network, ts.network_fee
+                FROM active_trades at
+                LEFT JOIN trade_sessions ts ON at.session_id = ts.id
+                WHERE at.status = 'COMPLETED'
+                  AND at.created_at >= datetime('now', ?)
+            """
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += " AND at.owner_user_id = ?"
+                params.append(owner_user_id)
+            query += " ORDER BY at.created_at DESC"
+            async with self._db.execute(query, tuple(params)) as cur:
+                rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error("get_completed_trades: %s", e)
+            return []
+
+    async def update_active_trade_payment_method(
+        self, trade_id: int, payment_method: str
+    ) -> None:
+        """Встановлює метод оплати для конкретної ноги угоди."""
+        if not self._db:
+            return
+        await self._db.execute(
+            "UPDATE active_trades SET payment_method = ? WHERE id = ?",
+            (payment_method, trade_id),
+        )
+        await self._db.commit()
