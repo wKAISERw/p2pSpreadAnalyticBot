@@ -368,6 +368,25 @@ class MerchantDB:
                                          created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
                                          updated_at       DATETIME
                                      );
+                                     
+                                     -- 🚀 Пропозиції сканера (для статистики "що знаходив сканер")
+                                     CREATE TABLE IF NOT EXISTS scanner_proposals (
+                                         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         buy_exchange    TEXT,
+                                         sell_exchange   TEXT,
+                                         buy_merchant    TEXT,
+                                         sell_merchant   TEXT,
+                                         spread_pct      REAL,
+                                         profit_uah      REAL,
+                                         deal_amount     REAL,
+                                         route_type      TEXT,
+                                         buy_bank        TEXT,
+                                         sell_bank       TEXT,
+                                         was_sent        INTEGER DEFAULT 0,
+                                         created_at      REAL NOT NULL
+                                     );
+                                     CREATE INDEX IF NOT EXISTS idx_proposals_ts
+                                         ON scanner_proposals(created_at);
                                      """)
         await self._db.commit()
 
@@ -379,7 +398,13 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
         await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
-        # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
+        # 🚀 ДОДАНО: Окремі банки для покупки і продажу
+        await self._ensure_column("scanner_users", "buy_bank_codes", "TEXT DEFAULT ''")
+        await self._ensure_column("scanner_users", "sell_bank_codes", "TEXT DEFAULT ''")
+        # 🚀 ДОДАНО: Персональні фільтри мерчантів per-exchange
+        await self._ensure_column("scanner_users", "exchange_merchant_filters_json", "TEXT DEFAULT '{}'")
+        # 🚀 ДОДАНО: Галочка показу вижимки ЛЛМ в алерті
+        await self._ensure_column("scanner_users", "show_llm_summary", "INTEGER DEFAULT 1")        # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
         # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ
         await self._ensure_column("trade_sessions", "buy_exchange", "TEXT")
@@ -1167,24 +1192,36 @@ class MerchantDB:
                 """SELECT user_id, telegram_chat_id, working_capital,
                           COALESCE(min_amount_uah, 0.0) as min_amount_uah,
                           min_spread_pct, bank_codes,
+                          COALESCE(buy_bank_codes, '') as buy_bank_codes,
+                          COALESCE(sell_bank_codes, '') as sell_bank_codes,
                           COALESCE(merchant_filters_json, '{}') as merchant_filters_json,
+                          COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
                           COALESCE(is_alerts_active, 1) as is_alerts_active
                    FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
             ) as cur:
                 rows = await cur.fetchall()
             import json as _json
-            return [
-                {
+            result = []
+            for row in rows:
+                general_banks = row["bank_codes"].split(",") if row["bank_codes"] else []
+                buy_codes_raw = row["buy_bank_codes"].strip()
+                sell_codes_raw = row["sell_bank_codes"].strip()
+                # Fallback: якщо buy/sell порожні — використовуємо загальні
+                buy_banks = buy_codes_raw.split(",") if buy_codes_raw else general_banks
+                sell_banks = sell_codes_raw.split(",") if sell_codes_raw else general_banks
+                result.append({
                     "user_id":          row["user_id"],
                     "chat_id":          row["telegram_chat_id"],
                     "capital":          float(row["working_capital"]),
                     "min_amount":       float(row["min_amount_uah"]),
                     "min_spread":       float(row["min_spread_pct"]),
-                    "bank_codes":       row["bank_codes"].split(","),
+                    "bank_codes":       general_banks,
+                    "buy_bank_codes":   buy_banks,
+                    "sell_bank_codes":  sell_banks,
                     "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
-                }
-                for row in rows
-            ]
+                    "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
+                })
+            return result
         except Exception as e:
             logger.error("get_active_users: %s", e)
             return []
@@ -1242,6 +1279,140 @@ class MerchantDB:
         delta = float(rows[-1]["neg_pct"]) - float(rows[0]["neg_pct"])
         trend = "worsening" if delta > 3.0 else "improving" if delta < -3.0 else "stable"
         return {"trend": trend, "delta": delta}
+
+    # ==========================================
+    # ── БЛОК 1.5: ПРОПОЗИЦІЇ СКАНЕРА (PROPOSALS) ──
+    # ==========================================
+
+    async def save_proposal(
+        self,
+        buy_exchange: str, sell_exchange: str,
+        buy_merchant: str, sell_merchant: str,
+        spread_pct: float, profit_uah: float, deal_amount: float,
+        route_type: str, buy_bank: str, sell_bank: str,
+        was_sent: bool = False,
+    ) -> None:
+        """Зберігає пропозицію сканера для статистики."""
+        if not self._db:
+            return
+        try:
+            await self._db.execute(
+                """INSERT INTO scanner_proposals
+                   (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
+                    spread_pct, profit_uah, deal_amount, route_type,
+                    buy_bank, sell_bank, was_sent, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
+                 spread_pct, profit_uah, deal_amount, route_type,
+                 buy_bank, sell_bank, 1 if was_sent else 0, time.time()),
+            )
+            await self._db.commit()
+        except Exception as e:
+            logger.debug("save_proposal: %s", e)
+
+    async def cleanup_old_proposals(self, retention_days: int = 7) -> int:
+        """Видаляє пропозиції старші за retention_days."""
+        if not self._db:
+            return 0
+        cutoff = time.time() - retention_days * 86400
+        cursor = await self._db.execute(
+            "DELETE FROM scanner_proposals WHERE created_at < ?", (cutoff,)
+        )
+        await self._db.commit()
+        return cursor.rowcount
+
+    async def get_proposals_summary(self, period_days: int = 30) -> dict:
+        """Зведена статистика пропозицій сканера."""
+        if not self._db:
+            return {}
+        try:
+            since = time.time() - period_days * 86400
+            async with self._db.execute(
+                """SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent,
+                    COALESCE(AVG(spread_pct), 0) as avg_spread,
+                    COALESCE(AVG(profit_uah), 0) as avg_profit,
+                    COALESCE(MAX(spread_pct), 0) as max_spread,
+                    COALESCE(SUM(profit_uah), 0) as total_potential_profit
+                FROM scanner_proposals WHERE created_at >= ?""",
+                (since,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row or row["total"] == 0:
+                return {}
+            return {
+                "total": row["total"],
+                "sent": row["sent"],
+                "avg_spread": round(row["avg_spread"], 3),
+                "avg_profit": round(row["avg_profit"], 2),
+                "max_spread": round(row["max_spread"], 3),
+                "total_potential_profit": round(row["total_potential_profit"], 2),
+            }
+        except Exception as e:
+            logger.error("get_proposals_summary: %s", e)
+            return {}
+
+    async def get_proposals_by_route(self, period_days: int = 30) -> list[dict]:
+        """Топ маршрутів по кількості пропозицій."""
+        if not self._db:
+            return []
+        try:
+            since = time.time() - period_days * 86400
+            async with self._db.execute(
+                """SELECT buy_exchange || '→' || sell_exchange as route,
+                          route_type,
+                          COUNT(*) as cnt,
+                          AVG(spread_pct) as avg_spread,
+                          AVG(profit_uah) as avg_profit
+                   FROM scanner_proposals WHERE created_at >= ?
+                   GROUP BY route, route_type
+                   ORDER BY cnt DESC LIMIT 15""",
+                (since,)
+            ) as cur:
+                rows = await cur.fetchall()
+            return [
+                {
+                    "route": r["route"],
+                    "route_type": r["route_type"],
+                    "count": r["cnt"],
+                    "avg_spread": round(r["avg_spread"], 3),
+                    "avg_profit": round(r["avg_profit"], 2),
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.error("get_proposals_by_route: %s", e)
+            return []
+
+    async def get_proposals_by_day(self, period_days: int = 7) -> list[dict]:
+        """Пропозиції по днях."""
+        if not self._db:
+            return []
+        try:
+            since = time.time() - period_days * 86400
+            async with self._db.execute(
+                """SELECT DATE(created_at, 'unixepoch', 'localtime') as date,
+                          COUNT(*) as total,
+                          SUM(CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent,
+                          AVG(spread_pct) as avg_spread
+                   FROM scanner_proposals WHERE created_at >= ?
+                   GROUP BY date ORDER BY date DESC""",
+                (since,)
+            ) as cur:
+                rows = await cur.fetchall()
+            return [
+                {
+                    "date": r["date"],
+                    "total": r["total"],
+                    "sent": r["sent"],
+                    "avg_spread": round(r["avg_spread"], 3),
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logger.error("get_proposals_by_day: %s", e)
+            return []
 
     # ==========================================
     # ── БЛОК 2: ТОРГОВІ СЕСІЇ (TRADE SESSIONS) ──

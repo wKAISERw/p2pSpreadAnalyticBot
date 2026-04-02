@@ -83,6 +83,8 @@ class GlobalSettingStates(StatesGroup):
 class MerchantFilterStates(StatesGroup):
     waiting_min_orders = State()
     waiting_min_rate   = State()
+    waiting_ex_min_orders = State()
+    waiting_ex_min_rate   = State()
 
 
 class ExchangeCooldownStates(StatesGroup):
@@ -1260,6 +1262,28 @@ async def on_stats_history(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data == "stats:proposals")
+async def on_stats_proposals(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_proposals_report(period_days=7)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
+@router.callback_query(F.data == "stats:routes")
+async def on_stats_routes(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    from core.analytics.stats_engine import StatsEngine
+    text = await StatsEngine(_db).format_proposals_routes(period_days=7)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_stats_kb(), parse_mode="HTML")
+    await call.answer()
+
+
 @router.callback_query(F.data == "menu:sessions")
 async def on_sessions_button(call: CallbackQuery) -> None:
     if not _db:
@@ -1334,25 +1358,79 @@ def _get_user_banks_from_db_cache(user_id: int) -> list[str]:
     return list(BANK_NAMES.keys())  # fallback — всі банки
 
 
+@router.callback_query(F.data == "set:banks_menu")
+async def on_banks_menu(call: CallbackQuery) -> None:
+    """Показує підменю вибору банків: загальні / покупка / продаж."""
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🏦 Загальні банки", callback_data="set:banks:general"))
+    builder.row(InlineKeyboardButton(text="🛒 Банки для покупки", callback_data="set:banks:buy"))
+    builder.row(InlineKeyboardButton(text="💸 Банки для продажу", callback_data="set:banks:sell"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+
+    # Підготуємо інфо про поточні налаштування
+    info_lines = ["🏦 <b>Налаштування банків</b>\n"]
+    if _db:
+        users = await _db.get_active_users()
+        for u in users:
+            if u["user_id"] == call.from_user.id:
+                gen = [BANK_NAMES.get(c, c) for c in u["bank_codes"]]
+                buy = [BANK_NAMES.get(c, c) for c in u.get("buy_bank_codes", [])]
+                sell = [BANK_NAMES.get(c, c) for c in u.get("sell_bank_codes", [])]
+                info_lines.append(f"├ Загальні: <b>{', '.join(gen) or '—'}</b>")
+                # Перевіряємо чи buy/sell відрізняються від загальних
+                if u.get("buy_bank_codes") and u["buy_bank_codes"] != u["bank_codes"]:
+                    info_lines.append(f"├ Покупка: <b>{', '.join(buy)}</b>")
+                else:
+                    info_lines.append(f"├ Покупка: <i>= загальні</i>")
+                if u.get("sell_bank_codes") and u["sell_bank_codes"] != u["bank_codes"]:
+                    info_lines.append(f"└ Продаж: <b>{', '.join(sell)}</b>")
+                else:
+                    info_lines.append(f"└ Продаж: <i>= загальні</i>")
+                break
+
+    info_lines.append("\n<i>Загальні — фільтри для обох сторін.\nОкремі buy/sell мають перевагу.</i>")
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("\n".join(info_lines), reply_markup=builder.as_markup())
+    await call.answer()
+
+
 @router.callback_query(F.data == "set:banks")
-async def on_set_banks(call: CallbackQuery) -> None:
-    """Показує меню вибору банків з галочками."""
+async def on_set_banks_legacy(call: CallbackQuery) -> None:
+    """Fallback для старого callback — перенаправляє на нове меню."""
+    return await on_banks_menu(call)
+
+
+@router.callback_query(F.data.startswith("set:banks:"))
+async def on_set_banks(call: CallbackQuery, state: FSMContext) -> None:
+    """Показує меню вибору банків з галочками для конкретної сторони."""
+    side = call.data.split(":")[-1]  # general / buy / sell
+    side_labels = {"general": "загальні", "buy": "для покупки 🛒", "sell": "для продажу 💸"}
+
     current_banks: list[str] = []
     if _db:
         users = await _db.get_active_users()
         for u in users:
             if u["user_id"] == call.from_user.id:
-                current_banks = u["bank_codes"]
+                if side == "buy":
+                    current_banks = u.get("buy_bank_codes", [])
+                elif side == "sell":
+                    current_banks = u.get("sell_bank_codes", [])
+                else:
+                    current_banks = u["bank_codes"]
                 break
     if not current_banks:
         current_banks = DEFAULT_BANK_CODES
 
+    await state.update_data(bank_side=side, selected_banks=current_banks[:])
+
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "🏦 <b>Вибір банків</b>\n\n"
+            f"🏦 <b>Банки — {side_labels.get(side, side)}</b>\n\n"
             "Обери банки для яких шукати спреди.\n"
             "<i>Натискай для вмикання/вимикання:</i>",
-            reply_markup=banks_selection_kb(BANK_NAMES, current_banks),
+            reply_markup=banks_selection_kb(BANK_NAMES, current_banks, side),
         )
     await call.answer()
 
@@ -1360,7 +1438,10 @@ async def on_set_banks(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("bank:toggle:"))
 async def on_bank_toggle(call: CallbackQuery, state: FSMContext) -> None:
     """Перемикає банк і оновлює повідомлення з галочками."""
-    code = call.data.split(":", 2)[2]
+    parts = call.data.split(":")
+    # bank:toggle:side:code
+    side = parts[2] if len(parts) >= 4 else "general"
+    code = parts[3] if len(parts) >= 4 else parts[2]
 
     # Читаємо поточний стан зі стейту (або БД якщо нема)
     data = await state.get_data()
@@ -1373,7 +1454,12 @@ async def on_bank_toggle(call: CallbackQuery, state: FSMContext) -> None:
             users = await _db.get_active_users()
             for u in users:
                 if u["user_id"] == call.from_user.id:
-                    selected = u["bank_codes"][:]
+                    if side == "buy":
+                        selected = list(u.get("buy_bank_codes", u["bank_codes"]))
+                    elif side == "sell":
+                        selected = list(u.get("sell_bank_codes", u["bank_codes"]))
+                    else:
+                        selected = u["bank_codes"][:]
                     break
 
     selected_set = set(selected)
@@ -1387,34 +1473,47 @@ async def on_bank_toggle(call: CallbackQuery, state: FSMContext) -> None:
         selected_set.add(code)
 
     selected = sorted(selected_set, key=lambda c: list(BANK_NAMES.keys()).index(c) if c in BANK_NAMES else 99)
-    await state.update_data(selected_banks=selected)
+    await state.update_data(selected_banks=selected, bank_side=side)
 
     with suppress(TelegramBadRequest):
         await call.message.edit_reply_markup(
-            reply_markup=banks_selection_kb(BANK_NAMES, selected)
+            reply_markup=banks_selection_kb(BANK_NAMES, selected, side)
         )
     await call.answer()
 
 
-@router.callback_query(F.data == "bank:save")
+@router.callback_query(F.data.startswith("bank:save:"))
 async def on_bank_save(call: CallbackQuery, state: FSMContext) -> None:
     """Зберігає вибрані банки в БД."""
+    side = call.data.split(":")[-1]  # general / buy / sell
     data = await state.get_data()
     selected = data.get("selected_banks", DEFAULT_BANK_CODES)
     await state.clear()
 
     if _db:
         conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute(
-            "UPDATE scanner_users SET bank_codes = ? WHERE user_id = ?",
-            (",".join(selected), call.from_user.id),
-        )
+        if side == "buy":
+            await conn.execute(
+                "UPDATE scanner_users SET buy_bank_codes = ? WHERE user_id = ?",
+                (",".join(selected), call.from_user.id),
+            )
+        elif side == "sell":
+            await conn.execute(
+                "UPDATE scanner_users SET sell_bank_codes = ? WHERE user_id = ?",
+                (",".join(selected), call.from_user.id),
+            )
+        else:
+            await conn.execute(
+                "UPDATE scanner_users SET bank_codes = ? WHERE user_id = ?",
+                (",".join(selected), call.from_user.id),
+            )
         await conn.commit()
 
+    side_labels = {"general": "загальні", "buy": "покупка 🛒", "sell": "продаж 💸"}
     bank_names = [BANK_NAMES.get(c, c) for c in selected]
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"✅ <b>Банки збережено!</b>\n\n"
+            f"✅ <b>Банки ({side_labels.get(side, side)}) збережено!</b>\n\n"
             f"Активні: {', '.join(bank_names)}\n\n"
             "<i>Сканер враховуватиме нові налаштування з наступного циклу.</i>",
             reply_markup=back_to_main_kb(),
@@ -1470,46 +1569,114 @@ async def on_mute(call: CallbackQuery) -> None:
         )
     await call.answer(f"🔕 Пауза на {hours:.0f} год")
 
+# ── Вижимка AI (toggle) ───────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set:llm_summary")
+async def on_toggle_llm_summary(call: CallbackQuery) -> None:
+    """Перемикає показ вижимки LLM (reason) в алерті."""
+    if not _db:
+        return await call.answer("БД не підключена", show_alert=True)
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT COALESCE(show_llm_summary, 1) FROM scanner_users WHERE user_id=?",
+        (call.from_user.id,)
+    ) as cur:
+        row = await cur.fetchone()
+    current = int(row[0]) if row else 1
+    new_val = 0 if current else 1
+    await conn.execute(
+        "UPDATE scanner_users SET show_llm_summary = ? WHERE user_id = ?",
+        (new_val, call.from_user.id),
+    )
+    await conn.commit()
+    label = "увімкнено ✅" if new_val else "вимкнено ❌"
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"🧠 <b>Вижимка AI в алерті: {label}</b>\n\n"
+            "Якщо увімкнено — в алерті під вердиктом AI буде\n"
+            "коротка вижимка: що перевірено, стан відгуків, висновок.\n\n"
+            "Якщо вимкнено — лише бейдж (✅/⚡/🚫).",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer(f"🧠 Вижимка AI: {label}")
+
 # ── Фільтри мерчантів ─────────────────────────────────────────────────────
+_MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet"]
+_MF_EX_ICONS = {"Bybit": "🟠", "OKX": "⚫", "Binance": "🟡", "MEXC": "🔵", "Wallet": "💎"}
+
+
+async def _load_merchant_filters(user_id: int) -> tuple[dict, dict]:
+    """Повертає (general_mf, exchange_mf) для юзера."""
+    if not _db:
+        return {}, {}
+    import json
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT merchant_filters_json, COALESCE(exchange_merchant_filters_json, '{}') as emf FROM scanner_users WHERE user_id=?",
+        (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return {}, {}
+    mf = json.loads(row[0] or "{}")
+    emf = json.loads(row[1] or "{}")
+    return mf, emf
+
 
 @router.callback_query(F.data == "set:merchant_filters")
 async def on_set_merchant_filters(call: CallbackQuery) -> None:
     """Показує поточні фільтри мерчанта і пропонує змінити."""
-    mf = {}
-    if _db:
-        users = await _db.get_active_users()
-        # get_active_users тільки для is_alerts_active=1, тому запитуємо напряму
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        async with conn.execute(
-            "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?",
-            (call.from_user.id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row and row[0]:
-            import json
-            mf = json.loads(row[0]) or {}
+    mf, emf = await _load_merchant_filters(call.from_user.id)
 
     min_orders = mf.get("min_orders", 0)
-    min_rate   = mf.get("min_rate", 0.0)
+    min_rate = mf.get("min_rate", 0.0)
 
     orders_label = f"{min_orders:.0f}" if min_orders else "без обмежень"
-    rate_label   = f"{min_rate:.0f}%" if min_rate else "без обмежень"
+    rate_label = f"{min_rate:.0f}%" if min_rate else "без обмежень"
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     builder.button(text=f"📊 Мін. угод: {orders_label}", callback_data="mf:orders")
     builder.button(text=f"⭐ Мін. рейтинг: {rate_label}", callback_data="mf:rate")
     builder.adjust(1)
+    # Per-exchange кнопки
+    for ex in _MF_EXCHANGES:
+        icon = _MF_EX_ICONS.get(ex, "🔌")
+        ex_f = emf.get(ex, {})
+        if ex_f:
+            o = ex_f.get("min_orders", 0)
+            r = ex_f.get("min_rate", 0.0)
+            parts = []
+            if o: parts.append(f"≥{o:.0f} угод")
+            if r: parts.append(f"≥{r:.0f}%")
+            label = f"{icon} {ex}: {', '.join(parts)}"
+        else:
+            label = f"{icon} {ex}: загальні"
+        builder.button(text=label, callback_data=f"mf:exchange:{ex}")
+    builder.adjust(1)
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
 
+    # Формуємо текст
+    lines = [
+        "📊 <b>Фільтри мерчанта</b>\n",
+        "Алерт прийде ТІЛЬКИ якщо обидва мерчанти (buy і sell) відповідають критеріям.\n",
+        f"<b>🌐 Загальні:</b>",
+        f"├ Мін. угод: <b>{orders_label}</b>",
+        f"└ Мін. рейтинг: <b>{rate_label}</b>",
+    ]
+    if emf:
+        lines.append("")
+        lines.append("<b>📋 Per-exchange (мають перевагу):</b>")
+        for ex in _MF_EXCHANGES:
+            ef = emf.get(ex, {})
+            if ef:
+                o = ef.get("min_orders", 0)
+                r = ef.get("min_rate", 0.0)
+                lines.append(f"  {_MF_EX_ICONS.get(ex, '')} {ex}: угод≥{o:.0f}, рейтинг≥{r:.0f}%")
+    lines.append("\n<i>Per-exchange мають перевагу над загальними.</i>")
+
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(
-            "📊 <b>Фільтри мерчанта</b>\n\n"
-            "Алерт прийде ТІЛЬКИ якщо обидва мерчанти (buy і sell) відповідають цим критеріям.\n\n"
-            f"├ Мін. угод: <b>{orders_label}</b>\n"
-            f"└ Мін. рейтинг: <b>{rate_label}</b>",
-            reply_markup=builder.as_markup(),
-        )
+        await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
     await call.answer()
 
 
@@ -1518,7 +1685,7 @@ async def on_mf_orders(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(MerchantFilterStates.waiting_min_orders)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "📊 <b>Мінімальна кількість угод мерчанта</b>\n\n"
+            "📊 <b>Мінімальна кількість угод мерчанта (загальна)</b>\n\n"
             "Введи число. <code>0</code> — вимкнути фільтр.\n"
             "<i>Приклад: 100 — показувати тільки мерчантів з ≥100 угодами</i>",
             reply_markup=back_to_main_kb(),
@@ -1546,7 +1713,7 @@ async def on_mf_rate(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(MerchantFilterStates.waiting_min_rate)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "⭐ <b>Мінімальний рейтинг мерчанта (%)</b>\n\n"
+            "⭐ <b>Мінімальний рейтинг мерчанта (загальний, %)</b>\n\n"
             "Введи число від 0 до 100. <code>0</code> — вимкнути.\n"
             "<i>Приклад: 95 — тільки мерчанти з рейтингом ≥95%</i>",
             reply_markup=back_to_main_kb(),
@@ -1569,6 +1736,130 @@ async def on_mf_rate_input(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+# ── Per-exchange фільтри мерчанта ──────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("mf:exchange:"))
+async def on_mf_exchange(call: CallbackQuery) -> None:
+    """Показує фільтри для конкретної біржі."""
+    ex_name = call.data.split(":", 2)[2]
+    _, emf = await _load_merchant_filters(call.from_user.id)
+    ef = emf.get(ex_name, {})
+
+    o = ef.get("min_orders", 0)
+    r = ef.get("min_rate", 0.0)
+    o_label = f"{o:.0f}" if o else "загальний"
+    r_label = f"{r:.0f}%" if r else "загальний"
+
+    icon = _MF_EX_ICONS.get(ex_name, "🔌")
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"📊 Мін. угод: {o_label}", callback_data=f"mf:ex_orders:{ex_name}")
+    builder.button(text=f"⭐ Мін. рейтинг: {r_label}", callback_data=f"mf:ex_rate:{ex_name}")
+    builder.adjust(1)
+    if ef:
+        builder.row(InlineKeyboardButton(text="🗑 Скинути (використ. загальні)", callback_data=f"mf:ex_reset:{ex_name}"))
+    builder.row(InlineKeyboardButton(text="🔙 До фільтрів", callback_data="set:merchant_filters"))
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"{icon} <b>Фільтри для {ex_name}</b>\n\n"
+            f"├ Мін. угод: <b>{o_label}</b>\n"
+            f"└ Мін. рейтинг: <b>{r_label}</b>\n\n"
+            "<i>0 = використовувати загальний фільтр</i>",
+            reply_markup=builder.as_markup(),
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("mf:ex_orders:"))
+async def on_mf_ex_orders(call: CallbackQuery, state: FSMContext) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    await state.set_state(MerchantFilterStates.waiting_ex_min_orders)
+    await state.update_data(mf_exchange=ex_name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"📊 <b>Мін. угод для {ex_name}</b>\n\n"
+            "Введи число. <code>0</code> — використати загальний.\n"
+            "<i>Приклад: 50</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_ex_min_orders)
+async def on_mf_ex_orders_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        data = await state.get_data()
+        ex_name = data.get("mf_exchange", "")
+        await _save_exchange_merchant_filter(message.from_user.id, ex_name, "min_orders", val)
+        label = f"{val}" if val > 0 else "загальний"
+        await message.answer(f"✅ {ex_name} мін. угод: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("mf:ex_rate:"))
+async def on_mf_ex_rate(call: CallbackQuery, state: FSMContext) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    await state.set_state(MerchantFilterStates.waiting_ex_min_rate)
+    await state.update_data(mf_exchange=ex_name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⭐ <b>Мін. рейтинг для {ex_name} (%)</b>\n\n"
+            "Введи число від 0 до 100. <code>0</code> — використати загальний.\n"
+            "<i>Приклад: 95</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_ex_min_rate)
+async def on_mf_ex_rate_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if not 0 <= val <= 100:
+            raise ValueError("Має бути від 0 до 100")
+        data = await state.get_data()
+        ex_name = data.get("mf_exchange", "")
+        await _save_exchange_merchant_filter(message.from_user.id, ex_name, "min_rate", val)
+        label = f"{val:.0f}%" if val > 0 else "загальний"
+        await message.answer(f"✅ {ex_name} мін. рейтинг: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("mf:ex_reset:"))
+async def on_mf_ex_reset(call: CallbackQuery) -> None:
+    """Скидає per-exchange фільтри — буде використовувати загальні."""
+    ex_name = call.data.split(":", 2)[2]
+    if not _db:
+        return await call.answer("❌ БД не підключена", show_alert=True)
+    import json
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (call.from_user.id,)
+    ) as cur:
+        row = await cur.fetchone()
+    emf = json.loads((row[0] if row else None) or "{}")
+    emf.pop(ex_name, None)
+    await conn.execute(
+        "UPDATE scanner_users SET exchange_merchant_filters_json = ? WHERE user_id = ?",
+        (json.dumps(emf), call.from_user.id),
+    )
+    await conn.commit()
+    await call.answer(f"✅ {ex_name} — скинуто на загальні", show_alert=True)
+    # Повертаємось до фільтрів
+    return await on_set_merchant_filters(call)
+
+
 async def _save_merchant_filter(user_id: int, key: str, value) -> None:
     """Зберігає один ключ в merchant_filters_json без перезапису інших."""
     if not _db:
@@ -1587,6 +1878,32 @@ async def _save_merchant_filter(user_id: int, key: str, value) -> None:
     await conn.execute(
         "UPDATE scanner_users SET merchant_filters_json = ? WHERE user_id = ?",
         (json.dumps(mf), user_id),
+    )
+    await conn.commit()
+
+
+async def _save_exchange_merchant_filter(user_id: int, exchange: str, key: str, value) -> None:
+    """Зберігає per-exchange фільтр в exchange_merchant_filters_json."""
+    if not _db:
+        return
+    import json
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    emf = json.loads((row[0] if row else None) or "{}")
+    if exchange not in emf:
+        emf[exchange] = {}
+    if value == 0 or value == 0.0:
+        emf[exchange].pop(key, None)
+        if not emf[exchange]:
+            emf.pop(exchange, None)
+    else:
+        emf[exchange][key] = value
+    await conn.execute(
+        "UPDATE scanner_users SET exchange_merchant_filters_json = ? WHERE user_id = ?",
+        (json.dumps(emf), user_id),
     )
     await conn.commit()
 
@@ -1687,6 +2004,10 @@ async def on_auto_trade_amount(message: Message, state: FSMContext) -> None:
 
     await state.update_data(amount_usdt=amount_usdt)
     await state.set_state(AutoTradeStates.waiting_confirm)
+
+    action = data.get("single_action", "BUY")
+    icon = "🛒" if action == "BUY" else "💸"
+    label = "Купівля" if action == "BUY" else "Продаж"
 
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -2027,5 +2348,4 @@ async def cmd_sessions(message: Message) -> None:
         )
 
     await message.answer("\n".join(lines))
-
 

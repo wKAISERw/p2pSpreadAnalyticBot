@@ -92,12 +92,15 @@ REC_LABELS = {
 
 
 def _llm_verdict_block(label: str, rec: str, reason: str) -> str:
-    """Форматує однорядковий вердикт AI для buy/sell мерчанта.
-    Деталі (reason, stats) вже виводяться в _risk_badge — тут лише лейбл.
-    """
+    """Форматує вердикт AI для buy/sell мерчанта з короткою вижимкою."""
     rec_upper = (rec or "PENDING").upper()
     rec_text = REC_LABELS.get(rec_upper, f"🔍 {rec_upper}")
-    return f"🧠 <b>{label}:</b> {rec_text}\n"
+    line = f"🧠 <b>{label}:</b> {rec_text}\n"
+    # Показуємо стислу вижимку від ЛЛМ (reason) — умови + відгуки
+    if reason and rec_upper != "PENDING":
+        safe_reason = escape(str(reason).strip()[:200])
+        line += f"<blockquote expandable>💬 {safe_reason}</blockquote>\n"
+    return line
 
 def _format_bank_list(codes: list[str] | None) -> str:
     if not codes:
@@ -434,6 +437,21 @@ class TelegramNotifier:
         bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor)
         # ← більше нічого не треба
 
+    async def _get_user_show_llm_summary(self, chat_id: int) -> bool:
+        """Перевіряє чи юзер хоче бачити вижимку AI в алерті."""
+        if not self._db:
+            return True  # default: показувати
+        try:
+            conn = getattr(self._db, "db", None) or getattr(self._db, "_db", self._db)
+            async with conn.execute(
+                "SELECT COALESCE(show_llm_summary, 1) FROM scanner_users WHERE telegram_chat_id=?",
+                (chat_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            return bool(row[0]) if row else True
+        except Exception:
+            return True
+
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
         """
         Multi-user: відправляє алерт в конкретний chat_id.
@@ -441,7 +459,8 @@ class TelegramNotifier:
         Повністю concurrency-safe: кожен виклик незалежний.
         """
         try:
-            await self._send_single(alert, chat_id=chat_id)
+            show_llm = await self._get_user_show_llm_summary(chat_id)
+            await self._send_single(alert, chat_id=chat_id, show_llm_summary=show_llm)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
 
@@ -584,7 +603,7 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, show_llm_summary: bool = True) -> None:
         # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
         if self._db:
             try:
@@ -640,9 +659,14 @@ class TelegramNotifier:
         sell_name = escape(alert.sell_order.merchant_name or alert.sell_order.merchant_id or "Unknown")
         sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
 
-        # 🧠 LLM Verdict блоки
-        buy_llm = _llm_verdict_block("Buy", alert.buy_rec, alert.buy_reason)
-        sell_llm = _llm_verdict_block("Sell", alert.sell_rec, alert.sell_reason)
+        # 🧠 LLM Verdict блоки (повна вижимка або тільки бейдж)
+        if show_llm_summary:
+            buy_llm = _llm_verdict_block("Buy", alert.buy_rec, alert.buy_reason)
+            sell_llm = _llm_verdict_block("Sell", alert.sell_rec, alert.sell_reason)
+        else:
+            # Тільки бейдж без expandable reason
+            buy_llm = _llm_verdict_block("Buy", alert.buy_rec, "")
+            sell_llm = _llm_verdict_block("Sell", alert.sell_rec, "")
 
         # 🚀 Блок D: Мережі переказу
         buy_ex = alert.buy_order.exchange

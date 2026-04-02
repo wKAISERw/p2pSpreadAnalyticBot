@@ -215,8 +215,11 @@ class StatsEngine:
     async def format_stats_message(self, period_days: int = 30) -> str:
         """Готове повідомлення для /stats команди в боті."""
         summary = await self.get_summary(period_days)
-        if not summary or summary.get("total_trades", 0) == 0:
-            return "📊 Статистика порожня — завершених угод немає."
+        proposals = await self._db.get_proposals_summary(period_days)
+
+        # Якщо взагалі нічого немає
+        if (not summary or summary.get("total_trades", 0) == 0) and not proposals:
+            return "📊 Статистика порожня — завершених угод і пропозицій немає."
 
         weekly = await self.get_weekly_comparison(period_days)
         wd = weekly.get("weekday", {})
@@ -225,15 +228,31 @@ class StatsEngine:
         lines = [
             f"📊 *Статистика за {period_days} днів*",
             "",
-            f"💰 Загальний прибуток: *{summary['total_profit']:.2f} UAH*",
-            f"📈 Угод: *{summary['total_trades']}*",
-            f"📉 Середній профіт: *{summary['avg_profit']:.2f} UAH*",
-            f"🏆 Найкращий день: *{summary['best_day']}*",
-            "",
-            "📅 *Будні vs Вихідні:*",
-            f"  Будні: {wd.get('trades', 0)} угод, avg {wd.get('avg_profit', 0):.2f} UAH",
-            f"  Вихідні: {we.get('trades', 0)} угод, avg {we.get('avg_profit', 0):.2f} UAH",
         ]
+
+        # ── Пропозиції сканера ──
+        if proposals:
+            lines.append("📡 *Пропозиції сканера:*")
+            lines.append(f"  Знайдено: *{proposals['total']}* спредів")
+            lines.append(f"  Надіслано: *{proposals.get('sent', 0)}* алертів")
+            lines.append(f"  Сер. спред: *{proposals['avg_spread']:.2f}%*")
+            lines.append(f"  Макс. спред: *{proposals['max_spread']:.2f}%*")
+            lines.append(f"  Потенц. прибуток: *{proposals['total_potential_profit']:.0f} UAH*")
+            lines.append("")
+
+        # ── Мої угоди ──
+        if summary and summary.get("total_trades", 0) > 0:
+            lines.append("💼 *Мої угоди:*")
+            lines.append(f"  💰 Прибуток: *{summary['total_profit']:.2f} UAH*")
+            lines.append(f"  📈 Угод: *{summary['total_trades']}*")
+            lines.append(f"  📉 Середній: *{summary['avg_profit']:.2f} UAH*")
+            lines.append(f"  🏆 Найкращий день: *{summary['best_day']}*")
+            lines.append("")
+            lines.append("📅 *Будні vs Вихідні:*")
+            lines.append(f"  Будні: {wd.get('trades', 0)} угод, avg {wd.get('avg_profit', 0):.2f} UAH")
+            lines.append(f"  Вихідні: {we.get('trades', 0)} угод, avg {we.get('avg_profit', 0):.2f} UAH")
+        else:
+            lines.append("💼 *Мої угоди:* немає завершених")
 
         # Топ банків
         top_banks = await self.get_top_banks(period_days)
@@ -517,10 +536,72 @@ class StatsEngine:
         """Повна статистика для API."""
         return {
             "summary": await self.get_summary(period_days),
+            "proposals": await self._db.get_proposals_summary(period_days),
             "daily": await self.get_profit_by_day(period_days),
             "exchanges": await self.get_top_exchanges(period_days),
             "banks": await self.get_top_banks(period_days),
             "heatmap": await self.get_hourly_heatmap(period_days),
             "weekly": await self.get_weekly_comparison(period_days),
         }
+
+    # ─── Пропозиції сканера (детальні звіти) ──────────────────────────────
+
+    async def format_proposals_report(self, period_days: int = 7) -> str:
+        """Детальний звіт по пропозиціях сканера по днях."""
+        summary = await self._db.get_proposals_summary(period_days)
+        days = await self._db.get_proposals_by_day(period_days)
+
+        if not summary or summary.get("total", 0) == 0:
+            return "📡 <b>Пропозиції сканера</b>\n\nЗа цей період пропозицій не знайдено."
+
+        lines = [
+            f"📡 <b>Пропозиції сканера ({period_days}д)</b>",
+            "",
+            f"📊 Всього знайдено: <b>{summary['total']}</b> спредів",
+            f"📤 Надіслано алертів: <b>{summary.get('sent', 0)}</b>",
+            f"📈 Сер. спред: <b>{summary['avg_spread']:.2f}%</b>",
+            f"🔝 Макс. спред: <b>{summary['max_spread']:.2f}%</b>",
+            f"💰 Сер. потенц. профіт: <b>{summary['avg_profit']:.2f} ₴</b>",
+            f"💎 Загальний потенціал: <b>{summary['total_potential_profit']:.0f} ₴</b>",
+        ]
+
+        if days:
+            lines.append("")
+            lines.append("<code>───────────────────────────</code>")
+            max_total = max(d["total"] for d in days) if days else 1
+            for d in days[:14]:
+                bar_len = int((d["total"] / max_total) * 8) if max_total > 0 else 0
+                bar = "█" * max(bar_len, 1)
+                short_date = d["date"][5:] if d["date"] else "?"
+                lines.append(
+                    f"<code>{short_date}</code> {bar} <b>{d['total']:>4}</b> ({d['sent']} відправл.) avg {d['avg_spread']:.2f}%"
+                )
+
+        return "\n".join(lines)
+
+    async def format_proposals_routes(self, period_days: int = 7) -> str:
+        """Топ маршрутів сканера."""
+        routes = await self._db.get_proposals_by_route(period_days)
+        if not routes:
+            return "🗺 <b>Маршрути сканера</b>\n\nДаних немає."
+
+        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛"}
+
+        lines = [
+            f"🗺 <b>Топ маршрутів сканера ({period_days}д)</b>",
+            "",
+        ]
+
+        for i, r in enumerate(routes, 1):
+            route = r["route"]
+            parts = route.split("→")
+            buy_icon = ICONS.get(parts[0].strip(), "◽️") if len(parts) > 0 else ""
+            sell_icon = ICONS.get(parts[1].strip(), "◽️") if len(parts) > 1 else ""
+            lines.append(
+                f"{i}. {buy_icon}→{sell_icon} <b>{route}</b> ({r['route_type']})\n"
+                f"   📊 {r['count']} раз | avg {r['avg_spread']:.2f}% | avg +{r['avg_profit']:.0f}₴"
+            )
+            lines.append("")
+
+        return "\n".join(lines)
 

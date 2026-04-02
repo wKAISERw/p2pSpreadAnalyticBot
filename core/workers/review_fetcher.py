@@ -108,7 +108,7 @@ def _enrich_bad_text(text: str) -> dict:
     """Збагачує текст відгуку аналітикою для збереження в БД."""
     analysis = _analyze_review_text(text)
     return {
-        "text": text[:200],
+        "text": text[:300],
         "score": analysis["score"],
         "categories": analysis["categories"],
         "excerpt": analysis["top_excerpt"],
@@ -482,12 +482,15 @@ class ReviewFetcher:
         bad_texts: list[dict] = []
         for item in raw_neg:
             content = str(item.get("content") or item.get("message") or "").strip()
-            if content and _has_bad_keywords(content):
-                bad_texts.append(_enrich_bad_text(content))
+            if content:
+                enriched = _enrich_bad_text(content)
+                enriched["keyword_flagged"] = _has_bad_keywords(content)
+                bad_texts.append(enriched)
 
-        neg = len(bad_texts) if bad_texts else 0
+        neg = len(raw_neg)
 
-        logger.debug("Binance %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        logger.debug("Binance %s: session bad_texts=%d (keyword_flagged=%d)", merchant_id, len(bad_texts),
+                      sum(1 for t in bad_texts if t.get("keyword_flagged")))
         return 0, neg, 0, bad_texts
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
@@ -528,13 +531,16 @@ class ReviewFetcher:
         bad_texts: list[dict] = []
         for item in raw_neg:
             content = str(item.get("remark") or item.get("content") or "").strip()
-            if content and _has_bad_keywords(content):
-                bad_texts.append(_enrich_bad_text(content))
+            if content:
+                enriched = _enrich_bad_text(content)
+                enriched["keyword_flagged"] = _has_bad_keywords(content)
+                bad_texts.append(enriched)
 
         # Якщо є погані тексти — беремо neg з них (pos/neg з профілю недоступний)
-        neg = len(bad_texts) if bad_texts else 0
+        neg = len(raw_neg) if raw_neg else 0
 
-        logger.debug("Bybit %s: session bad_texts=%d", merchant_id, len(bad_texts))
+        logger.debug("Bybit %s: session bad_texts=%d (keyword_flagged=%d)", merchant_id, len(bad_texts),
+                      sum(1 for t in bad_texts if t.get("keyword_flagged")))
         return 0, neg, 0, bad_texts
 
 
@@ -561,11 +567,14 @@ class ReviewFetcher:
             bad_texts: list[dict] = []
             for item in neg_raw:
                 content = str(item.get("content") or item.get("feedback") or "").strip()
-                if content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
+                if content:
+                    enriched = _enrich_bad_text(content)
+                    enriched["keyword_flagged"] = _has_bad_keywords(content)
+                    bad_texts.append(enriched)
 
-            logger.debug("OKX [auth] %s: pos=%d neg=%d (paginated) | bad_texts=%d", merchant_id, pos, neg,
-                         len(bad_texts))
+            logger.debug("OKX [auth] %s: pos=%d neg=%d (paginated) | bad_texts=%d (keyword_flagged=%d)",
+                         merchant_id, pos, neg, len(bad_texts),
+                         sum(1 for t in bad_texts if t.get("keyword_flagged")))
             return pos, neg, neutral, bad_texts
 
         except Exception as e:
@@ -612,11 +621,12 @@ class ReviewFetcher:
                 is_bad = item.get("rating") is False
                 content = str(item.get("comment") or "").strip()
                 if is_bad and content:
-                    bad_texts.append(_enrich_bad_text(content))
-                elif content and _has_bad_keywords(content):
-                    bad_texts.append(_enrich_bad_text(content))
+                    enriched = _enrich_bad_text(content)
+                    enriched["keyword_flagged"] = _has_bad_keywords(content)
+                    bad_texts.append(enriched)
 
-            logger.debug("MEXC %s: pos=%d neg=%d bad_texts=%d", merchant_id, pos, neg, len(bad_texts))
+            logger.debug("MEXC %s: pos=%d neg=%d bad_texts=%d (keyword_flagged=%d)", merchant_id, pos, neg,
+                         len(bad_texts), sum(1 for t in bad_texts if t.get("keyword_flagged")))
             return pos, neg, 0, bad_texts
 
         except Exception as e:

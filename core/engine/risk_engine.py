@@ -144,6 +144,9 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
 
     # 🚀 НОВЕ: ХАРД-БЛОК ЗА КРИТИЧНІ ВІДГУКИ (Навіть якщо він один)
     CRITICAL_CATEGORIES = {"TRIANGLE", "CHARGEBACK", "FINCRIME", "CASINO"}
+    SOFT_CATEGORIES = {"CHAT_FIRST", "APPEAL_PRESSURE", "SUSPICIOUS_BIZ", "EXTERNAL_LINK", "MIDDLEMAN", "NO_COMMENTS"}
+    soft_flags: list[str] = []
+    unflagged_count = 0
     for bad_text_item in bad_texts:
         if isinstance(bad_text_item, dict):
             cats = bad_text_item.get("categories",[])
@@ -151,6 +154,18 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
                 cat_names = ", ".join(cats)
                 excerpt = str(bad_text_item.get("excerpt", ""))[:100]
                 return[f"NEEDS_LLM:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
+            # Збираємо м'які сигнали для LLM-контексту
+            soft_cats = [c for c in cats if c in SOFT_CATEGORIES]
+            if soft_cats:
+                excerpt = str(bad_text_item.get("excerpt", ""))[:80]
+                soft_flags.append(f"REVIEW_SOFT:{','.join(soft_cats)} | {excerpt}")
+            # Відгуки без keyword-тригерів — LLM має побачити їх самостійно
+            if not bad_text_item.get("keyword_flagged", True) and not cats:
+                unflagged_count += 1
+
+    # Якщо є відгуки без ключових слів — м'який сигнал для LLM
+    if unflagged_count > 0:
+        soft_flags.append(f"REVIEW_UNFLAGGED:{unflagged_count} відгуків без тригерів — потребують LLM аналізу")
 
     total = pos + neg + neutral
     if total <= 0:
@@ -171,12 +186,13 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         reason += f" | {sample}"
 
     if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
-        return [f"NEEDS_LLM:BADREVIEWS:{reason}"]
+        return [f"NEEDS_LLM:BADREVIEWS:{reason}"] + soft_flags
 
     if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
-        return [f"BADREVIEWS:{reason}"]
+        return [f"BADREVIEWS:{reason}"] + soft_flags
 
-    return[]
+    # Навіть без порогу — повертаємо м'які сигнали якщо є
+    return soft_flags
 
 
 def _is_verdict_stale(analyzed_at: float) -> bool:

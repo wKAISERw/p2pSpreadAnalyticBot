@@ -59,10 +59,13 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📉 Мін. спред", callback_data="set:spread"),
-        InlineKeyboardButton(text="🏦 Банки", callback_data="set:banks"),
+        InlineKeyboardButton(text="🏦 Банки", callback_data="set:banks_menu"),
     )
     builder.row(
         InlineKeyboardButton(text="📊 Фільтри мерчантів", callback_data="set:merchant_filters"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🧠 Вижимка AI в алерті", callback_data="set:llm_summary"),
     )
     builder.row(
         InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="user:alerts:on"),
@@ -119,20 +122,21 @@ def back_to_settings_kb() -> InlineKeyboardMarkup:
     builder.button(text="🔙 До налаштувань", callback_data="menu:global_settings")
     return builder.as_markup()
 
-def banks_selection_kb(all_banks: dict[str, str], selected: list[str]) -> InlineKeyboardMarkup:
+def banks_selection_kb(all_banks: dict[str, str], selected: list[str], side: str = "general") -> InlineKeyboardMarkup:
     """
     Галочки банків — один клік вмикає/вимикає.
     all_banks: {internal_code: human_name}  напр. {"43": "Monobank", "14": "PrivatBank"}
     selected:  список internal_code що активні у юзера
+    side:      "general" | "buy" | "sell"
     """
     builder = InlineKeyboardBuilder()
     selected_set = set(selected)
     for code, name in all_banks.items():
         icon = "✅" if code in selected_set else "☐"
-        builder.button(text=f"{icon} {name}", callback_data=f"bank:toggle:{code}")
+        builder.button(text=f"{icon} {name}", callback_data=f"bank:toggle:{side}:{code}")
     builder.adjust(2)  # 2 кнопки в ряд
-    builder.row(InlineKeyboardButton(text="💾 Зберегти", callback_data="bank:save"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+    builder.row(InlineKeyboardButton(text="💾 Зберегти", callback_data=f"bank:save:{side}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="set:banks_menu"))
     return builder.as_markup()
 
 
@@ -157,6 +161,10 @@ def exchange_connect_kb(supported: list[str]) -> InlineKeyboardMarkup:
 def stats_overview_kb() -> InlineKeyboardMarkup:
     """Keyboard для загальної статистики з drill-down кнопками."""
     builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📡 Пропозиції сканера", callback_data="stats:proposals"),
+        InlineKeyboardButton(text="🗺 Маршрути", callback_data="stats:routes"),
+    )
     builder.row(
         InlineKeyboardButton(text="📅 По днях", callback_data="stats:daily"),
         InlineKeyboardButton(text="🏛 Біржі", callback_data="stats:exchanges"),

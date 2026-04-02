@@ -109,9 +109,12 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 
 🔍 ОБОВ'ЯЗКОВО АНАЛІЗУЙ ВІДГУКИ:
 - ЗАВЖДИ коментуй стан відгуків у thought_process: скільки позитивних/негативних, чи є тексти поганих відгуків, що саме там написано.
+- Відгуки позначені 🟡 — це збіг з відомими regex-патернами (ключові слова). Але це лише ПІДКАЗКА, не вичерпний аналіз.
+- Відгуки БЕЗ маркера 🟡 — regex не знайшов відомих патернів, але це НЕ означає що вони безпечні. ОБОВ'ЯЗКОВО прочитай кожен і визнач: чи є там скарги на обман, проблеми з оплатою, агресію, маніпуляції, невиконання зобов'язань.
 - Якщо відгуки чисті (neg=0 або дуже низький %) — напиши це явно: "Відгуки чисті, neg=X/Y, загроз не виявлено".
 - Якщо відгуки відсутні — зазнач це як фактор невизначеності.
 - Якщо є негативні тексти — проаналізуй їх зміст (скам, дроп, кинув — це BLOCK; повільно, не відповідає — це м'який сигнал).
+- Якщо є негативні тексти БЕЗ відомих ключових слів — ОБОВ'ЯЗКОВО вкажи у reason що саме ти там побачив. Не ігноруй їх!
 - Якщо мерчант підозрілий за поведінкою, але відгуки повністю чисті — це пом'якшуючий фактор, зазнач це.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON (без жодного тексту поза ним):
@@ -251,7 +254,7 @@ class LLMWorkerPool:
         verdict = result.get("status", "UNKNOWN").upper()
         risk_type = result.get("risk", "") or "NONE"
         reason = (result.get("reason", "") or "")[:900]
-        source = result.get("_source", "unknown")
+        source = result.get("source", "unknown")
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
@@ -307,17 +310,17 @@ class LLMWorkerPool:
                 result = await asyncio.wait_for(
                     self._call_groq(user_msg), timeout=LLM_TIMEOUT
                 )
-                result["source"] = "groq"
-                LLMWorkerPool.groq_consecutive_429 = 0
+                result["source"] = f"groq_{GROQ_MODEL}"
+                LLMWorkerPool._groq_consecutive_429 = 0
                 return result
             except RateLimitError:
-                n = LLMWorkerPool.groq_consecutive_429 + 1
-                LLMWorkerPool.groq_consecutive_429 = n
+                n = LLMWorkerPool._groq_consecutive_429 + 1
+                LLMWorkerPool._groq_consecutive_429 = n
                 wait = min(30.0 * (2 ** min(n - 1, 4)), 300.0)
-                LLMWorkerPool.groq_cooldown_until = time.monotonic() + wait
+                LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
                 logger.warning("Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
             except asyncio.TimeoutError:
-                self.stats["timeouts"] += 1
+                self._stats["timeouts"] += 1
                 logger.warning("Groq timeout: %s", task.merchant_name)
             except Exception as e:
                 logger.error("Groq помилка: %s", e)
@@ -334,10 +337,10 @@ class LLMWorkerPool:
                 logger.error("Gemini 404: %s → OpenAI", e)
                 # НЕ return — падаємо на OpenAI
             except ProviderRateLimitError:
-                LLMWorkerPool.gemini_cooldown_until = time.monotonic() + 60.0
+                LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
                 logger.warning("Gemini 429 → OpenAI")
             except asyncio.TimeoutError:
-                self.stats["timeouts"] += 1
+                self._stats["timeouts"] += 1
                 logger.warning("Gemini timeout: %s", task.merchant_name)
             except Exception as e:
                 logger.error("Gemini помилка: %s", e)
@@ -353,15 +356,15 @@ class LLMWorkerPool:
             except PermanentModelError:
                 pass
             except ProviderRateLimitError:
-                LLMWorkerPool.openai_cooldown_until = time.monotonic() + 30.0
+                LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
                 logger.warning("OpenAI 429")
             except asyncio.TimeoutError:
-                self.stats["timeouts"] += 1
+                self._stats["timeouts"] += 1
                 logger.warning("OpenAI timeout: %s", task.merchant_name)
             except Exception as e:
                 logger.error("OpenAI помилка: %s", e)
 
-        self.stats["timeouts"] += 1
+        self._stats["timeouts"] += 1
         return {
             "status": "UNKNOWN", "risk": "NONE",
             "reason": "All APIs unavailable",
@@ -443,7 +446,7 @@ class LLMWorkerPool:
         }
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={gemini_key}"
 
-        async with self.session.post(url, json=payload) as resp:
+        async with self._session.post(url, json=payload) as resp:
             if resp.status == 429:
                 raise ProviderRateLimitError("Gemini 429")
             if resp.status == 404:
@@ -612,10 +615,29 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
                 "⚠️ ВІДГУКИ НЕВІДОМІ: зазнач це у thought_process як м'який фактор невизначеності (НЕ як ризик).")
 
     if bad_texts:
-        lines.append("Негативні відгуки:")
-        for i, t in enumerate(bad_texts[:4], 1):
-            clean_t = str(t).replace("\n", " ").strip()
-            lines.append(f"  {i}. {clean_t[:150]}")
+        flagged_count = sum(1 for t in bad_texts if isinstance(t, dict) and t.get("keyword_flagged"))
+        unflagged_count = len(bad_texts) - flagged_count
+        lines.append(f"НЕГАТИВНІ ВІДГУКИ ({len(bad_texts)} шт, з них {flagged_count} з ключовими словами):")
+        lines.append("  🟡 = збіг з відомими ключовими словами/патернами (regex); без маркера = відгук без тригерів — проаналізуй САМОСТІЙНО.")
+        for i, t in enumerate(bad_texts[:10], 1):
+            if isinstance(t, dict):
+                text = str(t.get("text", "")).replace("\n", " ").strip()[:250]
+                score = t.get("score", 0)
+                cats = t.get("categories", [])
+                excerpt = str(t.get("excerpt", "")).replace("\n", " ").strip()[:100]
+                is_flagged = t.get("keyword_flagged", False)
+                marker = "🟡" if is_flagged else "  "
+                if cats:
+                    cat_str = ", ".join(cats)
+                    lines.append(f"  {marker} {i}. [{cat_str}, score={score}] {text}")
+                else:
+                    lines.append(f"  {marker} {i}. {text}")
+                if excerpt and excerpt not in text:
+                    lines.append(f"     ↳ ключовий фрагмент: «{excerpt}»")
+            else:
+                clean_t = str(t).replace("\n", " ").strip()
+                lines.append(f"     {i}. {clean_t[:250]}")
+        lines.append("  ⚠️ ПРОАНАЛІЗУЙ ЗМІСТ КОЖНОГО відгуку (навіть без 🟡): 'шахрай/кинув/дроп' → BLOCK; 'повільно/не відповідає' → м'який сигнал; скарги на конкретні проблеми → опиши їх у reason.")
 
     if excerpts:
         lines.append("Regex фрагменти:")

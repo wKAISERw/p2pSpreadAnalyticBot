@@ -87,8 +87,8 @@ class AlertDispatcher:
         Персональний фільтр юзера:
           1. Коридор сум: min_amount ≤ entry ≤ capital
           2. Мінімальний спред
-          3. Банки перетинаються
-          4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json)
+          3. Банки перетинаються (окремо для buy/sell з fallback на загальні)
+          4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json + per-exchange)
         """
         entry = float(opp["actual_entry_uah"])
 
@@ -103,26 +103,39 @@ class AlertDispatcher:
         if float(opp["net_spread_pct"]) < float(user["min_spread"]):
             return False
 
-        # 3. Банки
-        user_banks = set(user["bank_codes"])
+        # 3. Банки — окремо buy та sell з fallback на загальні
+        user_buy_banks = set(user.get("buy_bank_codes") or user["bank_codes"])
+        user_sell_banks = set(user.get("sell_bank_codes") or user["bank_codes"])
         opp_buy_banks = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
-        if not (opp_buy_banks & user_banks) or not (opp_sell_banks & user_banks):
+        if not (opp_buy_banks & user_buy_banks) or not (opp_sell_banks & user_sell_banks):
             return False
 
-        # 4. Персональні фільтри мерчанта
+        # 4. Персональні фільтри мерчанта (per-exchange → загальні → defaults)
+        from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
         mf = user.get("merchant_filters") or {}
-        if mf:
-            min_orders = float(mf.get("min_orders", 0))
-            min_rate = float(mf.get("min_rate", 0.0))
-            buy_o = opp["buy_order"]
-            sell_o = opp["sell_order"]
-            if min_orders > 0:
-                if buy_o.month_order_count < min_orders: return False
-                if sell_o.month_order_count < min_orders: return False
-            if min_rate > 0:
-                if buy_o.finish_rate_pct < min_rate: return False
-                if sell_o.finish_rate_pct < min_rate: return False
+        emf = user.get("exchange_merchant_filters") or {}
+        buy_o = opp["buy_order"]
+        sell_o = opp["sell_order"]
+
+        for order_obj in (buy_o, sell_o):
+            ex_name = getattr(order_obj, "exchange", "")
+            # Fallback chain: per_exchange → global user → defaults[exchange] → 0
+            ex_filters = emf.get(ex_name, {})
+            min_orders = float(
+                ex_filters.get("min_orders", 0)
+                or mf.get("min_orders", 0)
+                or _DEF_ORDERS.get(ex_name, 0)
+            )
+            min_rate = float(
+                ex_filters.get("min_rate", 0.0)
+                or mf.get("min_rate", 0.0)
+                or _DEF_RATE.get(ex_name, 0.0)
+            )
+            if min_orders > 0 and order_obj.month_order_count < min_orders:
+                return False
+            if min_rate > 0 and order_obj.finish_rate_pct < min_rate:
+                return False
 
         return True
 
@@ -239,6 +252,10 @@ async def _db_maintenance_loop(
             deleted = await db.prune_snapshots(max_age_hours=max_age)
             if deleted > 0:
                 logger.info("🧹 DB Maintenance: видалено %d старих снапшотів", deleted)
+            # Чистка старих пропозицій сканера (7 днів)
+            prop_deleted = await db.cleanup_old_proposals(retention_days=7)
+            if prop_deleted > 0:
+                logger.info("🧹 DB Maintenance: видалено %d старих пропозицій", prop_deleted)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -464,10 +481,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     if active_users:
                         current_capital = max(float(u["capital"]) for u in active_users)
                         current_spread  = min(float(u["min_spread"]) for u in active_users)
-                        # Динамічні банки — union всіх активних юзерів
+                        # Динамічні банки — union всіх активних юзерів (загальні + buy + sell)
                         _all_banks: set[str] = set()
                         for _u in active_users:
                             _all_banks.update(_u["bank_codes"])
+                            _all_banks.update(_u.get("buy_bank_codes") or [])
+                            _all_banks.update(_u.get("sell_bank_codes") or [])
                         target_banks = {c: BANK_NAMES[c] for c in _all_banks if c in BANK_NAMES}
                         if not target_banks:  # fallback якщо банки порожні
                             target_banks = {c: BANK_NAMES[c] for c in DEFAULT_BANK_CODES if c in BANK_NAMES}
@@ -621,6 +640,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             sell_reason=s_reason,
                         )
 
+                        # 🚀 Пропозиція зберігається ПІСЛЯ фільтрів (see below)
+
                         # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
                         frontend_opp = {
                             "id": f"{getattr(buy_o, 'id', 'b')}-{getattr(sell_o, 'id', 's')}",  # ← ФІКС flickering
@@ -721,6 +742,22 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         dedup_cache.mark(dedup_key)
                         sent_count += 1
+
+                        # 🚀 Зберігаємо пропозицію ПІСЛЯ всіх фільтрів (dedup, stability, BLOCK)
+                        _was_sent = not is_muted()
+                        asyncio.create_task(merchant_db.save_proposal(
+                            buy_exchange=buy_o.exchange,
+                            sell_exchange=sell_o.exchange,
+                            buy_merchant=buy_o.merchant_name,
+                            sell_merchant=sell_o.merchant_name,
+                            spread_pct=opp["net_spread_pct"],
+                            profit_uah=opp["net_profit"],
+                            deal_amount=opp["actual_entry_uah"],
+                            route_type=opp.get("route_type", "UNKNOWN"),
+                            buy_bank=opp.get("buy_bank", ""),
+                            sell_bank=opp.get("sell_bank", ""),
+                            was_sent=_was_sent,
+                        ))
 
                         if not is_muted():
                             logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
