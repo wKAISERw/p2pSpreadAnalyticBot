@@ -44,7 +44,7 @@ class BinanceExchange(BaseExchange):
             finish_rate_pct=round(finish_rate, 1),
             positive_rate=positive_rate,
             exchange="Binance",
-            link=f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={user.get('userNo', '')}",
+            link=f"https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={user.get('userNo', '')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
             trade_terms=str(adv.get("remarks", "") or "").strip().lower(),
             is_verified=str(user.get("userType", "")) == "merchant",

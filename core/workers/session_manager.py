@@ -19,7 +19,7 @@ TARGETS = {
         "ttl": 3600  # 1 година
     },
     "Binance": {
-        "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
+        "url": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
         "api_pattern": "review/list-by-page",
         "ttl": 14400  # 4 години (було 15 хв). Тепер ми покладаємось на AuthError!
     },

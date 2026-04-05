@@ -63,7 +63,7 @@ class MexcExchange(BaseExchange):
             month_order_count=order_count,
             finish_rate_pct=round(finish_rate, 1),
             exchange="MEXC",
-            link="https://www.mexc.com/p2p",
+            link=f"https://www.mexc.com/uk-UA/buy-crypto/merchant?id={user_id}",
             bank_codes=[bank_code],
             trade_terms=str(item.get("remark", "") or "").strip().lower(),
             is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),

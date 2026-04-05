@@ -251,7 +251,7 @@ class ReviewFetcher:
             session_h, _, _ = await self._db.get_auth_session(exchange)
             if not session_h:
                 logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
-                # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожну годину
+                # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожні 10 хв
                 try:
                     await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
                 except Exception:
@@ -277,7 +277,7 @@ class ReviewFetcher:
                 return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
 
             # Bybit/Binance: без сесії → NO_SESSION (не OK!) щоб needs_review_fetch
-            # повернув True через 1h — як тільки сесія з'явиться, всі перефетчаться
+            # повернув True через 10 хв — як тільки сесія з'явиться, всі перефетчаться
             if exchange in ("Bybit", "Binance"):
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 save_status = "OK" if session_h else "NO_SESSION"
@@ -391,7 +391,7 @@ class ReviewFetcher:
 
             self._known_merchants.add((exchange, merchant_id))
 
-            # Bybit/Binance: NO_SESSION якщо сесія не захоплена — перефетч через 1h
+            # Bybit/Binance: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
             if exchange in ("Bybit", "Binance"):
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 save_status = "OK" if session_h else "NO_SESSION"

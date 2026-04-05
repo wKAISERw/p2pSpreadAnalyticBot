@@ -32,8 +32,8 @@ class BinanceClient(BaseHttpClient):
         extra_headers = {
             "accept": "*/*",
             "content-type": "application/json",
-            "origin": "https://p2p.binance.com",
-            "referer": "https://p2p.binance.com/",
+            "origin": "https://c2c.binance.com",
+            "referer": "https://c2c.binance.com/",
             "x-trace-id": os.urandom(16).hex(),
         }
         super().__init__(proxy=proxy, extra_headers=extra_headers)
@@ -111,7 +111,7 @@ class BinanceClient(BaseHttpClient):
         if req_headers:
             req_headers.pop("Content-Length", None)
             req_headers.pop("Accept-Encoding", None)
-            req_headers["Referer"] = f"https://p2p.binance.com/en/advertiserDetail?advertiserNo={merchant_id}"
+            req_headers["Referer"] = f"https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={merchant_id}"
 
         try:
             if self._session is None: await self.__aenter__()

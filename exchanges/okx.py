@@ -40,7 +40,7 @@ class OkxExchange(BaseExchange):
             month_order_count=int(item.get("completedOrderQuantity", 0)),
             finish_rate_pct=float(item.get("completedRate", "0")) * 100,
             exchange="OKX",
-            link="https://www.okx.com/ua/p2p-markets/uah/buy-usdt",
+            link=f"https://www.okx.com/p2p/ads-merchant?publicUserId={item.get('publicUserId', '')}",
             bank_codes=bank_codes,
             trade_terms=str(item.get("tradingOrderInfo", {}).get("tradeOrderDesc", "") or "").strip().lower(),
             is_verified=bool(item.get("isAuthenticatedMerchant") or item.get("isMerchant")),

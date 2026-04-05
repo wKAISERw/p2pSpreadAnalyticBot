@@ -12,14 +12,14 @@ async def main():
         min_limit=Decimal("1000"), max_limit=Decimal("5000"),
         merchant_id="123", merchant_name="Драб",
         month_order_count=50, finish_rate_pct=98.5,
-        link="https://www.bybit.com/fiat/trade/otc/profile/123"
+        link="https://www.bybit.com/uk-UA/p2p/profile/s123/USDT/UAH/item"
     )
     sell_order = Order(
         id="222", price=Decimal("44.35"), available_amount=Decimal("200"),
         min_limit=Decimal("1000"), max_limit=Decimal("10000"),
         merchant_id="456", merchant_name="Rothschilds",
         month_order_count=120, finish_rate_pct=99.1,
-        link="https://www.bybit.com/fiat/trade/otc/profile/456"
+        link="https://www.bybit.com/uk-UA/p2p/profile/s456/USDT/UAH/item"
     )
 
     spread_pct = float((sell_order.price - buy_order.price) / buy_order.price * 100)

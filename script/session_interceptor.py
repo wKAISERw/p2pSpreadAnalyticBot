@@ -15,7 +15,7 @@ TARGETS = {
         "api_pattern": "appraiseList",  # 🚀 ВИПРАВЛЕНО ТУТ
     },
     "Binance": {
-        "url": "https://p2p.binance.com/en/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
+        "url": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
         "api_pattern": "review/list-by-page", # 🚀 Твій точний ендпоінт
     },
     "OKX": {

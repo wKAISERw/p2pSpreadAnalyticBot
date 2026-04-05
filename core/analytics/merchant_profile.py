@@ -1,26 +1,24 @@
 """
 merchant_profile.py — Генерація URL профілів мерчантів на біржах.
-
 Використовується для клікабельних посилань у Telegram-алертах.
 """
 
 
 def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
     """
-    Повертає URL профілю мерчанта на відповідній біржі.
-    
-    :param exchange: Назва біржі (Bybit, Binance, OKX, MEXC, Wallet)
-    :param merchant_id: ID мерчанта на біржі
-    :param merchant_name: Ім'я мерчанта (для OKX, де URL за нікнеймом)
-    :returns: URL профілю або пустий рядок
+    Повертає URL профілю/оголошень мерчанта на відповідній біржі.
+
+    Binance — публічний профіль мерчанта (advertiserNo).
+    Bybit   — сторінка оголошень мерчанта USDT/UAH.
+    OKX     — немає публічних P2P профілів.
+    MEXC    — немає публічних P2P профілів.
     """
     _URLS = {
-        "Bybit":   "https://www.bybit.com/fiat/trade/otc/profile/{id}/USDT/UAH/item",
-        "Binance": "https://p2p.binance.com/en/advertiserDetail?id={id}",
+        "Binance": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={id}",
+        "Bybit":   "https://www.bybit.com/uk-UA/p2p/profile/{id}/USDT/UAH/item",
         "OKX":     "https://www.okx.com/p2p/ads-merchant?publicUserId={id}",
-        "MEXC":    "https://www.mexc.com/otc/user/{id}",
+        "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/merchant?id={id}",
     }
-
     template = _URLS.get(exchange)
     if not template:
         return ""
@@ -28,10 +26,7 @@ def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") 
 
 
 def format_merchant_link(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
-    """
-    Повертає Markdown-посилання для Telegram.
-    Приклад: [CryptoKing](https://www.bybit.com/fiat/trade/otc/profile/12345/...)
-    """
+    """Повертає Markdown-посилання для Telegram."""
     url = build_profile_url(exchange, merchant_id, merchant_name)
     display = merchant_name or merchant_id[:12]
     if url:

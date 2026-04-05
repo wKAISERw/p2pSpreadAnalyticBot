@@ -34,7 +34,7 @@ class BybitExchange(BaseExchange):
             month_order_count=int(item.get("recentOrderNum", 0)),
             finish_rate_pct=float(item.get("recentExecuteRate", 0.0)),
             exchange="Bybit",
-            link=f"https://www.bybit.com/fiat/trade/otc/profile/{item.get('userId', '')}",
+            link=f"https://www.bybit.com/uk-UA/p2p/profile/{item.get('userMaskId', item.get('userId', ''))}/USDT/UAH/item",
             bank_codes=parsed_banks,
             trade_terms=str(item.get("remark", "") or "").strip().lower(),
             is_verified=bool(item.get("authTag") or item.get("isVerified")),

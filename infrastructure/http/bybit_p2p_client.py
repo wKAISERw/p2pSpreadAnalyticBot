@@ -29,7 +29,7 @@ class BybitP2PClient(BaseHttpClient):
         extra_headers = {
             "accept": "application/json",
             "origin": "https://www.bybit.com",
-            "referer": "https://www.bybit.com/fiat/trade/otc/",
+            "referer": "https://www.bybit.com/uk-UA/p2p/",
             "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"Windows"',
@@ -136,7 +136,7 @@ class BybitP2PClient(BaseHttpClient):
         req_headers.pop("Accept-Encoding", None)
 
         # МАГІЯ: Підставляємо правильний Referer під поточного мерчанта (Bybit це перевіряє!)
-        req_headers["Referer"] = f"https://www.bybit.com/en/p2p/profile/{merchant_id}/USDT/UAH/item"
+        req_headers["Referer"] = f"https://www.bybit.com/uk-UA/p2p/profile/{merchant_id}/USDT/UAH/item"
 
         try:
             # Робимо POST запит напряму через curl_cffi сесію, передаючи вкрадені заголовки та кукіси
@@ -271,4 +271,4 @@ class BybitP2PClient(BaseHttpClient):
             return None
         except Exception as e:
             logger.debug("Bybit fetch_p2p_book_top: %s", e)
-            return None
+            return None

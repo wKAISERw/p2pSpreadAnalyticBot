@@ -460,6 +460,7 @@ class RiskEngine:
                 review_summary_raw = dict(review_summary_raw)
                 review_summary_raw["positive"] = pos_est
                 review_summary_raw["negative"] = neg_est
+                review_summary_raw["estimated_from_stats"] = True
                 logger.debug(
                     "%s pos fallback (profile 404): %s pos=%d neg=%d (orders=%d)",
                     exchange, order.merchant_name, pos_est, neg_est, total_est,
@@ -556,17 +557,50 @@ class RiskEngine:
             has_anomalous_behavior = has_exact_limits or has_cross_bot or has_api_replenish
 
             # ── v2: Verdict freshness — інвалідуємо застарілий кеш ─────────
+            is_recheck = False  # чи це перепровірка (вердикт був, але інвалідований)
             if cached_verdict and _is_verdict_stale(verdict_ts):
                 logger.debug(
                     "🔄 Verdict freshness: %s [%s] вердикт старший %dd, перераховуємо",
                     order.merchant_name, exchange, VERDICT_MAX_AGE_DAYS,
                 )
                 cached_verdict = None
+                is_recheck = True
 
             # Cache override при поведінкових аномаліях
             if has_anomalous_behavior and cached_verdict == "OK":
                 cached_verdict = None
+                is_recheck = True
                 logger.debug("💥 Cache Override: аномалії для %s", order.merchant_name)
+
+            # ── v2.2: Інвалідація вердикту коли відгуки стали доступні ────
+            # Якщо вердикт був зроблений БЕЗ текстів відгуків (NO_SESSION/estimated),
+            # а тепер вони доступні — LLM має перепроаналізувати з реальними текстами.
+            if cached_verdict is not None and rev_summary:
+                rev_updated = float(rev_summary.get("updated_at", 0) or 0)
+                rev_status = rev_summary.get("status", "")
+                has_real_texts = bool(bad_texts)  # bad_texts вже визначено вище
+                # Вердикт зроблено ДО оновлення відгуків — тексти з'явились після
+                if rev_updated > 0 and verdict_ts > 0 and rev_updated > verdict_ts:
+                    if has_real_texts:
+                        logger.info(
+                            "🔄 Review upgrade: %s [%s] — вердикт від %.0fs ago, "
+                            "відгуки оновлені %.0fs ago з %d bad_texts → перерахунок LLM",
+                            order.merchant_name, exchange,
+                            time.time() - verdict_ts, time.time() - rev_updated,
+                            len(bad_texts),
+                        )
+                        cached_verdict = None
+                        is_recheck = True
+                    elif rev_status == "OK" and not rev_summary.get("estimated_from_stats"):
+                        # Навіть без bad_texts — якщо статус змінився на OK
+                        # (сесія з'явилась, відгуки перевірені), перераховуємо
+                        logger.info(
+                            "🔄 Review status upgrade: %s [%s] — "
+                            "відгуки тепер OK (раніше вердикт без текстів) → перерахунок LLM",
+                            order.merchant_name, exchange,
+                        )
+                        cached_verdict = None
+                        is_recheck = True
 
             # ── 3. Повернення з кешу ────────────────────────────────────────
             if score >= 80 and cached_verdict == "OK":
@@ -715,13 +749,19 @@ class RiskEngine:
                 and not behavior_flags
                 and self._llm
             ):
-                logger.debug(
-                    "🛡 Proactive screening → LLM: %s [%s] (no signals, no verdict)",
-                    order.merchant_name, exchange,
-                )
+                if is_recheck:
+                    logger.debug(
+                        "🔄 Recheck → LLM: %s [%s] (verdict invalidated, re-analyzing)",
+                        order.merchant_name, exchange,
+                    )
+                else:
+                    logger.debug(
+                        "🛡 Proactive screening → LLM: %s [%s] (no signals, no verdict)",
+                        order.merchant_name, exchange,
+                    )
                 regex_result.needs_llm = True
                 regex_result.verdict   = "NEEDS_LLM"
-                regex_result.risk_type = "PROACTIVE"
+                regex_result.risk_type = "RECHECK" if is_recheck else "PROACTIVE"
 
             # ── 5. LLM ──────────────────────────────────────────────────────
             if (regex_result.needs_llm or behavior_needs_llm) and self._llm:
@@ -733,7 +773,7 @@ class RiskEngine:
 
                 # Trusted skip: пропускаємо LLM тільки якщо немає поганих відгуків
                 # і це НЕ проактивний скринінг (перша перевірка — завжди потрібна)
-                is_proactive = regex_result.risk_type == "PROACTIVE"
+                is_proactive = regex_result.risk_type in ("PROACTIVE", "RECHECK")
                 has_review_concern = any("BADREVIEWS" in f for f in review_flags)
                 if trusted and regex_result.score < TRUSTED_LLM_MIN_SCORE and not has_review_concern and not is_proactive:
                     logger.debug(
@@ -764,6 +804,10 @@ class RiskEngine:
                 )
 
                 if scheduled:
+                    # Якщо це перепровірка — оновлюємо rec в БД щоб алерт показав "AI перепровіряє"
+                    if is_recheck:
+                        await self._db.mark_rechecking(exchange, mid)
+
                     if composite_risk or behavior_needs_llm:
                         pending_flag = f"LLM_PENDING:BEHAVIOR:S{behavior_score}:C{composite_score}"
                     else:

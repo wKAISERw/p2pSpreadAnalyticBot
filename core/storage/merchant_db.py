@@ -512,8 +512,10 @@ class MerchantDB:
         llm_calls = row["llm_calls_count"] or 0
 
         if terms_hash != hash_terms(current_terms):
-            # 🚀 Тепер SUSPICIOUS не буде перепровірятися кожні 5 секунд при зміні тексту
-            if verdict == "BLOCK" or (verdict in ("OK", "SUSPICIOUS") and (time.time() - updated_at) < 3600):
+            # BLOCK — жорсткий вердикт, зберігаємо незалежно від зміни умов.
+            # OK / SUSPICIOUS — умови змінились → негайна перепровірка LLM.
+            # (hash_terms стріпає цифри — зміна лише лімітів НЕ змінює хеш)
+            if verdict == "BLOCK":
                 pass
             else:
                 return None
@@ -599,7 +601,7 @@ class MerchantDB:
             _derive = {"OK": "APPROVE", "SUSPICIOUS": "CONDITIONAL", "BLOCK": "REJECT"}
             rec = _derive.get(verdict, "PENDING")
 
-        if rec not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING"):
+        if rec not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING", "RECHECKING"):
             rec = "PENDING"
         return rec, verdict, reason, terms_summary
 
@@ -681,6 +683,17 @@ class MerchantDB:
             verdict, merchant_name, exchange, source
         )
 
+    async def mark_rechecking(self, exchange: str, merchant_id: str) -> None:
+        """Позначає мерчанта як 'AI перепровіряє' — вердикт інвалідовано, LLM перезапущено."""
+        if not self._db:
+            return
+        await self._db.execute(
+            "UPDATE merchant_verdict SET trade_recommendation = 'RECHECKING' "
+            "WHERE exchange = ? AND merchant_id = ?",
+            (exchange, merchant_id),
+        )
+        await self._db.commit()
+
     async def needs_review_fetch(
             self,
             exchange: str,
@@ -704,10 +717,10 @@ class MerchantDB:
         updated_at = row["updated_at"] or 0
         status = row["status"] or "OK"
 
-        # NO_SESSION: re-check кожну годину — як тільки сесія з'явиться,
-        # всі мерчанти підтягнуть відгуки протягом ~1h без ручних дій
+        # NO_SESSION: re-check кожні 10 хвилин — як тільки сесія з'явиться,
+        # всі мерчанти підтягнуть відгуки протягом ~10m без ручних дій
         if status == "NO_SESSION":
-            return (time.time() - updated_at) > 3600.0
+            return (time.time() - updated_at) > 600.0
 
         # PENDING / UNAVAILABLE: завжди потребує перефетч
         if status in ("PENDING", "UNAVAILABLE"):

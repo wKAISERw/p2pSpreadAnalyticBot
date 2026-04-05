@@ -82,6 +82,7 @@ def rec_badge(rec: str) -> str:
         "CONDITIONAL": "⚡",
         "REJECT":      "🚫",
         "PENDING":     "🔍",
+        "RECHECKING":  "🔄",
     }.get((rec or "PENDING").upper(), "🔍")
 
 
@@ -90,6 +91,7 @@ REC_LABELS = {
     "CONDITIONAL": "⚡ З ОБЕРЕЖНІСТЮ",
     "REJECT":      "🚫 НЕ ТОРГУВАТИ",
     "PENDING":     "🔍 AI АНАЛІЗУЄ…",
+    "RECHECKING":  "🔄 AI ПЕРЕПРОВІРЯЄ…",
 }
 
 
@@ -105,9 +107,10 @@ def _llm_verdict_block(
     line = f"🧠 <b>{label}:</b> {rec_text}\n"
 
     # 🔘 Логіка AI (reason під спойлером)
-    if show_ai_logic and reason and rec_upper != "PENDING":
+    if show_ai_logic and reason and rec_upper not in ("PENDING",):
         safe_reason = escape(str(reason).strip()[:300])
-        line += f"<blockquote expandable>💬 {safe_reason}</blockquote>\n"
+        prefix = "💬 " if rec_upper != "RECHECKING" else "💬 (попередній аналіз) "
+        line += f"<blockquote expandable>{prefix}{safe_reason}</blockquote>\n"
     return line
 
 
@@ -162,13 +165,14 @@ def _format_route_variants(routes: list[str] | None, limit: int = 6) -> str:
 
 
 def _profile_link(exchange: str, merchant_id: str, merchant_name: str) -> str:
+    """Генерує клікабельне ім'я мерчанта (синій лінк у Telegram → профіль на біржі)."""
     safe_name = escape(str(merchant_name or "Unknown"))
     if not merchant_id:
         return safe_name
 
-    url = build_profile_url(exchange, merchant_id, merchant_name)
-    if url:
-        return f'<a href="{escape(url, quote=True)}">{safe_name}</a>'
+    web_url = build_profile_url(exchange, merchant_id, merchant_name)
+    if web_url:
+        return f'<a href="{escape(web_url, quote=True)}">{safe_name}</a>'
     return f"<b>{safe_name}</b>"
 
 
@@ -259,7 +263,7 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "NO_COMMENTS": "БЕЗ КОМЕНТІВ", "THIRD_PARTY_HINT": "3-ТІ ОСОБИ",
         "BEHAVIOR": "ПОВЕДІНКА", "SUSPICIOUS": "ПІДОЗРА", "BOT_API": "БОТ",
         "EXACT_LIMITS": "ФІКС.ЛІМІТИ", "NARROW_SPREAD": "ВУЗЬКИЙ ДІАПАЗОН",
-        "PROACTIVE": "СКРИНІНГ",
+        "PROACTIVE": "СКРИНІНГ", "RECHECK": "ПЕРЕПРОВІРКА",
     }
 
     # Категорії, для яких обов'язково показувати уривок умов
@@ -701,9 +705,8 @@ class TelegramNotifier:
         sell_fit = _format_bank_list(getattr(alert, "sell_banks_fit", None))
         buy_warn = _regex_warn_block(alert.buy_order)
         sell_warn = _regex_warn_block(alert.sell_order)
-        buy_name = escape(alert.buy_order.merchant_name or alert.buy_order.merchant_id or "Unknown")
+        # buy_name / sell_name вже є <a href> лінками від _profile_link() (рядки 675-684)
         buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}"
-        sell_name = escape(alert.sell_order.merchant_name or alert.sell_order.merchant_id or "Unknown")
         sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
 
         # 🧠 LLM Verdict блоки (конфігуровані per-user)
@@ -861,7 +864,7 @@ class TelegramNotifier:
         if single_leg_row:
             kb.append(single_leg_row)
 
-        # URL-кнопки (відкрити на біржі)
+        # URL-кнопки (відкрити оголошення на біржі)
         url_row = []
         buy_url = getattr(alert.buy_order, "link", "") or build_profile_url(
             alert.buy_order.exchange, alert.buy_order.merchant_id
@@ -875,6 +878,7 @@ class TelegramNotifier:
             url_row.append(InlineKeyboardButton(text="🔗 Sell на біржі", url=sell_url))
         if url_row:
             kb.append(url_row)
+
 
         b_mid = alert.buy_order.merchant_id
         if b_mid:
