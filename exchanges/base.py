@@ -36,6 +36,8 @@ class Order:
     review_fetched: bool = False
     # Binance: positiveRate (% позитивних відгуків, 0.0–1.0) — відрізняється від finish_rate_pct!
     positive_rate: float = 0.0
+    # Сторона ордера: "buy" (мерчант купує USDT) або "sell" (мерчант продає USDT)
+    side: str = ""
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""

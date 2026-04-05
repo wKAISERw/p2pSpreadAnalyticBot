@@ -38,6 +38,9 @@ def main_menu_kb(
         InlineKeyboardButton(text="⚙️ Налаштування", callback_data="menu:settings"),
         InlineKeyboardButton(text="🔑 API Ключі", callback_data="menu:keys"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📢 Створити оголошення", callback_data="ad:create"),
+    )
     # Пауза алертів (тимчасова через mute або постійна через is_alerts_active)
     if is_muted:
         builder.row(InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="mute:off"))
@@ -63,6 +66,10 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📊 Фільтри мерчантів", callback_data="set:merchant_filters"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔍 Режим сканування", callback_data="set:scanner_mode"),
+        InlineKeyboardButton(text="💲 Фільтр ціни", callback_data="set:price_range"),
     )
     builder.row(
         InlineKeyboardButton(text="🖥 Налаштування виводу", callback_data="set:display_menu"),
@@ -363,4 +370,101 @@ def back_to_status_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 До статусу", callback_data="menu:status")
     return builder.as_markup()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Scanner Mode — вибір режиму сканування
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SCANNER_MODE_LABELS = {
+    "SPREAD":      "🔄 Спред (зв'язки buy+sell)",
+    "TAKER_BUY":   "🛒 Тейкер: тільки купівля",
+    "TAKER_SELL":  "💸 Тейкер: тільки продаж",
+    "MAKER_BUY":   "📥 Мейкер: купівля (своє оголошення)",
+    "MAKER_SELL":  "📤 Мейкер: продаж (своє оголошення)",
+}
+
+
+def scanner_mode_kb(current_mode: str = "SPREAD") -> InlineKeyboardMarkup:
+    """Клавіатура вибору режиму сканера."""
+    builder = InlineKeyboardBuilder()
+    for mode, label in SCANNER_MODE_LABELS.items():
+        icon = "✅ " if mode == current_mode else ""
+        builder.row(InlineKeyboardButton(
+            text=f"{icon}{label}",
+            callback_data=f"smode:{mode}",
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+    return builder.as_markup()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Price Range — фільтр ціни для тейкера
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def price_range_kb() -> InlineKeyboardMarkup:
+    """Клавіатура вибору типу фільтра ціни."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="📏 Діапазон (від — до)", callback_data="prange:range"))
+    builder.row(InlineKeyboardButton(text="🎯 Точна ціна (±0.01)", callback_data="prange:exact"))
+    builder.row(InlineKeyboardButton(text="⬇️ Макс. ціна (не більше)", callback_data="prange:max"))
+    builder.row(InlineKeyboardButton(text="⬆️ Мін. ціна (не менше)", callback_data="prange:min"))
+    builder.row(InlineKeyboardButton(text="🚫 Вимкнути фільтр", callback_data="prange:off"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+    return builder.as_markup()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Create Ad — створення P2P оголошення
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_ad_exchange_kb() -> InlineKeyboardMarkup:
+    """Вибір біржі для створення оголошення."""
+    builder = InlineKeyboardBuilder()
+    # Наразі create_maker_ad реалізовано тільки для Bybit
+    exchanges = [
+        ("🟠 Bybit", "ad:ex:Bybit"),
+        ("🟡 Binance (скоро)", "ad:ex:_unsupported"),
+        ("⚫ OKX (скоро)", "ad:ex:_unsupported"),
+    ]
+    for label, cb in exchanges:
+        builder.row(InlineKeyboardButton(text=label, callback_data=cb))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def create_ad_side_kb() -> InlineKeyboardMarkup:
+    """Вибір сторони оголошення."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🛒 Купівля (BUY)", callback_data="ad:side:BUY"),
+        InlineKeyboardButton(text="💸 Продаж (SELL)", callback_data="ad:side:SELL"),
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="ad:create"))
+    return builder.as_markup()
+
+
+def create_ad_confirm_kb() -> InlineKeyboardMarkup:
+    """Підтвердження створення оголошення."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="✅ Створити", callback_data="ad:confirm"),
+        InlineKeyboardButton(text="❌ Скасувати", callback_data="ad:cancel"),
+    )
+    return builder.as_markup()
+
+
+def create_ad_banks_kb(all_banks: dict[str, str], selected: list[str]) -> InlineKeyboardMarkup:
+    """Вибір банків для оголошення."""
+    builder = InlineKeyboardBuilder()
+    selected_set = set(selected)
+    for code, name in all_banks.items():
+        icon = "✅" if code in selected_set else "☐"
+        builder.button(text=f"{icon} {name}", callback_data=f"ad:bank:{code}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="✅ Далі →", callback_data="ad:banks_done"))
+    builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="ad:cancel"))
+    return builder.as_markup()
+
+
 

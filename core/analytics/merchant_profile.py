@@ -25,6 +25,23 @@ def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") 
     return template.format(id=merchant_id, name=merchant_name)
 
 
+def build_order_url(exchange: str, order_id: str) -> str:
+    """
+    Повертає прямий URL на відкритий P2P ордер (trade/order).
+    Використовується після execute_taker_order → для прямого переходу.
+    """
+    _ORDER_URLS = {
+        "Binance": "https://p2p.binance.com/en/orderDetail?orderNo={id}",
+        "Bybit":   "https://www.bybit.com/fiat/trade/otc/order-detail?orderId={id}",
+        "OKX":     "https://www.okx.com/p2p/order/{id}",
+        "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/order/{id}",
+    }
+    template = _ORDER_URLS.get(exchange)
+    if not template or not order_id:
+        return ""
+    return template.format(id=order_id)
+
+
 def format_merchant_link(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
     """Повертає Markdown-посилання для Telegram."""
     url = build_profile_url(exchange, merchant_id, merchant_name)

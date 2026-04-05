@@ -283,6 +283,10 @@ class MerchantDB:
                                      CREATE INDEX IF NOT EXISTS idx_snap_name
                                          ON merchant_snapshots (merchant_name, exchange, recorded_at);
 
+                                     /* 🚀 Для get_best_sell_price — фільтрація по side */
+                                     CREATE INDEX IF NOT EXISTS idx_snap_side
+                                         ON merchant_snapshots (side, exchange, recorded_at);
+
                                      -- API credentials (зашифровані Fernet)
                                      -- user_id: Telegram user_id (0 = legacy/single-user)
                                      CREATE TABLE IF NOT EXISTS user_credentials (
@@ -418,6 +422,10 @@ class MerchantDB:
         await self._ensure_column("trade_sessions", "buy_exchange", "TEXT")
         # 🚀 BLOCK D: payment_method для аналітики банків
         await self._ensure_column("active_trades", "payment_method", "TEXT DEFAULT ''")
+        # 🚀 ФАЗА 1: Режим сканера (SPREAD / TAKER_BUY / TAKER_SELL / MAKER_BUY / MAKER_SELL)
+        await self._ensure_column("scanner_users", "scanner_mode", "TEXT DEFAULT 'SPREAD'")
+        # 🚀 ФАЗА 2: Фільтр по діапазону ціни для тейкер-режимів
+        await self._ensure_column("scanner_users", "price_range_json", "TEXT DEFAULT '{}'")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -970,6 +978,41 @@ class MerchantDB:
 
         return deleted
 
+    async def get_best_sell_price(self, exchange: str = "", minutes: int = 5) -> float:
+        """
+        Повертає найнижчу ціну sell-ордера (хто продає USDT) з останніх снапшотів.
+        Це sell_book_top — найвигідніша для покупця ціна в стакані.
+
+        Фільтрує по side='sell'. Якщо записів з side немає (старі снапшоти) —
+        повертає 0.0, що тригерить fallback у PriceAdvisor.
+        """
+        if not self._db:
+            return 0.0
+        try:
+            since = time.time() - (minutes * 60)
+            if exchange:
+                async with self._db.execute(
+                    """SELECT MIN(price) as best_price
+                       FROM merchant_snapshots
+                       WHERE recorded_at > ? AND exchange = ? AND price > 0
+                         AND side = 'sell'""",
+                    (since, exchange),
+                ) as cur:
+                    row = await cur.fetchone()
+            else:
+                async with self._db.execute(
+                    """SELECT MIN(price) as best_price
+                       FROM merchant_snapshots
+                       WHERE recorded_at > ? AND price > 0
+                         AND side = 'sell'""",
+                    (since,),
+                ) as cur:
+                    row = await cur.fetchone()
+            return float(row["best_price"]) if row and row["best_price"] else 0.0
+        except Exception as e:
+            logger.error("get_best_sell_price: %s", e)
+            return 0.0
+
     # ═══════════════════════════════════════════════════════════════════════
     # API Credentials (encrypted storage)
     # ═══════════════════════════════════════════════════════════════════════
@@ -1221,7 +1264,9 @@ class MerchantDB:
                           COALESCE(sell_bank_codes, '') as sell_bank_codes,
                           COALESCE(merchant_filters_json, '{}') as merchant_filters_json,
                           COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
-                          COALESCE(is_alerts_active, 1) as is_alerts_active
+                          COALESCE(is_alerts_active, 1) as is_alerts_active,
+                          COALESCE(scanner_mode, 'SPREAD') as scanner_mode,
+                          COALESCE(price_range_json, '{}') as price_range_json
                    FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
             ) as cur:
                 rows = await cur.fetchall()
@@ -1245,6 +1290,8 @@ class MerchantDB:
                     "sell_bank_codes":  sell_banks,
                     "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                     "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
+                    "scanner_mode":     row["scanner_mode"] or "SPREAD",
+                    "price_range":      _json.loads(row["price_range_json"] or "{}"),
                 })
             return result
         except Exception as e:

@@ -469,10 +469,12 @@ class TelegramNotifier:
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
 
-    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None) -> None:
+    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None, maker_monitor=None) -> None:
         """Оновлює змінні модуля. Router вже підключений в __init__."""
-        bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor)
-        # ← більше нічого не треба
+        bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor, maker_monitor=maker_monitor)
+        # Зберігаємо ПРЯМІ ПОСИЛАННЯ на кеші з commands — щоб send_taker_to_user
+        # писав у той самий dict, з якого on_taker_take() читає.
+        self._taker_cache = bot_commands._taker_order_cache
 
     async def _get_display_settings(self, chat_id: int) -> dict:
         """Повертає per-user налаштування виводу повідомлень."""
@@ -506,6 +508,184 @@ class TelegramNotifier:
             await self._send_single(alert, chat_id=chat_id, display_settings=display)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
+
+    async def send_taker_to_user(
+        self, chat_id: int, orders: list[Order], mode: str,
+    ) -> None:
+        """
+        Відправляє тейкер-алерт (список одиничних ордерів) юзеру.
+        mode: TAKER_BUY або TAKER_SELL
+        """
+        if not orders:
+            return
+        try:
+            if mode == "TAKER_BUY":
+                title = "🛒 <b>ТЕЙКЕР: КУПІВЛЯ USDT</b>"
+                action_label = "Купити"
+            else:
+                title = "💸 <b>ТЕЙКЕР: ПРОДАЖ USDT</b>"
+                action_label = "Продати"
+
+            lines = [
+                f"{title}\n"
+                f"⏱ {__import__('datetime').datetime.now().strftime('%H:%M:%S')} "
+                f"| Знайдено: <b>{len(orders)}</b>\n"
+                f"<code>{'─' * 28}</code>\n"
+            ]
+
+            kb_rows = []
+            for i, order in enumerate(orders[:10]):
+                icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
+                name = _profile_link(order.exchange, order.merchant_id, order.merchant_name)
+                risk = _risk_badge(order, short=True)
+                verified = _verified_badge(order)
+                banks = ", ".join(
+                    BANKS_SHORT.get(c, c) for c in (order.bank_codes or [])[:4]
+                )
+
+                lines.append(
+                    f"{'🥇🥈🥉'[i] if i < 3 else '▫️'} "
+                    f"<code>{order.price}</code> {icon}{escape(order.exchange)}"
+                    f"{risk}\n"
+                    f"  {name}{verified} "
+                    f"({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
+                    f"  📐 <code>{order.min_limit}–{order.max_limit} ₴</code> | {banks}\n"
+                )
+
+                # Кнопка «⚡ Взяти» для кожного ордера
+                ad_id = getattr(order, "ad_id", getattr(order, "order_id", order.id))
+                if ad_id and hasattr(self, "_taker_cache"):
+                    cache_key = f"tk_{ad_id[:12]}_{i}"
+                    self._taker_cache.set(cache_key, {
+                        "ad_id": str(ad_id),
+                        "exchange": order.exchange,
+                        "price": float(order.price),
+                        "merchant_id": order.merchant_id,
+                        "min_limit": float(order.min_limit),
+                        "max_limit": float(order.max_limit),
+                        "bank": (order.bank_codes[0] if order.bank_codes else ""),
+                        "action": "BUY" if mode == "TAKER_BUY" else "SELL",
+                    })
+                    kb_rows.append([InlineKeyboardButton(
+                        text=f"⚡ {action_label} #{i+1} ({order.exchange} {order.price})",
+                        callback_data=f"taker:take:{cache_key}",
+                    )])
+
+                # URL
+                url = getattr(order, "link", "") or ""
+                if url:
+                    kb_rows.append([InlineKeyboardButton(
+                        text=f"🔗 #{i+1} на біржі", url=url,
+                    )])
+
+            text = "".join(lines)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+
+            for chunk in self._split_message(text):
+                await self._send_with_retry(
+                    chunk, keyboard=keyboard if chunk == text else None,
+                    chat_id=chat_id,
+                )
+        except Exception as e:
+            logger.error("send_taker_to_user [%d]: %s", chat_id, e)
+
+    async def send_maker_order_alert(
+        self,
+        chat_id: int,
+        order_info: dict,
+        counterparty: "Order",
+        exchange: str,
+    ) -> None:
+        """
+        Відправляє TG-нотифікацію про вхідний ордер на мейкер-оголошення.
+
+        order_info: enriched dict з MakerAdMonitor
+        counterparty: synthetic Order з даними контрагента (+ risk_flag, composite_score)
+        """
+        try:
+            icon = EXCHANGE_ICONS.get(exchange, "◽️")
+            name = _profile_link(exchange, counterparty.merchant_id, counterparty.merchant_name)
+            verified = _verified_badge(counterparty)
+            risk = _risk_badge(counterparty)
+
+            # LLM вердикт
+            rec = order_info.get("rec", "PENDING")
+            reason = order_info.get("reason", "")
+            rec_text = REC_LABELS.get((rec or "PENDING").upper(), f"🔍 {rec}")
+            badge = rec_badge(rec)
+
+            order_id = order_info.get("order_id", "")
+            price = order_info.get("price", 0)
+            amount_usdt = order_info.get("amount_usdt", 0)
+            total_fiat = order_info.get("total_fiat", 0)
+            item_id = order_info.get("item_id", "")
+
+            text = (
+                f"🔔 <b>НОВЕ ЗАМОВЛЕННЯ!</b>\n\n"
+                f"{icon} <b>{escape(exchange)}</b> | "
+                f"Оголошення: <code>{escape(str(item_id)[:20])}</code>\n\n"
+                f"👤 <b>Контрагент:</b> {name}{verified}\n"
+                f"📊 {counterparty.finish_rate_pct:.1f}% | "
+                f"{counterparty.month_order_count} угод\n"
+            )
+
+            if risk:
+                text += f"\n{risk}"
+
+            text += (
+                f"\n💰 <b>Сума:</b> <code>{total_fiat:.0f} ₴</code>"
+                f" ({amount_usdt:.2f} USDT по {price:.2f})\n"
+            )
+
+            text += f"\n🧠 <b>AI:</b> {badge} {rec_text}\n"
+            if reason and rec.upper() not in ("PENDING", "RECHECKING"):
+                safe_reason = escape(str(reason).strip()[:300])
+                text += f"<blockquote expandable>💬 {safe_reason}</blockquote>\n"
+
+            # Кнопки
+            kb_rows = []
+
+            # Кешуємо order_id для кнопок
+            short_oid = order_id[:20] if order_id else "?"
+            kb_rows.append([
+                InlineKeyboardButton(
+                    text="✅ Прийняти",
+                    callback_data=f"mkord:accept:{short_oid}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Відхилити",
+                    callback_data=f"mkord:reject:{short_oid}",
+                ),
+            ])
+
+            # Лінк на біржу
+            order_url = ""
+            if exchange == "Bybit" and order_id:
+                order_url = f"https://www.bybit.com/uk-UA/p2p/order/{order_id}"
+            if order_url:
+                kb_rows.append([InlineKeyboardButton(text="🔗 Відкрити на біржі", url=order_url)])
+
+            # Бан контрагента
+            mid = counterparty.merchant_id
+            if mid:
+                kb_rows.append([
+                    InlineKeyboardButton(
+                        text="🚫 Бан контрагента",
+                        callback_data=f"fb:{exchange}:{mid}:triangle",
+                    ),
+                ])
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+            for chunk in self._split_message(text):
+                await self._send_with_retry(
+                    chunk,
+                    keyboard=keyboard if chunk == text else None,
+                    chat_id=chat_id,
+                )
+
+        except Exception as e:
+            logger.error("send_maker_order_alert [%d]: %s", chat_id, e, exc_info=True)
 
     def _setup_handlers(self):
         """Обробник натискань на callback-кнопки."""
@@ -548,6 +728,43 @@ class TelegramNotifier:
             except Exception as e:
                 logger.error("Помилка обробки кнопки: %s", e)
                 await call.answer("Помилка БД при блокуванні", show_alert=True)
+
+        @self._router.callback_query(F.data.startswith("mkord:"))
+        async def on_maker_order_action(call: CallbackQuery):
+            """Обробка кнопок Прийняти/Відхилити для вхідних maker-ордерів."""
+            try:
+                parts = call.data.split(":")
+                if len(parts) < 3:
+                    return await call.answer("Помилка формату")
+
+                action = parts[1]   # "accept" або "reject"
+                order_id = parts[2]
+
+                if action == "accept":
+                    # Просто підтверджуємо — фактичний release робиться на біржі вручну
+                    await call.answer("✅ Прийнято! Завершіть угоду на біржі.", show_alert=True)
+                    old_text = call.message.html_text or ""
+                    new_text = f"✅ <b>ПРИЙНЯТО</b>\n\n{old_text[:3500]}"
+                    from contextlib import suppress
+                    from aiogram.exceptions import TelegramBadRequest
+                    with suppress(TelegramBadRequest):
+                        await call.message.edit_text(new_text, reply_markup=None)
+
+                elif action == "reject":
+                    await call.answer("❌ Відхилено. Спробуйте скасувати на біржі.", show_alert=True)
+                    old_text = call.message.html_text or ""
+                    new_text = f"❌ <b>ВІДХИЛЕНО</b>\n\n<del>{old_text[:3500]}</del>"
+                    from contextlib import suppress
+                    from aiogram.exceptions import TelegramBadRequest
+                    with suppress(TelegramBadRequest):
+                        await call.message.edit_text(new_text, reply_markup=None)
+
+                else:
+                    await call.answer("Невідома дія")
+
+            except Exception as e:
+                logger.error("mkord callback error: %s", e)
+                await call.answer("Помилка обробки", show_alert=True)
 
     async def start(self) -> None:
         # 🚀 СТВОРЮЄМО СИСТЕМНЕ МЕНЮ КНОПКОЮ (Повний список)

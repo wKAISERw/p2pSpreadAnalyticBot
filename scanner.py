@@ -19,6 +19,8 @@ from core.engine.cross_matcher import CrossMatchingEngine
 from core.engine.risk_engine import RiskEngine
 from core.engine.stability import SpreadStabilityFilter
 from core.engine.exchange_manager import exchange_manager
+from core.engine.taker_scanner import TakerScanner
+from core.engine.maker_ad_monitor import MakerAdMonitor
 from core.storage.merchant_db import MerchantDB
 from core.utils.circuit_breaker import CircuitBreaker
 from core.utils.dedup_cache import TTLCache
@@ -291,7 +293,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     single_leg_executor = SingleLegExecutor(merchant_db)
 
     notifier.bind_db(merchant_db)
-    notifier.bind_commands(merchant_db, account_clients.as_dict(), trade_worker, single_leg_executor)
+    # bind_commands відкладено до ініціалізації MakerAdMonitor (після risk_engine)
 
     llm_pool = LLMWorkerPool(merchant_db)
     await llm_pool.start()
@@ -336,6 +338,26 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
     merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
+
+    # 🚀 MakerAdMonitor — моніторинг вхідних ордерів на мейкер-оголошення
+    maker_monitor = MakerAdMonitor(db=merchant_db, risk_engine=risk_engine)
+
+    async def _maker_notify_cb(chat_id: int, order_info: dict, counterparty_order, exchange: str):
+        """Callback для TG-нотифікації про вхідний maker-ордер."""
+        try:
+            await notifier.send_maker_order_alert(chat_id, order_info, counterparty_order, exchange)
+        except Exception as e:
+            logger.error("Maker notify callback error: %s", e)
+
+    maker_monitor.set_notify_callback(_maker_notify_cb)
+    await maker_monitor.seed_seen_orders()
+
+    # Передаємо maker_monitor в bot_commands через notifier.bind_commands
+    notifier.bind_commands(
+        merchant_db, account_clients.as_dict(), trade_worker,
+        single_leg_executor=single_leg_executor,
+        maker_monitor=maker_monitor,
+    )
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
         ttl_seconds=getattr(settings, "stability_ttl", 15.0),
@@ -352,6 +374,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     )
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
     dispatcher = AlertDispatcher(merchant_db, notifier)
+    taker_scanner = TakerScanner()
+    taker_dedup = TTLCache(
+        ttl_seconds=getattr(settings, "taker_dedup_ttl", 90.0),
+        max_size=500,
+    )
 
     # Таймінги
     cb_fails = getattr(settings, "cb_failure_threshold", 3)
@@ -526,6 +553,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         if isinstance(res, Exception):
                             continue
                         b_orders, s_orders = res
+
+                        # Тегуємо side для снапшотів і PriceAdvisor
+                        for o in b_orders:
+                            o.side = "buy"
+                        for o in s_orders:
+                            o.side = "sell"
+
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
@@ -767,6 +801,44 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             logger.debug("⏭ Скіп: muted")
                     state.opportunities = current_frontend_opps[:50]
                     state.current_alerts = current_cycle_alerts[:50]
+
+                    # ── Тейкер-шлях: алерти для TAKER_BUY / TAKER_SELL юзерів ──
+                    if active_users and not is_muted():
+                        taker_users = [
+                            u for u in active_users
+                            if u.get("scanner_mode") in ("TAKER_BUY", "TAKER_SELL")
+                        ]
+                        for t_user in taker_users:
+                            try:
+                                t_orders = taker_scanner.find_orders_for_user(
+                                    t_user, buy_grouped, sell_grouped,
+                                )
+                                if not t_orders:
+                                    continue
+                                # Dedup: не спамимо тим самим ордером щоцикл
+                                t_mode = t_user["scanner_mode"]
+                                fresh = []
+                                for o in t_orders:
+                                    dk = f"taker:{t_user['user_id']}:{o.id}"
+                                    if not taker_dedup.seen(dk):
+                                        taker_dedup.mark(dk)
+                                        fresh.append(o)
+                                if fresh:
+                                    logger.info(
+                                        "📤 Taker dispatch → user %s | %s | %d ордерів",
+                                        t_user["user_id"], t_mode, len(fresh),
+                                    )
+                                    asyncio.create_task(
+                                        notifier.send_taker_to_user(
+                                            t_user["chat_id"], fresh, t_mode,
+                                        )
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    "Taker dispatch error user %s: %s",
+                                    t_user.get("user_id"), e,
+                                )
+
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))
                     await asyncio.sleep(adaptive_sleep)
@@ -780,6 +852,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         maintenance_task.cancel()
         if "cb_userbot" in locals():
             await cb_userbot.stop()
+        maker_monitor.stop_all()
         await session_manager.stop()
         await review_fetcher.stop()
         await llm_pool.stop()

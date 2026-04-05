@@ -149,9 +149,16 @@ class AdRepricer:
                     success = await update_ad_price(self._exchange, self._sell_ad_id, target_price)
 
                 if success:
+                    old_display = f"{self._current_price:.2f}" if self._current_price else "—"
                     logger.info(
                         f"[AdRepricer #{self._session_id}] ✅ Ціну оновлено: "
-                        f"{self._current_price} → {target_price:.4f} UAH"
+                        f"{old_display} → {target_price:.4f} UAH"
+                    )
+                    await self._notify(
+                        f"🔄 <b>Репрайсер</b> #{self._session_id}\n"
+                        f"Ціну оголошення оновлено: "
+                        f"<code>{old_display}</code> → <code>{target_price:.4f}</code> ₴\n"
+                        f"Конкурент: <code>{book_top:.4f}</code> ₴"
                     )
                     self._current_price = target_price
                 else:
