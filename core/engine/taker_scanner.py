@@ -33,13 +33,13 @@ class TakerScanner:
 
         price_filter = PriceRangeFilter(user.get("price_range", {}))
 
-        # TAKER_BUY: я купую → шукаю sell-ордери (хто продає USDT)
-        # TAKER_SELL: я продаю → шукаю buy-ордери (хто купує USDT)
+        # buy_grouped  = мерчанти ПРОДАЮТЬ USDT (side=1, user BUYS, low price)
+        # sell_grouped = мерчанти КУПУЮТЬ USDT  (side=0, user SELLS, high price)
         if mode == "TAKER_BUY":
-            source_grouped = sell_grouped
+            source_grouped = buy_grouped   # user купує → ордери де мерчанти продають
             user_banks = set(user.get("buy_bank_codes") or user.get("bank_codes", []))
         else:
-            source_grouped = buy_grouped
+            source_grouped = sell_grouped  # user продає → ордери де мерчанти купують
             user_banks = set(user.get("sell_bank_codes") or user.get("bank_codes", []))
 
         capital = float(user.get("capital", 0))
@@ -64,6 +64,30 @@ class TakerScanner:
                     continue
                 if min_amount > 0 and order_max < min_amount:
                     continue
+
+                # ── Застосування фільтрів розпродажу (TAKER_SELL) ──
+                if mode == "TAKER_SELL":
+                    t_price = float(user.get("taker_sell_price", 0))
+                    t_profit = float(user.get("taker_sell_profit", 0))
+                    t_amount = float(user.get("taker_sell_amount", 0))
+                    t_speed = user.get("taker_sell_speed", "FAST")
+
+                    if t_price > 0 and t_profit > 0:
+                        target_price = t_price * (1 + t_profit)
+                        if float(order.price) < target_price:
+                            continue  # Не виходимо в бажаний профіт
+
+                    if t_amount > 0:
+                        fiat_val = t_amount * float(order.price)
+                        if t_speed == "FAST":
+                            # Маємо продати все за один раз
+                            if order_max < fiat_val or order_min > fiat_val:
+                                continue
+                        else:
+                            # Розпродаж частинами: головне щоб вистачало крипти хоча б на мінімалку
+                            if order_min > fiat_val:
+                                continue
+
                 if not price_filter.matches(order):
                     continue
                 if not self._merchant_ok(order, mf, emf):

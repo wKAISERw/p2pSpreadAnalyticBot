@@ -53,8 +53,8 @@ def main_menu_kb(
     builder.row(InlineKeyboardButton(text="ℹ️ Допомога", callback_data="menu:help"))
     return builder.as_markup()
 
-def settings_menu_kb() -> InlineKeyboardMarkup:
-    """Особисті налаштування юзера."""
+def settings_menu_kb(scanner_mode: str = "SPREAD") -> InlineKeyboardMarkup:
+    """Особисті налаштування юзера (контекстне меню за режимом)."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="💰 Макс. капітал", callback_data="set:capital"),
@@ -71,6 +71,15 @@ def settings_menu_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔍 Режим сканування", callback_data="set:scanner_mode"),
         InlineKeyboardButton(text="💲 Фільтр ціни", callback_data="set:price_range"),
     )
+    # Контекстні кнопки для мейкер-режимів
+    if scanner_mode == "MAKER_SELL":
+        builder.row(
+            InlineKeyboardButton(text="💲 Ціна купівлі (maker)", callback_data="set:maker_buy_price"),
+        )
+    elif scanner_mode == "MAKER_BUY":
+        builder.row(
+            InlineKeyboardButton(text="📊 Цільова маржа (maker)", callback_data="set:target_margin"),
+        )
     builder.row(
         InlineKeyboardButton(text="🖥 Налаштування виводу", callback_data="set:display_menu"),
     )

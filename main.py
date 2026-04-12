@@ -20,6 +20,7 @@ from infrastructure.api.mexc_account import MEXCAccountClient
 from bot.notifier import TelegramNotifier
 from scanner import run_scanner
 from state import state
+from core.workers.db_maintenance import DBMaintenanceTask
 
 db = MerchantDB()
 
@@ -73,6 +74,7 @@ def setup_logging():
 scanner_task = None
 notifier = None
 stop_event = asyncio.Event()
+db_maintainer = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -85,6 +87,10 @@ async def lifespan(app: FastAPI):
     # ДОДАНО: Ініціалізуємо підключення до БД ДО запуску ендпоінтів
     await db.start()
     logger.info("✅ База даних успішно підключена для API")
+
+    global db_maintainer
+    db_maintainer = DBMaintenanceTask(db)
+    db_maintainer.start()
 
     notifier = TelegramNotifier()
     await notifier.start()
@@ -111,6 +117,9 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(scanner_task, timeout=5.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+
+    if db_maintainer:
+        await db_maintainer.stop()
 
     if notifier:
         try:

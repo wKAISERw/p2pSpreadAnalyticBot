@@ -32,6 +32,10 @@ _trade_worker = None
 _single_leg_executor = None
 _maker_monitor = None
 _active_repricers: dict = {}   # ad_id → asyncio.Task (AdRepricer)
+
+# ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
+_single_leg_cache: dict = {}   # "b:<key>" / "s:<key>" → {ad_id, exchange, price, ...}
+_spread_cache: dict = {}       # "<key>" → (SpreadAlert, timestamp)
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -115,6 +119,24 @@ class CreateAdStates(StatesGroup):
 class TakerExecuteStates(StatesGroup):
     waiting_amount = State()
     waiting_confirm = State()
+
+
+class MakerSettingsStates(StatesGroup):
+    waiting_buy_price = State()
+    waiting_target_margin = State()
+
+
+class TakerSellSettingsStates(StatesGroup):
+    waiting_amount = State()
+    waiting_buy_price = State()
+    waiting_profit = State()
+    waiting_speed = State()
+
+class SniperStates(StatesGroup):
+    waiting_exchange = State()
+    waiting_direction = State()
+    waiting_min_spread = State()
+    waiting_min_volume = State()
 
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
@@ -270,9 +292,102 @@ async def cmd_help(message: Message) -> None:
         "<b>/keys</b>\nСписок підключених API ключів.\n\n"
         "<b>/settings</b>\nЗмінити глобальні налаштування сканера.\n\n"
         "<b>/ban [exchange] [merchant_id]</b>\nРучний бан мерчанта.\n\n"
+        "<b>/mode</b>\nПерегляд і зміна режиму сканування.\n\n"
         "<b>/status</b>\nПоточний стан сканера."
     )
     await message.answer(text)
+
+
+# ── /mode (ЗМІНА РЕЖИМУ СКАНУВАННЯ) ──────────────────────────────────────
+@router.message(Command("mode"))
+async def cmd_mode(message: Message) -> None:
+    """Показує меню вибору режиму сканера."""
+    current_mode = "SPREAD"
+    if _db:
+        users = await _db.get_active_users()
+        for u in users:
+            if u["user_id"] == message.from_user.id:
+                current_mode = u.get("scanner_mode", "SPREAD")
+                break
+    from bot.keyboards import scanner_mode_kb
+    await message.answer(
+        "🎯 <b>Режим сканування</b>\n\n"
+        "• <b>SPREAD</b> — класичний, шукає зв'язки Купівля→Продаж з маржею\n"
+        "• <b>TAKER BUY</b> — шукає найвигідніші sell-ордери для швидкої покупки\n"
+        "• <b>TAKER SELL</b> — шукає найвигідніші buy-ордери для швидкого продажу\n"
+        "• <b>MAKER BUY</b> — аналіз ринку + підказка оптимальної ціни купівлі\n"
+        "• <b>MAKER SELL</b> — розрахунок мін. ціни продажу за ціною купівлі\n\n"
+        f"Поточний: <b>{current_mode}</b>",
+        reply_markup=scanner_mode_kb(current_mode),
+    )
+
+
+# ── /stats (СТАТИСТИКА) ──────────────────────────────────────────────────
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    from core.analytics.stats_engine import StatsEngine
+    stats = StatsEngine(_db)
+    text = await stats.format_stats_message(period_days=30)
+    text += "\n\n<i>👇 Оберіть розділ для деталей:</i>"
+    await message.answer(text, reply_markup=stats_overview_kb())
+
+
+# ── /sessions (AUTH-СЕСІЇ) ────────────────────────────────────────────────
+@router.message(Command("sessions"))
+async def cmd_sessions(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    from core.workers.session_manager import SESSION_TTL
+    import time as _time
+    sessions = await _db.get_all_auth_sessions()
+
+    if not sessions:
+        return await message.answer("📭 Жодних auth-сесій не знайдено.")
+
+    lines = ["🩺 <b>Auth-сесії:</b>\n"]
+    for s in sessions:
+        exchange = s.get("exchange", "?")
+        updated_at = float(s.get("updated_at", 0))
+        is_active = s.get("is_active", 0)
+        age_h = (_time.time() - updated_at) / 3600 if updated_at else 0
+        ttl_h = SESSION_TTL.get(exchange, 96 * 3600) / 3600
+        remaining_h = ttl_h - age_h
+
+        if not is_active:
+            status = "❌ Протухла"
+        elif remaining_h < 2:
+            status = f"⚠️ Спливає ({remaining_h:.1f}г)"
+        else:
+            status = f"🟢 OK ({remaining_h:.0f}г)"
+
+        lines.append(
+            f"{'🟢' if is_active else '🔴'} <b>{exchange}</b>: {status}\n"
+            f"  Вік: {age_h:.1f}г / TTL: {ttl_h:.0f}г"
+        )
+    await message.answer("\n".join(lines), reply_markup=back_to_main_kb())
+
+
+# ── /trades (АКТИВНІ ТОРГОВІ СЕСІЇ) ──────────────────────────────────────
+@router.message(Command("trades"))
+async def cmd_trades(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    rows = await _db.get_recent_trade_sessions(limit=5)
+    if not rows:
+        return await message.answer("📭 Немає активних торгових сесій.")
+
+    lines = ["📊 <b>Останні торгові сесії:</b>\n"]
+    for row in rows:
+        lines.append(
+            f"🔹 <b>#{row['id']}</b> | <code>{row['strategy']}</code> | "
+            f"Статус: <b>{row['session_status']}</b> "
+            f"(Fee: {row['network_fee']}$, Профіт: {row['gross_profit']:.0f} ₴)"
+        )
+    await message.answer("\n".join(lines), reply_markup=back_to_main_kb())
 
 
 # ── /active (ПОКАЗАТИ ВСІ ПОТОЧНІ СПРЕДИ) ──────────────────────────────────
@@ -280,6 +395,20 @@ async def cmd_help(message: Message) -> None:
 async def cmd_active(message: Message) -> None:
     from state import state as app_state
     from copy import copy
+
+    mode = "SPREAD"
+    if _db:
+        users = await _db.get_active_users()
+        user = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        if user:
+            mode = user.get("scanner_mode", "SPREAD")
+            
+    if mode != "SPREAD":
+        return await message.answer(
+            f"🔄 <b>Твій поточний режим: {mode}</b>\n\n"
+            "В цьому режимі результати сканування надсилаються негайно як тільки з'являються вигідні пропозиції.\n"
+            "Щоб повернутись до загального списку спредів, зміни режим на SPREAD через /mode."
+        )
 
     alerts = getattr(app_state, "current_alerts", [])
     if not alerts:
@@ -308,10 +437,10 @@ async def cmd_active(message: Message) -> None:
             # 🔄 Re-fetch LLM verdicts from DB (можуть бути оновлені після створення алерту)
             fresh = copy(a)
             if _db:
-                b_rec, _, b_reason, _ = await _db.get_trade_recommendation_full(
+                b_rec, _, b_reason, _, _ = await _db.get_trade_recommendation_full(
                     a.buy_order.exchange, a.buy_order.merchant_id
                 )
-                s_rec, _, s_reason, _ = await _db.get_trade_recommendation_full(
+                s_rec, _, s_reason, _, _ = await _db.get_trade_recommendation_full(
                     a.sell_order.exchange, a.sell_order.merchant_id
                 )
                 fresh.buy_rec = b_rec
@@ -975,7 +1104,7 @@ async def on_exchange_toggle_menu(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("exch:disable:"))
 async def on_exchange_disable(call: CallbackQuery) -> None:
-    """Повністю вимикає біржу (до ручного ввімкнення)."""
+    """Повністю вимкає біржу (до ручного ввімкнення)."""
     from core.engine.exchange_manager import exchange_manager
     name = call.data.split(":")[2]
     await exchange_manager.disable(name, reason="manual", runtime_config=runtime_config)
@@ -1172,9 +1301,16 @@ async def on_user_alerts_on(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:settings")
 async def on_settings_menu(call: CallbackQuery) -> None:
+    scanner_mode = "SPREAD"
+    if _db:
+        users = await _db.get_active_users()
+        for u in users:
+            if u["user_id"] == call.from_user.id:
+                scanner_mode = u.get("scanner_mode", "SPREAD")
+                break
     text = "⚙️ <b>Налаштування персональних фільтрів</b>\n\nТут ти можеш змінити свої особисті обмеження. Бот надішле тобі угоду ТІЛЬКИ якщо вона проходить під ці фільтри."
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=settings_menu_kb())
+        await call.message.edit_text(text, reply_markup=settings_menu_kb(scanner_mode))
     await call.answer()
 
 
@@ -2012,7 +2148,9 @@ async def on_scanner_mode_menu(call: CallbackQuery) -> None:
             "🎯 <b>Режим сканування</b>\n\n"
             "• <b>SPREAD</b> — класичний, шукає зв'язки Купівля→Продаж з маржею\n"
             "• <b>TAKER BUY</b> — шукає найвигідніші sell-ордери для швидкої покупки\n"
-            "• <b>TAKER SELL</b> — шукає найвигідніші buy-ордери для швидкого продажу\n\n"
+            "• <b>TAKER SELL</b> — шукає найвигідніші buy-ордери для швидкого продажу\n"
+            "• <b>MAKER BUY</b> — аналіз ринку + підказка оптимальної ціни купівлі\n"
+            "• <b>MAKER SELL</b> — розрахунок мін. ціни продажу за ціною купівлі\n\n"
             f"Поточний: <b>{current_mode}</b>",
             reply_markup=scanner_mode_kb(current_mode),
         )
@@ -2020,9 +2158,19 @@ async def on_scanner_mode_menu(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("smode:"))
-async def on_scanner_mode_set(call: CallbackQuery) -> None:
-    """Зберігає обраний режим."""
+async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
+    """Зберігає обраний режим. Cleanup при виході з MAKER, промпт buy_price для MAKER_SELL."""
     mode = call.data.split(":")[1]
+
+    # ── Дізнаємось попередній режим для cleanup ──
+    old_mode = "SPREAD"
+    if _db:
+        users = await _db.get_active_users()
+        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        if user:
+            old_mode = user.get("scanner_mode", "SPREAD")
+
+    # ── Зберігаємо новий режим ──
     if _db:
         conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
         await conn.execute(
@@ -2030,10 +2178,60 @@ async def on_scanner_mode_set(call: CallbackQuery) -> None:
             (mode, call.from_user.id),
         )
         await conn.commit()
+
+    # ── Cleanup: зупиняємо мейкер-сервіси якщо виходимо з MAKER режиму ──
+    if old_mode in ("MAKER_SELL", "MAKER_BUY") and mode not in ("MAKER_SELL", "MAKER_BUY"):
+        user_repricers = [k for k in _active_repricers if str(call.from_user.id) in str(k)]
+        for key in user_repricers:
+            task = _active_repricers.pop(key, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info("🛑 AdRepricer зупинено: %s (mode switch)", key)
+        if _maker_monitor:
+            try:
+                _maker_monitor.stop_all()
+            except Exception:
+                pass
+
+    # ── Якщо MAKER_SELL — перевіряємо чи є ціна купівлі ──
+    if mode == "MAKER_SELL" and _db:
+        users = await _db.get_active_users()
+        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        if user and float(user.get("maker_buy_price", 0)) <= 0:
+            await state.set_state(MakerSettingsStates.waiting_buy_price)
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(
+                    f"✅ Режим: <b>{mode}</b>\n\n"
+                    "💲 <b>За скільки ти купив USDT?</b>\n"
+                    "Введи ціну купівлі (UAH/USDT), щоб розрахувати мін. ціну продажу:",
+                    reply_markup=back_to_main_kb(),
+                )
+            return await call.answer()
+
+    # ── Якщо TAKER_SELL — запитуємо параметри розпродажу ──
+    if mode == "TAKER_SELL":
+        await state.set_state(TakerSellSettingsStates.waiting_amount)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                f"✅ Режим: <b>{mode}</b>\n\n"
+                "📦 <b>Скільки USDT ти хочеш розпродати?</b>\n"
+                "Введи об'єм крипти (наприклад: 500):",
+                reply_markup=back_to_main_kb(),
+            )
+        return await call.answer()
+
     from bot.keyboards import scanner_mode_kb
+    mode_desc = {
+        "SPREAD": "🔄 Класичний пошук зв'язок",
+        "TAKER_BUY": "🛒 Тейкер: пошук sell-ордерів для купівлі",
+        "TAKER_SELL": "💸 Тейкер: пошук buy-ордерів для продажу",
+        "MAKER_BUY": "📥 Мейкер: аналіз ринку + підказки ціни",
+        "MAKER_SELL": "📤 Мейкер: розрахунок ціни продажу",
+    }
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"✅ Режим змінено на <b>{mode}</b>",
+            f"✅ Режим змінено на <b>{mode}</b>\n"
+            f"<i>{mode_desc.get(mode, '')}</i>",
             reply_markup=scanner_mode_kb(mode),
         )
     await call.answer(f"✅ {mode}")
@@ -2106,7 +2304,7 @@ async def on_price_range_max_input(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     price_min = data.get("price_min", 0)
     if val <= price_min:
-        return await message.answer(f"❌ Максимум ({val}) повинен бути більше мінімуму ({price_min}).")
+        return await message.answer(f"❌ Максимум ({val}) повинен бути більше мінімального ({price_min}).")
     await state.clear()
     import json
     pr = json.dumps({"mode": "range", "min": price_min, "max": val})
@@ -2602,7 +2800,7 @@ async def on_taker_take(call: CallbackQuery, state: FSMContext) -> None:
     label = "Купівля" if action == "BUY" else "Продаж"
     text = (
         f"{icon} <b>{label} (Taker)</b>\n\n"
-        f"Біржа: <b>{data['exchange']}</b>\n"
+        f"Біржа: <b>{data.get('exchange')}</b>\n"
         f"Ціна: <code>{price:.4f}</code> UAH\n"
         f"Ліміти: <b>{min_usdt:.1f} — {max_usdt:.1f} USDT</b>\n\n"
         f"👇 Введи суму в <b>USDT</b> (або <code>max</code>):"
@@ -2636,6 +2834,7 @@ async def on_taker_amount(message: Message, state: FSMContext) -> None:
     price = data.get("taker_price", 0)
     fiat_amount = amount * price
 
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="✅ Підтвердити", callback_data="taker:confirm"),
@@ -2730,4 +2929,445 @@ async def on_taker_confirm(call: CallbackQuery, state: FSMContext) -> None:
     with suppress(TelegramBadRequest):
         await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
+
+
+# =========================================================================
+# 🦵 SINGLE-LEG зі спред-алертів (кнопки «Купити» / «Продати»)
+# =========================================================================
+
+@router.callback_query(F.data.regexp(r"^sl:[bs]:"))
+async def on_single_leg_take(call: CallbackQuery, state: FSMContext) -> None:
+    """Обробляє натискання кнопок 'Купити'/'Продати' зі спред-алерту."""
+    if not _single_leg_executor:
+        return await call.answer("❌ SingleLegExecutor не підключено!", show_alert=True)
+
+    raw_key = call.data  # sl:b:<key> or sl:s:<key>
+    data = _single_leg_cache.get(raw_key)
+    if not data:
+        return await call.answer("❌ Дані застаріли, зачекайте новий алерт.", show_alert=True)
+
+    action = "BUY" if raw_key.startswith("sl:b:") else "SELL"
+    price = data.get("price", 0)
+    min_usdt = data.get("min_limit", 0) / price if price > 0 else 0
+    max_usdt = data.get("max_limit", 0) / price if price > 0 else 0
+
+    await state.update_data(
+        taker_action=action, taker_ad_id=data.get("ad_id", ""),
+        taker_exchange=data.get("exchange", ""), taker_price=price,
+        taker_merchant_id=data.get("merchant_id", ""),
+        taker_bank=data.get("bank", ""),
+        taker_min_usdt=min_usdt, taker_max_usdt=max_usdt,
+    )
+    await state.set_state(TakerExecuteStates.waiting_amount)
+
+    icon = "🛒" if action == "BUY" else "💸"
+    label = "Купівля" if action == "BUY" else "Продаж"
+    text = (
+        f"{icon} <b>{label} (Single-Leg)</b>\n\n"
+        f"Біржа: <b>{data.get('exchange')}</b>\n"
+        f"Ціна: <code>{price:.4f}</code> UAH\n"
+        f"Ліміти: <b>{min_usdt:.1f} — {max_usdt:.1f} USDT</b>\n\n"
+        f"👇 Введи суму в <b>USDT</b> (або <code>max</code>):"
+    )
+    await call.message.answer(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+# =========================================================================
+# 🔄 T→T Авто-трейд зі спред-алертів
+# =========================================================================
+
+@router.callback_query(F.data.startswith("trade:tt:"))
+async def on_trade_tt(call: CallbackQuery, state: FSMContext) -> None:
+    """Ініціює T→T трейд зі спред-алерту. Зберігає контекст, просить суму."""
+    if not _trade_worker:
+        return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
+
+    cache_key = call.data.split(":", 2)[2]
+    spread_data = _spread_cache.get(cache_key)
+    if not spread_data:
+        return await call.answer("❌ Зв'язка застаріла (>5 хв).", show_alert=True)
+
+    alert, _ts = spread_data
+    buy_leg = {
+        "exchange": alert.buy_exchange, "ad_id": getattr(alert, "buy_ad_id", ""),
+        "price": alert.buy_price, "merchant_id": getattr(alert, "buy_merchant_id", ""),
+        "bank": getattr(alert, "buy_bank", ""),
+        "min_limit": getattr(alert, "buy_min_limit", 0),
+        "max_limit": getattr(alert, "buy_max_limit", 0),
+    }
+    sell_leg = {
+        "exchange": alert.sell_exchange, "ad_id": getattr(alert, "sell_ad_id", ""),
+        "price": alert.sell_price, "merchant_id": getattr(alert, "sell_merchant_id", ""),
+        "bank": getattr(alert, "sell_bank", ""),
+    }
+
+    min_usdt = buy_leg["min_limit"] / buy_leg["price"] if buy_leg["price"] > 0 else 0
+    max_usdt = buy_leg["max_limit"] / buy_leg["price"] if buy_leg["price"] > 0 else 0
+
+    await state.update_data(
+        tt_buy_leg=buy_leg, tt_sell_leg=sell_leg,
+        tt_min_usdt=min_usdt, tt_max_usdt=max_usdt,
+        tt_spread=getattr(alert, "spread", 0),
+    )
+    await state.set_state(TakerExecuteStates.waiting_amount)
+
+    text = (
+        f"🔄 <b>Авто T→T трейд</b>\n\n"
+        f"Купівля: <b>{alert.buy_exchange}</b> @ <code>{alert.buy_price:.4f}</code>\n"
+        f"Продаж: <b>{alert.sell_exchange}</b> @ <code>{alert.sell_price:.4f}</code>\n"
+        f"Маржа: <b>{getattr(alert, 'spread', 0):.2f}%</b>\n\n"
+        f"Ліміти: <b>{min_usdt:.1f} — {max_usdt:.1f} USDT</b>\n\n"
+        f"👇 Введи суму в <b>USDT</b> (або <code>max</code>):"
+    )
+    await call.message.answer(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data.in_({"tt:confirm", "tt:cancel"}))
+async def on_tt_confirm(call: CallbackQuery, state: FSMContext) -> None:
+    """Підтверджує або скасовує T→T трейд."""
+    if call.data == "tt:cancel":
+        await state.clear()
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text("🚫 T→T скасовано.", reply_markup=back_to_main_kb())
+        return await call.answer("Скасовано.")
+
+    data = await state.get_data()
+    await state.clear()
+
+    if not _trade_worker:
+        return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
+
+    buy_leg = data.get("tt_buy_leg", {})
+    sell_leg = data.get("tt_sell_leg", {})
+    amount_usdt = data.get("taker_amount", 0)
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⏳ <b>Запускаю T→T: {buy_leg.get('exchange')} → {sell_leg.get('exchange')}…</b>",
+            reply_markup=None,
+        )
+
+    try:
+        success = await _trade_worker.execute_tt_route(
+            buy_leg=buy_leg, sell_leg=sell_leg,
+            amount_usdt=amount_usdt, owner_user_id=call.from_user.id,
+        )
+        if success:
+            text = (
+                f"✅ <b>T→T трейд запущено!</b>\n\n"
+                f"Купівля: {buy_leg.get('exchange')} @ {buy_leg.get('price', 0):.4f}\n"
+                f"Продаж: {sell_leg.get('exchange')} @ {sell_leg.get('price', 0):.4f}\n"
+                f"Об'єм: <code>{amount_usdt:.2f} USDT</code>\n\n"
+                f"📡 Моніторинг активний, оновлення прийдуть автоматично."
+            )
+        else:
+            text = "❌ <b>T→T трейд не вдалося запустити.</b>\nПеревірте логи."
+    except Exception as e:
+        logger.error("tt:confirm error: %s", e, exc_info=True)
+        text = f"❌ <b>Критична помилка:</b> <code>{str(e)[:200]}</code>"
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+# =========================================================================
+# 💲 MAKER SETTINGS: Ціна купівлі + Цільова маржа
+# =========================================================================
+
+@router.callback_query(F.data == "set:maker_buy_price")
+async def on_set_maker_buy_price(call: CallbackQuery, state: FSMContext) -> None:
+    """Запит ціни купівлі для MAKER_SELL."""
+    await state.set_state(MakerSettingsStates.waiting_buy_price)
+    current = 0.0
+    if _db:
+        users = await _db.get_active_users()
+        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        if user:
+            current = float(user.get("maker_buy_price", 0))
+
+    text = (
+        "💲 <b>Ціна купівлі (UAH/USDT)</b>\n\n"
+        f"Поточна: <code>{current:.4f}</code>\n\n"
+        "Введи ціну, за якою ти купив USDT.\n"
+        "Це потрібно для розрахунку мінімальної ціни продажу."
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.message(MakerSettingsStates.waiting_buy_price)
+async def on_maker_buy_price_input(message: Message, state: FSMContext) -> None:
+    """Зберігає ціну купівлі."""
+    try:
+        value = float(message.text.strip().replace(",", "."))
+        if value <= 0:
+            raise ValueError
+    except (ValueError, AttributeError):
+        return await message.answer("❌ Введи коректну ціну (число > 0):")
+
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET maker_buy_price = ? WHERE user_id = ?",
+            (value, message.from_user.id),
+        )
+        await conn.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Ціна купівлі збережена: <code>{value:.4f}</code> UAH/USDT",
+        reply_markup=back_to_main_kb(),
+    )
+
+
+@router.callback_query(F.data == "set:target_margin")
+async def on_set_target_margin(call: CallbackQuery, state: FSMContext) -> None:
+    """Запит цільової маржі для MAKER_BUY."""
+    await state.set_state(MakerSettingsStates.waiting_target_margin)
+    current = 0.5
+    if _db:
+        users = await _db.get_active_users()
+        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        if user:
+            current = float(user.get("target_margin", 0.005)) * 100
+
+    text = (
+        "📊 <b>Цільова маржа (%)</b>\n\n"
+        f"Поточна: <code>{current:.2f}%</code>\n\n"
+        "Введи бажану маржу у відсотках (напр. <code>0.5</code> = 0.5%).\n"
+        "Використовується для розрахунку оптимальної ціни купівлі."
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+    await call.answer()
+
+
+@router.message(MakerSettingsStates.waiting_target_margin)
+async def on_target_margin_input(message: Message, state: FSMContext) -> None:
+    """Зберігає цільову маржу."""
+    try:
+        pct = float(message.text.strip().replace(",", "."))
+        if pct < 0 or pct > 50:
+            raise ValueError
+    except (ValueError, AttributeError):
+        return await message.answer("❌ Введи коректний % (0–50):")
+
+    margin = pct / 100.0  # зберігаємо як десяткову
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute(
+            "UPDATE scanner_users SET target_margin = ? WHERE user_id = ?",
+            (margin, message.from_user.id),
+        )
+        await conn.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Цільова маржа збережена: <code>{pct:.2f}%</code>",
+        reply_markup=back_to_main_kb(),
+    )
+
+
+# =========================================================================
+# 🎯 TAKER SELL РЕЖИМ (Діалоги)
+# =========================================================================
+
+@router.message(TakerSellSettingsStates.waiting_amount)
+async def on_taker_sell_amount(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Будь ласка, введи додатнє число:")
+
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("UPDATE scanner_users SET taker_sell_amount = ? WHERE user_id = ?", (val, message.from_user.id))
+        await conn.commit()
+
+    await state.set_state(TakerSellSettingsStates.waiting_buy_price)
+    await message.answer(
+        "💲 <b>За якою ціною ти купував ці USDT?</b>\n"
+        "Введи курс закупівлі (напр: 41.25):",
+        reply_markup=back_to_main_kb(),
+    )
+
+
+@router.message(TakerSellSettingsStates.waiting_buy_price)
+async def on_taker_sell_price(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Будь ласка, введи коректний курс:")
+
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("UPDATE scanner_users SET taker_sell_price = ? WHERE user_id = ?", (val, message.from_user.id))
+        await conn.commit()
+
+    await state.set_state(TakerSellSettingsStates.waiting_profit)
+    await message.answer(
+        "📈 <b>Який цільовий профіт бажаєш?</b>\n"
+        "Введи у відсотках від суми закупівлі (напр: 0.5):",
+        reply_markup=back_to_main_kb(),
+    )
+
+
+@router.message(TakerSellSettingsStates.waiting_profit)
+async def on_taker_sell_profit(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи коректний відсоток:")
+    
+    # Конвертуємо у десятковий дріб (0.5% = 0.005)
+    margin = val / 100.0
+
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("UPDATE scanner_users SET taker_sell_profit = ? WHERE user_id = ?", (margin, message.from_user.id))
+        await conn.commit()
+
+    await state.set_state(TakerSellSettingsStates.waiting_speed)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⚡ Швидко (зважаємо на обсяг)", callback_data="tsell_speed:FAST"),
+            InlineKeyboardButton(text="🐢 Не важливо (просто найкр. ціна)", callback_data="tsell_speed:ANY")
+        ]
+    ])
+    
+    await message.answer(
+        "🚀 <b>Для тебе важлива швидкість розпродажу?</b>\n\n"
+        "⚡ <b>Швидко:</b> Бот аналізуватиме стакан: якщо на першому місці стоїть ордер на 10 USDT, ми його проігноруємо і встанемо за реальним об'ємом, щоб швидко продати.\n"
+        "🐢 <b>Не важливо:</b> Бот просто радитиме найвигіднішу ціну навіть якщо доведеться чекати.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(TakerSellSettingsStates.waiting_speed, F.data.startswith("tsell_speed:"))
+async def on_taker_sell_speed(call: CallbackQuery, state: FSMContext) -> None:
+    speed = call.data.split(":")[1]
+    
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("UPDATE scanner_users SET taker_sell_speed = ? WHERE user_id = ?", (speed, call.fromuser.id)) # Фікс помилки fromuser->from_user
+        await conn.commit()
+        
+    await state.clear()
+    
+    speed_text = "⚡ Швидко" if speed == "FAST" else "🐢 Не важливо"
+    
+    from bot.keyboards import scanner_mode_kb
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"✅ <b>Налаштування TAKER_SELL збережено!</b>\n\n"
+            f"Швидкість: <b>{speed_text}</b>\n\n"
+            f"Увімкнено режим: <b>TAKER_SELL</b>",
+            reply_markup=scanner_mode_kb("TAKER_SELL")
+        )
+    await call.answer()
+
+
+# =========================================================================
+# 🎯 СНАЙПЕР-ОРДЕРИ (VOLUME SWEEPER)
+# =========================================================================
+
+@router.message(Command("sniper"))
+async def cmd_sniper(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ База даних недоступна.")
+        
+    rules = await _db.get_sniper_rules(message.from_user.id)
+    text = "🎯 <b>Снайпер-правила (Volume Sweeper)</b>\n\nБот повідомить зі звуком, якщо знайде об'ємну угоду з великим спредом, навіть в беззвучному режимі.\n\n"
+    
+    if not rules:
+        text += "<i>У тебе ще немає правил.</i>"
+    else:
+        for idx, r in enumerate(rules, start=1):
+            text += f"{idx}. {r['exchange']} | {r['direction']} | Спред: >{r['min_spread']}% | Об'єм: >{r['min_volume']}$\n"
+            
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Додати правило", callback_data="sniper_add")],
+        [InlineKeyboardButton(text="🗑 Очистити правила", callback_data="sniper_clear")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="system_status")]
+    ])
+    await message.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data == "sniper_clear")
+async def on_sniper_clear(call: CallbackQuery) -> None:
+    if _db:
+        await _db.update_sniper_rules(call.from_user.id, [])
+    await call.message.edit_text("✅ Всі снайпер-правила видалено.")
+    await call.answer()
+
+@router.callback_query(F.data == "sniper_add")
+async def on_sniper_add(call: CallbackQuery, state: FSMContext) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Binance", callback_data="sn_ex:Binance"), InlineKeyboardButton(text="Bybit", callback_data="sn_ex:Bybit")],
+        [InlineKeyboardButton(text="OKX", callback_data="sn_ex:OKX"), InlineKeyboardButton(text="MEXC", callback_data="sn_ex:MEXC")]
+    ])
+    await state.set_state(SniperStates.waiting_exchange)
+    await call.message.edit_text("🎯 Обери біржу для снайпер-ордера:", reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(SniperStates.waiting_exchange, F.data.startswith("sn_ex:"))
+async def on_sniper_exchange(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[1]
+    await state.update_data(exchange=exchange)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Твій НАПРЯМОК: Купівля (Ти Taker BUY)", callback_data="sn_dir:BUY")],
+        [InlineKeyboardButton(text="Твій НАПРЯМОК: Продаж (Ти Taker SELL)", callback_data="sn_dir:SELL")]
+    ])
+    await state.set_state(SniperStates.waiting_direction)
+    await call.message.edit_text(f"Біржа {exchange}. Який твій напрямок?", reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(SniperStates.waiting_direction, F.data.startswith("sn_dir:"))
+async def on_sniper_dir(call: CallbackQuery, state: FSMContext) -> None:
+    direction = call.data.split(":")[1]
+    await state.update_data(direction=direction)
+    await state.set_state(SniperStates.waiting_min_spread)
+    await call.message.edit_text("Від якого спреду подавати алерт? (напр. 1.5):")
+    await call.answer()
+
+@router.message(SniperStates.waiting_min_spread)
+async def on_sniper_spread(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        return await message.answer("❌ Будь ласка, введи число:")
+    await state.update_data(min_spread=val)
+    await state.set_state(SniperStates.waiting_min_volume)
+    await message.answer("Від якого об'єму? (в USDT/еквіваленті):")
+
+@router.message(SniperStates.waiting_min_volume)
+async def on_sniper_volume(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        return await message.answer("❌ Будь ласка, введи число:")
+        
+    data = await state.get_data()
+    rule = {
+        "exchange": data.get("exchange"),
+        "direction": data.get("direction"),
+        "min_spread": data.get("min_spread"),
+        "min_volume": val
+    }
+    
+    if _db:
+        rules = await _db.get_sniper_rules(message.from_user.id)
+        rules.append(rule)
+        await _db.update_sniper_rules(message.from_user.id, rules)
+        
+    await state.clear()
+    await message.answer("✅ Снайпер-правило додано! Переглянути: /sniper")
+
 

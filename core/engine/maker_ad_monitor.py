@@ -300,7 +300,7 @@ class MakerAdMonitor:
             reason = ""
             if self._db and counterparty_id:
                 try:
-                    rec, _, reason, _ = await self._db.get_trade_recommendation_full(
+                    rec, _, reason, _, _ = await self._db.get_trade_recommendation_full(
                         watch.exchange, counterparty_id
                     )
                 except Exception:

@@ -44,3 +44,19 @@
 7.  **Documentation:**
     *   Update `requirements.txt` for any new dependencies.
     *   Use descriptive docstrings for complex logic.
+
+8.  **Maker-Taker Operations:**
+    *   **Rate Limiting & Queueing:** All requests to `AdRepricer` and price update operations must pass through `ExchangeManager` to prevent API rate limiting (Burst limiting).
+    *   **Idempotency:** All order actions (Create/Update/Cancel) must be idempotent. Use unique Client Order IDs (UUIDs) to track state in `state.py`.
+    *   **Circuit Breakers:** `MakerAdMonitor` must immediately halt ad activity if `RiskEngine` detects anomalous activity or `PriceAdvisor` receives inconsistent order book data.
+
+9.  **State & Concurrency:**
+    *   **Atomic Updates:** Updates to ad states and balances in SQLite must occur only via transactions (use `async with db.execute(...)` with required commits).
+    *   **Race Conditions:** Avoid direct reading/writing of order data across different workers. Use `asyncio.Queue` for inter-worker communication between `MakerAdMonitor` and `TradeWorker`.
+
+10. **Monitoring & Alerting:**
+    *   **Automated Heartbeat:** Every active Maker bot must regularly update its heartbeat in the database. If absent for >60 seconds, `Bot/Notifier` must send a "stalled maker" alert.
+
+11. **Volatility Stop-Loss (RiskEngine):**
+    *   The system must monitor abrupt spikes in average market price (or spot). If the price shifts by >X% within Y minutes, all Maker-ads must automatically transition to Offline status until market stabilization.
+

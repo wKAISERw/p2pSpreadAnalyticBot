@@ -497,7 +497,7 @@ class TelegramNotifier:
                 "show_llm_summary": True,
             }
 
-    async def send_to_user(self, chat_id: int, alert: "SpreadAlert") -> None:
+    async def send_to_user(self, chat_id: int, alert: "SpreadAlert", is_sniper_match: bool = False) -> None:
         """
         Multi-user: відправляє алерт в конкретний chat_id.
         chat_id передається явним параметром — без мутації self._chat_id.
@@ -505,89 +505,288 @@ class TelegramNotifier:
         """
         try:
             display = await self._get_display_settings(chat_id)
-            await self._send_single(alert, chat_id=chat_id, display_settings=display)
+            await self._send_single(alert, chat_id=chat_id, display_settings=display, is_sniper_match=is_sniper_match)
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
+
+    async def send_maker_buy_suggestion(self, chat_id: int, advice: dict) -> None:
+        """
+        Надсилає рекомендацію оптимальної ціни купівлі (MAKER_BUY).
+        advice: dict від PriceAdvisor.suggest_buy_price() + можливий buy_book_top
+        """
+        from core.engine.price_advisor import PriceAdvisor
+        buy_book_top = advice.get("buy_book_top", 0)
+        book_block = ""
+        if buy_book_top > 0:
+            diff = advice["max_buy_price"] - buy_book_top
+            if diff > 0:
+                book_block = (
+                    f"\n📊 <b>Стакан:</b> топ buy = <code>{buy_book_top:.2f}</code> ₴\n"
+                    f"✅ Можна поставити вище на <code>+{diff:.4f}</code> ₴ і залишитись в плюсі"
+                )
+            else:
+                book_block = (
+                    f"\n📊 <b>Стакан:</b> топ buy = <code>{buy_book_top:.2f}</code> ₴\n"
+                    f"⚠️ Конкуренція висока — топ buy вже вище рекомендації на <code>{abs(diff):.4f}</code> ₴"
+                )
+
+        text = (
+            "📥 <b>MAKER BUY: Аналіз ринку</b>\n\n"
+            f"{PriceAdvisor.format_buy_suggestion(advice)}"
+            f"{book_block}\n\n"
+            f"⏱ {datetime.now().strftime('%H:%M:%S')}\n"
+            "<i>💡 Натисни «Створити оголошення» щоб виставити ad з рекомендованою ціною.</i>"
+        )
+        kb = [[InlineKeyboardButton(
+            text="📢 Створити оголошення",
+            callback_data="ad:create",
+        )]]
+        try:
+            await self._send_with_retry(
+                text,
+                keyboard=InlineKeyboardMarkup(inline_keyboard=kb),
+                disable_notification=False,
+                chat_id=chat_id,
+            )
+        except Exception as e:
+            logger.error("send_maker_buy_suggestion [%d]: %s", chat_id, e)
+
+    async def send_maker_sell_update(self, chat_id: int, advice: dict) -> None:
+        """
+        Надсилає оновлення рекомендованої ціни продажу (MAKER_SELL).
+        advice: dict від PriceAdvisor.suggest_sell_price() + можливі sell_book_top, book_vs_min
+        """
+        from core.engine.price_advisor import PriceAdvisor
+        book_top = advice.get("sell_book_top", 0)
+        book_vs_min = advice.get("book_vs_min", 0)
+
+        book_block = ""
+        if book_top > 0:
+            if book_vs_min > 0:
+                book_block = (
+                    f"\n📊 <b>Стакан:</b> топ sell = <code>{book_top:.2f}</code> ₴\n"
+                    f"✅ Різниця з мін. ціною: <code>+{book_vs_min:.4f}</code> ₴ (вигідно!)"
+                )
+            else:
+                book_block = (
+                    f"\n📊 <b>Стакан:</b> топ sell = <code>{book_top:.2f}</code> ₴\n"
+                    f"⚠️ Різниця з мін. ціною: <code>{book_vs_min:.4f}</code> ₴ (невигідно)"
+                )
+
+        text = (
+            "📤 <b>MAKER SELL: Оновлення ціни</b>\n\n"
+            f"{PriceAdvisor.format_sell_suggestion(advice)}"
+            f"{book_block}\n\n"
+            f"⏱ {datetime.now().strftime('%H:%M:%S')}\n"
+            "<i>💡 Порада оновлена на основі поточного стакану.</i>"
+        )
+        kb = [[InlineKeyboardButton(
+            text="📢 Створити / оновити оголошення",
+            callback_data="ad:create",
+        )]]
+        try:
+            await self._send_with_retry(
+                text,
+                keyboard=InlineKeyboardMarkup(inline_keyboard=kb),
+                disable_notification=True,
+                chat_id=chat_id,
+            )
+        except Exception as e:
+            logger.error("send_maker_sell_update [%d]: %s", chat_id, e)
 
     async def send_taker_to_user(
         self, chat_id: int, orders: list[Order], mode: str,
     ) -> None:
         """
-        Відправляє тейкер-алерт (список одиничних ордерів) юзеру.
+        Відправляє тейкер-алерти юзеру — КОЖЕН ордер як окреме повідомлення
+        в тому ж дизайні що й spread-алерт, але з однією стороною.
         mode: TAKER_BUY або TAKER_SELL
         """
         if not orders:
             return
-        try:
-            if mode == "TAKER_BUY":
-                title = "🛒 <b>ТЕЙКЕР: КУПІВЛЯ USDT</b>"
-                action_label = "Купити"
-            else:
-                title = "💸 <b>ТЕЙКЕР: ПРОДАЖ USDT</b>"
-                action_label = "Продати"
+        ds = await self._get_display_settings(chat_id)
+        for i, order in enumerate(orders[:10]):
+            try:
+                await self._send_taker_single(order, mode, chat_id=chat_id, display_settings=ds)
+                if i < len(orders) - 1:
+                    await asyncio.sleep(0.8)
+            except Exception as e:
+                logger.error("send_taker_to_user [%d] order #%d: %s", chat_id, i, e)
 
-            lines = [
-                f"{title}\n"
-                f"⏱ {__import__('datetime').datetime.now().strftime('%H:%M:%S')} "
-                f"| Знайдено: <b>{len(orders)}</b>\n"
-                f"<code>{'─' * 28}</code>\n"
-            ]
+    async def _send_taker_single(
+        self, order: Order, mode: str,
+        chat_id: int | None = None,
+        display_settings: dict | None = None,
+    ) -> None:
+        """
+        Відправляє ОДИН тейкер-ордер як повноцінне повідомлення
+        у стилі spread-алерту (ризики, LLM вердикт, умови, банки, кнопки).
+        """
+        import time
 
-            kb_rows = []
-            for i, order in enumerate(orders[:10]):
-                icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
-                name = _profile_link(order.exchange, order.merchant_id, order.merchant_name)
-                risk = _risk_badge(order, short=True)
-                verified = _verified_badge(order)
-                banks = ", ".join(
-                    BANKS_SHORT.get(c, c) for c in (order.bank_codes or [])[:4]
+        ds = display_settings or {
+            "show_ai_terms_summary": True, "show_full_terms": True,
+            "show_ai_logic": True, "show_bank_details": True, "show_llm_summary": True,
+        }
+
+        is_buy = mode == "TAKER_BUY"
+        side_title = "🛒 <b>ТЕЙКЕР: КУПІВЛЯ</b>" if is_buy else "💸 <b>ТЕЙКЕР: ПРОДАЖ</b>"
+        side_label = "КУПУЄМО" if is_buy else "ПРОДАЄМО"
+        side_icon = "🛒" if is_buy else "💸"
+
+        # ── Refresh LLM verdict from DB ──
+        llm_rec = "PENDING"
+        llm_reason = ""
+        terms_summary = ""
+        rev_analysis = ""
+        if self._db:
+            try:
+                rec, _, reason, t_sum, rev_analyz = await self._db.get_trade_recommendation_full(
+                    order.exchange, order.merchant_id,
                 )
+                llm_rec = rec
+                llm_reason = reason
+                terms_summary = t_sum
+                rev_analysis = rev_analyz
+            except Exception:
+                pass
 
-                lines.append(
-                    f"{'🥇🥈🥉'[i] if i < 3 else '▫️'} "
-                    f"<code>{order.price}</code> {icon}{escape(order.exchange)}"
-                    f"{risk}\n"
-                    f"  {name}{verified} "
-                    f"({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
-                    f"  📐 <code>{order.min_limit}–{order.max_limit} ₴</code> | {banks}\n"
-                )
+        icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
+        merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name)
+        name_str = f"{rec_badge(llm_rec)} {merchant_link}{_verified_badge(order)}"
 
-                # Кнопка «⚡ Взяти» для кожного ордера
-                ad_id = getattr(order, "ad_id", getattr(order, "order_id", order.id))
-                if ad_id and hasattr(self, "_taker_cache"):
-                    cache_key = f"tk_{ad_id[:12]}_{i}"
-                    self._taker_cache.set(cache_key, {
-                        "ad_id": str(ad_id),
-                        "exchange": order.exchange,
-                        "price": float(order.price),
-                        "merchant_id": order.merchant_id,
-                        "min_limit": float(order.min_limit),
-                        "max_limit": float(order.max_limit),
-                        "bank": (order.bank_codes[0] if order.bank_codes else ""),
-                        "action": "BUY" if mode == "TAKER_BUY" else "SELL",
-                    })
-                    kb_rows.append([InlineKeyboardButton(
-                        text=f"⚡ {action_label} #{i+1} ({order.exchange} {order.price})",
-                        callback_data=f"taker:take:{cache_key}",
-                    )])
+        risk_block = _risk_badge(order)
+        warn_block = _regex_warn_block(order)
 
-                # URL
-                url = getattr(order, "link", "") or ""
-                if url:
-                    kb_rows.append([InlineKeyboardButton(
-                        text=f"🔗 #{i+1} на біржі", url=url,
-                    )])
+        banks_all = _format_bank_list(order.bank_codes)
 
-            text = "".join(lines)
-            keyboard = InlineKeyboardMarkup(inline_keyboard=kb_rows) if kb_rows else None
+        now = datetime.now()
+        silent = False  # тейкер — завжди зі звуком
 
-            for chunk in self._split_message(text):
-                await self._send_with_retry(
-                    chunk, keyboard=keyboard if chunk == text else None,
-                    chat_id=chat_id,
-                )
-        except Exception as e:
-            logger.error("send_taker_to_user [%d]: %s", chat_id, e)
+        text = (
+            f"{side_title}\n\n"
+            f"⏱ {now.strftime('%H:%M:%S')} | {icon} <b>{escape(order.exchange)}</b>\n\n"
+        )
+
+        # ── Деталі банків ──
+        if ds.get("show_bank_details", True):
+            text += (
+                f"<blockquote expandable>"
+                f"🏦 Банки: {banks_all}"
+                f"</blockquote>\n"
+            )
+
+        # ── Основний блок ордера ──
+        terms_raw = getattr(order, "trade_terms", "") or ""
+        text += (
+            f"{side_icon} <b>{side_label}</b>\n"
+            f"Курс: <code>{escape(str(order.price))}</code>\n"
+            f"Мерчант: {name_str} "
+            f"({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
+            f"Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code>\n"
+            f"{risk_block if risk_block else ''}"
+            f"{warn_block if warn_block else ''}"
+        )
+
+        # ── Блок умов ──
+        terms_blk = _terms_block(
+            terms_raw,
+            terms_summary=terms_summary,
+            show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+            show_full_terms=ds.get("show_full_terms", True),
+        )
+        if terms_blk:
+            text += terms_blk
+
+        # ── LLM Verdict ──
+        if ds.get("show_llm_summary", True):
+            llm_block = _llm_verdict_block(
+                "Buy" if is_buy else "Sell", llm_rec, llm_reason,
+                terms_summary=terms_summary,
+                show_ai_logic=ds.get("show_ai_logic", True),
+                show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+                reviews_analysis=rev_analysis
+            )
+        else:
+            llm_block = _llm_verdict_block(
+                "Buy" if is_buy else "Sell", llm_rec, "",
+                show_ai_logic=False, show_ai_terms_summary=False,
+            )
+        text += f"\n{llm_block}"
+
+        # ── Кнопки ──
+        kb: list[list[InlineKeyboardButton]] = []
+
+        ad_id = getattr(order, "ad_id", getattr(order, "order_id", order.id))
+        if ad_id and llm_rec != "REJECT":
+            # Кнопка ⚡ Взяти
+            if hasattr(self, "_taker_cache"):
+                cache_key = f"tk_{ad_id[:12]}_{int(time.time()) % 10000}"
+                self._taker_cache.set(cache_key, {
+                    "ad_id": str(ad_id),
+                    "exchange": order.exchange,
+                    "price": float(order.price),
+                    "merchant_id": order.merchant_id,
+                    "min_limit": float(order.min_limit),
+                    "max_limit": float(order.max_limit),
+                    "bank": (order.bank_codes[0] if order.bank_codes else ""),
+                    "direction": "b" if is_buy else "s",
+                    "action": "BUY" if is_buy else "SELL",
+                    "ts": time.time(),
+                })
+                action_label = "Купити" if is_buy else "Продати"
+                kb.append([InlineKeyboardButton(
+                    text=f"⚡ {action_label} ({order.exchange} {order.price})",
+                    callback_data=f"taker:take:{cache_key}",
+                )])
+
+            # Single-Leg кнопка
+            bank_code = (order.bank_codes[0] if order.bank_codes else "")
+            direction = "b" if is_buy else "s"
+            sl_key = f"{str(ad_id)[:10]}|{order.exchange[:3]}|{bank_code[:4]}"
+            bot_commands._single_leg_cache[f"{direction}:{sl_key}"] = {
+                "ad_id": str(ad_id), "exchange": order.exchange,
+                "price": float(order.price),
+                "merchant_id": order.merchant_id,
+                "min_limit": float(order.min_limit),
+                "max_limit": float(order.max_limit),
+                "bank": bank_code, "ts": time.time(),
+            }
+            sl_label = "🛒 Купити" if is_buy else "💸 Продати"
+            kb.append([InlineKeyboardButton(
+                text=f"{sl_label} ({order.exchange})",
+                callback_data=f"sl:{direction}:{sl_key}",
+            )])
+
+        # URL-кнопка
+        url = getattr(order, "link", "") or build_profile_url(
+            order.exchange, order.merchant_id
+        )
+        if url:
+            kb.append([InlineKeyboardButton(text="🔗 На біржі", url=url)])
+
+        # Blacklist кнопки
+        mid = order.merchant_id
+        if mid:
+            prefix = "🔴 Buy" if is_buy else "🔵 Sell"
+            kb.append([
+                InlineKeyboardButton(text=f"{prefix}: 3-ті",
+                                     callback_data=f"fb:{order.exchange}:{mid}:triangle"),
+                InlineKeyboardButton(text="Чек", callback_data=f"fb:{order.exchange}:{mid}:receipt"),
+                InlineKeyboardButton(text="ТГ", callback_data=f"fb:{order.exchange}:{mid}:chat"),
+            ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+
+        # Розбиваємо якщо > 4096
+        chunks = self._split_message(text)
+        for i, chunk in enumerate(chunks):
+            await self._send_with_retry(
+                chunk,
+                keyboard=keyboard if i == 0 else None,
+                disable_notification=silent,
+                chat_id=chat_id,
+            )
 
     async def send_maker_order_alert(
         self,
@@ -766,12 +965,15 @@ class TelegramNotifier:
                 logger.error("mkord callback error: %s", e)
                 await call.answer("Помилка обробки", show_alert=True)
 
+
     async def start(self) -> None:
         # 🚀 СТВОРЮЄМО СИСТЕМНЕ МЕНЮ КНОПКОЮ (Повний список)
         commands =[
             BotCommand(command="start", description="▶️ Запустити мій сканер (Дашборд)"),
             BotCommand(command="stop", description="🛑 Зупинити мій сканер"),
             BotCommand(command="active", description="📡 Активні спреди зараз"),
+            BotCommand(command="mode", description="🎯 Режим сканування"),
+            BotCommand(command="ad", description="📢 Створити P2P оголошення"),
             BotCommand(command="balance", description="💰 Перевірити баланси"),
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),
@@ -863,7 +1065,7 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None, is_sniper_match: bool = False) -> None:
         # Display settings (per-user)
         ds = display_settings or {
             "show_ai_terms_summary": True, "show_full_terms": True,
@@ -873,10 +1075,10 @@ class TelegramNotifier:
         # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
         if self._db:
             try:
-                b_rec, _, b_reason, b_terms = await self._db.get_trade_recommendation_full(
+                b_rec, _, b_reason, b_terms, b_rev = await self._db.get_trade_recommendation_full(
                     alert.buy_order.exchange, alert.buy_order.merchant_id
                 )
-                s_rec, _, s_reason, s_terms = await self._db.get_trade_recommendation_full(
+                s_rec, _, s_reason, s_terms, s_rev = await self._db.get_trade_recommendation_full(
                     alert.sell_order.exchange, alert.sell_order.merchant_id
                 )
                 alert.buy_rec = b_rec
@@ -885,10 +1087,15 @@ class TelegramNotifier:
                 alert.sell_reason = s_reason
                 alert.buy_terms_summary = b_terms
                 alert.sell_terms_summary = s_terms
+                alert.buy_reviews_analysis = b_rev
+                alert.sell_reviews_analysis = s_rev
             except Exception:
                 pass  # fallback: використовуємо значення з алерту
 
         title, silent = _alert_grade(alert.spread_pct)
+        if is_sniper_match:
+            title = f"🎯 <b>СНАЙПЕР ОРДЕР!</b>\n{title}"
+            silent = False  # Примусово вмикаємо звук для снайпера
 
         b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
         s_icon = EXCHANGE_ICONS.get(alert.sell_order.exchange, "◽️")
@@ -930,15 +1137,17 @@ class TelegramNotifier:
         if ds.get("show_llm_summary", True):
             buy_llm = _llm_verdict_block(
                 "Buy", alert.buy_rec, alert.buy_reason,
-                terms_summary=alert.buy_terms_summary,
+                terms_summary=getattr(alert, "buy_terms_summary", ""),
                 show_ai_logic=ds.get("show_ai_logic", True),
                 show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+                reviews_analysis=getattr(alert, "buy_reviews_analysis", "")
             )
             sell_llm = _llm_verdict_block(
                 "Sell", alert.sell_rec, alert.sell_reason,
-                terms_summary=alert.sell_terms_summary,
+                terms_summary=getattr(alert, "sell_terms_summary", ""),
                 show_ai_logic=ds.get("show_ai_logic", True),
                 show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
+                reviews_analysis=getattr(alert, "sell_reviews_analysis", "")
             )
         else:
             # Тільки бейдж без деталей

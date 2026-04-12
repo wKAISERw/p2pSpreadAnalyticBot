@@ -13,7 +13,9 @@ PriceAdvisor — калькулятор/порадник ціни для мей�
 """
 from __future__ import annotations
 import logging
-from typing import Optional
+from typing import Optional, List
+
+from exchanges.base import Order
 
 from core.engine.network_fee_engine import NetworkFeeEngine
 
@@ -139,4 +141,82 @@ class PriceAdvisor:
             f"├ <b>Макс. ціна купівлі: <code>{advice['max_buy_price']:.4f}</code> ₴</b>\n"
             f"└ Очікуваний профіт: <code>+{advice['estimated_profit_uah']:.2f}</code> ₴"
         )
+        
+    @staticmethod
+    def analyze_sell_depth(
+        buy_price: float,
+        amount_usdt: float,
+        sell_orders: List[Order],
+        min_margin: float = 0.003,
+        speed: str = "FAST",
+        network_fee: float = 0.0,
+    ) -> dict:
+        """
+        Аналізує глибину стакану для продажу з урахуванням об'єму та швидкості.
+        
+        :param buy_price: Ціна закупівлі
+        :param amount_usdt: Обсяг на продаж (USDT)
+        :param sell_orders: Стакан конкурентів (які ТАКОЖ продають USDT, side=0)
+        :param min_margin: Мінімальна допустима маржа (щоб не піти в мінус)
+        :param speed: "FAST" (враховуємо об'єм конкурентів, встаємо перед великим "стінкою") або "ANY" (просто найкраща ціна)
+        """
+        # 1. Базові обчислення
+        fee_per_usdt = network_fee / max(amount_usdt, 1)
+        absolute_min_sell = buy_price * (1 + min_margin) + fee_per_usdt
+        
+        if not sell_orders:
+            # Немає конкурентів — ставимо ціну з маржею X (наприклад 1.5%)
+            recommended = absolute_min_sell * 1.015
+            return {
+                "recommended_price": round(recommended, 4),
+                "absolute_min_sell": round(absolute_min_sell, 4),
+                "competitor_price": 0,
+                "reason": "Стакан порожній. Встановлено дефолтну націнку."
+            }
+
+        # 2. Сортуємо стакан — нам потрібні найдешевші продавці (ми з ними конкуруємо)
+        sorted_orders = sorted(sell_orders, key=lambda o: float(o.price))
+        top_price = float(sorted_orders[0].price)
+        
+        # 3. Аналіз залежно від швидкості
+        if speed == "ANY":
+            # Якщо швидкість не важлива — ми просто перебиваємо топ-1 на 1 копійку, 
+            # або хоча б стаємо на мінімально можливу ціну, якщо топ-1 занадто дешевий
+            recommended = top_price - 0.0001
+            reason = "Перебито топ-1 ціну (швидкість неважлива)"
+        else:
+            # Швидкість = FAST! Аналізуємо "стінки" ліквідності
+            # Шукаємо першу ціну, перед якою НАКОПИЧЕНО достатньо об'єму (наприклад > нашого)
+            accumulated_volume = 0.0
+            wall_price = top_price
+            
+            for o in sorted_orders:
+                wall_price = float(o.price)
+                o_vol = float(o.max_limit) / wall_price if wall_price > 0 else 0
+                accumulated_volume += o_vol
+                
+                # Якщо об'єми конкурентів перед нами ВЖЕ вдвічі більші за нашу суму —
+                # то далі ставати немає сенсу, ми ніколи не продамо
+                if accumulated_volume >= amount_usdt * 1.5:
+                    break
+                    
+            # 🚀 Ми хочемо встати БЕЗПОСЕРЕДНЬО ПЕРЕД цією "стінкою"
+            recommended = wall_price - 0.0001
+            reason = f"Оптимальна ціна перед стінкою ліквідності ({accumulated_volume:.0f} USDT)"
+            
+        # 4. Перевірка Safety Breaker (Чи не продаємо ми в мінус?)
+        if recommended < absolute_min_sell:
+            recommended = absolute_min_sell
+            reason += " (Спрацював Market Stop-Loss: ціну скориговано до мін. маржі)"
+            
+        # 5. Розрахунок прибутку
+        profit = (amount_usdt - network_fee) * recommended - (amount_usdt * buy_price)
+        
+        return {
+            "recommended_price": round(recommended, 4),
+            "absolute_min_sell": round(absolute_min_sell, 4),
+            "competitor_price": top_price,
+            "reason": reason,
+            "estimated_profit": round(profit, 2)
+        }
 

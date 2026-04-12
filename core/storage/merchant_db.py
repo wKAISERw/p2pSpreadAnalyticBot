@@ -416,6 +416,7 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")        # Деталі банків (спойлер)
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
+        await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
         # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
         # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ
@@ -426,6 +427,14 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "scanner_mode", "TEXT DEFAULT 'SPREAD'")
         # 🚀 ФАЗА 2: Фільтр по діапазону ціни для тейкер-режимів
         await self._ensure_column("scanner_users", "price_range_json", "TEXT DEFAULT '{}'")
+        # 🚀 ФАЗА 3: Maker — ціна купівлі (MAKER_SELL) + цільова маржа (MAKER_BUY)
+        await self._ensure_column("scanner_users", "maker_buy_price", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "target_margin", "REAL DEFAULT 0.005")
+        # 🚀 ФАЗА 4: Taker Sell параметри (сума, ціна, профіт, швидкість)
+        await self._ensure_column("scanner_users", "taker_sell_amount", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_sell_price", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_sell_profit", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_sell_speed", "TEXT DEFAULT 'FAST'")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -583,26 +592,27 @@ class MerchantDB:
 
     async def get_trade_recommendation_full(
         self, exchange: str, merchant_id: str
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[str, str, str, str, str]:
         """
-        Повертає (recommendation, verdict, reason, terms_summary) — повну інфу від LLM.
+        Повертає (recommendation, verdict, reason, terms_summary, reviews_analysis) — повну інфу від LLM.
         Якщо trade_recommendation ще PENDING, але verdict вже є —
         автоматично виводимо рекомендацію з verdict.
         """
         if not self._db:
-            return "PENDING", "", "", ""
+            return "PENDING", "", "", "", ""
         async with self._db.execute(
-            "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary FROM merchant_verdict "
+            "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary, COALESCE(reviews_analysis, '') as reviews_analysis FROM merchant_verdict "
             "WHERE exchange = ? AND merchant_id = ?",
             (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
-            return "PENDING", "", "", ""
+            return "PENDING", "", "", "", ""
         rec = (row["trade_recommendation"] or "PENDING").strip().upper()
         verdict = (row["verdict"] or "").strip().upper()
         reason = (row["reason"] or "").strip()
         terms_summary = (row["terms_summary"] or "").strip()
+        reviews_analysis = (row["reviews_analysis"] or "").strip()
 
         # Якщо trade_recommendation ще PENDING але verdict вже є — derive
         if rec == "PENDING" and verdict and verdict != "UNKNOWN":
@@ -611,7 +621,7 @@ class MerchantDB:
 
         if rec not in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING", "RECHECKING"):
             rec = "PENDING"
-        return rec, verdict, reason, terms_summary
+        return rec, verdict, reason, terms_summary, reviews_analysis
 
     async def save_verdict(
             self,
@@ -625,6 +635,7 @@ class MerchantDB:
             source: str = "",
             trade_recommendation: str = "CONDITIONAL",  # ← НОВЕ
             terms_summary: str = "",  # 🔘 AI вижимка умов
+            reviews_analysis: str = "", # 📝 AI вижимка відгуків
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
@@ -642,8 +653,8 @@ class MerchantDB:
             INSERT INTO merchant_verdict
             (exchange, merchant_id, merchant_name, terms_hash,
              verdict, risk_type, reason, risk_score,
-             llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary, reviews_analysis)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 merchant_name = excluded.merchant_name,
                 terms_hash = excluded.terms_hash,
@@ -655,7 +666,8 @@ class MerchantDB:
                 save_count = merchant_verdict.save_count + 1,
                 updated_at = excluded.updated_at,
                 trade_recommendation = excluded.trade_recommendation,
-                terms_summary = excluded.terms_summary
+                terms_summary = excluded.terms_summary,
+                reviews_analysis = excluded.reviews_analysis
             """,
             (
                 exchange,
@@ -669,8 +681,9 @@ class MerchantDB:
                 llm_inc,
                 1,
                 now,
-                trade_recommendation,  # ← НОВЕ
+                trade_recommendation,
                 terms_summary,
+                reviews_analysis,
                 llm_inc,
             ),
         )
@@ -1266,7 +1279,10 @@ class MerchantDB:
                           COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
                           COALESCE(is_alerts_active, 1) as is_alerts_active,
                           COALESCE(scanner_mode, 'SPREAD') as scanner_mode,
-                          COALESCE(price_range_json, '{}') as price_range_json
+                          COALESCE(price_range_json, '{}') as price_range_json,
+                          COALESCE(maker_buy_price, 0.0) as maker_buy_price,
+                          COALESCE(target_margin, 0.005) as target_margin,
+                          COALESCE(sniper_rules, '[]') as sniper_rules
                    FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
             ) as cur:
                 rows = await cur.fetchall()
@@ -1292,6 +1308,9 @@ class MerchantDB:
                     "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
                     "scanner_mode":     row["scanner_mode"] or "SPREAD",
                     "price_range":      _json.loads(row["price_range_json"] or "{}"),
+                    "maker_buy_price":  float(row["maker_buy_price"]),
+                    "target_margin":    float(row["target_margin"]),
+                    "sniper_rules":     _json.loads(row["sniper_rules"] or "[]"),
                 })
             return result
         except Exception as e:
@@ -1384,6 +1403,29 @@ class MerchantDB:
         delta = float(rows[-1]["neg_pct"]) - float(rows[0]["neg_pct"])
         trend = "worsening" if delta > 3.0 else "improving" if delta < -3.0 else "stable"
         return {"trend": trend, "delta": delta}
+
+    async def get_sniper_rules(self, user_id: int) -> list:
+        if not self._db: return []
+        async with self._db.execute(
+            "SELECT sniper_rules FROM scanner_users WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if row and row["sniper_rules"]:
+                import json
+                try:
+                    return json.loads(row["sniper_rules"])
+                except Exception:
+                    pass
+            return []
+
+    async def update_sniper_rules(self, user_id: int, rules: list) -> None:
+        if not self._db: return
+        import json
+        rules_str = json.dumps(rules)
+        await self._db.execute(
+            "UPDATE scanner_users SET sniper_rules = ? WHERE user_id = ?", (rules_str, user_id)
+        )
+        await self._db.commit()
 
     # ==========================================
     # ── БЛОК 1.5: ПРОПОЗИЦІЇ СКАНЕРА (PROPOSALS) ──
