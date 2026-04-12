@@ -323,9 +323,18 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     session_manager = SessionManager(merchant_db)
 
     # 🚀 Блок C: Підключаємо TG-сповіщення для session health
-    async def _session_notify(msg: str) -> None:
+    async def _session_notify(msg: str, user_id: int = 0, exchange: str = "") -> None:
         try:
-            await notifier._send_with_retry(msg)
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            kb = None
+            if exchange:
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="📲 Оновити через скрипт-закладку", callback_data=f"intercept:{exchange}")]
+                ])
+                
+            # Відправляємо конкретному юзеру або всім адмінам
+            target_chat = user_id if user_id else None
+            await notifier._send_with_retry(msg, keyboard=kb, chat_id=target_chat)
         except Exception as e:
             logger.error("Session notify error: %s", e)
 

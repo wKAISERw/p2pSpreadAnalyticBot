@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 import uvicorn
 from pydantic import BaseModel
+from typing import Optional
 from core.storage.merchant_db import MerchantDB
 from bot.commands import _is_admin
 from infrastructure.api.binance_account import BinanceAccountClient
@@ -316,6 +317,42 @@ async def update_telegram_settings(settings: dict): # Змінено ім'я ф�
         state.user_settings.update(snake_settings)
 
     return {"status": "success"}
+
+class SessionPayload(BaseModel):
+    exchange: str
+    user_id: int
+    cookies_str: str
+
+@app.post("/api/v1/session/receive")
+async def receive_session(payload: SessionPayload):
+    """Ендпоінт для отримання кукісів браузера через Bookmarklet скрипт."""
+    logger = logging.getLogger("Main")
+    # Перетворюємо "name=value; name2=value2" у словник
+    cookies_dict = {}
+    if payload.cookies_str:
+        for chunk in str(payload.cookies_str).split(';'):
+            if '=' in chunk:
+                k, v = chunk.split('=', 1)
+                cookies_dict[k.strip()] = v.strip()
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*"
+    }
+    
+    # Зберігаємо (update_auth_session)
+    success = await db.save_auth_session(
+        exchange=payload.exchange,
+        headers=headers,
+        cookies=cookies_dict,
+        user_id=payload.user_id
+    )
+    if success:
+        logger.info(f"✅ Успішно отримано сесію {payload.exchange} від юзера {payload.user_id} через Bookmarklet")
+        return {"status": "ok", "message": "Session saved successfully"}
+    
+    logger.error(f"❌ Помилка збереження сесії {payload.exchange}")
+    return {"status": "error", "message": "Failed to save session"}
 
 
 @app.get("/api/v1/accounts/{telegram_id}")

