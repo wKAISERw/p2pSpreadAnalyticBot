@@ -1687,6 +1687,26 @@ class MerchantDB:
             logger.error("get_active_trades_by_status: %s", e)
             return []
 
+    async def get_user_active_trades(self, user_id: int) -> list[dict]:
+        """Отримує всі активні поточні угоди користувача, які не закриті кінцевими статусами."""
+        if not self._db:
+            return []
+        try:
+            query = """
+                SELECT at.*, ts.strategy as session_strategy
+                FROM active_trades at
+                LEFT JOIN trade_sessions ts ON at.session_id = ts.id
+                WHERE at.owner_user_id = ? 
+                  AND at.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                ORDER BY at.created_at DESC
+            """
+            async with self._db.execute(query, (user_id,)) as cur:
+                rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error("get_user_active_trades error: %s", e)
+            return []
+
     async def get_active_repricer_sessions(self) -> list[dict]:
         """
         Блок 6: Повертає всі торгові сесії в статусі SELL_IN_PROGRESS.

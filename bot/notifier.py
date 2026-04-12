@@ -974,6 +974,8 @@ class TelegramNotifier:
             BotCommand(command="active", description="📡 Активні спреди зараз"),
             BotCommand(command="mode", description="🎯 Режим сканування"),
             BotCommand(command="ad", description="📢 Створити P2P оголошення"),
+            BotCommand(command="ads", description="📝 Мої активні оголошення"),
+            BotCommand(command="orders", description="📋 Мої поточні угоди"),
             BotCommand(command="balance", description="💰 Перевірити баланси"),
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),

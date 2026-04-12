@@ -2717,7 +2717,8 @@ async def on_ad_confirm(call: CallbackQuery, state: FSMContext) -> None:
                         return await _exec.update_maker_ad_price(ex, _ad_id, new_price, creds)
 
                     import asyncio as _aio
-                    _active_repricers[str(ad_id)] = _aio.create_task(
+                    repricer_key = f"{call.from_user.id}_{ad_id}"
+                    _active_repricers[repricer_key] = _aio.create_task(
                         repricer.watch(_fetch_book_top, _update_price, _db),
                         name=f"repricer_{ad_id}",
                     )
@@ -3369,5 +3370,75 @@ async def on_sniper_volume(message: Message, state: FSMContext) -> None:
         
     await state.clear()
     await message.answer("✅ Снайпер-правило додано! Переглянути: /sniper")
+
+
+# =========================================================================
+# 📋 КЕРУВАННЯ УГОДАМИ (ORDERS)
+# =========================================================================
+
+@router.message(Command("orders"))
+async def cmd_orders(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    
+    trades = await _db.get_user_active_trades(message.from_user.id)
+    if not trades:
+        return await message.answer("📭 У тебе немає активних P2P угод на даний момент.")
+        
+    lines = ["📋 <b>Мої активні P2P угоди:</b>\n"]
+    for idx, t in enumerate(trades, 1):
+        strategy = t.get("session_strategy", "—")
+        exchange = t.get("exchange", "—")
+        role = t.get("leg", "—")
+        status = t.get("status", "—")
+        fiat = t.get("fiat_amount", 0.0)
+        
+        status_text = status
+        if status == "PENDING_PAYMENT":
+            status_text = "⏳ Очікує твоєї оплати" if role == "BUY" else "⏳ Чекаємо оплату покупця"
+        elif status == "WAITING_COUNTERPARTY" or status == "WAITING_BUYER":
+            status_text = "👀 Чекаємо зустрічного мейкера/тейкера"
+            
+        lines.append(
+            f"{idx}. <b>{exchange} ({strategy})</b> | {role}\n"
+            f"   💰 Сума: <code>{fiat:.2f} UAH</code>\n"
+            f"   📊 Статус: <i>{status_text}</i>\n"
+        )
+        
+    await message.answer("\n".join(lines), reply_markup=back_to_main_kb())
+
+
+# =========================================================================
+# 📢 КЕРУВАННЯ ОГОЛОШЕННЯМИ (ADS)
+# =========================================================================
+
+@router.message(Command("ads"))
+async def cmd_ads(message: Message) -> None:
+    user_id_str = str(message.from_user.id)
+    user_ads = {k: v for k, v in _active_repricers.items() if k.startswith(f"{user_id_str}_")}
+
+    if not user_ads:
+        return await message.answer("📭 У тебе немає активних AdRepricer (мейкер-оголошень в авто-оновленні).")
+
+    for key, task in user_ads.items():
+        ad_id = key.split("_")[1]
+        text = f"📢 <b>Оголошення {ad_id}</b>\nСтатус: {'🛑 Зупинено' if task.done() else '🟢 Оновлюється'}"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Зупинити бота", callback_data=f"stop_ad:{key}")]
+        ])
+        await message.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data.startswith("stop_ad:"))
+async def on_stop_ad(call: CallbackQuery) -> None:
+    key = call.data.split(":")[1]
+    task = _active_repricers.pop(key, None)
+    if task:
+        if not task.done():
+            task.cancel()
+        await call.message.edit_text(call.message.html_text + "\n\n✅ <i>Репрайсер успішно зупинено. Оголошення залишається на біржі, але більше не оновлюється.</i>", reply_markup=None)
+    else:
+        await call.answer("Завдання не знайдено або вже зупинено.", show_alert=True)
+        await call.message.edit_text(call.message.html_text + "\n\n❌ <i>Завдання вже було зупинено.</i>", reply_markup=None)
 
 
