@@ -118,6 +118,10 @@ class CreateAdStates(StatesGroup):
 
 class TakerExecuteStates(StatesGroup):
     waiting_amount = State()
+
+class HybridTradeStates(StatesGroup):
+    waiting_tm_amount = State()
+    waiting_mt_amount = State()
     waiting_confirm = State()
 
 
@@ -3409,6 +3413,54 @@ async def cmd_orders(message: Message) -> None:
 
 
 # =========================================================================
+# 🛠 ЕКСПЕРИМЕНТАЛЬНІ ФУНКЦІЇ (FEATURES)
+# =========================================================================
+
+@router.message(Command("features"))
+async def cmd_features(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+        
+    settings = await _db.get_user_display_settings(message.chat.id)
+    state_flag = settings.get("is_hybrid_routes_enabled", False)
+    status_str = "🟢 УВІМКНЕНО" if state_flag else "🔴 ВИМКНЕНО"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
+    ])
+    
+    text = (
+        "🛠 <b>Експериментальні функції</b>\n\n"
+        "<b>Гібридні маршрути (T→M / M→T)</b>\n"
+        "<i>Дозволяє швидко запускати стратегії Taker-Maker або Maker-Taker з алертів. "
+        "Бот автоматично поставить мейкер-оголошення.</i>\n\n"
+        f"Статус: <b>{status_str}</b>"
+    )
+    await message.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data == "toggle_hybrid")
+async def on_toggle_hybrid(call: CallbackQuery) -> None:
+    if not _db: return await call.answer("Помилка БД", show_alert=True)
+    new_val = await _db.toggle_hybrid_routes(call.from_user.id)
+    status_str = "🟢 УВІМКНЕНО" if new_val else "🔴 ВИМКНЕНО"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
+    ])
+    text = (
+        "🛠 <b>Експериментальні функції</b>\n\n"
+        "<b>Гібридні маршрути (T→M / M→T)</b>\n"
+        "<i>Дозволяє швидко запускати стратегії Taker-Maker або Maker-Taker з алертів. "
+        "Бот автоматично поставить мейкер-оголошення.</i>\n\n"
+        f"Статус: <b>{status_str}</b>"
+    )
+    from contextlib import suppress
+    from aiogram.exceptions import TelegramBadRequest
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=kb)
+    await call.answer(f"Гібриди {'включено' if new_val else 'вимкнено'}")
+
+# =========================================================================
 # 📢 КЕРУВАННЯ ОГОЛОШЕННЯМИ (ADS)
 # =========================================================================
 
@@ -3441,4 +3493,131 @@ async def on_stop_ad(call: CallbackQuery) -> None:
         await call.answer("Завдання не знайдено або вже зупинено.", show_alert=True)
         await call.message.edit_text(call.message.html_text + "\n\n❌ <i>Завдання вже було зупинено.</i>", reply_markup=None)
 
+# =========================================================================
+# 🔄 ГІБРИДНІ МАРШРУТИ (T→M / M→T)
+# =========================================================================
 
+@router.callback_query(F.data.startswith("trade:tm:"))
+async def on_trade_tm(call: CallbackQuery, state: FSMContext) -> None:
+    if not _trade_worker:
+        return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
+        
+    cache_key = call.data.split(":", 2)[2]
+    spread_data = _spread_cache.get(cache_key)
+    if not spread_data:
+        return await call.answer("❌ Зв'язка застаріла (>5 хв).", show_alert=True)
+
+    alert, _ts = spread_data
+    buy_leg = {
+        "exchange": alert.buy_exchange, "ad_id": getattr(alert, "buy_ad_id", ""),
+        "price": alert.buy_price, "merchant_id": getattr(alert, "buy_merchant_id", ""),
+        "min_limit": getattr(alert, "buy_min_limit", 0),
+        "max_limit": getattr(alert, "buy_max_limit", 0),
+    }
+
+    min_usdt = buy_leg["min_limit"] / buy_leg["price"] if buy_leg["price"] > 0 else 0
+    max_usdt = buy_leg["max_limit"] / buy_leg["price"] if buy_leg["price"] > 0 else 0
+
+    await state.update_data(
+        tm_buy_leg=buy_leg, 
+        tm_sell_exchange=alert.sell_exchange,
+        tm_min_usdt=min_usdt, tm_max_usdt=max_usdt
+    )
+    await state.set_state(HybridTradeStates.waiting_tm_amount)
+
+    text = (
+        f"🚨 <b>УВАГА: Авто T→M трейд</b>\n\n"
+        f"<i>Бот одразу купить крипту як Taker, після чого автоматично виставить твоє Maker SELL оголошення.</i>\n\n"
+        f"Ліміти продавця: {min_usdt:.1f} – {max_usdt:.1f} USDT\n"
+        f"Введи об'єм угоди (USDT) або натисни /cancel для відміни:"
+    )
+    await call.message.answer(text)
+    await call.answer()
+
+@router.message(HybridTradeStates.waiting_tm_amount)
+async def process_tm_amount(message: Message, state: FSMContext) -> None:
+    try:
+        amount_usdt = float(message.text.strip())
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа.")
+
+    data = await state.get_data()
+    min_u = data.get("tm_min_usdt", 0)
+    max_u = data.get("tm_max_usdt", 0)
+
+    if amount_usdt < min_u or (max_u > 0 and amount_usdt > max_u):
+        return await message.answer(f"❌ Сума не відповідає лімітам {min_u:.1f} - {max_u:.1f} USDT.")
+        
+    await state.clear()
+    await message.answer("⏳ Запускаю гібридний маршрут T→M...\nОчікуй сповіщення про створення угоди.")
+    
+    import asyncio
+    asyncio.create_task(_trade_worker.execute_tm_route(
+        buy_leg=data["tm_buy_leg"],
+        sell_exchange=data["tm_sell_exchange"],
+        amount_usdt=amount_usdt,
+        owner_user_id=message.from_user.id
+    ))
+
+@router.callback_query(F.data.startswith("trade:mt:"))
+async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
+    if not _trade_worker:
+        return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
+        
+    cache_key = call.data.split(":", 2)[2]
+    spread_data = _spread_cache.get(cache_key)
+    if not spread_data:
+        return await call.answer("❌ Зв'язка застаріла (>5 хв).", show_alert=True)
+
+    alert, _ts = spread_data
+    sell_leg = {
+        "exchange": alert.sell_exchange, "ad_id": getattr(alert, "sell_ad_id", ""),
+        "price": alert.sell_price, "merchant_id": getattr(alert, "sell_merchant_id", ""),
+        "min_limit": getattr(alert, "sell_min_limit", 0),
+        "max_limit": getattr(alert, "sell_max_limit", 0),
+    }
+
+    min_usdt = sell_leg["min_limit"] / sell_leg["price"] if sell_leg["price"] > 0 else 0
+    max_usdt = sell_leg["max_limit"] / sell_leg["price"] if sell_leg["price"] > 0 else 0
+
+    await state.update_data(
+        mt_sell_leg=sell_leg, 
+        mt_buy_exchange=alert.buy_exchange,
+        mt_buy_price=alert.buy_price,
+        mt_min_usdt=min_usdt, mt_max_usdt=max_usdt
+    )
+    await state.set_state(HybridTradeStates.waiting_mt_amount)
+
+    text = (
+        f"🚨 <b>УВАГА: Авто M→T трейд</b>\n\n"
+        f"<i>Бот виставить Maker BUY оголошення по {alert.buy_price} UAH. Коли тобі продадуть крипту, бот миттєво зіллє її по Taker-ордеру!</i>\n\n"
+        f"Місткість Taker покупця: {max_usdt:.1f} USDT\n"
+        f"Введи об'єм твоєї купівлі (USDT) або натисни /cancel для відміни:"
+    )
+    await call.message.answer(text)
+    await call.answer()
+
+@router.message(HybridTradeStates.waiting_mt_amount)
+async def process_mt_amount(message: Message, state: FSMContext) -> None:
+    try:
+        amount_usdt = float(message.text.strip())
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа.")
+
+    data = await state.get_data()
+    max_u = data.get("mt_max_usdt", 0)
+
+    if max_u > 0 and amount_usdt > max_u:
+        return await message.answer(f"❌ Ти не зможеш злити стільки крипти, Taker приймає максимум {max_u:.1f} USDT.")
+        
+    await state.clear()
+    await message.answer("⏳ Запускаю гібридний маршрут M→T...\nОголошення скоро з'явиться у стакані.")
+    
+    import asyncio
+    asyncio.create_task(_trade_worker.execute_mt_route(
+        buy_exchange=data["mt_buy_exchange"],
+        buy_price=data["mt_buy_price"],
+        sell_leg=data["mt_sell_leg"],
+        amount_usdt=amount_usdt,
+        owner_user_id=message.from_user.id
+    ))

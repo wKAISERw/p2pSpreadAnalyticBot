@@ -414,6 +414,7 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "show_full_terms", "INTEGER DEFAULT 1")          # Повні умови (спойлер)
         await self._ensure_column("scanner_users", "show_ai_logic", "INTEGER DEFAULT 1")            # Логіка AI (спойлер)
         await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")        # Деталі банків (спойлер)
+        await self._ensure_column("scanner_users", "is_hybrid_routes_enabled", "INTEGER DEFAULT 0") # Підтримка кнопок T-M та M-T
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
@@ -1329,6 +1330,7 @@ class MerchantDB:
             "show_ai_logic": True,
             "show_bank_details": True,
             "show_llm_summary": True,
+            "is_hybrid_routes_enabled": False,
         }
         if not self._db:
             return defaults
@@ -1339,7 +1341,8 @@ class MerchantDB:
                     COALESCE(show_full_terms, 1) as show_full_terms,
                     COALESCE(show_ai_logic, 1) as show_ai_logic,
                     COALESCE(show_bank_details, 1) as show_bank_details,
-                    COALESCE(show_llm_summary, 1) as show_llm_summary
+                    COALESCE(show_llm_summary, 1) as show_llm_summary,
+                    COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled
                 FROM scanner_users WHERE telegram_chat_id=?""",
                 (chat_id,),
             ) as cur:
@@ -1426,6 +1429,21 @@ class MerchantDB:
             "UPDATE scanner_users SET sniper_rules = ? WHERE user_id = ?", (rules_str, user_id)
         )
         await self._db.commit()
+
+    async def toggle_hybrid_routes(self, user_id: int) -> bool:
+        """Перемикає стан експериментальних гібридних маршрутів для юзера."""
+        if not self._db: return False
+        try:
+            async with self._db.execute("SELECT COALESCE(is_hybrid_routes_enabled, 0) FROM scanner_users WHERE user_id=?", (user_id,)) as cur:
+                row = await cur.fetchone()
+            if not row: return False
+            new_val = 0 if row[0] else 1
+            await self._db.execute("UPDATE scanner_users SET is_hybrid_routes_enabled = ? WHERE user_id = ?", (new_val, user_id))
+            await self._db.commit()
+            return bool(new_val)
+        except Exception as e:
+            logger.error("toggle_hybrid_routes error: %s", e)
+            return False
 
     # ==========================================
     # ── БЛОК 1.5: ПРОПОЗИЦІЇ СКАНЕРА (PROPOSALS) ──

@@ -976,6 +976,7 @@ class TelegramNotifier:
             BotCommand(command="ad", description="📢 Створити P2P оголошення"),
             BotCommand(command="ads", description="📝 Мої активні оголошення"),
             BotCommand(command="orders", description="📋 Мої поточні угоди"),
+            BotCommand(command="features", description="🛠 Експериментальні функції"),
             BotCommand(command="balance", description="💰 Перевірити баланси"),
             BotCommand(command="keys", description="🔑 Підключені API Ключі"),
             BotCommand(command="connect", description="🔌 Підключити біржу"),
@@ -1251,6 +1252,14 @@ class TelegramNotifier:
                 InlineKeyboardButton(text=f"⚡ Авто-Трейд (T→T) {alert.spread_pct:.2f}%",
                                      callback_data=f"trade:tt:{cache_key}")
             ])
+
+            if ds.get("is_hybrid_routes_enabled", False):
+                kb.append([
+                    InlineKeyboardButton(text=f"🚨 T→M (Купити і стати мейкером)", callback_data=f"trade:tm:{cache_key}")
+                ])
+                kb.append([
+                    InlineKeyboardButton(text=f"🚨 M→T (Стати мейкером і злити)", callback_data=f"trade:mt:{cache_key}")
+                ])
 
         # Кнопки Single-Leg (незалежні від пари)
         single_leg_row = []
