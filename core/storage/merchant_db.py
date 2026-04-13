@@ -436,6 +436,8 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "taker_sell_price", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "taker_sell_profit", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "taker_sell_speed", "TEXT DEFAULT 'FAST'")
+        # 🚀 SNIPER: правила снайпер-моду (JSON масив)
+        await self._ensure_column("scanner_users", "sniper_rules", "TEXT DEFAULT '[]'")
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
