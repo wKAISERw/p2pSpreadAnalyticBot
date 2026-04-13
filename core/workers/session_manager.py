@@ -279,6 +279,41 @@ class SessionManager:
                 self._warned_sessions.discard(session_key)
                 self._expired_sessions.discard(session_key)
 
+    async def are_all_sessions_valid(self, exchanges: list[str]) -> bool:
+        """Перевіряє, чи є валідні сесії для всіх вказаних бірж."""
+        invalid = await self.get_invalid_sessions(exchanges)
+        return len(invalid) == 0
+
+    async def get_invalid_sessions(self, exchanges: list[str]) -> list[str]:
+        """Повертає список бірж, для яких сесії відсутні або протухли."""
+        invalid_exchanges = []
+        sessions = await self._db.get_all_auth_sessions()
+        
+        # Створюємо мапу сесій для швидкого пошуку
+        # Якщо в БД кілька сесій (для різних user_id), достатньо хоча б однієї живої
+        active_map = {}
+        for session in sessions:
+            ex = session.get("exchange", "")
+            updated_at = float(session.get("updated_at", 0))
+            is_active = session.get("is_active", 1)
+            
+            if not is_active or not ex:
+                continue
+                
+            ttl = SESSION_TTL.get(ex, 96 * 3600)
+            age = time.time() - updated_at
+            
+            if age < ttl:
+                active_map[ex] = True
+        
+        for ex in exchanges:
+            # Для деяких бірж (наприклад MEXC або WhiteBIT) сесії не використовуються
+            if ex in ["Binance", "Bybit", "OKX"]:
+                if ex not in active_map:
+                    invalid_exchanges.append(ex)
+                    
+        return invalid_exchanges
+
     async def _try_bybit_refresh(self, user_id: int = 0) -> bool:
         """
         Bybit auto-refresh: робимо легкий API запит (get_pending_orders).

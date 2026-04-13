@@ -300,9 +300,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     all_creds = await merchant_db.get_all_credentials()
     account_clients = await _load_credentials(merchant_db)
 
-    # 🚀 ДОДАНО ІНІЦІАЛІЗАЦІЮ ТОРГОВОГО ДВИГУНА
     from core.engine.trade_worker import TradeWorker
-    trade_worker = TradeWorker(merchant_db)
+    from core.engine.strategy_manager import StrategyManager
 
     # 🚀 Блок A: Single-Leg Executor
     from core.engine.single_leg_executor import SingleLegExecutor
@@ -376,6 +375,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     maker_monitor.set_notify_callback(_maker_notify_cb)
     await maker_monitor.seed_seen_orders()
+
+    # Створюємо TradeWorker першим (бо в нього всередині створюється RouteExecutor)
+    trade_worker = TradeWorker(merchant_db)
+    
+    # Створюємо StrategyManager і передаємо йому RouteExecutor
+    strategy_manager = StrategyManager(merchant_db, maker_monitor, trade_worker._executor)
+    
+    # Інжектимо зв'язок назад у TradeWorker
+    trade_worker._strategy_manager = strategy_manager
 
     # Передаємо maker_monitor в bot_commands через notifier.bind_commands
     notifier.bind_commands(
@@ -510,8 +518,40 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
             exchange_manager.set_health_check(_health_check)
 
+            # ── Safe Boot Flow ──────────────────────────────────────────────
+            await runtime_config.load()
+            
+            # Перевірялка "здоров'я" при старті
+            require_sessions = runtime_config.get("require_sessions", "true") == "true"
+            if require_sessions:
+                invalid_exchanges = await session_manager.get_invalid_sessions(["Binance", "Bybit", "OKX"])
+                if invalid_exchanges:
+                    # Ставимо сканер на паузу
+                    await runtime_config.set("is_scanner_active", "false")
+                    
+                    # Сповіщаємо адмінів
+                    ex_list = ", ".join(invalid_exchanges)
+                    msg = (
+                        f"🛑 <b>Safe Boot: Сканер на паузі</b>\n\n"
+                        f"У тебе протухли сесії для: <b>{ex_list}</b>.\n"
+                        f"Без них RiskEngine матиме менше даних для аналізу мерчантів.\n\n"
+                        f"👉 Онови сесії, після чого запусти сканер знову."
+                    )
+                    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="🏃‍♂️ Поїхали без сесій (Ігнор)", callback_data="boot_ignore_sessions")],
+                        [InlineKeyboardButton(text="📲 Оновити через скрипт-закладки", callback_data="menu:global_settings")]
+                    ])
+                    await notifier._send_with_retry(msg, keyboard=kb)
+                    logger.warning(f"Safe Boot: відкладено старт через недійсні сесії ({ex_list}).")
+                else:
+                    # Сесії валідні або відключена перевірка — піднімаємо покинуті ордери (Регідратація)
+                    await strategy_manager.hydrate_active_trades()
+            else:
+                await strategy_manager.hydrate_active_trades()
+
             # ── Головний цикл ──────────────────────────────────────────────
-            _runtime_last_load: float = 0.0
+            _runtime_last_load: float = time.monotonic()
             _cycle_counter: int = 0
 
             while not stop_event.is_set():

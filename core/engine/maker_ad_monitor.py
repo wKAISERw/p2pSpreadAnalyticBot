@@ -63,6 +63,7 @@ class MakerAdMonitor:
         self._notify_cb = notify_cb
         self._watches: dict[int, UserWatch] = {}   # user_id → UserWatch
         self._seen_order_ids: set[str] = set()      # глобальний кеш побачених ордерів
+        self._global_poll_task: Optional[asyncio.Task] = None
 
     # ─── Публічний API ──────────────────────────────────────────────────────
 
@@ -110,15 +111,16 @@ class MakerAdMonitor:
             credentials=creds,
             ad_ids={ad_id},
         )
-        watch.task = asyncio.create_task(
-            self._poll_loop(watch),
-            name=f"maker_monitor_{user_id}",
-        )
         self._watches[user_id] = watch
         logger.info(
             "[MakerAdMonitor] Запущено моніторинг для user %d | exchange=%s | ad=%s",
             user_id, exchange, ad_id,
         )
+        
+        if self._global_poll_task is None or self._global_poll_task.done():
+            self._global_poll_task = asyncio.create_task(
+                self._global_poll_loop(), name="maker_global_poll"
+            )
 
     def remove_ad(self, user_id: int, ad_id: str) -> None:
         """Прибирає оголошення з моніторингу."""
@@ -127,94 +129,96 @@ class MakerAdMonitor:
             return
         watch.ad_ids.discard(ad_id)
         if not watch.ad_ids:
-            # Немає більше оголошень — зупиняємо polling
-            self._stop_watch(user_id)
+            self._watches.pop(user_id, None)
+            logger.info("[MakerAdMonitor] Зупинено монітор для user %d", user_id)
 
     def stop_all(self) -> None:
         """Зупиняє всі активні монітори."""
-        for user_id in list(self._watches.keys()):
-            self._stop_watch(user_id)
         self._watches.clear()
+        if self._global_poll_task and not self._global_poll_task.done():
+            self._global_poll_task.cancel()
         logger.info("[MakerAdMonitor] Всі монітори зупинено.")
-
-    def _stop_watch(self, user_id: int) -> None:
-        watch = self._watches.pop(user_id, None)
-        if watch and watch.task and not watch.task.done():
-            watch.task.cancel()
-            logger.info("[MakerAdMonitor] Зупинено монітор для user %d", user_id)
 
     # ─── Внутрішній цикл ────────────────────────────────────────────────────
 
-    async def _poll_loop(self, watch: UserWatch) -> None:
-        """Основний polling цикл для одного юзера."""
+    async def _global_poll_loop(self) -> None:
+        """Єдиний глобальний цикл опитування для масштабованості."""
+        logger.info("[MakerAdMonitor] Глобальний цикл опитування запущено.")
+        while True:
+            try:
+                if not self._watches:
+                    await asyncio.sleep(self.POLL_INTERVAL)
+                    continue
+                    
+                tasks = []
+                for watch in list(self._watches.values()):
+                    tasks.append(self._poll_user(watch))
+                
+                await asyncio.gather(*tasks, return_exceptions=True)
+                
+            except asyncio.CancelledError:
+                logger.info("[MakerAdMonitor] Глобальний цикл зупинено.")
+                break
+            except Exception as e:
+                logger.error(f"[MakerAdMonitor] Глобальна помилка циклу: {e}", exc_info=True)
+                
+            await asyncio.sleep(self.POLL_INTERVAL)
+
+    async def _poll_user(self, watch: UserWatch) -> None:
+        """Опитує Bybit API для конкретного юзера (одна ітерація)."""
         client = BybitP2PClient()
         client.set_credentials(
             watch.credentials.get("api_key", ""),
             watch.credentials.get("api_secret", ""),
         )
 
-        while True:
-            try:
-                async with client:
-                    orders = await client.get_pending_orders()
+        try:
+            async with client:
+                orders = await client.get_pending_orders()
 
-                if not orders:
-                    await asyncio.sleep(self.POLL_INTERVAL)
+            if not orders:
+                return
+
+            for order_data in orders:
+                order_id = str(order_data.get("id") or order_data.get("orderId") or "")
+                if not order_id:
                     continue
 
-                for order_data in orders:
-                    order_id = str(order_data.get("id") or order_data.get("orderId") or "")
-                    if not order_id:
-                        continue
+                if order_id in self._seen_order_ids:
+                    continue
 
-                    # Вже бачили — пропускаємо
-                    if order_id in self._seen_order_ids:
-                        continue
+                item_id = str(order_data.get("itemId") or order_data.get("adId") or "")
+                if item_id and watch.ad_ids and item_id not in watch.ad_ids:
+                    continue
 
-                    # Фільтруємо тільки наші оголошення
-                    item_id = str(order_data.get("itemId") or order_data.get("adId") or "")
-                    if item_id and watch.ad_ids and item_id not in watch.ad_ids:
-                        continue
-
-                    # Визначаємо сторону: якщо ми Maker (продавець), хтось відкрив BUY
-                    # orderStatus "20" = PENDING_PAYMENT в Bybit
-                    status = str(order_data.get("orderStatus") or "")
-                    # Беремо тільки свіжі ордери (CREATED або PENDING_PAYMENT)
-                    if status not in ("10", "20", ""):
-                        # Ордер вже в процесі або завершений
-                        self._seen_order_ids.add(order_id)
-                        continue
-
+                status = str(order_data.get("orderStatus") or "")
+                if status not in ("10", "20", ""):
                     self._seen_order_ids.add(order_id)
+                    continue
 
-                    # Обмежуємо розмір кешу
-                    if len(self._seen_order_ids) > self.MAX_ORDERS_CACHE:
-                        # Видаляємо найстаріші (set не ordered, але для safety)
-                        excess = len(self._seen_order_ids) - self.MAX_ORDERS_CACHE
-                        for _ in range(excess):
+                self._seen_order_ids.add(order_id)
+
+                if len(self._seen_order_ids) > self.MAX_ORDERS_CACHE:
+                    excess = len(self._seen_order_ids) - self.MAX_ORDERS_CACHE
+                    for _ in range(excess):
+                        if self._seen_order_ids:
                             self._seen_order_ids.pop()
 
-                    logger.info(
-                        "[MakerAdMonitor] 🔔 Новий вхідний ордер! user=%d order=%s item=%s",
-                        watch.user_id, order_id, item_id,
-                    )
-
-                    # Обробляємо асинхронно
-                    asyncio.create_task(
-                        self._process_incoming_order(watch, order_data, order_id),
-                        name=f"maker_process_{order_id}",
-                    )
-
-            except asyncio.CancelledError:
-                logger.info("[MakerAdMonitor] Polling для user %d зупинено.", watch.user_id)
-                break
-            except Exception as e:
-                logger.error(
-                    "[MakerAdMonitor] Помилка polling user %d: %s",
-                    watch.user_id, e, exc_info=True,
+                logger.info(
+                    "[MakerAdMonitor] 🔔 Новий вхідний ордер! user=%d order=%s item=%s",
+                    watch.user_id, order_id, item_id,
                 )
 
-            await asyncio.sleep(self.POLL_INTERVAL)
+                asyncio.create_task(
+                    self._process_incoming_order(watch, order_data, order_id),
+                    name=f"maker_process_{order_id}",
+                )
+
+        except Exception as e:
+            logger.error(
+                "[MakerAdMonitor] Помилка polling user %d: %s",
+                watch.user_id, e
+            )
 
     async def _process_incoming_order(
         self,

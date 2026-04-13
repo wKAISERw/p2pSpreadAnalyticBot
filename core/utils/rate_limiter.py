@@ -38,18 +38,19 @@ class RateLimiter:
         Очікує, поки з'явиться можливість зробити запит до вказаної біржі.
         Використовує Sliding Window алгоритм.
         """
-        async with self._lock:
-            config = self.limit_configs.get(exchange, self.limit_configs["default"])
-            max_calls = config["calls"]
-            period = config["period"]
-            
-            if exchange not in self._history:
-                self._history[exchange] = []
-            
-            history = self._history[exchange]
-            
-            while True:
+        while True:
+            # Блокуємо лише для перевірки/оновлення історії, щоб не блокувати інші біржі під час сну
+            async with self._lock:
+                config = self.limit_configs.get(exchange, self.limit_configs["default"])
+                max_calls = config["calls"]
+                period = config["period"]
+                
+                if exchange not in self._history:
+                    self._history[exchange] = []
+                
+                history = self._history[exchange]
                 now = time.time()
+                
                 # Видаляємо записи, що старіші за період
                 while history and history[0] <= now - period:
                     history.pop(0)
@@ -59,14 +60,13 @@ class RateLimiter:
                     history.append(now)
                     return True
                 
-                # Чекаємо до звільнення найстарішого слота
+                # Обчислюємо скільки чекати
                 wait_time = history[0] + period - now
-                if wait_time > 0:
-                    logger.debug(f"[RateLimit] Exchange {exchange} limit reached. Waiting {wait_time:.2f}s...")
-                    await asyncio.sleep(wait_time)
-                else:
-                    # Малоймовірно, але на випадок дрифту часу
-                    history.pop(0)
+
+            # Спимо ПОЗА локом, щоб не блокувати інші корутини/біржі!
+            if wait_time > 0:
+                logger.debug(f"[RateLimit] Exchange {exchange} limit reached. Waiting {wait_time:.2f}s...")
+                await asyncio.sleep(wait_time)
 
     def __call__(self, exchange: str = "default"):
         """Дозволяє використовувати як асинхронний контекстний менеджер."""

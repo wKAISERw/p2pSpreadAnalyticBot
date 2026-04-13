@@ -23,9 +23,10 @@ class TradeWorker:
     4. Оновлює FSM-статуси.
     """
 
-    def __init__(self, db: MerchantDB):
+    def __init__(self, db: MerchantDB, strategy_manager=None):
         self._db       = db
         self._executor = RouteExecutor()
+        self._strategy_manager = strategy_manager
 
     # ════════════════════════════════════════════════════════════════════
     # Стратегія T→T: Taker-Buy + Taker-Sell
@@ -279,10 +280,12 @@ class TradeWorker:
         async def _update_ad_price(exc: str, ad: str, price: float, _creds=sell_creds) -> bool:
             return await self._executor.update_maker_ad_price(exc, ad, price, _creds)
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             repricer.watch(_fetch_book_top, _update_ad_price, self._db),
             name=f"repricer_tm_{session_id}",
         )
+        if self._strategy_manager:
+            self._strategy_manager.register_repricer(session_id, repricer, task)
         logger.info(
             f"[TM] ✅ T→M маршрут запущено! Сесія #{session_id}. "
             f"Чекаємо покупця на оголошення {sell_ad_id} @ {min_sell_price:.4f} UAH."
@@ -548,10 +551,12 @@ class TradeWorker:
         async def _update_ad_price(exc: str, ad: str, price: float, _creds=sell_creds) -> bool:
             return await self._executor.update_maker_ad_price(exc, ad, price, _creds)
 
-        asyncio.create_task(
+        task = asyncio.create_task(
             repricer.watch(_fetch_book_top, _update_ad_price, self._db),
             name=f"repricer_mm_{session_id}",
         )
+        if self._strategy_manager:
+            self._strategy_manager.register_repricer(session_id, repricer, task)
         logger.info(f"[MM] ✅ M→M Sell-нога запущена. AdRepricer активний для сесії #{session_id}.")
         return True
 

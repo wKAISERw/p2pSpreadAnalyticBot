@@ -3616,6 +3616,21 @@ async def cmd_intercept(message: Message) -> None:
     ])
     await message.answer("📲 Вибери біржу для якої згенерувати скрипт-закладку (Bookmarklet):", reply_markup=kb)
 
+@router.callback_query(F.data == "boot_ignore_sessions")
+async def on_boot_ignore_sessions(call: CallbackQuery) -> None:
+    # Запускаємо сканер навіть без сесій
+    await runtime_config.set("is_scanner_active", "true")
+    # Відключаємо перевірку при наступному рестарті до ручного вмикання
+    await runtime_config.set("require_sessions", "false")
+    
+    await call.message.edit_text(
+        "🏃‍♂️ <b>Запуск без сесій</b>\n\n"
+        "Сканер активовано! Збираємо мерчантів без глибокого аналізу репутації.\n"
+        "<i>Ти можеш оновити сесії пізніше через налаштування.</i>",
+        reply_markup=None
+    )
+    await call.answer("Сканер запущено!")
+
 @router.callback_query(F.data.startswith("trade:mt:"))
 async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
     if not _trade_worker:
