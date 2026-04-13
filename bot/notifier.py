@@ -100,6 +100,7 @@ def _llm_verdict_block(
     terms_summary: str = "",        # залишаємо для сумісності — тепер у _terms_block
     show_ai_logic: bool = True,
     show_ai_terms_summary: bool = True,  # залишаємо для сумісності
+    reviews_analysis: str = "",
 ) -> str:
     """Форматує вердикт AI для buy/sell мерчанта (лише вердикт + логіка)."""
     rec_upper = (rec or "PENDING").upper()
@@ -111,6 +112,12 @@ def _llm_verdict_block(
         safe_reason = escape(str(reason).strip()[:300])
         prefix = "💬 " if rec_upper != "RECHECKING" else "💬 (попередній аналіз) "
         line += f"<blockquote expandable>{prefix}{safe_reason}</blockquote>\n"
+
+    # 📝 Аналіз відгуків (якщо є)
+    if reviews_analysis and str(reviews_analysis).strip():
+        safe_rev = escape(str(reviews_analysis).strip()[:300])
+        line += f"<blockquote expandable>📝 Відгуки: {safe_rev}</blockquote>\n"
+
     return line
 
 
