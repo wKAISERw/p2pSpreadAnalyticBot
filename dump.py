@@ -54,6 +54,10 @@ PRIORITY_FILES = [
     "core/engine/network_fee_engine.py",
     "core/engine/exchange_manager.py",
     "core/engine/startup.py",
+    "core/engine/price_advisor.py",
+    "core/engine/taker_scanner.py",
+    "core/engine/maker_ad_monitor.py",
+    "core/engine/strategy_manager.py",
     # ── Storage
     "core/storage/merchant_db.py",
     # ── Analysis
@@ -69,6 +73,7 @@ PRIORITY_FILES = [
     "core/workers/llm_worker.py",
     "core/workers/review_fetcher.py",
     "core/workers/session_manager.py",
+    "core/workers/db_maintenance.py",
     # ── Utils
     "core/utils/circuit_breaker.py",
     "core/utils/cache.py",
