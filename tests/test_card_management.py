@@ -38,8 +38,7 @@ def event_loop():
 
 @pytest.fixture
 async def db(tmp_path):
-    """Creates an in-memory MerchantDB for testing."""
-    db_path = str(tmp_path / "test_cards.db")
+    db_path = tmp_path / "test_cards.db"  # прибери str(), залиш Path
     merchant_db = MerchantDB(db_path=db_path)
     await merchant_db.start()
     yield merchant_db
@@ -180,7 +179,8 @@ async def test_reserve_card_amount(db):
         target_bank="monobank",
         direction="out",
         split_strategy=split,
-        order_id=order_id
+        order_id=order_id,
+        expected_window_minutes=30  # додати це
     )
     assert result is True
 
@@ -367,7 +367,8 @@ async def test_find_pending_order_match(db):
         target_bank="monobank",
         direction="in",
         split_strategy=split,
-        order_id=order_id
+        order_id=order_id,
+        expected_window_minutes=30  # додати
     )
     found = await db.find_pending_order_for_card(card_id, 15000.0)
     assert found is not None

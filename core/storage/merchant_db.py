@@ -22,6 +22,7 @@ import re
 import hashlib
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -2248,7 +2249,7 @@ class MerchantDB:
         if not self._db:
             return
         now = time.time()
-        tx_id = f"tx_{int(now*1000)}_{card_id[-4:]}"
+        tx_id = str(uuid.uuid4())
         try:
             await self._db.execute("BEGIN TRANSACTION")
             
