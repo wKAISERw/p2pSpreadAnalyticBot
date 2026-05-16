@@ -4,10 +4,8 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# Спробуємо імпортувати tiktoken для точного підрахунку токенів
 try:
     import tiktoken
-
     HAS_TIKTOKEN = True
 except ImportError:
     HAS_TIKTOKEN = False
@@ -16,19 +14,25 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTreeWidget, QTreeWidgetItem,
     QProgressBar, QTextEdit, QSplitter, QStatusBar, QMessageBox, QStyle,
-    QComboBox
+    QComboBox, QFrame,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QTextCursor
 
-# --- НАЛАШТУВАННЯ ПРОЄКТУ ---
 ROOT = Path(__file__).parent
 INCLUDE_EXTENSIONS = {".py", ".md", ".env.example", ".json"}
 SKIP_DIRS = {".venv", "__pycache__", ".git", ".idea", "logs", "data", "migrations", ".pytest_cache"}
 SKIP_DIR_PREFIXES = ("_backup",)
 SKIP_FILES = {"dump.py", "dump_ui.py", "project_dump.txt"}
 
-# --- СТИЛІСТИКА ---
+TOKEN_LIMITS = {
+    "GPT-4o / GPT-4 (128K)":  128_000,
+    "Claude 3.5 / 3 (200K)":  200_000,
+    "Gemini 1.5 Pro (2M)":  2_000_000,
+    "GPT-3.5 (16K)":           16_000,
+}
+_ROLE_META = Qt.ItemDataRole.UserRole + 1
+
 STYLE = """
 QMainWindow, QWidget {
     background-color: #0d1117;
@@ -36,61 +40,46 @@ QMainWindow, QWidget {
     font-family: 'Consolas', 'JetBrains Mono', 'Courier New', monospace;
     font-size: 13px;
 }
-QLabel { color: #8b949e; font-size: 12px; font-weight: bold;}
+QLabel { color: #8b949e; font-size: 12px; font-weight: bold; }
 QLineEdit, QComboBox {
-    background-color: #161b22; 
-    border: 1px solid #30363d; 
-    padding: 6px; 
-    border-radius: 4px; 
-    color: #cdd6f4;
+    background-color: #161b22; border: 1px solid #30363d;
+    padding: 6px; border-radius: 4px; color: #cdd6f4;
 }
 QComboBox::drop-down { border: none; }
 QComboBox QAbstractItemView {
-    background-color: #161b22;
-    color: #cdd6f4;
+    background-color: #161b22; color: #cdd6f4;
     selection-background-color: #30363d;
 }
 QPushButton {
-    background-color: #238636; 
-    color: #ffffff; 
-    font-weight: bold; 
-    padding: 8px 16px; 
-    border-radius: 4px; 
-    border: 1px solid rgba(240, 246, 252, 0.1);
+    background-color: #238636; color: #ffffff; font-weight: bold;
+    padding: 8px 16px; border-radius: 4px;
+    border: 1px solid rgba(240,246,252,0.1);
 }
 QPushButton:hover { background-color: #2ea043; }
 QPushButton:disabled { background-color: #21262d; color: #8b949e; }
 QPushButton#toolBtn {
-    background-color: #21262d;
-    color: #c9d1d9;
-    border: 1px solid #30363d;
-    padding: 6px 10px;
+    background-color: #21262d; color: #c9d1d9;
+    border: 1px solid #30363d; padding: 6px 10px;
 }
 QPushButton#toolBtn:hover { background-color: #30363d; }
 QTreeWidget, QTextEdit {
-    background-color: #0d1117; 
-    border: 1px solid #30363d; 
-    border-radius: 4px; 
+    background-color: #0d1117; border: 1px solid #30363d; border-radius: 4px;
 }
 QProgressBar {
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    text-align: center;
-    background-color: #161b22;
+    border: 1px solid #30363d; border-radius: 4px;
+    text-align: center; background-color: #161b22;
 }
 QProgressBar::chunk { background-color: #238636; }
 QStatusBar { border-top: 1px solid #30363d; background-color: #161b22; }
+QFrame#statsBar { background-color: #161b22; border: 1px solid #30363d; border-radius: 4px; }
 """
 
 
-# =============================================================================
-# РОБОЧИЙ ПОТІК (QThread)
-# =============================================================================
 class DumpWorker(QThread):
-    log = pyqtSignal(str)
+    log      = pyqtSignal(str)
     progress = pyqtSignal(int)
-    done = pyqtSignal(str, int, float, int)  # Шлях, Рядки, Розмір, Токени
-    error = pyqtSignal(str)
+    done     = pyqtSignal(str, int, float, int)
+    error    = pyqtSignal(str)
 
     def __init__(self, selected_files, out_path, mode="STANDARD"):
         super().__init__()
@@ -99,43 +88,31 @@ class DumpWorker(QThread):
         self.mode = mode
 
     def get_token_count(self, text):
-        """Підрахунок токенів для cl100k_base (GPT-4/o)."""
         if HAS_TIKTOKEN:
             try:
-                encoding = tiktoken.get_encoding("cl100k_base")
-                return len(encoding.encode(text))
+                return len(tiktoken.get_encoding("cl100k_base").encode(text))
             except Exception:
-                return len(text) // 4
-        return len(text) // 4  # Груба оцінка (1 токен ~ 4 символи)
+                pass
+        return len(text) // 4
 
     def generate_tree_str(self):
-        tree_lines = ["Project Structure:"]
-        paths = sorted([Path(f) for f in self.selected_files])
-        for p in paths:
-            depth = len(p.parts) - 1
-            indent = "  " * depth
-            tree_lines.append(f"{indent}📄 {p.name}")
-        return "\n".join(tree_lines)
+        lines = ["Project Structure:"]
+        for p in sorted(Path(f) for f in self.selected_files):
+            lines.append("  " * (len(p.parts) - 1) + f"📄 {p.name}")
+        return "\n".join(lines)
 
     def run(self):
         total_lines = 0
         total_files = len(self.selected_files)
-        final_full_text = ""
-
+        full_text = ""
         try:
             with open(self.out_path, "w", encoding="utf-8") as out:
-
-                # --- ГЕНЕРУЄМО ХЕДЕР ---
-                header = ""
                 if self.mode == "REPO_PROMPT":
                     header = (
-                            "### REPO TO PROMPT CONTEXT ###\n"
-                            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-                            "INSTRUCTIONS for LLM:\n"
-                            "The following is the source code of the project. Analyze the structure and logic.\n"
-                            "Each file is wrapped in <file> tags with a 'path' attribute.\n\n"
-                            f"{self.generate_tree_str()}\n\n"
-                            + "=" * 40 + "\n\n"
+                        "### REPO TO PROMPT CONTEXT ###\n"
+                        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                        "INSTRUCTIONS for LLM:\nThe following is the source code of the project.\n"
+                        f"{self.generate_tree_str()}\n\n" + "=" * 40 + "\n\n"
                     )
                 else:
                     header = (
@@ -147,144 +124,173 @@ class DumpWorker(QThread):
                     header += "\n"
 
                 out.write(header)
-                final_full_text += header
+                full_text += header
 
-                # --- ДОДАЄМО КОНТЕНТ ФАЙЛІВ ---
-                for i, file_path_str in enumerate(self.selected_files):
-                    full_path = ROOT / file_path_str
-                    block_content = ""
-
+                for i, rel_str in enumerate(self.selected_files):
+                    full_path = ROOT / rel_str
                     try:
-                        raw_content = full_path.read_text(encoding="utf-8")
-                        lines = raw_content.count("\n")
+                        raw = full_path.read_text(encoding="utf-8")
+                        lines = raw.count("\n")
                         total_lines += lines
-
                         if self.mode == "REPO_PROMPT":
-                            block_content = f'<file path="{file_path_str}">\n{raw_content}\n</file>\n\n'
+                            block = f'<file path="{rel_str}">\n{raw}\n</file>\n\n'
                         else:
                             sep = "=" * 60
-                            block_content = f"\n{sep}\nFILE: {file_path_str}\n{sep}\n\n{raw_content}\n"
-
-                        out.write(block_content)
-                        final_full_text += block_content
-                        self.log.emit(f"✅ Додано: {file_path_str} ({lines} рядків)")
+                            block = f"\n{sep}\nFILE: {rel_str}\n{sep}\n\n{raw}\n"
+                        out.write(block)
+                        full_text += block
+                        self.log.emit(f"✅ {rel_str} ({lines} рядків)")
                     except Exception as e:
-                        err_msg = f"# ERROR reading {file_path_str}: {e}\n"
-                        out.write(err_msg)
-                        self.log.emit(f"❌ {err_msg}")
+                        msg = f"# ERROR reading {rel_str}: {e}\n"
+                        out.write(msg)
+                        self.log.emit(f"❌ {msg}")
 
-                    self.progress.emit(int(((i + 1) / total_files) * 100))
+                    self.progress.emit(int((i + 1) / total_files * 100))
                     time.sleep(0.01)
 
-            # Підрахунок токенів
-            tokens = self.get_token_count(final_full_text)
+            tokens  = self.get_token_count(full_text)
             size_kb = os.path.getsize(self.out_path) / 1024
             self.done.emit(str(self.out_path), total_lines, size_kb, tokens)
-
         except Exception as e:
             self.error.emit(str(e))
 
 
-# =============================================================================
-# ГОЛОВНЕ ВІКНО UI
-# =============================================================================
 class DumpApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Pro Dump Builder & AI Context Manager")
         self.resize(1000, 750)
         self.setStyleSheet(STYLE)
+        self._stats_dirty = False
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
-        # 1. КОМПАКТНА ВЕРХНЯ ПАНЕЛЬ
-        top_layout = QHBoxLayout()
-        top_layout.addWidget(QLabel("Режим:"))
+        # ── 1. Верхня панель ──────────────────────────────────────────────────
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Режим:"))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Repo-to-Prompt (AI / XML)", "Standard (Звичайний)"])
-        top_layout.addWidget(self.mode_combo)
-
-        top_layout.addSpacing(15)
-        top_layout.addWidget(QLabel("Файл:"))
+        top.addWidget(self.mode_combo)
+        top.addSpacing(15)
+        top.addWidget(QLabel("Файл:"))
         self.filename_input = QLineEdit("project_dump.txt")
         self.filename_input.setFixedWidth(150)
-        top_layout.addWidget(self.filename_input)
-
-        top_layout.addSpacing(15)
+        top.addWidget(self.filename_input)
+        top.addSpacing(15)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 Швидкий пошук файлів...")
         self.search_input.textChanged.connect(self.filter_tree)
-        top_layout.addWidget(self.search_input)
-        main_layout.addLayout(top_layout)
+        top.addWidget(self.search_input)
+        layout.addLayout(top)
 
-        # 2. КНОПКИ КЕРУВАННЯ ДЕРЕВОМ
-        tools_layout = QHBoxLayout()
-        btn_select_all = QPushButton("☑ Вибрати все")
-        btn_select_all.setObjectName("toolBtn")
-        btn_select_all.clicked.connect(self.select_all)
-        tools_layout.addWidget(btn_select_all)
+        # ── 2. Кнопки ─────────────────────────────────────────────────────────
+        tools = QHBoxLayout()
+        for label, slot in [("☑ Вибрати все", self.select_all),
+                             ("☐ Зняти виділення", self.deselect_all)]:
+            b = QPushButton(label); b.setObjectName("toolBtn"); b.clicked.connect(slot)
+            tools.addWidget(b)
+        tools.addStretch()
+        for label, fn in [("📂 Розгорнути", self.tree_expand),
+                           ("📁 Згорнути",   self.tree_collapse)]:
+            b = QPushButton(label); b.setObjectName("toolBtn"); b.clicked.connect(fn)
+            tools.addWidget(b)
+        layout.addLayout(tools)
 
-        btn_deselect_all = QPushButton("☐ Зняти виділення")
-        btn_deselect_all.setObjectName("toolBtn")
-        btn_deselect_all.clicked.connect(self.deselect_all)
-        tools_layout.addWidget(btn_deselect_all)
-
-        tools_layout.addStretch()
-
-        btn_expand = QPushButton("📂 Розгорнути")
-        btn_expand.setObjectName("toolBtn")
-        btn_expand.clicked.connect(lambda: self.tree.expandAll())
-        tools_layout.addWidget(btn_expand)
-
-        btn_collapse = QPushButton("📁 Згорнути")
-        btn_collapse.setObjectName("toolBtn")
-        btn_collapse.clicked.connect(lambda: self.tree.collapseAll())
-        tools_layout.addWidget(btn_collapse)
-        main_layout.addLayout(tools_layout)
-
-        # 3. СПЛІТТЕР
+        # ── 3. Сплітер ────────────────────────────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("📦 Структура проєкту")
+        self.tree.itemChanged.connect(self._on_item_changed)
         splitter.addWidget(self.tree)
-
         self.log_edit = QTextEdit()
         self.log_edit.setReadOnly(True)
         self.log_edit.setPlaceholderText("Логи генерації з'являться тут...")
         splitter.addWidget(self.log_edit)
-
         splitter.setSizes([500, 400])
-        main_layout.addWidget(splitter)
+        layout.addWidget(splitter)
 
-        # 4. НИЖНЯ ПАНЕЛЬ
-        self.progress = QProgressBar()
-        self.progress.setValue(0)
-        main_layout.addWidget(self.progress)
+        # ── 4. Stats bar ──────────────────────────────────────────────────────
+        sf = QFrame(); sf.setObjectName("statsBar")
+        sb = QHBoxLayout(sf)
+        sb.setContentsMargins(14, 7, 14, 7)
+        sb.setSpacing(0)
 
+        def cap(t):
+            w = QLabel(t)
+            w.setStyleSheet("color:#444c56; font-size:11px; letter-spacing:0.06em;")
+            return w
+
+        def val(t, clr="#c9d1d9"):
+            w = QLabel(t)
+            w.setStyleSheet(f"color:{clr}; font-size:13px; font-weight:600;")
+            return w
+
+        def dot():
+            w = QLabel("  ·  ")
+            w.setStyleSheet("color:#2d333b; font-size:16px;")
+            return w
+
+        sb.addWidget(cap("ОБРАНО")); sb.addSpacing(8)
+        self.stat_files  = val("0 файлів");      sb.addWidget(self.stat_files)
+        sb.addWidget(dot())
+        self.stat_lines  = val("0 рядків");      sb.addWidget(self.stat_lines)
+        sb.addWidget(dot())
+        sb.addWidget(QLabel("🧠")); sb.addSpacing(4)
+        self.stat_tokens = val("~0 токенів", "#89b4fa"); sb.addWidget(self.stat_tokens)
+        sb.addSpacing(12)
+
+        self.token_bar = QProgressBar()
+        self.token_bar.setRange(0, 100); self.token_bar.setValue(0)
+        self.token_bar.setFixedWidth(110); self.token_bar.setFixedHeight(8)
+        self.token_bar.setTextVisible(False)
+        sb.addWidget(self.token_bar); sb.addSpacing(6)
+
+        self.stat_pct = QLabel("0%")
+        self.stat_pct.setStyleSheet("color:#444c56; font-size:11px;")
+        sb.addWidget(self.stat_pct)
+        sb.addStretch()
+
+        sb.addWidget(cap("ЛІМІТ")); sb.addSpacing(8)
+        self.limit_combo = QComboBox()
+        self.limit_combo.addItems(list(TOKEN_LIMITS.keys()))
+        self.limit_combo.setFixedWidth(210)
+        self.limit_combo.currentIndexChanged.connect(self._refresh_stats)
+        sb.addWidget(self.limit_combo)
+        layout.addWidget(sf)
+
+        # ── 5. Прогрес + кнопка ───────────────────────────────────────────────
+        self.progress = QProgressBar(); self.progress.setValue(0)
+        layout.addWidget(self.progress)
         self.build_btn = QPushButton("🚀 ЗГЕНЕРУВАТИ ДАМП")
         self.build_btn.clicked.connect(self.start_generation)
-        main_layout.addWidget(self.build_btn)
-
-        self.status = QStatusBar()
-        self.setStatusBar(self.status)
+        layout.addWidget(self.build_btn)
+        self.status = QStatusBar(); self.setStatusBar(self.status)
 
         self.populate_tree()
 
+    def tree_expand(self):  self.tree.expandAll()
+    def tree_collapse(self): self.tree.collapseAll()
+
     def select_all(self):
+        self.tree.blockSignals(True)
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setCheckState(0, Qt.CheckState.Checked)
+        self.tree.blockSignals(False); self._refresh_stats()
 
     def deselect_all(self):
+        self.tree.blockSignals(True)
         for i in range(self.tree.topLevelItemCount()):
             self.tree.topLevelItem(i).setCheckState(0, Qt.CheckState.Unchecked)
+        self.tree.blockSignals(False); self._refresh_stats()
 
     def populate_tree(self):
-        self.tree.clear()
+        self.tree.blockSignals(True); self.tree.clear()
         paths = []
         for root, dirs, files in os.walk(ROOT):
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(SKIP_DIR_PREFIXES)]
+            dirs[:] = [d for d in dirs
+                       if d not in SKIP_DIRS and not d.startswith(SKIP_DIR_PREFIXES)]
             for file in files:
                 if file in SKIP_FILES: continue
                 if Path(file).suffix in INCLUDE_EXTENSIONS or file.endswith(".json"):
@@ -293,59 +299,99 @@ class DumpApp(QMainWindow):
         nodes = {}
         for p in sorted(paths):
             parent = self.tree.invisibleRootItem()
-            curr_path = Path()
+            curr   = Path()
             for part in p.parts[:-1]:
-                curr_path /= part
-                if curr_path not in nodes:
-                    item = QTreeWidgetItem([part])
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
-                    item.setCheckState(0, Qt.CheckState.Checked)
-                    item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon))
-                    parent.addChild(item)
-                    nodes[curr_path] = item
-                parent = nodes[curr_path]
+                curr /= part
+                if curr not in nodes:
+                    it = QTreeWidgetItem([part])
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate)
+                    it.setCheckState(0, Qt.CheckState.Checked)
+                    it.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon))
+                    parent.addChild(it); nodes[curr] = it
+                parent = nodes[curr]
 
-            file_item = QTreeWidgetItem([p.name])
-            file_item.setFlags(file_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            file_item.setCheckState(0, Qt.CheckState.Checked)
-            file_item.setData(0, Qt.ItemDataRole.UserRole, str(p).replace("\\", "/"))
-            file_item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
-            parent.addChild(file_item)
+            full = ROOT / p
+            try:
+                txt   = full.read_text(encoding="utf-8", errors="replace")
+                lc    = txt.count("\n") + (1 if txt and not txt.endswith("\n") else 0)
+                cc    = len(txt)
+            except Exception:
+                lc = cc = 0
+
+            fi = QTreeWidgetItem([p.name])
+            fi.setFlags(fi.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            fi.setCheckState(0, Qt.CheckState.Checked)
+            fi.setData(0, Qt.ItemDataRole.UserRole, str(p).replace("\\", "/"))
+            fi.setData(0, _ROLE_META, (lc, cc))
+            fi.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+            parent.addChild(fi)
 
         self.tree.expandAll()
+        self.tree.blockSignals(False)
+        self._refresh_stats()
         self.status.showMessage(f"Знайдено файлів: {len(paths)}")
 
     def filter_tree(self, text):
-        query = text.lower()
+        q = text.lower()
+        def _f(n):
+            m = q in n.text(0).lower()
+            cm = any(_f(n.child(i)) for i in range(n.childCount()))
+            n.setHidden(not (m or cm)); return m or cm
+        for i in range(self.tree.topLevelItemCount()): _f(self.tree.topLevelItem(i))
 
-        def _filter(node):
-            match = query in node.text(0).lower()
-            child_match = any(_filter(node.child(i)) for i in range(node.childCount()))
-            node.setHidden(not (match or child_match))
-            return match or child_match
+    def _on_item_changed(self, _item, _col):
+        if not self._stats_dirty:
+            self._stats_dirty = True
+            QTimer.singleShot(80, self._refresh_stats)
 
-        for i in range(self.tree.topLevelItemCount()): _filter(self.tree.topLevelItem(i))
+    def _refresh_stats(self):
+        self._stats_dirty = False
+        tf = tl = tc = 0
+
+        def _walk(n):
+            nonlocal tf, tl, tc
+            if n.childCount() == 0:
+                if n.checkState(0) == Qt.CheckState.Checked:
+                    m = n.data(0, _ROLE_META)
+                    if m: tf += 1; tl += m[0]; tc += m[1]
+            else:
+                for i in range(n.childCount()): _walk(n.child(i))
+
+        for i in range(self.tree.topLevelItemCount()): _walk(self.tree.topLevelItem(i))
+
+        est   = int(tc / 3.5) if HAS_TIKTOKEN else tc // 4
+        limit = TOKEN_LIMITS.get(self.limit_combo.currentText(), 128_000)
+        pct   = min(int(est / limit * 100), 100)
+
+        if pct < 50:   bc, tc_clr = "#238636", "#89b4fa"
+        elif pct < 80: bc, tc_clr = "#d29922", "#e3b341"
+        else:          bc, tc_clr = "#da3633", "#f38ba8"
+
+        self.token_bar.setStyleSheet(
+            f"QProgressBar{{background:#21262d;border:1px solid #30363d;border-radius:3px;}}"
+            f"QProgressBar::chunk{{background:{bc};border-radius:3px;}}"
+        )
+        self.stat_files.setText(f"{tf:,} файлів")
+        self.stat_lines.setText(f"{tl:,} рядків")
+        self.stat_tokens.setText(f"~{est:,} токенів")
+        self.stat_tokens.setStyleSheet(f"color:{tc_clr}; font-size:13px; font-weight:600;")
+        self.token_bar.setValue(pct)
+        self.stat_pct.setText(f"{pct}%")
+        self.stat_pct.setStyleSheet(f"color:{tc_clr}; font-size:11px;")
 
     def start_generation(self):
         selected = []
-
-        def _collect(node):
-            if node.childCount() == 0 and node.checkState(0) == Qt.CheckState.Checked:
-                p = node.data(0, Qt.ItemDataRole.UserRole)
+        def _col(n):
+            if n.childCount() == 0 and n.checkState(0) == Qt.CheckState.Checked:
+                p = n.data(0, Qt.ItemDataRole.UserRole)
                 if p: selected.append(p)
-            for i in range(node.childCount()): _collect(node.child(i))
-
-        for i in range(self.tree.topLevelItemCount()): _collect(self.tree.topLevelItem(i))
-
+            for i in range(n.childCount()): _col(n.child(i))
+        for i in range(self.tree.topLevelItemCount()): _col(self.tree.topLevelItem(i))
         if not selected: return QMessageBox.warning(self, "Увага", "Виберіть хоча б один файл!")
 
-        is_repo_mode = self.mode_combo.currentIndex() == 0
-        mode = "REPO_PROMPT" if is_repo_mode else "STANDARD"
-
-        self.log_edit.clear()
-        self.log_edit.append(f"<b>Режим: {mode}</b>")
-        self.build_btn.setEnabled(False)
-        self.progress.setValue(0)
+        mode = "REPO_PROMPT" if self.mode_combo.currentIndex() == 0 else "STANDARD"
+        self.log_edit.clear(); self.log_edit.append(f"<b>Режим: {mode}</b>")
+        self.build_btn.setEnabled(False); self.progress.setValue(0)
 
         self._worker = DumpWorker(selected, ROOT / self.filename_input.text(), mode)
         self._worker.log.connect(lambda t: self.log_edit.append(t))
@@ -355,26 +401,23 @@ class DumpApp(QMainWindow):
         self._worker.start()
 
     def _on_done(self, path, lines, size_kb, tokens):
-        self.log_edit.append(f"<br><font color='#a6e3a1'><b>🎉 УСПІХ! ГЕНЕРАЦІЮ ЗАВЕРШЕНО.</b></font>")
-        self.log_edit.append(f"📄 Рядків: {lines:,}")
-        self.log_edit.append(f"📏 Розмір: {size_kb:.1f} KB")
-
-        # Підсвітка токенів: синій (норма), помаранчевий (багато)
-        token_color = "#89b4fa" if tokens < 100000 else "#fab387"
-        self.log_edit.append(f"🧠 <b>Токенів (cl100k): <span style='color:{token_color};'>{tokens:,}</span></b>")
-
-        self.build_btn.setEnabled(True)
-        self.progress.setValue(100)
-        self.status.showMessage(f"✅ Готово! Токенів: {tokens:,}")
-
+        limit = TOKEN_LIMITS.get(self.limit_combo.currentText(), 128_000)
+        pct   = min(int(tokens / limit * 100), 100)
+        clr   = "#89b4fa" if pct < 50 else "#e3b341" if pct < 80 else "#f38ba8"
+        self.log_edit.append("<br><font color='#a6e3a1'><b>🎉 УСПІХ!</b></font>")
+        self.log_edit.append(f"📄 Рядків: {lines:,}   📏 {size_kb:.1f} KB")
+        self.log_edit.append(
+            f"🧠 <b>Токенів: <span style='color:{clr};'>{tokens:,}</span> ({pct}% від ліміту)</b>"
+        )
         if not HAS_TIKTOKEN:
-            self.log_edit.append(
-                "<br><small>⚠️ Примітка: Встановіть 'pip install tiktoken' для точного підрахунку.</small>")
+            self.log_edit.append("<small>⚠️ pip install tiktoken для точності</small>")
+        self.build_btn.setEnabled(True); self.progress.setValue(100)
+        self.status.showMessage(f"✅ Готово! {tokens:,} токенів ({pct}%)")
 
     def _on_error(self, err):
-        self.log_edit.append(f"<br><font color='#f38ba8'>❌ ПОМИЛКА: {err}</font>")
+        self.log_edit.append(f"<font color='#f38ba8'>❌ {err}</font>")
         self.build_btn.setEnabled(True)
-        QMessageBox.critical(self, "Критична помилка", err)
+        QMessageBox.critical(self, "Помилка", err)
 
 
 if __name__ == "__main__":

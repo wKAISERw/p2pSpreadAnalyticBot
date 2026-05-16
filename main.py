@@ -469,10 +469,10 @@ async def fix_bank_codes_in_db(db_path: str):
 
 from fastapi import Request
 
-@app.post("/api/v1/webhooks/mono/{user_id}/{secret}")
-async def mono_webhook(user_id: int, secret: str, request: Request):
+@app.post("/api/v1/webhooks/mono/card/{card_id}/{secret}")
+async def mono_webhook(card_id: str, secret: str, request: Request):
     logger = logging.getLogger("Main")
-    settings = await db.get_user_mono_settings(user_id)
+    settings = await db.get_card_mono_settings(card_id)
     if not settings or settings.get("webhook_secret") != secret:
         return {"status": "error", "detail": "Invalid secret"}
 

@@ -42,6 +42,10 @@ def main_menu_kb(
         InlineKeyboardButton(text="🔌 Біржі", callback_data="exch:list"),
         InlineKeyboardButton(text="📢 Створити оголошення", callback_data="ad:create"),
     )
+    builder.row(
+        InlineKeyboardButton(text="💳 Мої картки", callback_data="menu:cards"),
+        InlineKeyboardButton(text="📊 Звіт по картках", callback_data="menu:report"),
+    )
     # Пауза алертів (тимчасова через mute або постійна через is_alerts_active)
     if is_muted:
         builder.row(InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="mute:off"))
@@ -498,7 +502,10 @@ def cards_dashboard_kb(cards: list[dict], module_mode: str) -> InlineKeyboardMar
         label = f"{icon} {card['bank_name']} {card['last_four']}{drop} — {card['balance']:.0f} ₴"
         builder.row(InlineKeyboardButton(text=label, callback_data=f"card:view:{card['id']}"))
         
-    builder.row(InlineKeyboardButton(text="➕ Додати картку", callback_data="card:add_start"))
+    builder.row(
+        InlineKeyboardButton(text="➕ Додати картку", callback_data="card:add_start"),
+        InlineKeyboardButton(text="⚙️ Ліміти банків", callback_data="menu:bank_limits")
+    )
     
     mode_label = "УВІМКНЕНО" if module_mode == "full" else "ВИМКНЕНО"
     builder.row(InlineKeyboardButton(text=f"⚙️ Модуль: {mode_label}", callback_data="card:toggle_module"))
@@ -526,7 +533,7 @@ def card_is_own_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="card:cancel"))
     return builder.as_markup()
 
-def card_details_kb(card_id: str, status: str) -> InlineKeyboardMarkup:
+def card_details_kb(card_id: str, status: str, bank_name: str = "") -> InlineKeyboardMarkup:
     """Управління конкретною карткою."""
     builder = InlineKeyboardBuilder()
     
@@ -536,6 +543,9 @@ def card_details_kb(card_id: str, status: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📝 Нотатка", callback_data=f"card:edit:note:{card_id}"),
         InlineKeyboardButton(text="👥 Категорія", callback_data=f"card:edit:category:{card_id}"),
     )
+    
+    if bank_name.lower() == "monobank":
+        builder.row(InlineKeyboardButton(text="🔗 Підключити Mono Webhook", callback_data=f"card:mono_setup:{card_id}"))
     
     if status in ("active", "frozen_funds"):
         toggle_text = "❄️ Заморозити" if status == "active" else "🟢 Розморозити"

@@ -161,7 +161,7 @@ class SniperStates(StatesGroup):
 
 class CardAddStates(StatesGroup):
     waiting_bank = State()
-    waiting_last_four = State()
+    waiting_card_number = State()
     waiting_balance = State()
     waiting_label = State()
     waiting_is_own = State()
@@ -4723,6 +4723,18 @@ async def _show_cards_dashboard(user_id: int, message_or_call) -> None:
 async def cb_cards_dashboard(call: CallbackQuery) -> None:
     await _show_cards_dashboard(call.from_user.id, call)
 
+@router.callback_query(F.data == "menu:cards")
+async def cb_menu_cards(call: CallbackQuery) -> None:
+    await _show_cards_dashboard(call.from_user.id, call)
+
+@router.callback_query(F.data == "menu:report")
+async def cb_menu_report(call: CallbackQuery) -> None:
+    await call.message.edit_text(
+        "📊 <b>Звіт по картках</b>\n\nОберіть період для генерації звіту:",
+        reply_markup=keyboards.report_period_kb()
+    )
+    await call.answer()
+
 @router.callback_query(F.data == "card:toggle_module")
 async def cb_card_toggle_module(call: CallbackQuery) -> None:
     if not _db:
@@ -4745,16 +4757,16 @@ async def cb_card_add_start(call: CallbackQuery, state: FSMContext) -> None:
 async def cb_card_add_bank(call: CallbackQuery, state: FSMContext) -> None:
     bank = call.data.split(":")[2]
     await state.update_data(bank=bank)
-    await call.message.edit_text(f"Вибрано банк: <b>{bank.capitalize()}</b>\n\nВведіть останні 4 цифри картки:")
-    await state.set_state(CardAddStates.waiting_last_four)
+    await call.message.edit_text(f"Вибрано банк: <b>{bank.capitalize()}</b>\n\nВведіть повний номер картки (16 цифр):")
+    await state.set_state(CardAddStates.waiting_card_number)
     await call.answer()
 
-@router.message(CardAddStates.waiting_last_four)
-async def process_card_add_last_four(message: Message, state: FSMContext) -> None:
-    last_four = message.text.strip()
-    if len(last_four) != 4 or not last_four.isdigit():
-        return await message.answer("❌ Останні 4 цифри мають складатися рівно з 4 цифр. Спробуйте ще раз:")
-    await state.update_data(last_four=last_four)
+@router.message(CardAddStates.waiting_card_number)
+async def process_card_add_number(message: Message, state: FSMContext) -> None:
+    card_number = message.text.strip().replace(" ", "")
+    if len(card_number) != 16 or not card_number.isdigit():
+        return await message.answer("❌ Номер картки має складатися з 16 цифр. Спробуйте ще раз:")
+    await state.update_data(card_number=card_number, last_four=card_number[-4:])
     await message.answer("Введіть поточний баланс картки (грн):")
     await state.set_state(CardAddStates.waiting_balance)
 
@@ -4784,8 +4796,9 @@ async def cb_card_add_is_own(call: CallbackQuery, state: FSMContext) -> None:
     card_id = str(uuid.uuid4())
     card_data = {
         "id": card_id,
-        "owner_id": call.from_user.id,
+        "owner_id": call.fromuser.id if hasattr(call, 'fromuser') else call.from_user.id,
         "bank_name": data["bank"],
+        "card_number": data["card_number"],
         "last_four": data["last_four"],
         "label": data["label"],
         "is_own": is_own,
@@ -4796,22 +4809,9 @@ async def cb_card_add_is_own(call: CallbackQuery, state: FSMContext) -> None:
     if _db:
         await _db.add_card(card_data)
         
-        # Auto-map Monobank if token is linked
-        if data["bank"].lower() == "monobank":
-            mono_settings = await _db.get_user_mono_settings(call.from_user.id)
-            if mono_settings and mono_settings.get("x_token_encrypted"):
-                from core.security.crypto_utils import CryptoUtils
-                from infrastructure.api.mono_client import MonoApiClient
-                token = CryptoUtils.decrypt(mono_settings["x_token_encrypted"])
-                if token:
-                    client = MonoApiClient(token)
-                    info = await client.get_client_info()
-                    if info and "accounts" in info:
-                        for acc in info["accounts"]:
-                            pan = acc.get("maskedPan", [])
-                            if pan and len(pan) > 0 and pan[0].endswith(data["last_four"]):
-                                await _db.update_card_mono_account(card_id, acc["id"])
-                                break
+        # Note: We no longer auto-map Mono here using a global token.
+        # User must set up webhook per card.
+        pass
         
     await state.clear()
     await call.message.edit_text("✅ Картку успішно додано!")
@@ -4836,6 +4836,13 @@ async def cb_card_view(call: CallbackQuery) -> None:
     used_daily_out = await _db.get_rolling_used(card_id, "out", 24)
     tx_count = await _db.get_card_transactions_count(card_id, 24)
     
+    limits = await _db.get_user_bank_limits(call.from_user.id, card['bank_name'])
+    limit_daily_in = limits["daily_in_max"] if limits else 150000.0
+    limit_daily_out = limits["daily_out_max"] if limits else 150000.0
+    
+    rem_in = max(0, limit_daily_in - used_daily_in)
+    rem_out = max(0, limit_daily_out - used_daily_out)
+    
     import datetime
     cooldown_str = "Немає"
     if card["cooldown_until"] > time.time():
@@ -4848,8 +4855,8 @@ async def cb_card_view(call: CallbackQuery) -> None:
         f"👤 <b>Тип:</b> {'Власна' if card['is_own'] else 'Дроп'}\n"
         f"💰 <b>Баланс:</b> {card['balance']:.2f} ₴\n\n"
         f"📊 <b>Статистика за 24г:</b>\n"
-        f"📥 Надходження: {used_daily_in:.0f} ₴\n"
-        f"📤 Витрати: {used_daily_out:.0f} ₴\n"
+        f"📥 Надходження: {used_daily_in:.0f} ₴ (Залишок: {rem_in:.0f} ₴)\n"
+        f"📤 Витрати: {used_daily_out:.0f} ₴ (Залишок: {rem_out:.0f} ₴)\n"
         f"🔄 Транзакцій: {tx_count}\n\n"
         f"📌 <b>Статус:</b> {card['status']}\n"
         f"⏳ <b>Cooldown до:</b> {cooldown_str}"
@@ -4857,10 +4864,10 @@ async def cb_card_view(call: CallbackQuery) -> None:
     
     # Якщо викликано з FakeCall (message), то треба відповісти або відредагувати існуюче
     if hasattr(call, "message") and hasattr(call.message, "edit_text"):
-        await call.message.edit_text(text, reply_markup=keyboards.card_details_kb(card_id, card["status"]))
+        await call.message.edit_text(text, reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
     else:
         # Для фейкового call
-        await call.message.answer(text, reply_markup=keyboards.card_details_kb(card_id, card["status"]))
+        await call.message.answer(text, reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
         
     if hasattr(call, "answer"):
         await call.answer()
@@ -5063,32 +5070,38 @@ async def cb_card_match_cancel(call: CallbackQuery):
     await call.message.edit_text("❌ Підбір картки скасовано.")
     await call.answer()
 
-@router.message(Command("mono"))
-async def cmd_mono(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    settings = await _db.get_user_mono_settings(user_id)
-    if settings:
-        secret = settings.get("webhook_secret")
-        await message.answer(
+@router.callback_query(F.data.startswith("card:mono_setup:"))
+async def cb_card_mono_setup(call: CallbackQuery, state: FSMContext):
+    card_id = call.data.split(":")[2]
+    settings = await _db.get_card_mono_settings(card_id)
+    if settings and settings.get("webhook_secret"):
+        secret = settings["webhook_secret"]
+        await call.message.edit_text(
             f"🐈 <b>Налаштування Monobank Webhook</b>\n\n"
-            f"Токен вже підключений.\n"
+            f"Токен вже підключений для цієї картки.\n"
             f"Webhook URL для Monobank:\n"
-            f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/{user_id}/{secret}</code>\n\n"
+            f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/card/{card_id}/{secret}</code>\n\n"
             f"Щоб змінити токен, відправте новий X-Token нижче, або /cancel."
         )
     else:
-        await message.answer(
+        await call.message.edit_text(
             "🐈 <b>Інтеграція Monobank</b>\n\n"
-            "Щоб налаштувати автоматичне підтвердження транзакцій, введіть ваш X-Token.\n"
+            "Щоб налаштувати автоматичне підтвердження транзакцій для цієї картки, введіть X-Token.\n"
             "Ви можете отримати його тут: https://api.monobank.ua/ \n\n"
             "<i>Токен буде зашифровано.</i>"
         )
+    await state.update_data(setup_card_id=card_id)
     await state.set_state(MonoStates.waiting_token)
+    await call.answer()
 
 @router.message(MonoStates.waiting_token)
 async def process_mono_token(message: Message, state: FSMContext):
     token = message.text.strip()
-    
+    data = await state.get_data()
+    card_id = data.get("setup_card_id")
+    if not card_id:
+        return await message.answer("❌ Помилка: картка не знайдена. Спробуйте ще раз через меню карток.")
+        
     from infrastructure.api.mono_client import MonoApiClient
     from core.security.crypto_utils import CryptoUtils
     import secrets
@@ -5100,33 +5113,48 @@ async def process_mono_token(message: Message, state: FSMContext):
     if not info:
         return await msg.edit_text("❌ Помилка: невірний токен або збій API Mono.")
         
-    user_id = message.from_user.id
     secret = secrets.token_urlsafe(16)
     encrypted_token = CryptoUtils.encrypt(token)
     
-    await _db.save_user_mono_settings(user_id, encrypted_token, secret)
+    await _db.save_card_mono_settings(card_id, encrypted_token, secret)
     
     # Auto-map existing cards
     accounts = info.get("accounts", [])
-    mapped = 0
-    cards = await _db.get_cards(user_id, bank_name="Monobank", status="active")
-    for c in cards:
-        last_four = c["last_four"]
+    
+    # We only map THIS specific card now
+    cards = await _db.get_cards(message.from_user.id)
+    card_obj = next((c for c in cards if c["id"] == card_id), None)
+    mapped = False
+    
+    if card_obj:
+        last_four = card_obj["last_four"]
         for acc in accounts:
             pan = acc.get("maskedPan", [])
             if pan and len(pan) > 0 and pan[0].endswith(last_four):
-                await _db.update_card_mono_account(c["id"], acc["id"])
-                mapped += 1
+                await _db.update_card_mono_account(card_id, acc["id"])
+                
+                # Автоматично підтягуємо актуальний баланс з АПІ
+                real_balance = acc.get("balance", 0) / 100.0
+                conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+                await conn.execute("UPDATE cards SET balance=? WHERE id=?", (real_balance, card_id))
+                await conn.commit()
+                
+                mapped = True
                 break
                 
     await state.clear()
     await message.delete() # hide token
+    
+    status_text = "✅ <b>Monobank успішно підключено!</b>\n"
+    if mapped:
+        status_text += "Картку знайдено в API та успішно прив'язано.\n\n"
+    else:
+        status_text += "⚠️ Увага: Картку з такими останніми цифрами не знайдено в цьому токені.\n\n"
+        
     await msg.edit_text(
-        f"✅ <b>Monobank успішно підключено!</b>\n"
-        f"Знайдено та прив'язано карток: {mapped} / {len(cards)}\n\n"
+        status_text +
         f"Встановіть цей Webhook URL у налаштуваннях Mono:\n"
-        f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/{user_id}/{secret}</code>\n\n"
-        f"<i>Прив'язка нових карток Monobank буде відбуватись автоматично, якщо ви додали їх через /cards.</i>"
+        f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/card/{card_id}/{secret}</code>\n"
     )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5253,12 +5281,27 @@ async def cb_report_period(call: CallbackQuery) -> None:
 
 @router.message(Command("set_bank_limits"))
 async def cmd_set_bank_limits(message: Message) -> None:
+    await _show_bank_limits_menu(message)
+
+@router.callback_query(F.data == "menu:bank_limits")
+async def cb_menu_bank_limits(call: CallbackQuery) -> None:
+    await _show_bank_limits_menu(call.message)
+    await call.answer()
+
+async def _show_bank_limits_menu(message: Message):
     if not _db:
         return await message.answer("❌ БД не підключена.")
-    await message.answer(
-        "⚙️ <b>Налаштування лімітів банку</b>\n\nОберіть банк:",
-        reply_markup=keyboards.bank_limits_bank_kb()
-    )
+    
+    text = "⚙️ <b>Налаштування лімітів банку</b>\n\nОберіть банк:"
+    reply_markup = keyboards.bank_limits_bank_kb()
+    
+    if hasattr(message, "edit_text"):
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except:
+            await message.answer(text, reply_markup=reply_markup)
+    else:
+        await message.answer(text, reply_markup=reply_markup)
 
 @router.callback_query(F.data == "limits:back")
 async def cb_limits_back(call: CallbackQuery, state: FSMContext) -> None:

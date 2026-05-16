@@ -79,6 +79,19 @@ class MerchantDB:
         await self._db.commit()
 
         await self._init_schema()
+        
+        # Apply migrations for new columns safely
+        try:
+            await self._db.execute("ALTER TABLE cards ADD COLUMN card_number TEXT")
+        except Exception: pass
+        try:
+            await self._db.execute("ALTER TABLE cards ADD COLUMN mono_x_token_encrypted TEXT")
+        except Exception: pass
+        try:
+            await self._db.execute("ALTER TABLE cards ADD COLUMN mono_webhook_secret TEXT")
+        except Exception: pass
+        await self._db.commit()
+
         logger.info("MerchantDB запущено (WAL): %s", self._path)
 
     async def stop(self) -> None:
@@ -435,7 +448,10 @@ class MerchantDB:
                                          last_monthly_reset   REAL DEFAULT 0,
                                          created_at           REAL DEFAULT 0,
                                          last_tx_timestamp    REAL DEFAULT 0,
-                                         mono_account_id      TEXT
+                                         mono_account_id      TEXT,
+                                         card_number          TEXT,
+                                         mono_x_token_encrypted TEXT,
+                                         mono_webhook_secret  TEXT
                                      );
                                      CREATE INDEX IF NOT EXISTS idx_cards_owner_status ON cards(owner_id, status);
                                      
@@ -2357,25 +2373,23 @@ class MerchantDB:
             logger.error("release_expired_reservations failed: %s", e)
             return 0
 
-    async def get_user_mono_settings(self, user_id: int) -> dict:
+    async def get_card_mono_settings(self, card_id: str) -> dict:
         if not self._db:
             return {}
-        async with self._db.execute("SELECT x_token_encrypted, webhook_secret FROM user_mono_settings WHERE user_id=?", (user_id,)) as cur:
+        async with self._db.execute("SELECT mono_x_token_encrypted as x_token_encrypted, mono_webhook_secret as webhook_secret FROM cards WHERE id=?", (card_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else {}
 
-    async def save_user_mono_settings(self, user_id: int, x_token_encrypted: str, webhook_secret: str) -> None:
+    async def save_card_mono_settings(self, card_id: str, x_token_encrypted: str, webhook_secret: str) -> None:
         if not self._db:
             return
         await self._db.execute(
             """
-            INSERT INTO user_mono_settings (user_id, x_token_encrypted, webhook_secret)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET 
-            x_token_encrypted=excluded.x_token_encrypted, 
-            webhook_secret=excluded.webhook_secret
+            UPDATE cards 
+            SET mono_x_token_encrypted=?, mono_webhook_secret=?
+            WHERE id=?
             """,
-            (user_id, x_token_encrypted, webhook_secret)
+            (x_token_encrypted, webhook_secret, card_id)
         )
         await self._db.commit()
 

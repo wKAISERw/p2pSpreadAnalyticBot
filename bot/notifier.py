@@ -994,6 +994,9 @@ class TelegramNotifier:
         commands =[
             BotCommand(command="start", description="▶️ Запустити мій сканер (Дашборд)"),
             BotCommand(command="stop", description="🛑 Зупинити мій сканер"),
+            BotCommand(command="cards", description="💳 Дашборд моїх карток"),
+            BotCommand(command="report", description="📊 Звіт по оборотах карток"),
+            BotCommand(command="set_bank_limits", description="⚙️ Налаштування банківських лімітів"),
             BotCommand(command="active", description="📡 Активні спреди зараз"),
             BotCommand(command="mode", description="🎯 Режим сканування"),
             BotCommand(command="ad", description="📢 Створити P2P оголошення"),
