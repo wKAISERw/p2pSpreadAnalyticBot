@@ -222,7 +222,7 @@ class ReviewFetcher:
         ніж завантажаться його відгуки.
         """
         if not merchant_id:
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN", "error_reason": "empty merchant_id"}
 
         if exchange not in RATE_LIMITS:
             # Біржа не підтримує API відгуків (Wallet, CryptoBot)
@@ -231,7 +231,10 @@ class ReviewFetcher:
                 await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
             except Exception:
                 pass
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NOT_SUPPORTED"}
+            return {
+                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                "status": "NOT_SUPPORTED", "error_reason": f"{exchange}: reviews API not supported"
+            }
 
         # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──────
         _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx, "MEXC": self._mexc}
@@ -240,29 +243,45 @@ class ReviewFetcher:
         if exchange == "MEXC":
             # MEXC: публічне API — тільки перевіряємо що клієнт є
             if not client:
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+                return {
+                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                    "status": "NO_AUTH", "error_reason": "MEXC client is not initialized"
+                }
 
         elif exchange in ("Bybit", "Binance"):
             # Bybit/Binance: профіль API мертвий (404).
             # Тексти відгуків → тільки через перехоплену браузерну сесію.
             # Клієнт потрібен для HTTP запитів, але API-ключі не обов'язкові.
             if not client:
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+                return {
+                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                    "status": "NO_AUTH", "error_reason": f"{exchange} client is not initialized"
+                }
             session_h, _, _ = await self._db.get_auth_session(exchange)
             if not session_h:
                 logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
                 # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожні 10 хв
                 try:
-                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_SESSION",
+                        error_reason=f"{exchange} browser session not captured"
+                    )
                 except Exception:
                     pass
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_SESSION"}
+                return {
+                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                    "status": "NO_SESSION", "error_reason": f"{exchange} browser session not captured"
+                }
 
         else:
             # OKX: класична API-автентифікація
             if not client or not getattr(client, "is_authenticated", False):
                 logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", exchange, merchant_id[:12])
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+                return {
+                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                    "status": "NO_AUTH", "error_reason": f"{exchange} API client is not authenticated"
+                }
 
         try:
             if exchange == "Binance":
@@ -284,7 +303,15 @@ class ReviewFetcher:
             else:
                 save_status = "OK"
 
-            await self._db.save_reviews(exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status)
+            save_reason = ""
+            if save_status == "OK" and (pos + neg + neutral) == 0 and not bad_texts:
+                save_status = "NO_FEEDBACK"
+                save_reason = f"{exchange} API returned 0 feedback entries"
+
+            await self._db.save_reviews(
+                exchange, merchant_id, pos, neg, neutral, bad_texts,
+                status=save_status, error_reason=save_reason
+            )
             self._known_merchants.add((exchange, merchant_id))
 
             return {
@@ -293,10 +320,27 @@ class ReviewFetcher:
                 "neutral": neutral,
                 "bad_texts": bad_texts,
                 "status": save_status,
+                "error_reason": save_reason,
             }
         except Exception as e:
             logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNAVAILABLE"}
+            emsg = str(e)
+            status = "UNAVAILABLE"
+            if "AuthError" in emsg:
+                status = "SESSION_EXPIRED"
+            elif "API_ERROR" in emsg:
+                status = "API_ERROR"
+            try:
+                await self._db.save_reviews(
+                    exchange, merchant_id, 0, 0, 0, [],
+                    status=status, error_reason=emsg[:500]
+                )
+            except Exception:
+                pass
+            return {
+                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                "status": status, "error_reason": emsg[:500]
+            }
 
     # ─── Worker loop ────────────────────────────────────────────────────────
 
@@ -316,7 +360,11 @@ class ReviewFetcher:
                     now = asyncio.get_event_loop().time()
                     if now < self._exchange_cooldown.get(exchange, 0):
                         logger.debug("ReviewFetcher Degraded Mode для %s, пропускаємо", exchange)
-                        await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
+                        await self._db.save_reviews(
+                            exchange, merchant_id, 0, 0, 0, [],
+                            status="UNAVAILABLE",
+                            error_reason=f"{exchange} degraded mode (temporary cooldown)"
+                        )
                         continue
 
                     needs_fetch = await self._db.needs_review_fetch(
@@ -349,6 +397,10 @@ class ReviewFetcher:
             if exchange == "MEXC":
                 if not self._mexc:
                     logger.debug("_fetch_and_save: MEXC клієнт не підключений, skip %s", merchant_id[:12])
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_AUTH", error_reason="MEXC client is not initialized"
+                    )
                     return
 
             elif exchange in ("Bybit", "Binance"):
@@ -358,11 +410,18 @@ class ReviewFetcher:
                 client = _client_map.get(exchange)
                 if not client:
                     logger.debug("_fetch_and_save: %s [%s] — клієнт відсутній", exchange, merchant_id[:12])
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_AUTH", error_reason=f"{exchange} client is not initialized"
+                    )
                     return
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 if not session_h:
                     logger.debug("_fetch_and_save: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
-                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION")
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_SESSION", error_reason=f"{exchange} browser session not captured"
+                    )
                     return
 
             else:
@@ -371,7 +430,10 @@ class ReviewFetcher:
                 client = _client_map.get(exchange)
                 if not client or not getattr(client, "is_authenticated", False):
                     logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
-                    await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_AUTH")
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_AUTH", error_reason=f"{exchange} API client is not authenticated"
+                    )
                     return
 
             if exchange == "Binance":
@@ -398,8 +460,14 @@ class ReviewFetcher:
             else:
                 save_status = "OK"
 
+            save_reason = ""
+            if save_status == "OK" and total == 0 and not bad_texts:
+                save_status = "NO_FEEDBACK"
+                save_reason = f"{exchange} API returned 0 feedback entries"
+
             await self._db.save_reviews(
-                exchange, merchant_id, pos, neg, neutral, bad_texts, status=save_status
+                exchange, merchant_id, pos, neg, neutral, bad_texts,
+                status=save_status, error_reason=save_reason
             )
             self._processed += 1
 
@@ -417,7 +485,16 @@ class ReviewFetcher:
                 self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
                 logger.error("🚨 %s API впало 3 рази! Degraded Mode на %.0f хв.", exchange, cooldown_sec / 60)
 
-            await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="UNAVAILABLE")
+            emsg = str(e)
+            err_status = "UNAVAILABLE"
+            if "AuthError" in emsg:
+                err_status = "SESSION_EXPIRED"
+            elif "API_ERROR" in emsg:
+                err_status = "API_ERROR"
+            await self._db.save_reviews(
+                exchange, merchant_id, 0, 0, 0, [],
+                status=err_status, error_reason=emsg[:500]
+            )
 
     def _send_burnout_alert(self, exchange: str):
         """Надсилає миттєве Telegram-сповіщення (і пише в лог) про згоряння сесії."""
@@ -475,9 +552,10 @@ class ReviewFetcher:
                 logger.error("🚨 Binance session burnout detected! %s", fe)
                 asyncio.create_task(self._db.invalidate_auth_session("Binance", user_id=0))
                 self._send_burnout_alert("Binance")
+                raise RuntimeError(f"AuthError: Binance session expired: {fe}")
             else:
                 logger.debug("Binance review texts error %s: %s", merchant_id, fe)
-            raw_neg = []
+                raise RuntimeError(f"API_ERROR: Binance review API failed: {fe}")
 
         bad_texts: list[dict] = []
         for item in raw_neg:
@@ -524,9 +602,10 @@ class ReviewFetcher:
                 logger.error("🚨 Bybit session burnout detected! %s", fe)
                 asyncio.create_task(self._db.invalidate_auth_session("Bybit", user_id=0))
                 self._send_burnout_alert("Bybit")
+                raise RuntimeError(f"AuthError: Bybit session expired: {fe}")
             else:
                 logger.debug("Bybit feedback error %s: %s", merchant_id, fe)
-            raw_neg = []
+                raise RuntimeError(f"API_ERROR: Bybit feedback API failed: {fe}")
 
         bad_texts: list[dict] = []
         for item in raw_neg:
@@ -579,7 +658,7 @@ class ReviewFetcher:
 
         except Exception as e:
             logger.debug("OKX fetch error %s: %s", merchant_id, e)
-            return 0, 0, 0, []
+            raise RuntimeError(f"API_ERROR: OKX feedback API failed: {e}")
 
     async def _fetch_okx_paginated(self, client, merchant_id: str, feedback_type: int, max_pages: int = 3) -> list[
         dict]:
@@ -593,15 +672,31 @@ class ReviewFetcher:
                 url = f"https://www.okx.com{path}"
                 headers = client._sign_headers("GET", path)
                 data = await client._get(url, headers=headers)
+
+                code = str(data.get("code", "0"))
+                if code not in ("0", ""):
+                    raise RuntimeError(f"OKX returned code={code}, msg={data.get('msg', '')}")
+
                 items = data.get("data", []) or []
                 all_items.extend(items)
+
                 # OKX повертає nextCursor якщо є ще сторінки
                 next_cursor = data.get("nextCursor", "")
                 if not next_cursor or len(items) < 20:
                     break
                 cursor = next_cursor
-            except Exception:
+
+            except Exception as e:
+                # 🚀 ДОДАНО: Граціозно ковтаємо 404 помилку
+                if "Status 404" in str(e):
+                    logger.debug("OKX 404 Not Found для %s (ендпоінт змінено або юзера видалено).", merchant_id)
+                    break
+
+                if not all_items:
+                    raise RuntimeError(f"OKX pagination failed: {e}")
+                logger.debug("OKX pagination partial for %s type=%s: %s", merchant_id, feedback_type, e)
                 break
+
         return all_items
 
     async def _fetch_mexc(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:

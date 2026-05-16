@@ -39,6 +39,7 @@ def main_menu_kb(
         InlineKeyboardButton(text="🔑 API Ключі", callback_data="menu:keys"),
     )
     builder.row(
+        InlineKeyboardButton(text="🔌 Біржі", callback_data="exch:list"),
         InlineKeyboardButton(text="📢 Створити оголошення", callback_data="ad:create"),
     )
     # Пауза алертів (тимчасова через mute або постійна через is_alerts_active)
@@ -53,7 +54,7 @@ def main_menu_kb(
     builder.row(InlineKeyboardButton(text="ℹ️ Допомога", callback_data="menu:help"))
     return builder.as_markup()
 
-def settings_menu_kb(scanner_mode: str = "SPREAD") -> InlineKeyboardMarkup:
+def settings_menu_kb(scanner_mode: str = "SPREAD", is_admin: bool = False) -> InlineKeyboardMarkup:
     """Особисті налаштування юзера (контекстне меню за режимом)."""
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -83,6 +84,14 @@ def settings_menu_kb(scanner_mode: str = "SPREAD") -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="🖥 Налаштування виводу", callback_data="set:display_menu"),
     )
+    builder.row(
+        InlineKeyboardButton(text="🔌 Управління біржами", callback_data="exch:list"),
+    )
+    # Адмінські глобальні налаштування
+    if is_admin:
+        builder.row(
+            InlineKeyboardButton(text="🛠 Глобальні налаштування (адмін)", callback_data="menu:global_settings"),
+        )
     builder.row(
         InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="user:alerts:on"),
     )
@@ -462,7 +471,6 @@ def create_ad_confirm_kb() -> InlineKeyboardMarkup:
     )
     return builder.as_markup()
 
-
 def create_ad_banks_kb(all_banks: dict[str, str], selected: list[str]) -> InlineKeyboardMarkup:
     """Вибір банків для оголошення."""
     builder = InlineKeyboardBuilder()
@@ -475,5 +483,127 @@ def create_ad_banks_kb(all_banks: dict[str, str], selected: list[str]) -> Inline
     builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="ad:cancel"))
     return builder.as_markup()
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Card Management UI
+# ═══════════════════════════════════════════════════════════════════════════════
 
+def cards_dashboard_kb(cards: list[dict], module_mode: str) -> InlineKeyboardMarkup:
+    """Дашборд управління картками."""
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопки карток
+    for card in cards:
+        icon = "🟢" if card["status"] == "active" else ("❄️" if card["status"] == "frozen_funds" else "🔴")
+        drop = " (Дроп)" if not card.get("is_own", 1) else ""
+        label = f"{icon} {card['bank_name']} {card['last_four']}{drop} — {card['balance']:.0f} ₴"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"card:view:{card['id']}"))
+        
+    builder.row(InlineKeyboardButton(text="➕ Додати картку", callback_data="card:add_start"))
+    
+    mode_label = "УВІМКНЕНО" if module_mode == "full" else "ВИМКНЕНО"
+    builder.row(InlineKeyboardButton(text=f"⚙️ Модуль: {mode_label}", callback_data="card:toggle_module"))
+    
+    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
+    return builder.as_markup()
 
+def card_banks_kb() -> InlineKeyboardMarkup:
+    """Вибір банку при додаванні картки."""
+    builder = InlineKeyboardBuilder()
+    banks = ["monobank", "privatbank", "pumb", "izibank", "a-bank", "sense"]
+    for bank in banks:
+        builder.button(text=bank.capitalize(), callback_data=f"card_add:bank:{bank}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="card:cancel"))
+    return builder.as_markup()
+
+def card_is_own_kb() -> InlineKeyboardMarkup:
+    """Вибір типу картки."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🙋‍♂️ Власна", callback_data="card_add:is_own:1"),
+        InlineKeyboardButton(text="🤝 Дроп (Чужа)", callback_data="card_add:is_own:0")
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="card:cancel"))
+    return builder.as_markup()
+
+def card_details_kb(card_id: str, status: str) -> InlineKeyboardMarkup:
+    """Управління конкретною карткою."""
+    builder = InlineKeyboardBuilder()
+    
+    builder.row(InlineKeyboardButton(text="🔄 Актуалізувати баланс", callback_data=f"card:update_bal:{card_id}"))
+    builder.row(
+        InlineKeyboardButton(text="🏷 Мітка", callback_data=f"card:edit:label:{card_id}"),
+        InlineKeyboardButton(text="📝 Нотатка", callback_data=f"card:edit:note:{card_id}"),
+        InlineKeyboardButton(text="👥 Категорія", callback_data=f"card:edit:category:{card_id}"),
+    )
+    
+    if status in ("active", "frozen_funds"):
+        toggle_text = "❄️ Заморозити" if status == "active" else "🟢 Розморозити"
+        builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"card:toggle:{card_id}"))
+        
+    builder.row(InlineKeyboardButton(text="🗑 Видалити картку", callback_data=f"card:delete:{card_id}"))
+    builder.row(InlineKeyboardButton(text="🔙 До списку", callback_data="card:dashboard"))
+    return builder.as_markup()
+
+def card_category_kb(card_id: str) -> InlineKeyboardMarkup:
+    """Вибір категорії картки."""
+    builder = InlineKeyboardBuilder()
+    categories = [
+        ("🙋 Власна", "self"),
+        ("👪 Родич", "relative"),
+        ("🤝 Друг", "friend"),
+        ("💼 Дроп", "drop"),
+    ]
+    for label, value in categories:
+        builder.button(text=label, callback_data=f"card:set_cat:{card_id}:{value}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"card:view:{card_id}"))
+    return builder.as_markup()
+
+def report_period_kb() -> InlineKeyboardMarkup:
+    """Вибір періоду для звіту по картках."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📅 За 24 години", callback_data="report:period:24"),
+        InlineKeyboardButton(text="📅 За 7 днів", callback_data="report:period:168"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📅 За 30 днів", callback_data="report:period:720"),
+    )
+    builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="menu:main"))
+    return builder.as_markup()
+
+def bank_limits_bank_kb() -> InlineKeyboardMarkup:
+    """Вибір банку для налаштування лімітів."""
+    builder = InlineKeyboardBuilder()
+    banks = ["monobank", "privatbank", "pumb", "izibank", "a-bank", "sense"]
+    for bank in banks:
+        builder.button(text=bank.capitalize(), callback_data=f"limits:bank:{bank}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="menu:main"))
+    return builder.as_markup()
+
+LIMIT_FIELD_LABELS = {
+    "daily_out_max": "📤 Денний OUT макс",
+    "daily_in_max": "📥 Денний IN макс",
+    "monthly_out_max": "📤 Місячний OUT макс",
+    "monthly_in_max": "📥 Місячний IN макс",
+    "max_single_tx_out": "📤 Макс 1 TX OUT",
+    "max_single_tx_in": "📥 Макс 1 TX IN",
+    "max_tx_per_day": "🔄 Макс TX/день",
+    "cooldown_hours": "⏳ Cooldown (годин)",
+}
+
+def bank_limits_fields_kb(bank: str, current: dict) -> InlineKeyboardMarkup:
+    """Показує поточні ліміти банку з кнопками для редагування."""
+    builder = InlineKeyboardBuilder()
+    for field, label in LIMIT_FIELD_LABELS.items():
+        val = current.get(field, "—")
+        if isinstance(val, float):
+            val = f"{val:.0f}"
+        builder.row(InlineKeyboardButton(
+            text=f"{label}: {val}",
+            callback_data=f"limits:field:{bank}:{field}"
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="limits:back"))
+    return builder.as_markup()

@@ -8,7 +8,6 @@ TakerScanner — пайплайн для режимів TAKER_BUY / TAKER_SELL.
 from __future__ import annotations
 import logging
 from exchanges.base import Order
-from filters.price_filter import PriceRangeFilter
 from config.defaults import MIN_ORDERS, MIN_COMPLETION
 
 logger = logging.getLogger("TakerScanner")
@@ -30,8 +29,6 @@ class TakerScanner:
         mode = user.get("scanner_mode", "SPREAD")
         if mode not in ("TAKER_BUY", "TAKER_SELL"):
             return []
-
-        price_filter = PriceRangeFilter(user.get("price_range", {}))
 
         # buy_grouped  = мерчанти ПРОДАЮТЬ USDT (side=1, user BUYS, low price)
         # sell_grouped = мерчанти КУПУЮТЬ USDT  (side=0, user SELLS, high price)
@@ -65,31 +62,77 @@ class TakerScanner:
                 if min_amount > 0 and order_max < min_amount:
                     continue
 
-                # ── Застосування фільтрів розпродажу (TAKER_SELL) ──
+                # ── Фільтри TAKER_SELL (використовуємо обчислений min_sell_price) ──
                 if mode == "TAKER_SELL":
-                    t_price = float(user.get("taker_sell_price", 0))
-                    t_profit = float(user.get("taker_sell_profit", 0))
+                    strategy = user.get("taker_sell_price_strategy", "roi")
+                    min_sell_price = float(user.get("taker_sell_min_price", 0))
+                    price_to = float(user.get("taker_sell_price_to", 0))
                     t_amount = float(user.get("taker_sell_amount", 0))
-                    t_speed = user.get("taker_sell_speed", "FAST")
+                    t_speed = user.get("taker_sell_speed", "ANY")
+                    order_price = float(order.price)
 
-                    if t_price > 0 and t_profit > 0:
-                        target_price = t_price * (1 + t_profit)
-                        if float(order.price) < target_price:
-                            continue  # Не виходимо в бажаний профіт
+                    # ── Цінова стратегія ──────────────────────────────────
+                    if strategy in ("roi", "min") and min_sell_price > 0:
+                        if order_price < min_sell_price:
+                            continue
+                    elif strategy == "range":
+                        if min_sell_price > 0 and order_price < min_sell_price:
+                            continue
+                        if price_to > 0 and order_price > price_to:
+                            continue
+                    elif strategy == "exact" and min_sell_price > 0:
+                        if abs(order_price - min_sell_price) > 0.005:
+                            continue
+                    # "any" → без фільтру
 
+                    # ── Ob'єм ─────────────────────────────────────────────
                     if t_amount > 0:
-                        fiat_val = t_amount * float(order.price)
+                        fiat_val = t_amount * order_price
                         if t_speed == "FAST":
-                            # Маємо продати все за один раз
                             if order_max < fiat_val or order_min > fiat_val:
                                 continue
                         else:
-                            # Розпродаж частинами: головне щоб вистачало крипти хоча б на мінімалку
                             if order_min > fiat_val:
                                 continue
 
-                if not price_filter.matches(order):
-                    continue
+                # ── Фільтри TAKER_BUY ────────────────────────────────────────────────
+                if mode == "TAKER_BUY":
+                    strategy = user.get("taker_buy_price_strategy", "any")
+                    price_to = float(user.get("taker_buy_max_price", 0))
+                    price_from = float(user.get("taker_buy_price_from", 0))
+                    t_limit_min = float(user.get("taker_buy_limit_min", 0))
+                    t_limit_max = float(user.get("taker_buy_limit_max", 0))
+                    t_speed = user.get("taker_buy_speed", "ANY")
+                    order_price = float(order.price)
+
+                    # ── Цінова стратегія ──────────────────────────────────
+                    if strategy == "max" and price_to > 0:
+                        if order_price > price_to:
+                            continue
+                    elif strategy == "range":
+                        if price_from > 0 and order_price < price_from:
+                            continue
+                        if price_to > 0 and order_price > price_to:
+                            continue
+                    elif strategy == "exact" and price_to > 0:
+                        if abs(order_price - price_to) > 0.005:  # допуск 0.5 копійки
+                            continue
+                    # "any" → без фільтру
+
+                    # ── Фіатні ліміти ──────────────────────────────────────
+                    if t_limit_min > 0 and order_max < t_limit_min:
+                        continue
+                    if t_limit_max > 0 and order_min > t_limit_max:
+                        continue
+
+                    # ── Швидкість (FAST = вимагаємо перекриття об'єму) ─────
+                    if t_speed == "FAST":
+                        t_amount = float(user.get("taker_buy_amount", 0))
+                        if t_amount > 0:
+                            fiat_needed = t_amount * order_price
+                            if order_max < fiat_needed:
+                                continue
+
                 if not self._merchant_ok(order, mf, emf):
                     continue
                 if "BLOCK" in (getattr(order, "risk_flag", "") or ""):
@@ -122,4 +165,3 @@ class TakerScanner:
         if min_rate > 0 and order.finish_rate_pct < min_rate:
             return False
         return True
-

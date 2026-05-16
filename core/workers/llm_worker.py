@@ -569,6 +569,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     excerpts = _top_excerpts(rr)
 
     rev_status = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
+    rev_error_reason = (review_summary.get("error_reason", "") if review_summary else "") or ""
     pos = int((review_summary or {}).get("positive", 0) or 0)
     neg = int((review_summary or {}).get("negative", 0) or 0)
     neutral = int((review_summary or {}).get("neutral", 0) or 0)
@@ -610,6 +611,12 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     ]
 
     _NO_REVIEW_EXCHANGES = {"Wallet", "CryptoBot"}
+    if rev_status != "OK" or rev_error_reason:
+        diag = f"Reviews diagnostics: status={rev_status}"
+        if rev_error_reason:
+            diag += f", reason={rev_error_reason[:220]}"
+        lines.append(diag)
+
     if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
         lines.append(
             f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")
@@ -634,6 +641,17 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(
                 "Reviews: Браузерна сесія ще не перехоплена — тексти відгуків тимчасово недоступні. "
                 "Оцінюй за умовами та поведінкою. НЕ вважай це фактором ризику.")
+    elif rev_status == "SESSION_EXPIRED":
+        lines.append(
+            "Reviews: Сесія доступу до відгуків протухла/невалідна. "
+            "Тексти відгуків тимчасово недоступні до повторного логіну.")
+    elif rev_status == "API_ERROR":
+        lines.append(
+            "Reviews: Біржа повернула технічну помилку API при завантаженні відгуків. "
+            "Вважай відгуки тимчасово недоступними.")
+    elif rev_status == "NO_FEEDBACK":
+        lines.append(
+            "Reviews: API біржі повернув 0 записів відгуків для цього мерчанта (можливо, відгуків справді немає).")
     elif is_estimated and total > 0:
         # Pos/neg вираховані з finish_rate/positive_rate, а не з реальних відгуків
         lines.append(

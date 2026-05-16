@@ -160,14 +160,15 @@ class BybitP2PClient(BaseHttpClient):
             ret_code = data.get("ret_code", data.get("retCode", 0))
             if ret_code in (10001, 10002, 10003, 10004, 10005, 33004) or "unauthorized" in str(data).lower() or "not login" in str(data).lower():
                 raise RuntimeError(f"AuthError: Token expired. {data}")
+            if str(ret_code) not in ("0", ""):
+                raise RuntimeError(f"ApiError: ret_code={ret_code}, ret_msg={data.get('ret_msg', data.get('retMsg', ''))}")
 
             # Повертаємо масив відгуків
             return data.get("result", {}).get("items", []) or []
         except Exception as e:
             if "AuthError" in str(e):
                 raise  # Прокидаємо вище для перехоплення у ReviewFetcher
-            logger.debug("Bybit fetch_merchant_feedback [%s] error: %s", merchant_id, e)
-            return []
+            raise RuntimeError(f"ApiError: {e}")
 
     async def fetch_account_balance(self) -> list[dict]:
         """Баланс Bybit unified account."""

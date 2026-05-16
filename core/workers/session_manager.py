@@ -120,16 +120,16 @@ class SessionManager:
                         "--window-size=1280,720",
                     ],
                 )
-                page = await context.new_page()
-
-                # 🚀 ДОДАЙ ЦЕ: Блокуємо важкі ресурси для швидкості
-                await page.route("**/*.{png,jpg,jpeg,svg,woff2,css}", lambda route: route.abort())
-
                 # 🚀 НОВИЙ СИНТАКСИС ДЛЯ PLAYWRIGHT-STEALTH 2.0.2+
                 stealth_plugin = Stealth()
                 await stealth_plugin.apply_stealth_async(context)
 
-                page = await context.new_page()
+                # ФІКС 1: Беремо вже існуючу першу вкладку замість створення нової
+                page = context.pages[0] if context.pages else await context.new_page()
+
+                # ФІКС 2: Прибрали .css з блокування (щоб JS-фреймворки не крашились)
+                await page.route("**/*.{png,jpg,jpeg,svg,woff2}", lambda route: route.abort())
+
 
                 async def handle_request(request: Request):
                     if target["api_pattern"] in request.url:

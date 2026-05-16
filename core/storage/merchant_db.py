@@ -73,7 +73,7 @@ class MerchantDB:
         # без WAL можливі помилки при конкурентному доступі.
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")  # безпечно + швидше
-        await self._db.execute("PRAGMA cache_size=-65536")   # 64 MB кеш
+        await self._db.execute("PRAGMA cache_size=-65536")  # 64 MB кеш
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.commit()
 
@@ -330,7 +330,7 @@ class MerchantDB:
                                          updated_at   REAL DEFAULT 0,
                                          PRIMARY KEY (user_id, exchange)
                                      );
-                                     
+
                                      -- Таблиця: trade_sessions
                                      CREATE TABLE IF NOT EXISTS trade_sessions (
                                          id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -372,7 +372,7 @@ class MerchantDB:
                                          created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
                                          updated_at       DATETIME
                                      );
-                                     
+
                                      -- 🚀 Пропозиції сканера (для статистики "що знаходив сканер")
                                      CREATE TABLE IF NOT EXISTS scanner_proposals (
                                          id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -391,13 +391,107 @@ class MerchantDB:
                                      );
                                      CREATE INDEX IF NOT EXISTS idx_proposals_ts
                                          ON scanner_proposals(created_at);
+
+                                     /* =========================================================
+                                        БЛОК УПРАВЛІННЯ КАРТКАМИ (CARD MANAGEMENT SYSTEM)
+                                        ========================================================= */
+
+                                     CREATE TABLE IF NOT EXISTS user_card_settings (
+                                         user_id              INTEGER PRIMARY KEY,
+                                         card_module_mode     TEXT DEFAULT 'off',
+                                         max_cards_per_order  INTEGER DEFAULT 3
+                                     );
+
+                                     CREATE TABLE IF NOT EXISTS user_bank_limits (
+                                         user_id              INTEGER NOT NULL,
+                                         bank_name            TEXT NOT NULL,
+                                         daily_out_max        REAL DEFAULT 150000.0,
+                                         daily_in_max         REAL DEFAULT 150000.0,
+                                         monthly_out_max      REAL DEFAULT 400000.0,
+                                         monthly_in_max       REAL DEFAULT 400000.0,
+                                         max_single_tx_out    REAL DEFAULT 29999.0,
+                                         max_single_tx_in     REAL DEFAULT 29999.0,
+                                         max_tx_per_day       INTEGER DEFAULT 15,
+                                         cooldown_hours       INTEGER DEFAULT 24,
+                                         PRIMARY KEY (user_id, bank_name)
+                                     );
+
+                                     CREATE TABLE IF NOT EXISTS cards (
+                                         id                   TEXT PRIMARY KEY,
+                                         owner_id             INTEGER NOT NULL,
+                                         bank_name            TEXT NOT NULL,
+                                         last_four            TEXT NOT NULL,
+                                         label                TEXT,
+                                         is_own               INTEGER DEFAULT 1,
+                                         category             TEXT DEFAULT 'self',
+                                         note                 TEXT,
+                                         is_custom_limits     INTEGER DEFAULT 0,
+                                         limits_override_json TEXT DEFAULT '{}',
+                                         balance              REAL DEFAULT 0.0,
+                                         balance_updated_at   REAL DEFAULT 0,
+                                         status               TEXT DEFAULT 'active',
+                                         cooldown_until       REAL DEFAULT 0,
+                                         last_monthly_reset   REAL DEFAULT 0,
+                                         created_at           REAL DEFAULT 0,
+                                         last_tx_timestamp    REAL DEFAULT 0,
+                                         mono_account_id      TEXT
+                                     );
+                                     CREATE INDEX IF NOT EXISTS idx_cards_owner_status ON cards(owner_id, status);
+                                     
+                                     CREATE TABLE IF NOT EXISTS user_mono_settings (
+                                         user_id              INTEGER PRIMARY KEY,
+                                         x_token_encrypted    TEXT,
+                                         webhook_secret       TEXT
+                                     );
+
+                                     CREATE TABLE IF NOT EXISTS card_orders (
+                                         id                       TEXT PRIMARY KEY,
+                                         owner_id                 INTEGER NOT NULL,
+                                         trade_session_id         INTEGER,
+                                         total_amount             REAL NOT NULL,
+                                         target_bank              TEXT NOT NULL,
+                                         direction                TEXT NOT NULL,
+                                         status                   TEXT DEFAULT 'pending',
+                                         completed_amount         REAL DEFAULT 0.0,
+                                         expected_window_minutes  INTEGER DEFAULT 30,
+                                         created_at               REAL DEFAULT 0
+                                     );
+                                     CREATE INDEX IF NOT EXISTS idx_card_orders_status ON card_orders(status);
+
+                                     CREATE TABLE IF NOT EXISTS card_order_legs (
+                                         id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         order_id                 TEXT NOT NULL,
+                                         card_id                  TEXT NOT NULL,
+                                         amount                   REAL NOT NULL,
+                                         leg_status               TEXT DEFAULT 'pending',
+                                         FOREIGN KEY(order_id) REFERENCES card_orders(id) ON DELETE CASCADE,
+                                         FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE CASCADE
+                                     );
+
+                                     CREATE TABLE IF NOT EXISTS card_transactions (
+                                         id                       TEXT PRIMARY KEY,
+                                         card_id                  TEXT NOT NULL,
+                                         amount                   REAL NOT NULL,
+                                         direction                TEXT NOT NULL,
+                                         type                     TEXT DEFAULT 'work',
+                                         linked_order_id          TEXT,
+                                         source                   TEXT DEFAULT 'manual',
+                                         timestamp                REAL DEFAULT 0,
+                                         FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE CASCADE
+                                     );
+                                     CREATE INDEX IF NOT EXISTS idx_card_txs_time ON card_transactions(card_id, timestamp);
                                      """)
+
         await self._db.commit()
 
+        await self._ensure_column("cards", "last_tx_timestamp", "REAL DEFAULT 0")
+        await self._ensure_column("cards", "mono_account_id", "TEXT")
+        
         await self._ensure_column("merchant_verdict", "save_count", "INTEGER DEFAULT 0")
         await self._ensure_column("merchant_verdict", "llm_decision", "TEXT DEFAULT 'UNKNOWN'")
         await self._ensure_column("merchant_verdict", "trade_recommendation", "TEXT DEFAULT 'PENDING'")
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
+        await self._ensure_column("merchant_reviews", "error_reason", "TEXT DEFAULT ''")
         # Міграція колонок scanner_users
         await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
@@ -410,11 +504,13 @@ class MerchantDB:
         # 🚀 ДОДАНО: Галочка показу вижимки ЛЛМ в алерті
         await self._ensure_column("scanner_users", "show_llm_summary", "INTEGER DEFAULT 1")
         # 🔘 Налаштування виводу повідомлень (per-user)
-        await self._ensure_column("scanner_users", "show_ai_terms_summary", "INTEGER DEFAULT 1")   # AI вижимка умов (inline)
-        await self._ensure_column("scanner_users", "show_full_terms", "INTEGER DEFAULT 1")          # Повні умови (спойлер)
-        await self._ensure_column("scanner_users", "show_ai_logic", "INTEGER DEFAULT 1")            # Логіка AI (спойлер)
-        await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")        # Деталі банків (спойлер)
-        await self._ensure_column("scanner_users", "is_hybrid_routes_enabled", "INTEGER DEFAULT 0") # Підтримка кнопок T-M та M-T
+        await self._ensure_column("scanner_users", "show_ai_terms_summary",
+                                  "INTEGER DEFAULT 1")  # AI вижимка умов (inline)
+        await self._ensure_column("scanner_users", "show_full_terms", "INTEGER DEFAULT 1")  # Повні умови (спойлер)
+        await self._ensure_column("scanner_users", "show_ai_logic", "INTEGER DEFAULT 1")  # Логіка AI (спойлер)
+        await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")  # Деталі банків (спойлер)
+        await self._ensure_column("scanner_users", "is_hybrid_routes_enabled",
+                                  "INTEGER DEFAULT 0")  # Підтримка кнопок T-M та M-T
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
@@ -436,8 +532,30 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "taker_sell_price", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "taker_sell_profit", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "taker_sell_speed", "TEXT DEFAULT 'FAST'")
+        # ── Нові колонки для рефакторингу TAKER FSM ──────────────────────────
+        await self._ensure_column("scanner_users", "taker_sell_exchange", "TEXT DEFAULT ''")
+        await self._ensure_column("scanner_users", "taker_sell_min_price", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_buy_amount", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_buy_max_price", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_buy_limit_min", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_buy_limit_max", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_buy_speed", "TEXT DEFAULT 'ANY'")
+
+        await self._ensure_column("scanner_users", "taker_buy_price_strategy", "TEXT DEFAULT 'any'")
+        await self._ensure_column("scanner_users", "taker_buy_price_from", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "taker_sell_price_strategy", "TEXT DEFAULT 'roi'")
+        await self._ensure_column("scanner_users", "taker_sell_price_to", "REAL DEFAULT 0.0")
         # 🚀 SNIPER: правила снайпер-моду (JSON масив)
         await self._ensure_column("scanner_users", "sniper_rules", "TEXT DEFAULT '[]'")
+        try:
+            await self.db.execute("ALTER TABLE snapshots ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except Exception:
+            pass  # Колонка вже існує
+
+        try:
+            await self.db.execute("ALTER TABLE proposals ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        except Exception:
+            pass  # Колонка вже існує
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
@@ -565,7 +683,7 @@ class MerchantDB:
         return "", ""
 
     async def get_trade_recommendation(
-        self, exchange: str, merchant_id: str
+            self, exchange: str, merchant_id: str
     ) -> str:
         """
         Повертає пряму рекомендацію LLM щодо проведення угоди:
@@ -577,9 +695,9 @@ class MerchantDB:
         if not self._db:
             return "PENDING"
         async with self._db.execute(
-            "SELECT trade_recommendation, verdict FROM merchant_verdict "
-            "WHERE exchange = ? AND merchant_id = ?",
-            (exchange, merchant_id),
+                "SELECT trade_recommendation, verdict FROM merchant_verdict "
+                "WHERE exchange = ? AND merchant_id = ?",
+                (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
@@ -594,7 +712,7 @@ class MerchantDB:
         return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING") else "PENDING"
 
     async def get_trade_recommendation_full(
-        self, exchange: str, merchant_id: str
+            self, exchange: str, merchant_id: str
     ) -> tuple[str, str, str, str, str]:
         """
         Повертає (recommendation, verdict, reason, terms_summary, reviews_analysis) — повну інфу від LLM.
@@ -604,9 +722,9 @@ class MerchantDB:
         if not self._db:
             return "PENDING", "", "", "", ""
         async with self._db.execute(
-            "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary, COALESCE(reviews_analysis, '') as reviews_analysis FROM merchant_verdict "
-            "WHERE exchange = ? AND merchant_id = ?",
-            (exchange, merchant_id),
+                "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary, COALESCE(reviews_analysis, '') as reviews_analysis FROM merchant_verdict "
+                "WHERE exchange = ? AND merchant_id = ?",
+                (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
@@ -638,7 +756,7 @@ class MerchantDB:
             source: str = "",
             trade_recommendation: str = "CONDITIONAL",  # ← НОВЕ
             terms_summary: str = "",  # 🔘 AI вижимка умов
-            reviews_analysis: str = "", # 📝 AI вижимка відгуків
+            reviews_analysis: str = "",  # 📝 AI вижимка відгуків
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
@@ -746,8 +864,8 @@ class MerchantDB:
         if status == "NO_SESSION":
             return (time.time() - updated_at) > 600.0
 
-        # PENDING / UNAVAILABLE: завжди потребує перефетч
-        if status in ("PENDING", "UNAVAILABLE"):
+        # PENDING / технічні збої: завжди потребує перефетч
+        if status in ("PENDING", "UNAVAILABLE", "API_ERROR", "SESSION_EXPIRED"):
             return True
 
         ttl_sec = review_ttl_hours * 3600.0
@@ -756,41 +874,45 @@ class MerchantDB:
     async def save_reviews(
             self, exchange: str, merchant_id: str,
             positive_count: int, negative_count: int, neutral_count: int,
-            bad_texts: list[str], status: str = "OK"  # <--- Додали параметр
+            bad_texts: list[str], status: str = "OK", error_reason: str = ""
     ) -> None:
         import json
         now = time.time()
         bad_texts_json = json.dumps(bad_texts[:20], ensure_ascii=False)
+        err = (error_reason or "")[:500]
 
         await self._db.execute(
             """
             INSERT INTO merchant_reviews
-            (exchange, merchant_id, positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+            (exchange, merchant_id, positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status,
+             error_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 positive_count = excluded.positive_count,
                 negative_count = excluded.negative_count,
                 neutral_count = excluded.neutral_count,
                 bad_texts_json = excluded.bad_texts_json,
                 updated_at = excluded.updated_at,
-                status = excluded.status
+                status = excluded.status,
+                error_reason = excluded.error_reason
             """,
             (exchange, merchant_id, max(int(positive_count), 0), max(int(negative_count), 0),
-             max(int(neutral_count), 0), bad_texts_json, now, status),
+             max(int(neutral_count), 0), bad_texts_json, now, status, err),
         )
         await self._db.commit()
 
     async def get_reviews_summary(self, exchange: str, merchant_id: str) -> dict:
         import json
         async with self._db.execute(
-                "SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status "
+                "SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status, COALESCE(error_reason, '') as error_reason "
                 "FROM merchant_reviews WHERE exchange=? AND merchant_id=?",
                 (exchange, merchant_id),
         ) as cur:
             row = await cur.fetchone()
 
         if not row:
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "updated_at": 0, "status": "UNKNOWN"}
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "updated_at": 0, "status": "UNKNOWN",
+                    "error_reason": ""}
 
         try:
             bad_texts = json.loads(row["bad_texts_json"] or "[]")
@@ -803,7 +925,8 @@ class MerchantDB:
             "neutral": row["neutral_count"] or 0,
             "bad_texts": bad_texts,
             "updated_at": row["updated_at"] or 0,
-            "status": row["status"] or "OK"  # <--- Повертаємо статус
+            "status": row["status"] or "OK",
+            "error_reason": row["error_reason"] or "",
         }
 
     async def add_snapshots_batch(self, orders: list, heartbeat_minutes: int = 10) -> int:
@@ -1008,20 +1131,23 @@ class MerchantDB:
             since = time.time() - (minutes * 60)
             if exchange:
                 async with self._db.execute(
-                    """SELECT MIN(price) as best_price
-                       FROM merchant_snapshots
-                       WHERE recorded_at > ? AND exchange = ? AND price > 0
-                         AND side = 'sell'""",
-                    (since, exchange),
+                        """SELECT MIN(price) as best_price
+                           FROM merchant_snapshots
+                           WHERE recorded_at > ?
+                             AND exchange = ?
+                             AND price > 0
+                             AND side = 'sell'""",
+                        (since, exchange),
                 ) as cur:
                     row = await cur.fetchone()
             else:
                 async with self._db.execute(
-                    """SELECT MIN(price) as best_price
-                       FROM merchant_snapshots
-                       WHERE recorded_at > ? AND price > 0
-                         AND side = 'sell'""",
-                    (since,),
+                        """SELECT MIN(price) as best_price
+                           FROM merchant_snapshots
+                           WHERE recorded_at > ?
+                             AND price > 0
+                             AND side = 'sell'""",
+                        (since,),
                 ) as cur:
                     row = await cur.fetchone()
             return float(row["best_price"]) if row and row["best_price"] else 0.0
@@ -1034,13 +1160,13 @@ class MerchantDB:
     # ═══════════════════════════════════════════════════════════════════════
 
     async def save_credentials(
-        self,
-        exchange: str,
-        api_key: str,
-        api_secret: str,
-        passphrase: str = "",
-        label: str = "",
-        user_id: int = 0,
+            self,
+            exchange: str,
+            api_key: str,
+            api_secret: str,
+            passphrase: str = "",
+            label: str = "",
+            user_id: int = 0,
     ) -> bool:
         """
         Зберігає API ключі для біржі (зашифровано Fernet).
@@ -1054,14 +1180,14 @@ class MerchantDB:
             now = time.time()
             await self._db.execute(
                 """INSERT INTO user_credentials
-                       (user_id, exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(user_id, exchange) DO UPDATE SET
-                       api_key    = excluded.api_key,
-                       api_secret = excluded.api_secret,
-                       passphrase = excluded.passphrase,
-                       label      = excluded.label,
-                       updated_at = excluded.updated_at""",
+                   (user_id, exchange, api_key, api_secret, passphrase, label, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id, exchange) DO
+                UPDATE SET
+                    api_key = excluded.api_key,
+                    api_secret = excluded.api_secret,
+                    passphrase = excluded.passphrase,
+                    label = excluded.label,
+                    updated_at = excluded.updated_at""",
                 (
                     user_id,
                     exchange,
@@ -1088,17 +1214,17 @@ class MerchantDB:
             return None
         try:
             async with self._db.execute(
-                "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=? AND exchange = ?",
-                (user_id, exchange),
+                    "SELECT api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=? AND exchange = ?",
+                    (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
             if not row:
                 return None
             return {
-                "api_key":    decrypt(row["api_key"]),
+                "api_key": decrypt(row["api_key"]),
                 "api_secret": decrypt(row["api_secret"]),
                 "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
-                "label":      row["label"] or "",
+                "label": row["label"] or "",
             }
         except Exception as e:
             logger.error("get_credentials [%s]: %s", exchange, e)
@@ -1113,16 +1239,16 @@ class MerchantDB:
             return {}
         try:
             async with self._db.execute(
-                "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=?",
-                (user_id,),
+                    "SELECT exchange, api_key, api_secret, passphrase, label FROM user_credentials WHERE user_id=?",
+                    (user_id,),
             ) as cur:
                 rows = await cur.fetchall()
             return {
                 row["exchange"]: {
-                    "api_key":    decrypt(row["api_key"]),
+                    "api_key": decrypt(row["api_key"]),
                     "api_secret": decrypt(row["api_secret"]),
                     "passphrase": decrypt(row["passphrase"]) if row["passphrase"] else "",
-                    "label":      row["label"] or "",
+                    "label": row["label"] or "",
                 }
                 for row in rows
             }
@@ -1151,7 +1277,7 @@ class MerchantDB:
             return False
         try:
             async with self._db.execute(
-                "SELECT 1 FROM user_credentials WHERE user_id=? AND exchange = ? LIMIT 1", (user_id, exchange,)
+                    "SELECT 1 FROM user_credentials WHERE user_id=? AND exchange = ? LIMIT 1", (user_id, exchange,)
             ) as cur:
                 return await cur.fetchone() is not None
         except Exception:
@@ -1180,13 +1306,13 @@ class MerchantDB:
 
             await self._db.execute(
                 """INSERT INTO auth_sessions
-                        (user_id, exchange, headers_json, cookies_json, updated_at, is_active)
-                    VALUES (?, ?, ?, ?, ?, 1) 
-                    ON CONFLICT(user_id, exchange) DO UPDATE SET
-                        headers_json = excluded.headers_json,
-                        cookies_json = excluded.cookies_json,
-                        updated_at = excluded.updated_at,
-                        is_active = 1""",
+                       (user_id, exchange, headers_json, cookies_json, updated_at, is_active)
+                   VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT(user_id, exchange) DO
+                UPDATE SET
+                    headers_json = excluded.headers_json,
+                    cookies_json = excluded.cookies_json,
+                    updated_at = excluded.updated_at,
+                    is_active = 1""",
                 (user_id, exchange, headers_json, cookies_json, now),
             )
             await self._db.commit()
@@ -1234,17 +1360,18 @@ class MerchantDB:
         except Exception as e:
             logger.error("invalidate_auth_session [%s]: %s", exchange, e)
             return False
+
     # ═══════════════════════════════════════════════════════════════════════
     # Scanner Users (multi-user)
     # ═══════════════════════════════════════════════════════════════════════
 
     async def register_user(
-        self,
-        user_id: int,
-        chat_id: int,
-        working_capital: float = 5100.0,
-        min_spread_pct: float = 0.5,
-        bank_codes: list[str] | None = None,
+            self,
+            user_id: int,
+            chat_id: int,
+            working_capital: float = 5100.0,
+            min_spread_pct: float = 0.5,
+            bank_codes: list[str] | None = None,
     ) -> bool:
         """Реєструє нового підписника сканера."""
         if not self._db:
@@ -1254,11 +1381,11 @@ class MerchantDB:
             banks_str = ",".join(bank_codes or ["43", "14", "64"])
             await self._db.execute(
                 """INSERT INTO scanner_users
-                       (user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes, is_active, created_at)
-                   VALUES (?, ?, ?, ?, ?, 1, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       telegram_chat_id = excluded.telegram_chat_id,
-                       is_active = 1""",
+                   (user_id, telegram_chat_id, working_capital, min_spread_pct, bank_codes, is_active, created_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?) ON CONFLICT(user_id) DO
+                UPDATE SET
+                    telegram_chat_id = excluded.telegram_chat_id,
+                    is_active = 1""",
                 (user_id, chat_id, working_capital, min_spread_pct, banks_str, time.time()),
             )
             await self._db.commit()
@@ -1273,20 +1400,43 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                """SELECT user_id, telegram_chat_id, working_capital,
-                          COALESCE(min_amount_uah, 0.0) as min_amount_uah,
-                          min_spread_pct, bank_codes,
-                          COALESCE(buy_bank_codes, '') as buy_bank_codes,
-                          COALESCE(sell_bank_codes, '') as sell_bank_codes,
-                          COALESCE(merchant_filters_json, '{}') as merchant_filters_json,
-                          COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
-                          COALESCE(is_alerts_active, 1) as is_alerts_active,
-                          COALESCE(scanner_mode, 'SPREAD') as scanner_mode,
-                          COALESCE(price_range_json, '{}') as price_range_json,
-                          COALESCE(maker_buy_price, 0.0) as maker_buy_price,
-                          COALESCE(target_margin, 0.005) as target_margin,
-                          COALESCE(sniper_rules, '[]') as sniper_rules
-                   FROM scanner_users WHERE is_active=1 AND COALESCE(is_alerts_active,1)=1"""
+                    """SELECT user_id,
+                              telegram_chat_id,
+                              working_capital,
+                              COALESCE(min_amount_uah, 0.0)                  as min_amount_uah,
+                              min_spread_pct,
+                              bank_codes,
+                              COALESCE(buy_bank_codes, '')                   as buy_bank_codes,
+                              COALESCE(sell_bank_codes, '')                  as sell_bank_codes,
+                              COALESCE(merchant_filters_json, '{}')          as merchant_filters_json,
+                              COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
+                              COALESCE(is_alerts_active, 1)                  as is_alerts_active,
+                              COALESCE(scanner_mode, 'SPREAD')               as scanner_mode,
+                              COALESCE(price_range_json, '{}')               as price_range_json,
+                              COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
+                              COALESCE(target_margin, 0.005)                 as target_margin,
+                              COALESCE(sniper_rules, '[]')                   as sniper_rules,
+                              COALESCE(sniper_rules, '')             AS sniper_rules,
+                            -- ── TAKER SELL ────────────────────────────────────────
+                              COALESCE(taker_sell_amount, 0.0)       AS taker_sell_amount,
+                              COALESCE(taker_sell_price, 0.0)        AS taker_sell_price,
+                              COALESCE(taker_sell_exchange, '')      AS taker_sell_exchange,
+                              COALESCE(taker_sell_profit, 0.0)       AS taker_sell_profit,
+                              COALESCE(taker_sell_min_price, 0.0)    AS taker_sell_min_price,
+                              COALESCE(taker_sell_speed, 'ANY')      AS taker_sell_speed,
+                              COALESCE(taker_sell_price_strategy, 'roi') AS taker_sell_price_strategy,
+                              COALESCE(taker_sell_price_to, 0.0)     AS taker_sell_price_to,
+                             -- ── TAKER BUY ─────────────────────────────────────────
+                              COALESCE(taker_buy_amount, 0.0)        AS taker_buy_amount,
+                              COALESCE(taker_buy_max_price, 0.0)     AS taker_buy_max_price,
+                              COALESCE(taker_buy_limit_min, 0.0)     AS taker_buy_limit_min,
+                              COALESCE(taker_buy_limit_max, 0.0)     AS taker_buy_limit_max,
+                              COALESCE(taker_buy_speed, 'ANY')       AS taker_buy_speed,
+                              COALESCE(taker_buy_price_strategy, 'any') AS taker_buy_price_strategy,
+                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from
+                       FROM scanner_users
+                       WHERE is_active = 1
+                         AND COALESCE(is_alerts_active, 1) = 1"""
             ) as cur:
                 rows = await cur.fetchall()
             import json as _json
@@ -1299,21 +1449,38 @@ class MerchantDB:
                 buy_banks = buy_codes_raw.split(",") if buy_codes_raw else general_banks
                 sell_banks = sell_codes_raw.split(",") if sell_codes_raw else general_banks
                 result.append({
-                    "user_id":          row["user_id"],
-                    "chat_id":          row["telegram_chat_id"],
-                    "capital":          float(row["working_capital"]),
-                    "min_amount":       float(row["min_amount_uah"]),
-                    "min_spread":       float(row["min_spread_pct"]),
-                    "bank_codes":       general_banks,
-                    "buy_bank_codes":   buy_banks,
-                    "sell_bank_codes":  sell_banks,
+                    "user_id": row["user_id"],
+                    "chat_id": row["telegram_chat_id"],
+                    "capital": float(row["working_capital"]),
+                    "min_amount": float(row["min_amount_uah"]),
+                    "min_spread": float(row["min_spread_pct"]),
+                    "bank_codes": general_banks,
+                    "buy_bank_codes": buy_banks,
+                    "sell_bank_codes": sell_banks,
                     "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                     "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
-                    "scanner_mode":     row["scanner_mode"] or "SPREAD",
-                    "price_range":      _json.loads(row["price_range_json"] or "{}"),
-                    "maker_buy_price":  float(row["maker_buy_price"]),
-                    "target_margin":    float(row["target_margin"]),
-                    "sniper_rules":     _json.loads(row["sniper_rules"] or "[]"),
+                    "scanner_mode": row["scanner_mode"] or "SPREAD",
+                    "price_range": _json.loads(row["price_range_json"] or "{}"),
+                    "maker_buy_price": float(row["maker_buy_price"]),
+                    "target_margin": float(row["target_margin"]),
+                    "sniper_rules": _json.loads(row["sniper_rules"] or "[]"),
+                    # ── TAKER SELL ────────────────────────────────────
+                    "taker_sell_amount": float(row["taker_sell_amount"]),
+                    "taker_sell_price": float(row["taker_sell_price"]),
+                    "taker_sell_exchange": row["taker_sell_exchange"],
+                    "taker_sell_profit": float(row["taker_sell_profit"]),
+                    "taker_sell_min_price": float(row["taker_sell_min_price"]),
+                    "taker_sell_speed": row["taker_sell_speed"],
+                    "taker_sell_price_strategy": row["taker_sell_price_strategy"],
+                    "taker_sell_price_to": float(row["taker_sell_price_to"]),
+                    # ── TAKER BUY ─────────────────────────────────────
+                    "taker_buy_amount": float(row["taker_buy_amount"]),
+                    "taker_buy_max_price": float(row["taker_buy_max_price"]),
+                    "taker_buy_limit_min": float(row["taker_buy_limit_min"]),
+                    "taker_buy_limit_max": float(row["taker_buy_limit_max"]),
+                    "taker_buy_speed": row["taker_buy_speed"],
+                    "taker_buy_price_strategy": row["taker_buy_price_strategy"],
+                    "taker_buy_price_from": float(row["taker_buy_price_from"]),
                 })
             return result
         except Exception as e:
@@ -1338,15 +1505,15 @@ class MerchantDB:
             return defaults
         try:
             async with self._db.execute(
-                """SELECT
-                    COALESCE(show_ai_terms_summary, 1) as show_ai_terms_summary,
-                    COALESCE(show_full_terms, 1) as show_full_terms,
-                    COALESCE(show_ai_logic, 1) as show_ai_logic,
-                    COALESCE(show_bank_details, 1) as show_bank_details,
-                    COALESCE(show_llm_summary, 1) as show_llm_summary,
-                    COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled
-                FROM scanner_users WHERE telegram_chat_id=?""",
-                (chat_id,),
+                    """SELECT COALESCE(show_ai_terms_summary, 1)    as show_ai_terms_summary,
+                              COALESCE(show_full_terms, 1)          as show_full_terms,
+                              COALESCE(show_ai_logic, 1)            as show_ai_logic,
+                              COALESCE(show_bank_details, 1)        as show_bank_details,
+                              COALESCE(show_llm_summary, 1)         as show_llm_summary,
+                              COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled
+                       FROM scanner_users
+                       WHERE telegram_chat_id = ?""",
+                    (chat_id,),
             ) as cur:
                 row = await cur.fetchone()
             if not row:
@@ -1412,7 +1579,7 @@ class MerchantDB:
     async def get_sniper_rules(self, user_id: int) -> list:
         if not self._db: return []
         async with self._db.execute(
-            "SELECT sniper_rules FROM scanner_users WHERE user_id = ?", (user_id,)
+                "SELECT sniper_rules FROM scanner_users WHERE user_id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
             if row and row["sniper_rules"]:
@@ -1436,11 +1603,14 @@ class MerchantDB:
         """Перемикає стан експериментальних гібридних маршрутів для юзера."""
         if not self._db: return False
         try:
-            async with self._db.execute("SELECT COALESCE(is_hybrid_routes_enabled, 0) FROM scanner_users WHERE user_id=?", (user_id,)) as cur:
+            async with self._db.execute(
+                    "SELECT COALESCE(is_hybrid_routes_enabled, 0) FROM scanner_users WHERE user_id=?",
+                    (user_id,)) as cur:
                 row = await cur.fetchone()
             if not row: return False
             new_val = 0 if row[0] else 1
-            await self._db.execute("UPDATE scanner_users SET is_hybrid_routes_enabled = ? WHERE user_id = ?", (new_val, user_id))
+            await self._db.execute("UPDATE scanner_users SET is_hybrid_routes_enabled = ? WHERE user_id = ?",
+                                   (new_val, user_id))
             await self._db.commit()
             return bool(new_val)
         except Exception as e:
@@ -1452,12 +1622,12 @@ class MerchantDB:
     # ==========================================
 
     async def save_proposal(
-        self,
-        buy_exchange: str, sell_exchange: str,
-        buy_merchant: str, sell_merchant: str,
-        spread_pct: float, profit_uah: float, deal_amount: float,
-        route_type: str, buy_bank: str, sell_bank: str,
-        was_sent: bool = False,
+            self,
+            buy_exchange: str, sell_exchange: str,
+            buy_merchant: str, sell_merchant: str,
+            spread_pct: float, profit_uah: float, deal_amount: float,
+            route_type: str, buy_bank: str, sell_bank: str,
+            was_sent: bool = False,
     ) -> None:
         """Зберігає пропозицію сканера для статистики."""
         if not self._db:
@@ -1468,7 +1638,7 @@ class MerchantDB:
                    (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
                     spread_pct, profit_uah, deal_amount, route_type,
                     buy_bank, sell_bank, was_sent, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
                  spread_pct, profit_uah, deal_amount, route_type,
                  buy_bank, sell_bank, 1 if was_sent else 0, time.time()),
@@ -1495,15 +1665,15 @@ class MerchantDB:
         try:
             since = time.time() - period_days * 86400
             async with self._db.execute(
-                """SELECT
-                    COUNT(*) as total,
-                    SUM(CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent,
-                    COALESCE(AVG(spread_pct), 0) as avg_spread,
-                    COALESCE(AVG(profit_uah), 0) as avg_profit,
-                    COALESCE(MAX(spread_pct), 0) as max_spread,
-                    COALESCE(SUM(profit_uah), 0) as total_potential_profit
-                FROM scanner_proposals WHERE created_at >= ?""",
-                (since,)
+                    """SELECT COUNT(*)                                      as total,
+                              SUM(CASE WHEN was_sent = 1 THEN 1 ELSE 0 END) as sent,
+                              COALESCE(AVG(spread_pct), 0)                  as avg_spread,
+                              COALESCE(AVG(profit_uah), 0)                  as avg_profit,
+                              COALESCE(MAX(spread_pct), 0)                  as max_spread,
+                              COALESCE(SUM(profit_uah), 0)                  as total_potential_profit
+                       FROM scanner_proposals
+                       WHERE created_at >= ?""",
+                    (since,)
             ) as cur:
                 row = await cur.fetchone()
             if not row or row["total"] == 0:
@@ -1527,15 +1697,16 @@ class MerchantDB:
         try:
             since = time.time() - period_days * 86400
             async with self._db.execute(
-                """SELECT buy_exchange || '→' || sell_exchange as route,
-                          route_type,
-                          COUNT(*) as cnt,
-                          AVG(spread_pct) as avg_spread,
-                          AVG(profit_uah) as avg_profit
-                   FROM scanner_proposals WHERE created_at >= ?
-                   GROUP BY route, route_type
-                   ORDER BY cnt DESC LIMIT 15""",
-                (since,)
+                    """SELECT buy_exchange || '→' || sell_exchange as route,
+                              route_type,
+                              COUNT(*)                             as cnt,
+                              AVG(spread_pct)                      as avg_spread,
+                              AVG(profit_uah)                      as avg_profit
+                       FROM scanner_proposals
+                       WHERE created_at >= ?
+                       GROUP BY route, route_type
+                       ORDER BY cnt DESC LIMIT 15""",
+                    (since,)
             ) as cur:
                 rows = await cur.fetchall()
             return [
@@ -1559,13 +1730,12 @@ class MerchantDB:
         try:
             since = time.time() - period_days * 86400
             async with self._db.execute(
-                """SELECT DATE(created_at, 'unixepoch', 'localtime') as date,
-                          COUNT(*) as total,
-                          SUM(CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent,
-                          AVG(spread_pct) as avg_spread
-                   FROM scanner_proposals WHERE created_at >= ?
-                   GROUP BY date ORDER BY date DESC""",
-                (since,)
+                    """SELECT DATE (created_at, 'unixepoch', 'localtime') as date, COUNT (*) as total, SUM (CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent, AVG (spread_pct) as avg_spread
+                       FROM scanner_proposals
+                       WHERE created_at >= ?
+                       GROUP BY date
+                       ORDER BY date DESC""",
+                    (since,)
             ) as cur:
                 rows = await cur.fetchall()
             return [
@@ -1602,26 +1772,27 @@ class MerchantDB:
         await self._db.commit()
         return cursor.lastrowid
 
-    async def update_trade_session(self, session_id: int, status: str, buy_leg_id: Optional[int] = None, sell_leg_id: Optional[int] = None) -> None:
+    async def update_trade_session(self, session_id: int, status: str, buy_leg_id: Optional[int] = None,
+                                   sell_leg_id: Optional[int] = None) -> None:
         """Оновлює стан торгової сесії."""
         if not self._db:
             return
-            
+
         fields = ["session_status = ?"]
         values = [status]
-        
+
         if buy_leg_id is not None:
             fields.append("buy_leg_id = ?")
             values.append(buy_leg_id)
         if sell_leg_id is not None:
             fields.append("sell_leg_id = ?")
             values.append(sell_leg_id)
-            
+
         if status in ('COMPLETED', 'CANCELLED', 'FAILED'):
             fields.append("completed_at = CURRENT_TIMESTAMP")
-            
+
         values.append(session_id)
-        
+
         query = f"UPDATE trade_sessions SET {', '.join(fields)} WHERE id = ?"
         await self._db.execute(query, tuple(values))
         await self._db.commit()
@@ -1633,24 +1804,24 @@ class MerchantDB:
         async with self._db.execute("SELECT * FROM trade_sessions WHERE id = ?", (session_id,)) as cur:
             row = await cur.fetchone()
         return dict(row) if row else None
+
     # ==========================================
     # ── БЛОК 3: АКТИВНІ ОРДЕРИ (ACTIVE TRADES) ──
     # ==========================================
 
-    async def create_active_trade(self, session_id: int, strategy: str, leg: str, route_type: str, 
-                                  network: str, network_fee: float, owner_user_id: Optional[int], 
-                                  exchange: str, order_id: str, ad_id: str, asset: str, fiat: str, 
+    async def create_active_trade(self, session_id: int, strategy: str, leg: str, route_type: str,
+                                  network: str, network_fee: float, owner_user_id: Optional[int],
+                                  exchange: str, order_id: str, ad_id: str, asset: str, fiat: str,
                                   price: float, amount: float, fiat_amount: float, status: str) -> int:
         """Записує створений ордер (leg) у базу."""
         if not self._db:
             return 0
-            
+
         cursor = await self._db.execute(
             """
-            INSERT INTO active_trades (
-                session_id, strategy, leg, route_type, network, network_fee, owner_user_id,
-                exchange, order_id, ad_id, asset, fiat, price, amount, fiat_amount, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO active_trades (session_id, strategy, leg, route_type, network, network_fee, owner_user_id,
+                                       exchange, order_id, ad_id, asset, fiat, price, amount, fiat_amount, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (session_id, strategy, leg, route_type, network, network_fee, owner_user_id,
              exchange, order_id, ad_id, asset, fiat, price, amount, fiat_amount, status)
@@ -1662,7 +1833,7 @@ class MerchantDB:
         """Оновлює статус конкретного ордера (FSM)."""
         if not self._db:
             return
-            
+
         await self._db.execute(
             "UPDATE active_trades SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (new_status, trade_id)
@@ -1673,7 +1844,7 @@ class MerchantDB:
         """Оновлює order_id після того як біржа його повернула."""
         if not self._db:
             return
-            
+
         await self._db.execute(
             "UPDATE active_trades SET order_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (new_order_id, trade_id)
@@ -1713,13 +1884,17 @@ class MerchantDB:
             return []
         try:
             query = """
-                SELECT at.*, ts.strategy as session_strategy
-                FROM active_trades at
-                LEFT JOIN trade_sessions ts ON at.session_id = ts.id
-                WHERE at.owner_user_id = ? 
-                  AND at.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                ORDER BY at.created_at DESC
-            """
+                    SELECT at.*, ts.strategy as session_strategy
+                    FROM active_trades at
+                LEFT JOIN trade_sessions ts \
+                    ON at.session_id = ts.id
+                    WHERE at.owner_user_id = ?
+                      AND at.status NOT IN ('COMPLETED' \
+                        , 'FAILED' \
+                        , 'CANCELLED' \
+                        , 'EXPIRED')
+                    ORDER BY at.created_at DESC \
+                    """
             async with self._db.execute(query, (user_id,)) as cur:
                 rows = await cur.fetchall()
             return [dict(row) for row in rows]
@@ -1736,14 +1911,19 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                """
-                SELECT ts.*, at.exchange, at.ad_id, at.price as buy_price,
-                       at.amount, at.network_fee
-                FROM trade_sessions ts
-                JOIN active_trades at ON ts.buy_leg_id = at.id
-                WHERE ts.session_status = 'SELL_IN_PROGRESS'
-                ORDER BY ts.created_at ASC
-                """
+                    """
+                    SELECT ts.*,
+                           at.exchange,
+                           at.ad_id,
+                           at.price as buy_price,
+                           at.amount,
+                           at.network_fee
+                    FROM trade_sessions ts
+                             JOIN active_trades at
+                    ON ts.buy_leg_id = at.id
+                    WHERE ts.session_status = 'SELL_IN_PROGRESS'
+                    ORDER BY ts.created_at ASC
+                    """
             ) as cur:
                 rows = await cur.fetchall()
             return [dict(row) for row in rows]
@@ -1775,8 +1955,8 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                "SELECT exchange, merchant_id, merchant_name, reason, source, added_at "
-                "FROM global_blacklist ORDER BY added_at DESC"
+                    "SELECT exchange, merchant_id, merchant_name, reason, source, added_at "
+                    "FROM global_blacklist ORDER BY added_at DESC"
             ) as cur:
                 rows = await cur.fetchall()
             return [dict(r) for r in rows]
@@ -1790,8 +1970,8 @@ class MerchantDB:
             return []
         try:
             async with self._db.execute(
-                "SELECT user_id, exchange, updated_at, is_active "
-                "FROM auth_sessions ORDER BY exchange"
+                    "SELECT user_id, exchange, updated_at, is_active "
+                    "FROM auth_sessions ORDER BY exchange"
             ) as cur:
                 rows = await cur.fetchall()
             return [dict(r) for r in rows]
@@ -1808,9 +1988,9 @@ class MerchantDB:
             return float("inf")
         try:
             async with self._db.execute(
-                "SELECT updated_at FROM auth_sessions "
-                "WHERE user_id=? AND exchange=? AND is_active=1",
-                (user_id, exchange),
+                    "SELECT updated_at FROM auth_sessions "
+                    "WHERE user_id=? AND exchange=? AND is_active=1",
+                    (user_id, exchange),
             ) as cur:
                 row = await cur.fetchone()
 
@@ -1822,7 +2002,7 @@ class MerchantDB:
             return float("inf")
 
     async def get_completed_trades(
-        self, period_days: int = 30, owner_user_id: int = 0
+            self, period_days: int = 30, owner_user_id: int = 0
     ) -> list[dict]:
         """
         Повертає завершені угоди за період — для StatsEngine.
@@ -1832,16 +2012,29 @@ class MerchantDB:
             return []
         try:
             query = """
-                SELECT at.id, at.session_id, at.strategy, at.leg, at.exchange,
-                       at.price, at.amount, at.fiat_amount, at.payment_method,
-                       at.counterparty_id, at.counterparty_name,
-                       at.created_at, at.updated_at,
-                       ts.gross_profit, ts.network, ts.network_fee
-                FROM active_trades at
-                LEFT JOIN trade_sessions ts ON at.session_id = ts.id
-                WHERE at.status = 'COMPLETED'
-                  AND at.created_at >= datetime('now', ?)
-            """
+                    SELECT at.id, \
+                           at.session_id, \
+                           at.strategy, \
+                           at.leg, \
+                           at.exchange,
+                           at.price, \
+                           at.amount, \
+                           at.fiat_amount, \
+                           at.payment_method,
+                           at.counterparty_id, \
+                           at.counterparty_name,
+                           at.created_at, \
+                           at.updated_at,
+                           ts.gross_profit, \
+                           ts.network, \
+                           ts.network_fee
+                    FROM active_trades at
+                LEFT JOIN trade_sessions ts \
+                    ON at.session_id = ts.id
+                    WHERE at.status = 'COMPLETED'
+                      AND at.created_at >= datetime('now' \
+                        , ?) \
+                    """
             params = [f"-{period_days} days"]
             if owner_user_id:
                 query += " AND at.owner_user_id = ?"
@@ -1855,7 +2048,7 @@ class MerchantDB:
             return []
 
     async def update_active_trade_payment_method(
-        self, trade_id: int, payment_method: str
+            self, trade_id: int, payment_method: str
     ) -> None:
         """Встановлює метод оплати для конкретної ноги угоди."""
         if not self._db:
@@ -1865,3 +2058,408 @@ class MerchantDB:
             (payment_method, trade_id),
         )
         await self._db.commit()
+
+    # =============================================================================
+    # CARD MANAGEMENT SYSTEM - DAO METHODS
+    # =============================================================================
+
+    async def get_user_card_settings(self, user_id: int) -> dict | None:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM user_card_settings WHERE user_id=?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_card_transactions_count(self, card_id: str, hours: int = 24) -> int:
+        """Повертає сумарну кількість транзакцій (in + out) за останні N годин."""
+        if not self._db:
+            return 0
+        cutoff = time.time() - (hours * 3600)
+        async with self._db.execute(
+            "SELECT COUNT(id) as cnt FROM card_transactions WHERE card_id=? AND timestamp > ?",
+            (card_id, cutoff)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row["cnt"]) if row and row["cnt"] else 0
+
+    async def lazy_monthly_reset(self, card_id: str) -> None:
+        """Перевіряє чи змінився місяць з моменту last_monthly_reset. Якщо так — оновлює таймстемп і статус (зняття заморозки)."""
+        if not self._db:
+            return
+        
+        async with self._db.execute("SELECT last_monthly_reset FROM cards WHERE id=?", (card_id,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return
+            
+            last_reset = row["last_monthly_reset"] or 0
+            import datetime
+            now_dt = datetime.datetime.now()
+            
+            if last_reset > 0:
+                last_dt = datetime.datetime.fromtimestamp(last_reset)
+                if last_dt.year == now_dt.year and last_dt.month == now_dt.month:
+                    return  # Все ще той самий місяць
+            
+            # Місяць змінився (або це перший раз), оновлюємо
+            await self._db.execute(
+                "UPDATE cards SET last_monthly_reset=?, status='active' WHERE id=? AND status='frozen_funds'",
+                (now_dt.timestamp(), card_id)
+            )
+            if last_reset == 0:
+                 await self._db.execute(
+                    "UPDATE cards SET last_monthly_reset=? WHERE id=?",
+                    (now_dt.timestamp(), card_id)
+                )
+            await self._db.commit()
+
+    async def get_user_bank_limits(self, user_id: int, bank_name: str) -> dict | None:
+        if not self._db:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM user_bank_limits WHERE user_id=? AND bank_name=?",
+            (user_id, bank_name)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def set_user_bank_limit(self, user_id: int, bank_name: str, field: str, value: float) -> None:
+        """Оновлює одне поле лімітів банку. Створює рядок з дефолтами якщо його немає."""
+        if not self._db:
+            return
+        allowed = {
+            "daily_out_max", "daily_in_max", "monthly_out_max", "monthly_in_max",
+            "max_single_tx_out", "max_single_tx_in", "max_tx_per_day", "cooldown_hours"
+        }
+        if field not in allowed:
+            return
+        # Upsert: insert default row if missing
+        await self._db.execute(
+            "INSERT OR IGNORE INTO user_bank_limits (user_id, bank_name) VALUES (?, ?)",
+            (user_id, bank_name)
+        )
+        await self._db.execute(
+            f"UPDATE user_bank_limits SET {field}=? WHERE user_id=? AND bank_name=?",
+            (value, user_id, bank_name)
+        )
+        await self._db.commit()
+
+    async def add_card(self, card_data: dict) -> None:
+        if not self._db:
+            return
+        fields = list(card_data.keys())
+        placeholders = ",".join(["?"] * len(fields))
+        values = tuple(card_data.values())
+        query = f"INSERT INTO cards ({','.join(fields)}) VALUES ({placeholders})"
+        await self._db.execute(query, values)
+        await self._db.commit()
+
+    async def update_card(self, card_id: str, updates: dict) -> None:
+        if not self._db or not updates:
+            return
+        fields = [f"{k}=?" for k in updates.keys()]
+        values = list(updates.values()) + [card_id]
+        query = f"UPDATE cards SET {','.join(fields)} WHERE id=?"
+        await self._db.execute(query, tuple(values))
+        await self._db.commit()
+
+    async def get_cards(self, owner_id: int, bank_name: str = None, status: str = None) -> list[dict]:
+        if not self._db:
+            return []
+        query = "SELECT * FROM cards WHERE owner_id=?"
+        params = [owner_id]
+        if bank_name:
+            query += " AND bank_name=?"
+            params.append(bank_name)
+        if status:
+            query += " AND status=?"
+            params.append(status)
+        
+        async with self._db.execute(query, tuple(params)) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+    async def update_card_balance(self, card_id: str, new_balance: float) -> None:
+        if not self._db:
+            return
+        now = time.time()
+        await self._db.execute(
+            "UPDATE cards SET balance=?, balance_updated_at=? WHERE id=?",
+            (new_balance, now, card_id)
+        )
+        await self._db.commit()
+
+    async def get_rolling_used(self, card_id: str, direction: str, hours: int = 24) -> float:
+        """Повертає суму транзакцій за останні N годин по напрямку 'in' або 'out'."""
+        if not self._db:
+            return 0.0
+        cutoff = time.time() - (hours * 3600)
+        async with self._db.execute(
+            "SELECT SUM(amount) as total FROM card_transactions "
+            "WHERE card_id=? AND direction=? AND timestamp > ?",
+            (card_id, direction, cutoff)
+        ) as cur:
+            row = await cur.fetchone()
+            return float(row["total"]) if row and row["total"] else 0.0
+
+    async def reserve_card_amount(
+        self, order_id: str, owner_id: int, target_bank: str, direction: str,
+        total_amount: float, expected_window_minutes: int, split_strategy: list[dict],
+        trade_session_id: int = None
+    ) -> bool:
+        """
+        Атомарно створює order та записує leg(s). 
+        split_strategy: [{"card_id": "uuid", "amount": 10000}, ...]
+        """
+        if not self._db:
+            return False
+        now = time.time()
+        try:
+            await self._db.execute("BEGIN TRANSACTION")
+            await self._db.execute(
+                """
+                INSERT INTO card_orders (id, owner_id, trade_session_id, total_amount, target_bank, direction, status, expected_window_minutes, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (order_id, owner_id, trade_session_id, total_amount, target_bank, direction, expected_window_minutes, now)
+            )
+            for leg in split_strategy:
+                await self._db.execute(
+                    "INSERT INTO card_order_legs (order_id, card_id, amount, leg_status) VALUES (?, ?, ?, 'pending')",
+                    (order_id, leg["card_id"], leg["amount"])
+                )
+            await self._db.commit()
+            return True
+        except Exception as e:
+            await self._db.rollback()
+            logger.error("reserve_card_amount failed: %s", e)
+            return False
+
+    async def confirm_transaction(
+        self, card_id: str, amount: float, direction: str, type_str: str, 
+        linked_order_id: str = None, source: str = "manual", true_balance: float = None
+    ) -> None:
+        """
+        Логує транзакцію та оновлює баланс. Якщо true_balance передано (Mono Webhook) — 
+        використовуємо його. Інакше розраховуємо на основі існуючого.
+        """
+        if not self._db:
+            return
+        now = time.time()
+        tx_id = f"tx_{int(now*1000)}_{card_id[-4:]}"
+        try:
+            await self._db.execute("BEGIN TRANSACTION")
+            
+            # 1. Запис транзакції
+            await self._db.execute(
+                """
+                INSERT INTO card_transactions (id, card_id, amount, direction, type, linked_order_id, source, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (tx_id, card_id, amount, direction, type_str, linked_order_id, source, now)
+            )
+            
+            # 2. Оновлення балансу (фактичний або розрахунковий)
+            if true_balance is not None:
+                await self._db.execute(
+                    "UPDATE cards SET balance=?, balance_updated_at=?, last_tx_timestamp=? WHERE id=?",
+                    (true_balance, now, now, card_id)
+                )
+            else:
+                sign = "+" if direction == "in" else "-"
+                await self._db.execute(
+                    f"UPDATE cards SET balance=balance {sign} ?, balance_updated_at=?, last_tx_timestamp=? WHERE id=?",
+                    (amount, now, now, card_id)
+                )
+                
+            # 3. Оновлення статусу leg якщо це робоча транзакція
+            if linked_order_id:
+                await self._db.execute(
+                    "UPDATE card_order_legs SET leg_status='completed' WHERE order_id=? AND card_id=?",
+                    (linked_order_id, card_id)
+                )
+
+            # 4. Авто-cooldown при 95% денного ліміту (C7)
+            async with self._db.execute("SELECT owner_id, bank_name FROM cards WHERE id=?", (card_id,)) as cur:
+                card_row = await cur.fetchone()
+            if card_row:
+                owner_id = card_row["owner_id"]
+                bank_name = card_row["bank_name"]
+                limits = await self.get_user_bank_limits(owner_id, bank_name)
+                if limits:
+                    daily_max = limits.get(f"daily_{direction}_max", 150000.0)
+                    cooldown_hours = limits.get("cooldown_hours", 24)
+                    # Підрахунок rolling used за 24г (включаючи щойно записану TX)
+                    cutoff_24h = now - (24 * 3600)
+                    async with self._db.execute(
+                        "SELECT SUM(amount) as total FROM card_transactions WHERE card_id=? AND direction=? AND timestamp > ?",
+                        (card_id, direction, cutoff_24h)
+                    ) as cur2:
+                        row2 = await cur2.fetchone()
+                        used = float(row2["total"]) if row2 and row2["total"] else 0.0
+                    if daily_max > 0 and used / daily_max >= 0.95:
+                        cooldown_until = now + (cooldown_hours * 3600)
+                        await self._db.execute(
+                            "UPDATE cards SET cooldown_until=? WHERE id=? AND cooldown_until < ?",
+                            (cooldown_until, card_id, cooldown_until)
+                        )
+                        logger.info("Auto-cooldown set for card %s: %.0f/%.0f (%.0f%%)", card_id[-4:], used, daily_max, used/daily_max*100)
+
+            await self._db.commit()
+        except Exception as e:
+            await self._db.rollback()
+            logger.error("confirm_transaction failed: %s", e)
+
+    async def release_expired_reservations(self) -> int:
+        """
+        Звільняє завислі leg-и ордерів (timeout) та маркує ордер відповідно.
+        Викликається з циклу сканера. Повертає кількість звільнених legs.
+        """
+        if not self._db:
+            return 0
+        now = time.time()
+        count = 0
+        try:
+            await self._db.execute("BEGIN TRANSACTION")
+            
+            # Знаходимо pending orders, чиї вікна (у хвилинах) спливли (з 5-хвилинним буфером)
+            async with self._db.execute(
+                """
+                SELECT id, expected_window_minutes, created_at 
+                FROM card_orders 
+                WHERE status IN ('pending', 'partially_completed')
+                """
+            ) as cur:
+                orders = await cur.fetchall()
+                
+            for order in orders:
+                expire_time = order["created_at"] + (order["expected_window_minutes"] * 60) + 300 # +5 mins buffer
+                if now > expire_time:
+                    # Timeout legs
+                    async with self._db.execute(
+                        "UPDATE card_order_legs SET leg_status='timeout' WHERE order_id=? AND leg_status='pending'",
+                        (order["id"],)
+                    ) as upd_cur:
+                        if upd_cur.rowcount > 0:
+                            count += upd_cur.rowcount
+                            # Оновлюємо статус самого ордера
+                            await self._db.execute(
+                                "UPDATE card_orders SET status='canceled' WHERE id=? AND status='pending'",
+                                (order["id"],)
+                            )
+            await self._db.commit()
+            return count
+        except Exception as e:
+            await self._db.rollback()
+            logger.error("release_expired_reservations failed: %s", e)
+            return 0
+
+    async def get_user_mono_settings(self, user_id: int) -> dict:
+        if not self._db:
+            return {}
+        async with self._db.execute("SELECT x_token_encrypted, webhook_secret FROM user_mono_settings WHERE user_id=?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else {}
+
+    async def save_user_mono_settings(self, user_id: int, x_token_encrypted: str, webhook_secret: str) -> None:
+        if not self._db:
+            return
+        await self._db.execute(
+            """
+            INSERT INTO user_mono_settings (user_id, x_token_encrypted, webhook_secret)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET 
+            x_token_encrypted=excluded.x_token_encrypted, 
+            webhook_secret=excluded.webhook_secret
+            """,
+            (user_id, x_token_encrypted, webhook_secret)
+        )
+        await self._db.commit()
+
+    async def update_card_mono_account(self, card_id: str, mono_account_id: str) -> None:
+        if not self._db:
+            return
+        await self._db.execute("UPDATE cards SET mono_account_id=? WHERE id=?", (mono_account_id, card_id))
+        await self._db.commit()
+
+    async def get_card_by_mono_account(self, mono_account_id: str) -> dict:
+        if not self._db:
+            return None
+        async with self._db.execute("SELECT * FROM cards WHERE mono_account_id=? AND status='active'", (mono_account_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def find_pending_order_for_card(self, card_id: str, amount: float) -> dict:
+        """Шукає активний card_order_legs для даної картки з точною сумою."""
+        if not self._db:
+            return None
+        # Ми шукаємо серед pending legs
+        async with self._db.execute(
+            """
+            SELECT o.id, o.direction 
+            FROM card_order_legs l
+            JOIN card_orders o ON l.order_id = o.id
+            WHERE l.card_id = ? AND l.amount = ? AND l.leg_status = 'pending' AND o.status = 'pending'
+            ORDER BY o.created_at ASC LIMIT 1
+            """,
+            (card_id, amount)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_rolling_used(self, card_id: str, direction: str, hours: int = 24) -> float:
+        if not self._db:
+            return 0.0
+        cutoff = time.time() - (hours * 3600)
+        async with self._db.execute(
+            "SELECT SUM(amount) as total FROM card_transactions WHERE card_id=? AND direction=? AND timestamp > ?",
+            (card_id, direction, cutoff)
+        ) as cur:
+            row = await cur.fetchone()
+            return float(row["total"]) if row and row["total"] else 0.0
+
+    async def get_card_report_stats(self, card_id: str) -> dict:
+        if not self._db:
+            return {}
+        cutoff_today = time.time() - (24 * 3600)
+        cutoff_month = time.time() - (30 * 24 * 3600)
+        
+        async with self._db.execute(
+            """
+            SELECT 
+                COUNT(*) as tx_count,
+                SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) as in_volume_today,
+                SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) as out_volume_today,
+                SUM(CASE WHEN direction='in' AND type='work' THEN amount ELSE 0 END) as work_in_today,
+                SUM(CASE WHEN direction='out' AND type='work' THEN amount ELSE 0 END) as work_out_today,
+                SUM(CASE WHEN direction='in' AND type='personal' THEN amount ELSE 0 END) as personal_in_today,
+                SUM(CASE WHEN direction='out' AND type='personal' THEN amount ELSE 0 END) as personal_out_today
+            FROM card_transactions
+            WHERE card_id=? AND timestamp > ?
+            """,
+            (card_id, cutoff_today)
+        ) as cur:
+            row = await cur.fetchone()
+            stats = dict(row) if row else {}
+            
+        async with self._db.execute(
+            """
+            SELECT 
+                SUM(CASE WHEN direction='in' THEN amount ELSE 0 END) as in_volume_month,
+                SUM(CASE WHEN direction='out' THEN amount ELSE 0 END) as out_volume_month
+            FROM card_transactions
+            WHERE card_id=? AND timestamp > ?
+            """,
+            (card_id, cutoff_month)
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                stats.update(dict(row))
+                
+        for k in stats:
+            if stats[k] is None:
+                stats[k] = 0.0 if "volume" in k or "work" in k or "personal" in k else 0
+                
+        return stats

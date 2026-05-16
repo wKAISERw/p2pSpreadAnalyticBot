@@ -447,6 +447,82 @@ async def get_real_exchange_accounts(telegram_id: int):
 
     return dict_to_camel(accounts)
 
+import aiosqlite, json
+
+async def fix_bank_codes_in_db(db_path: str):
+    async with aiosqlite.connect(db_path) as conn:
+        async with conn.execute("SELECT user_id, buy_bank_codes FROM scanner_users") as cur:
+            rows = await cur.fetchall()
+        for user_id, raw in rows:
+            if raw and raw.strip().startswith("["):
+                try:
+                    codes = json.loads(raw)
+                    csv = ",".join(str(c) for c in codes)
+                    await conn.execute(
+                        "UPDATE scanner_users SET buy_bank_codes = ? WHERE user_id = ?",
+                        (csv, user_id)
+                    )
+                    print(f"Fixed user {user_id}: {raw} → {csv}")
+                except Exception as e:
+                    print(f"Skip user {user_id}: {e}")
+        await conn.commit()
+
+from fastapi import Request
+
+@app.post("/api/v1/webhooks/mono/{user_id}/{secret}")
+async def mono_webhook(user_id: int, secret: str, request: Request):
+    logger = logging.getLogger("Main")
+    settings = await db.get_user_mono_settings(user_id)
+    if not settings or settings.get("webhook_secret") != secret:
+        return {"status": "error", "detail": "Invalid secret"}
+
+    payload = await request.json()
+    if payload.get("type") != "StatementItem":
+        return {"status": "ok"}
+    
+    data = payload.get("data", {})
+    account_id = data.get("account")
+    stmt = data.get("statementItem", {})
+    amount = float(stmt.get("amount", 0)) / 100.0
+    true_balance = float(stmt.get("balance", 0)) / 100.0
+
+    if not account_id or not amount:
+        return {"status": "ignored"}
+    
+    direction = "in" if amount > 0 else "out"
+    abs_amount = abs(amount)
+
+    card = await db.get_card_by_mono_account(account_id)
+    if not card:
+        logger.warning(f"Webhook received for unknown Mono account: {account_id}")
+        return {"status": "ignored", "detail": "Account not found"}
+
+    order_leg = await db.find_pending_order_for_card(card["id"], abs_amount)
+    
+    if order_leg:
+        await db.confirm_transaction(
+            card_id=card["id"],
+            amount=abs_amount,
+            direction=direction,
+            type_str="work",
+            linked_order_id=order_leg["id"],
+            source="webhook_mono",
+            true_balance=true_balance
+        )
+        logger.info(f"✅ Webhook auto-confirmed order {order_leg['id']} for card {card['id']}")
+    else:
+        await db.confirm_transaction(
+            card_id=card["id"],
+            amount=abs_amount,
+            direction=direction,
+            type_str="personal",
+            linked_order_id=None,
+            source="webhook_mono",
+            true_balance=true_balance
+        )
+        logger.info(f"ℹ️ Webhook recorded personal transaction for card {card['id']}")
+        
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

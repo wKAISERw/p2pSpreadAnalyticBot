@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 
 from config import settings
 from bot import commands as bot_commands
+from bot.card_notifier import CardNotifier
 from exchanges.base import Order
 from core.storage.merchant_db import MerchantDB
 from core.engine.network_fee_engine import NetworkFeeEngine
@@ -69,6 +70,8 @@ class SpreadAlert:
     sell_reason: str = ""
     buy_terms_summary: str = ""
     sell_terms_summary: str = ""
+    buy_reviews_analysis: str = ""
+    sell_reviews_analysis: str = ""
     timestamp: datetime = None
 
     def __post_init__(self):
@@ -475,6 +478,7 @@ class TelegramNotifier:
     def bind_db(self, db: MerchantDB):
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
         self._db = db
+        self.card_notifier = CardNotifier(db, self._bot)
 
     def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None, maker_monitor=None) -> None:
         """Оновлює змінні модуля. Router вже підключений в __init__."""
@@ -794,6 +798,18 @@ class TelegramNotifier:
                 disable_notification=silent,
                 chat_id=chat_id,
             )
+
+        if getattr(self, "card_notifier", None):
+            bank = order.bank_codes[0] if order.bank_codes else ""
+            direction = "buy" if is_buy else "sell"
+            import asyncio
+            asyncio.create_task(self.card_notifier.send_card_recommendation(
+                chat_id=chat_id or self._chat_id,
+                target_amount=float(order.min_limit),
+                direction=direction,
+                bank=bank,
+                order_id=str(ad_id)
+            ))
 
     async def send_maker_order_alert(
         self,
@@ -1204,7 +1220,8 @@ class TelegramNotifier:
             f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
             f"Мерчант: {buy_name_str} "
             f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
-            f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>\n"
+            f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>"
+            f"  💎 <code>{float(alert.buy_order.available_amount):.0f} USDT</code> в ордері\n"
             f"{buy_risk if buy_risk else ''}"
             f"{buy_warn if buy_warn else ''}"
         )
@@ -1226,7 +1243,8 @@ class TelegramNotifier:
             f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
             f"Мерчант: {sell_name_str} "
             f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
-            f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>\n"
+            f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>"
+            f"  💎 <code>{float(alert.sell_order.available_amount):.0f} USDT</code> в ордері\n"
             f"{sell_risk if sell_risk else ''}"
             f"{sell_warn if sell_warn else ''}"
         )
@@ -1354,6 +1372,28 @@ class TelegramNotifier:
                 disable_notification=silent,
                 chat_id=chat_id,
             )
+
+        if getattr(self, "card_notifier", None):
+            target_chat = chat_id or self._chat_id
+            import asyncio
+            b_ad = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
+            if b_ad:
+                asyncio.create_task(self.card_notifier.send_card_recommendation(
+                    chat_id=target_chat,
+                    target_amount=alert.deal_amount_uah,
+                    direction="buy",
+                    bank=alert.buy_bank,
+                    order_id=str(b_ad)
+                ))
+            s_ad = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
+            if s_ad:
+                asyncio.create_task(self.card_notifier.send_card_recommendation(
+                    chat_id=target_chat,
+                    target_amount=alert.deal_amount_uah,
+                    direction="sell",
+                    bank=alert.sell_bank,
+                    order_id=str(s_ad)
+                ))
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         """Підсумок усіх знайдених маршрутів за цикл."""

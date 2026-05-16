@@ -85,34 +85,43 @@ class AlertDispatcher:
             self._cache_loaded_at = time.monotonic()
         return self._users_cache
 
-    def _user_wants(self, user: dict, opp: dict) -> bool:
+    def _user_wants(self, user: dict, opp: dict) -> tuple[bool, str]:
         """
-        Персональний фільтр юзера:
+        Персональний фільтр юзера. Повертає (True, "") або (False, причина).
+          0. SPREAD алерти — тільки юзерам у режимі SPREAD
           1. Коридор сум: min_amount ≤ entry ≤ capital
           2. Мінімальний спред
           3. Банки перетинаються (окремо для buy/sell з fallback на загальні)
           4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json + per-exchange)
         """
+        # 0. SPREAD алерти — тільки для SPREAD-режиму
+        # TAKER/MAKER юзери отримують свої алерти через окремі пайплайни
+        mode = user.get("scanner_mode", "SPREAD")
+        if mode != "SPREAD":
+            return False, f"mode={mode}"
+
         entry = float(opp["actual_entry_uah"])
 
         # 1. Капітальний коридор
         if entry > float(user["capital"]):
-            return False
+            return False, f"entry {entry:.0f} > capital {user['capital']}"
         min_amount = float(user.get("min_amount", 0.0))
         if min_amount > 0 and entry < min_amount:
-            return False
+            return False, f"entry {entry:.0f} < min_amount {min_amount:.0f}"
 
         # 2. Мінімальний спред
         if float(opp["net_spread_pct"]) < float(user["min_spread"]):
-            return False
+            return False, f"spread {opp['net_spread_pct']:.2f}% < min {user['min_spread']}"
 
         # 3. Банки — окремо buy та sell з fallback на загальні
         user_buy_banks = set(user.get("buy_bank_codes") or user["bank_codes"])
         user_sell_banks = set(user.get("sell_bank_codes") or user["bank_codes"])
         opp_buy_banks = set(opp.get("buy_banks_fit") or [])
         opp_sell_banks = set(opp.get("sell_banks_fit") or [])
-        if not (opp_buy_banks & user_buy_banks) or not (opp_sell_banks & user_sell_banks):
-            return False
+        if not (opp_buy_banks & user_buy_banks):
+            return False, f"buy banks no match: user={user_buy_banks} opp={opp_buy_banks}"
+        if not (opp_sell_banks & user_sell_banks):
+            return False, f"sell banks no match: user={user_sell_banks} opp={opp_sell_banks}"
 
         # 4. Персональні фільтри мерчанта (per-exchange → загальні → defaults)
         from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
@@ -123,6 +132,7 @@ class AlertDispatcher:
 
         for order_obj in (buy_o, sell_o):
             ex_name = getattr(order_obj, "exchange", "")
+            side_label = "buy" if order_obj is buy_o else "sell"
             # Fallback chain: per_exchange → global user → defaults[exchange] → 0
             ex_filters = emf.get(ex_name, {})
             min_orders = float(
@@ -136,41 +146,68 @@ class AlertDispatcher:
                 or _DEF_RATE.get(ex_name, 0.0)
             )
             if min_orders > 0 and order_obj.month_order_count < min_orders:
-                return False
+                return False, f"{side_label} merchant orders {order_obj.month_order_count} < {min_orders}"
             if min_rate > 0 and order_obj.finish_rate_pct < min_rate:
-                return False
+                return False, f"{side_label} merchant rate {order_obj.finish_rate_pct:.1f}% < {min_rate}"
 
-        return True
+        return True, ""
 
     async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
-        """Відправляє алерт всім підходящим юзерам."""
+        """Відправляє алерт всім підходящим юзерам з детальним логуванням."""
         users = await self._get_users()
-        if users:
-            for user in users:
-                is_sniper = False
-                for r in user.get("sniper_rules", []):
-                    req_ex = r.get("exchange", "")
-                    req_dir = r.get("direction", "")
-                    min_spd = float(r.get("min_spread", 0))
-                    min_vol = float(r.get("min_volume", 0))
-                    
-                    if float(opp["net_spread_pct"]) >= min_spd and float(opp["actual_entry_uah"]) >= min_vol:
-                        if req_dir == "BUY" and opp["sell_order"].exchange.upper() == req_ex.upper():
-                            is_sniper = True
-                            break
-                        elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
-                            is_sniper = True
-                            break
-
-                if self._user_wants(user, opp) or is_sniper:
-                    try:
-                        await self._notifier.send_to_user(user["chat_id"], alert, is_sniper_match=is_sniper)
-                    except Exception as e:
-                        # Юзер заблокував бота або інша помилка — не зупиняємо розсилку іншим
-                        logger.warning("dispatch failed for user %s: %s", user.get("user_id"), e)
-        else:
-            # Fallback: single-user (ніхто не написав /start)
+        if not users:
+            logger.info("📬 Dispatch fallback → queue (немає зареєстрованих юзерів)")
             await self._notifier.push(alert)
+            return
+
+        matched_count = 0
+        logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
+
+        for user in users:
+            uid = user.get("user_id")
+            chat_id = user.get("chat_id")
+
+            is_sniper = False
+            for r in user.get("sniper_rules", []):
+                req_ex = r.get("exchange", "")
+                req_dir = r.get("direction", "")
+                min_spd = float(r.get("min_spread", 0))
+                min_vol = float(r.get("min_volume", 0))
+
+                if float(opp["net_spread_pct"]) >= min_spd and float(opp["actual_entry_uah"]) >= min_vol:
+                    if req_dir == "BUY" and opp["sell_order"].exchange.upper() == req_ex.upper():
+                        is_sniper = True
+                        break
+                    elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
+                        is_sniper = True
+                        break
+
+            wants, skip_reason = self._user_wants(user, opp)
+
+            if wants or is_sniper:
+                matched_count += 1
+                match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
+
+                try:
+                    await self._notifier.send_to_user(chat_id, alert, is_sniper_match=is_sniper)
+                    # ЯВНЕ ЛОГУВАННЯ УСПІХУ
+                    logger.info(
+                        "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Режим: %s",
+                        match_type, uid, user.get("scanner_mode", "UNKNOWN")
+                    )
+                except Exception as e:
+                    logger.warning("  └─ ❌ Помилка відправки юзеру %s: %s", uid, e)
+            else:
+                # ЛОГУВАННЯ ПРИЧИНИ ВІДМОВИ (можна залишити в DEBUG або INFO)
+                logger.debug(
+                    "  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Причина: %s",
+                    uid, skip_reason
+                )
+
+        logger.info(
+            "📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.",
+            matched_count, len(users)
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -864,8 +901,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         if not is_muted():
                             logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
-                            # Fire-and-forget: не блокуємо сканер чекаючи Telegram API
-                            asyncio.create_task(dispatcher.dispatch(alert, opp))
+                            # Fire-and-forget з логуванням помилок
+                            task = asyncio.create_task(dispatcher.dispatch(alert, opp))
+                            task.add_done_callback(
+                                lambda t: logger.error("💥 dispatch task error: %s", t.exception()) if t.exception() else None
+                            )
                         else:
                             logger.debug("⏭ Скіп: muted")
                     state.opportunities = current_frontend_opps[:50]

@@ -28,14 +28,17 @@ from aiogram.fsm.state import State, StatesGroup
 
 from bot import keyboards
 from config import settings
+
 _trade_worker = None
 _single_leg_executor = None
 _maker_monitor = None
-_active_repricers: dict = {}   # ad_id → asyncio.Task (AdRepricer)
+_active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 
 # ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
-_single_leg_cache: dict = {}   # "b:<key>" / "s:<key>" → {ad_id, exchange, price, ...}
-_spread_cache: dict = {}       # "<key>" → (SpreadAlert, timestamp)
+_single_leg_cache: dict = {}  # "b:<key>" / "s:<key>" → {ad_id, exchange, price, ...}
+_spread_cache: dict = {}  # "<key>" → (SpreadAlert, timestamp)
+
+
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -44,6 +47,8 @@ def _is_admin(user_id: int) -> bool:
     if not admin_id:
         admin_id = getattr(settings, "telegram_chat_id", 0)
     return user_id == admin_id
+
+
 from config.runtime import runtime_config, ALLOWED_KEYS
 from bot.keyboards import (
     main_menu_kb, settings_menu_kb, keys_menu_kb,
@@ -78,9 +83,9 @@ class ConnectStates(StatesGroup):
 
 
 class SettingStates(StatesGroup):
-    waiting_capital    = State()
+    waiting_capital = State()
     waiting_min_amount = State()
-    waiting_spread     = State()
+    waiting_spread = State()
 
 
 class GlobalSettingStates(StatesGroup):
@@ -89,9 +94,9 @@ class GlobalSettingStates(StatesGroup):
 
 class MerchantFilterStates(StatesGroup):
     waiting_min_orders = State()
-    waiting_min_rate   = State()
+    waiting_min_rate = State()
     waiting_ex_min_orders = State()
-    waiting_ex_min_rate   = State()
+    waiting_ex_min_rate = State()
 
 
 class ExchangeCooldownStates(StatesGroup):
@@ -119,6 +124,7 @@ class CreateAdStates(StatesGroup):
 class TakerExecuteStates(StatesGroup):
     waiting_amount = State()
 
+
 class HybridTradeStates(StatesGroup):
     waiting_tm_amount = State()
     waiting_mt_amount = State()
@@ -130,11 +136,22 @@ class MakerSettingsStates(StatesGroup):
     waiting_target_margin = State()
 
 
+class TakerBuySettingsStates(StatesGroup):
+    waiting_amount          = State()  # 1 — обʼєм USDT
+    waiting_price_strategy  = State()  # 2 — стратегія ціни (inline-меню)
+    waiting_price_to        = State()  # 3 — max/exact ціна (або range-max)
+    waiting_price_from      = State()  # 3b — range-min ціна
+    waiting_limit_min       = State()  # 4 — мін ліміт UAH
+    waiting_limit_max       = State()  # 4b — макс ліміт UAH
+    waiting_banks           = State()  # 5 — банки (inline-чекбокси)
+    waiting_speed           = State()  # 6 — швидкість
+
 class TakerSellSettingsStates(StatesGroup):
-    waiting_amount = State()
-    waiting_buy_price = State()
-    waiting_profit = State()
-    waiting_speed = State()
+    waiting_amount    = State()   # крок 1 — об'єм
+    waiting_buy_price = State()   # крок 2 — ціна купівлі
+    waiting_exchange  = State()   # крок 3 — біржа (Network Fee)
+    waiting_profit    = State()   # крок 4 — спред % (з breakeven підказкою)
+    waiting_speed     = State()   # крок 5 — час важливий?
 
 class SniperStates(StatesGroup):
     waiting_exchange = State()
@@ -142,26 +159,45 @@ class SniperStates(StatesGroup):
     waiting_min_spread = State()
     waiting_min_volume = State()
 
+class CardAddStates(StatesGroup):
+    waiting_bank = State()
+    waiting_last_four = State()
+    waiting_balance = State()
+    waiting_label = State()
+    waiting_is_own = State()
+
+class CardUpdateStates(StatesGroup):
+    waiting_true_balance = State()
+
+class CardEditStates(StatesGroup):
+    waiting_label = State()
+    waiting_note = State()
+
+class MonoStates(StatesGroup):
+    waiting_token = State()
+
+class BankLimitStates(StatesGroup):
+    waiting_value = State()
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
 # Тільки системні параметри (персональні - в scanner_users через меню)
 SETTING_DESCRIPTIONS = {
-    "risk_mode":              "🛡 Рівень антифроду",
-    "behavior_alert_score":   "🤖 Поріг балів ботів",
-    "velocity_spike_per_hour":"⚡ Аномальна швидкість (угод/год)",
-    "sticky_min_chain":       "📌 Липкі ліміти (циклів)",
-    "review_ttl_hours":       "💬 Кеш відгуків (годин)",
-    "max_alerts_per_cycle":   "🔔 Макс. алертів за цикл",
+    "risk_mode": "🛡 Рівень антифроду",
+    "behavior_alert_score": "🤖 Поріг балів ботів",
+    "velocity_spike_per_hour": "⚡ Аномальна швидкість (угод/год)",
+    "sticky_min_chain": "📌 Липкі ліміти (циклів)",
+    "review_ttl_hours": "💬 Кеш відгуків (годин)",
+    "max_alerts_per_cycle": "🔔 Макс. алертів за цикл",
 }
 
 # Відповідність ключ → опис для кнопок
 _KEY_LABELS = {
-    "risk_mode":               "🛡 Антифрод",
-    "behavior_alert_score":    "🤖 Поріг ботів",
+    "risk_mode": "🛡 Антифрод",
+    "behavior_alert_score": "🤖 Поріг ботів",
     "velocity_spike_per_hour": "⚡ Швидкість",
-    "sticky_min_chain":        "📌 Липкі ліміти",
-    "review_ttl_hours":        "💬 Кеш відгуків",
-    "max_alerts_per_cycle":    "🔔 Макс. алертів",
+    "sticky_min_chain": "📌 Липкі ліміти",
+    "review_ttl_hours": "💬 Кеш відгуків",
+    "max_alerts_per_cycle": "🔔 Макс. алертів",
 }
 
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
@@ -186,7 +222,8 @@ def is_muted() -> bool:
     return time.monotonic() < _mute_until
 
 
-def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None, maker_monitor=None) -> None:
+def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None,
+          maker_monitor=None) -> None:
     global _db, _account_clients, _trade_worker, _notifier, _single_leg_executor, _maker_monitor
     if _trade_worker and trade_worker and _trade_worker is not trade_worker:
         logger.warning("setup(): TradeWorker перезаписується!")
@@ -209,15 +246,15 @@ def update_stats(**kwargs) -> None:
 # ── /start (ЗАПУСК ПЕРСОНАЛЬНОГО СКАНЕРА ТА ДАШБОРД) ──────────────────────
 # ── /start (ЗАПУСК ПЕРСОНАЛЬНОГО СКАНЕРА ТА ДАШБОРД) ──────────────────────
 async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
-    user_capital    = str(settings.working_capital_uah)
+    user_capital = str(settings.working_capital_uah)
     user_min_amount = "без обмежень"
-    user_spread     = "0.50"
+    user_spread = "0.50"
     if _db:
         active_users = await _db.get_active_users()
         for u in active_users:
             if u["user_id"] == user_id:
                 user_capital = f"{u['capital']:.1f}"
-                user_spread  = f"{u['min_spread']:.2f}"
+                user_spread = f"{u['min_spread']:.2f}"
                 _min_amt = float(u.get("min_amount") or 0.0)
                 user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
                 break
@@ -297,7 +334,8 @@ async def cmd_help(message: Message) -> None:
         "<b>/settings</b>\nЗмінити глобальні налаштування сканера.\n\n"
         "<b>/ban [exchange] [merchant_id]</b>\nРучний бан мерчанта.\n\n"
         "<b>/mode</b>\nПерегляд і зміна режиму сканування.\n\n"
-        "<b>/status</b>\nПоточний стан сканера."
+        "<b>/status</b>\nПоточний стан сканера.\n\n"
+        "<b>/debugfilters</b> — діагностика фільтрів розсилки (admin)\n"
     )
     await message.answer(text)
 
@@ -399,14 +437,73 @@ async def cmd_trades(message: Message) -> None:
 async def cmd_active(message: Message) -> None:
     from state import state as app_state
     from copy import copy
+    from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
+
+    def _matches_user_filters(user_row: dict, spread_alert) -> tuple[bool, str]:
+        """Same filter chain as scanner dispatch to keep /active consistent with auto-push."""
+        mode_val = user_row.get("scanner_mode", "SPREAD")
+        if mode_val != "SPREAD":
+            return False, f"mode={mode_val}"
+
+        entry_val = float(getattr(spread_alert, "deal_amount_uah", 0.0))
+        capital_val = float(user_row.get("capital", 0.0))
+        if entry_val > capital_val:
+            return False, f"entry {entry_val:.0f} > capital {capital_val:.0f}"
+
+        min_amount_val = float(user_row.get("min_amount", 0.0))
+        if min_amount_val > 0 and entry_val < min_amount_val:
+            return False, f"entry {entry_val:.0f} < min_amount {min_amount_val:.0f}"
+
+        spread_val = float(getattr(spread_alert, "spread_pct", 0.0))
+        user_min_spread = float(user_row.get("min_spread", 0.0))
+        if spread_val < user_min_spread:
+            return False, f"spread {spread_val:.2f}% < min {user_min_spread:.2f}%"
+
+        user_buy_banks = set(user_row.get("buy_bank_codes") or user_row.get("bank_codes") or [])
+        user_sell_banks = set(user_row.get("sell_bank_codes") or user_row.get("bank_codes") or [])
+        opp_buy_banks = set(getattr(spread_alert, "buy_banks_fit", None) or [])
+        opp_sell_banks = set(getattr(spread_alert, "sell_banks_fit", None) or [])
+        if not (opp_buy_banks & user_buy_banks):
+            return False, "buy banks no match"
+        if not (opp_sell_banks & user_sell_banks):
+            return False, "sell banks no match"
+
+        merchant_filters = user_row.get("merchant_filters") or {}
+        ex_merchant_filters = user_row.get("exchange_merchant_filters") or {}
+        buy_order = getattr(spread_alert, "buy_order", None)
+        sell_order = getattr(spread_alert, "sell_order", None)
+        if not buy_order or not sell_order:
+            return False, "missing orders"
+
+        for order_obj in (buy_order, sell_order):
+            ex_name = getattr(order_obj, "exchange", "")
+            side_label = "buy" if order_obj is buy_order else "sell"
+            ex_filters = ex_merchant_filters.get(ex_name, {})
+            min_orders = float(
+                ex_filters.get("min_orders", 0)
+                or merchant_filters.get("min_orders", 0)
+                or _DEF_ORDERS.get(ex_name, 0)
+            )
+            min_rate = float(
+                ex_filters.get("min_rate", 0.0)
+                or merchant_filters.get("min_rate", 0.0)
+                or _DEF_RATE.get(ex_name, 0.0)
+            )
+            if min_orders > 0 and getattr(order_obj, "month_order_count", 0) < min_orders:
+                return False, f"{side_label} merchant orders < {min_orders:.0f}"
+            if min_rate > 0 and getattr(order_obj, "finish_rate_pct", 0.0) < min_rate:
+                return False, f"{side_label} merchant rate < {min_rate:.1f}%"
+
+        return True, ""
 
     mode = "SPREAD"
+    user = None
     if _db:
         users = await _db.get_active_users()
         user = next((u for u in users if u["user_id"] == message.from_user.id), None)
         if user:
             mode = user.get("scanner_mode", "SPREAD")
-            
+
     if mode != "SPREAD":
         return await message.answer(
             f"🔄 <b>Твій поточний режим: {mode}</b>\n\n"
@@ -415,10 +512,12 @@ async def cmd_active(message: Message) -> None:
         )
 
     alerts = getattr(app_state, "current_alerts", [])
+    if user:
+        alerts = [a for a in alerts if _matches_user_filters(user, a)[0]]
     if not alerts:
         return await message.answer(
-            "📭 <b>Зараз активних спредів немає</b>\n\n"
-            "Сканер працює, але поки не знайшов підходящих зв'язок.\n"
+            "📭 <b>Зараз активних спредів для твоїх фільтрів немає</b>\n\n"
+            "Сканер працює, але поки не знайшов підходящих зв'язок під твої банки/капітал/фільтри.\n"
             "Спробуй пізніше або перевір /status"
         )
 
@@ -478,21 +577,21 @@ async def cmd_status(message: Message) -> None:
             connected.append(f"❌ {ex} (відсутні)")
 
     # Персональні параметри з scanner_users
-    _my_capital    = settings.working_capital_uah
-    _my_spread     = settings.min_spread_pct
+    _my_capital = settings.working_capital_uah
+    _my_spread = settings.min_spread_pct
     _my_min_amount = 0.0
     active_users = await _db.get_active_users()
     for u in active_users:
         if u["user_id"] == message.from_user.id:
-            _my_capital    = float(u["capital"])
-            _my_spread     = float(u["min_spread"])
+            _my_capital = float(u["capital"])
+            _my_spread = float(u["min_spread"])
             _my_min_amount = float(u.get("min_amount", 0.0))
             break
 
     # Глобальні системні параметри
     capital = _my_capital
-    spread  = _my_spread
-    risk    = runtime_config.get("risk_mode", settings.risk_mode)
+    spread = _my_spread
+    risk = runtime_config.get("risk_mode", settings.risk_mode)
     min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
 
     llm_q = _scanner_stats.get("llm_queue", 0)
@@ -502,7 +601,7 @@ async def cmd_status(message: Message) -> None:
     cb_lines = [f"  {_cb_icons.get(v, '⚪')} {k}: {v}" for k, v in cb_st.items()]
     import time as _t
     mute_left = max(0, _mute_until - _t.monotonic())
-    mute_line = f"\n🔕 Пауза: <b>{mute_left/3600:.1f} год</b>" if mute_left > 0 else ""
+    mute_line = f"\n🔕 Пауза: <b>{mute_left / 3600:.1f} год</b>" if mute_left > 0 else ""
 
     text = (
             "📊 <b>Стан системного сканера</b>\n\n"
@@ -566,7 +665,153 @@ async def cmd_users(message: Message) -> None:
 
     await message.answer("\n".join(lines))
 
+# ═══════════════════════════════════════════════════════
+# 🔍 /debugfilters — admin-only діагностика розсилки
+# ═══════════════════════════════════════════════════════
 
+@router.message(Command("debugfilters"))
+async def cmd_debugfilters(message: Message) -> None:
+    """Показує фільтри кожного юзера + симулює dispatch на поточних алертах."""
+    if not _is_admin(message.from_user.id):
+        return await message.answer("⛔ Тільки для адміна.")
+    if not _db:
+        return await message.answer("❌ БД недоступна.")
+
+    from config.defaults import MIN_ORDERS as DEF_ORDERS, MIN_COMPLETION as DEF_RATE
+    from config.banks import BANK_NAMES
+
+    users = await _db.get_active_users()
+    if not users:
+        return await message.answer("Юзерів немає.")
+
+    # ── Поточні алерти зі state ──
+    try:
+        from state import state as appstate
+        raw_alerts = getattr(appstate, "current_alerts", [])
+        alerts = [a[0] if isinstance(a, (list, tuple)) else a for a in raw_alerts]
+    except Exception:
+        alerts = []
+
+    lines = ["🔍 <b>Debug Filters</b>\n"]
+
+    for u in users:
+        uid = u.get("user_id") or u.get("userid") or "?"
+        mode      = u.get("scanner_mode", "SPREAD")
+        capital   = float(u.get("capital", 0))
+        minamount = float(u.get("min_amount", 0))
+        minspread = float(u.get("min_spread", 0))
+        is_active = bool(u.get("is_alerts_active", 1))
+        buy_banks = set(u.get("buy_bank_codes") or u.get("bank_codes") or [])
+        sell_banks = set(u.get("sell_bank_codes") or u.get("bank_codes") or [])
+        mf  = u.get("merchant_filters") or {}
+        emf = u.get("exchange_merchant_filters") or {}
+
+        buy_bank_names  = [BANK_NAMES.get(str(b), str(b)) for b in buy_banks]
+        sell_bank_names = [BANK_NAMES.get(str(b), str(b)) for b in sell_banks]
+
+        lines.append(f"👤 <code>{uid}</code>  {'✅' if is_active else '🔕 ВИМКНЕНО'}")
+        lines.append(f"  режим:      <b>{mode}</b>")
+        lines.append(f"  капітал:    <b>{capital:.0f} ₴</b>")
+        lines.append(f"  мін.сума:   <b>{minamount:.0f} ₴</b>" if minamount > 0 else "  мін.сума:   вимкнено")
+        lines.append(f"  мін.спред:  <b>{minspread:.2f}%</b>")
+        lines.append(f"  buy банки:  {', '.join(buy_bank_names) if buy_bank_names else '⚠️ ПОРОЖНЬО'}")
+        lines.append(f"  sell банки: {', '.join(sell_bank_names) if sell_bank_names else '⚠️ ПОРОЖНЬО'}")
+
+        if mf:
+            lines.append(f"  mf глобал:  ордери≥{mf.get('min_orders',0):.0f}  рейт≥{mf.get('min_rate',0):.0f}%")
+        if emf:
+            for ex, ef in emf.items():
+                lines.append(f"  mf {ex}: ордери≥{ef.get('min_orders',0):.0f}  рейт≥{ef.get('min_rate',0):.0f}%")
+
+        # ── Симуляція фільтру на кожному поточному алерті ──
+        if mode != "SPREAD":
+            lines.append(f"  <i>⏭ Пропускаємо симуляцію — не SPREAD режим</i>")
+            lines.append("")
+            continue
+
+        if not alerts:
+            lines.append("  <i>ℹ️ Поточних алертів у state немає</i>")
+            lines.append("")
+            continue
+
+        failed_reasons: dict[str, int] = {}
+        passed = 0
+
+        for alert in alerts:
+            entry  = float(getattr(alert, "deal_amount_uah", 0))
+            spread = float(getattr(alert, "spread_pct", 0))
+            ob     = set(getattr(alert, "buy_banks_fit", None) or [])
+            os_    = set(getattr(alert, "sell_banks_fit", None) or [])
+            bo     = getattr(alert, "buy_order", None)
+            so     = getattr(alert, "sell_order", None)
+
+            if entry > capital:
+                failed_reasons["entry > capital"] = failed_reasons.get("entry > capital", 0) + 1
+                continue
+            if minamount > 0 and entry < minamount:
+                failed_reasons["entry < min_amount"] = failed_reasons.get("entry < min_amount", 0) + 1
+                continue
+            if spread < minspread:
+                failed_reasons[f"spread {spread:.2f}% < min {minspread:.2f}%"] = failed_reasons.get(f"spread {spread:.2f}% < min {minspread:.2f}%", 0) + 1
+                continue
+            if not (ob & buy_banks):
+                failed_reasons["buy banks no match"] = failed_reasons.get("buy banks no match", 0) + 1
+                continue
+            if not (os_ & sell_banks):
+                failed_reasons["sell banks no match"] = failed_reasons.get("sell banks no match", 0) + 1
+                continue
+            if not bo or not so:
+                failed_reasons["missing orders obj"] = failed_reasons.get("missing orders obj", 0) + 1
+                continue
+
+            # merchant filters
+            mf_fail = False
+            for side_label, order_obj in [("buy", bo), ("sell", so)]:
+                ex_name   = getattr(order_obj, "exchange", "")
+                ex_filt   = emf.get(ex_name, {})
+                min_ord   = float(ex_filt.get("min_orders", 0) or mf.get("min_orders", 0) or DEF_ORDERS.get(ex_name, 0))
+                min_rate  = float(ex_filt.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or DEF_RATE.get(ex_name, 0.0))
+                if min_ord > 0 and getattr(order_obj, "month_order_count", 0) < min_ord:
+                    r = f"{side_label} merchant orders < {min_ord:.0f}"
+                    failed_reasons[r] = failed_reasons.get(r, 0) + 1
+                    mf_fail = True; break
+                if min_rate > 0 and getattr(order_obj, "finish_rate_pct", 0.0) < min_rate:
+                    r = f"{side_label} merchant rate < {min_rate:.1f}%"
+                    failed_reasons[r] = failed_reasons.get(r, 0) + 1
+                    mf_fail = True; break
+            if mf_fail:
+                continue
+
+            passed += 1
+
+        total = len(alerts)
+        if passed > 0:
+            lines.append(f"  ✅ Пройшли фільтр: <b>{passed}/{total}</b> алертів")
+        else:
+            lines.append(f"  ❌ Жоден алерт не пройшов ({total} перевірено)")
+            for reason, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1]):
+                lines.append(f"    └ <code>{reason}</code> × {cnt}")
+
+            # ── Детальний дамп першого алерту ──
+            a0 = alerts[0]
+            e0 = float(getattr(a0, "deal_amount_uah", 0))
+            s0 = float(getattr(a0, "spread_pct", 0))
+            ob0 = set(getattr(a0, "buy_banks_fit", None) or [])
+            os0 = set(getattr(a0, "sell_banks_fit", None) or [])
+            lines.append(f"\n  📋 <i>Перший алерт:</i>")
+            lines.append(f"    deal_amount_uah = <b>{e0:.0f} ₴</b>  (capital = {capital:.0f} ₴)")
+            lines.append(f"    spread_pct = <b>{s0:.2f}%</b>  (min = {minspread:.2f}%)")
+            lines.append(f"    buy_banks_fit  = <code>{ob0 or 'ПОРОЖНЬО'}</code>")
+            lines.append(f"    sell_banks_fit = <code>{os0 or 'ПОРОЖНЬО'}</code>")
+            lines.append(f"    user buy_banks  = <code>{buy_banks or 'ПОРОЖНЬО'}</code>")
+            lines.append(f"    user sell_banks = <code>{sell_banks or 'ПОРОЖНЬО'}</code>")
+
+        lines.append("")
+
+    text = "\n".join(lines)
+    # Telegram обмеження — ріжемо якщо > 4096
+    for chunk in [text[i:i+4096] for i in range(0, len(text), 4096)]:
+        await message.answer(chunk, parse_mode="HTML")
 # ── /keys ──────────────────────────────────────────────────────────────────
 @router.message(Command("keys"))
 async def cmd_keys(message: Message) -> None:
@@ -617,7 +862,8 @@ async def on_connect_exchange(call: CallbackQuery, state: FSMContext) -> None:
 @router.message(ConnectStates.waiting_api_key)
 async def on_api_key(message: Message, state: FSMContext) -> None:
     api_key = message.text.strip()
-    with suppress(Exception): await message.delete()
+    with suppress(Exception):
+        await message.delete()
     if len(api_key) < 10:
         return await message.answer("❌ API Key занадто короткий. Спробуй ще раз:")
     data = await state.get_data()
@@ -717,9 +963,9 @@ async def _generate_balance_text(user_id: int) -> str:
             found_any = True
             lines.append(f"\n🏦 <b>{exchange}</b>:")
             for b in balances:
-                coin   = b.get("coin", "?")
-                free   = float(b.get("free", 0))
-                total  = float(b.get("total", free))
+                coin = b.get("coin", "?")
+                free = float(b.get("free", 0))
+                total = float(b.get("total", free))
                 locked = total - free
                 if locked > 0:
                     lines.append(f"  {coin}: <code>{free:.2f}</code> (заблок: <code>{locked:.2f}</code>)")
@@ -743,7 +989,8 @@ async def cmd_balance(message: Message) -> None:
 # ── /settings (ГЛОБАЛЬНІ НАЛАШТУВАННЯ З ВАЛІДАЦІЄЮ) ────────────────────────
 def _generate_settings_text() -> str:
     lines = ["⚙️ <b>Системні налаштування</b>\n"]
-    lines.append("<i>Впливають на поведінку всього сканера. Особисті фільтри (капітал/спред/банки) — в головному меню.</i>\n")
+    lines.append(
+        "<i>Впливають на поведінку всього сканера. Особисті фільтри (капітал/спред/банки) — в головному меню.</i>\n")
     for key, desc in SETTING_DESCRIPTIONS.items():
         val = runtime_config.get(key, getattr(settings, key, "—"))
         lines.append(f"▫️ <b>{desc}</b>\n  └ <code>{key}</code>: <b>{val}</b>\n")
@@ -783,16 +1030,16 @@ async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(setting_key=key)
     await state.set_state(GlobalSettingStates.waiting_value)
 
-    val  = runtime_config.get(key, getattr(settings, key, "—"))
+    val = runtime_config.get(key, getattr(settings, key, "—"))
     desc = SETTING_DESCRIPTIONS.get(key, key)
 
     _HINTS = {
         "velocity_spike_per_hour": "<i>Число з крапкою (напр. 20.0)</i>",
-        "review_ttl_hours":        "<i>Число з крапкою (напр. 24.0)</i>",
-        "behavior_alert_score":    "<i>Ціле число (напр. 60)</i>",
-        "sticky_min_chain":        "<i>Ціле число (напр. 3)</i>",
-        "max_alerts_per_cycle":    "<i>Ціле число (напр. 5)</i>",
-        "risk_mode":               "<i>STRICT, WARNING або RELAXED</i>",
+        "review_ttl_hours": "<i>Число з крапкою (напр. 24.0)</i>",
+        "behavior_alert_score": "<i>Ціле число (напр. 60)</i>",
+        "sticky_min_chain": "<i>Ціле число (напр. 3)</i>",
+        "max_alerts_per_cycle": "<i>Ціле число (напр. 5)</i>",
+        "risk_mode": "<i>STRICT, WARNING або RELAXED</i>",
     }
     hint = _HINTS.get(key, "<i>Введи нове значення</i>")
     text = f"✏️ <b>{desc}</b>\n<code>{key}</code>\n\nПоточне: <b>{val}</b>\n\n{hint}"
@@ -948,7 +1195,8 @@ async def on_main_menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+        await call.message.edit_text(text,
+                                     reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     await call.answer()
 
 
@@ -961,7 +1209,8 @@ async def on_scanner_toggle(call: CallbackQuery) -> None:
     await runtime_config.set("is_scanner_active", new_state)
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+        await call.message.edit_text(text,
+                                     reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     action = "ЗАПУЩЕНО! Парсинг почався" if is_active else "ЗУПИНЕНО! Парсинг на паузі"
     await call.answer(f"✅ Сканер {action}!", show_alert=True)
 
@@ -1023,17 +1272,17 @@ async def _build_status_text(user_id: int) -> str:
             ex_lines.append(f"  ⚪ {name}: {cb_state_val}")
 
     text = (
-        "📊 <b>Стан системи</b>\n\n"
-        f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
-        f"🔄 Циклів: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
-        f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
-        f"{mute_line}\n\n"
-        f"💼 Капітал: <code>{_my_capital} ₴</code>\n"
-        f"📉 Спред: <code>{_my_spread}%</code>"
-        f"{min_amount_line}\n"
-        f"🛡 Ризик: <code>{risk}</code>\n\n"
-        "🔌 <b>API:</b>\n" + "\n".join(connected) + "\n\n"
-        "⚡ <b>Біржі:</b>\n" + "\n".join(ex_lines)
+            "📊 <b>Стан системи</b>\n\n"
+            f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
+            f"🔄 Циклів: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
+            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
+            f"{mute_line}\n\n"
+            f"💼 Капітал: <code>{_my_capital} ₴</code>\n"
+            f"📉 Спред: <code>{_my_spread}%</code>"
+            f"{min_amount_line}\n"
+            f"🛡 Ризик: <code>{risk}</code>\n\n"
+            "🔌 <b>API:</b>\n" + "\n".join(connected) + "\n\n"
+                                                       "⚡ <b>Біржі:</b>\n" + "\n".join(ex_lines)
     )
     return text
 
@@ -1265,7 +1514,8 @@ async def on_exchange_ignore(call: CallbackQuery) -> None:
     """Ігноруємо проблему — залишаємо як є."""
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+        await call.message.edit_text(text,
+                                     reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     await call.answer("👌 OK, залишаємо як є")
 
 
@@ -1283,7 +1533,8 @@ async def on_user_alerts_off(call: CallbackQuery) -> None:
         await conn.commit()
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+        await call.message.edit_text(text,
+                                     reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     await call.answer("🔕 Мої алерти вимкнено", show_alert=True)
 
 
@@ -1299,7 +1550,8 @@ async def on_user_alerts_on(call: CallbackQuery) -> None:
         await conn.commit()
     text, is_active = await _generate_dashboard_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
+        await call.message.edit_text(text,
+                                     reply_markup=main_menu_kb(is_active, is_muted(), _is_admin(call.from_user.id)))
     await call.answer("🔔 Мої алерти увімкнено!", show_alert=True)
 
 
@@ -1314,7 +1566,8 @@ async def on_settings_menu(call: CallbackQuery) -> None:
                 break
     text = "⚙️ <b>Налаштування персональних фільтрів</b>\n\nТут ти можеш змінити свої особисті обмеження. Бот надішле тобі угоду ТІЛЬКИ якщо вона проходить під ці фільтри."
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=settings_menu_kb(scanner_mode))
+        await call.message.edit_text(text,
+                                     reply_markup=settings_menu_kb(scanner_mode, is_admin=_is_admin(call.from_user.id)))
     await call.answer()
 
 
@@ -1368,7 +1621,7 @@ async def on_stats_callback(call: CallbackQuery):
         return
 
     parts = call.data.split(":")
-    action = parts[1]   # main | menu | daily | exchanges | heatmap | routes
+    action = parts[1]  # main | menu | daily | exchanges | heatmap | routes
     source = parts[2] if len(parts) > 2 else "my"  # my | scanner
 
     from core.analytics.stats_engine import StatsEngine
@@ -1706,9 +1959,9 @@ async def cmd_ban(message: Message) -> None:
             "❌ Формат: <code>/ban [exchange] [merchant_id] [причина]</code>\n"
             "Приклад: <code>/ban Binance s42ee507f2dc скам</code>"
         )
-    exchange    = parts[1].strip()
+    exchange = parts[1].strip()
     merchant_id = parts[2].strip()
-    reason      = parts[3].strip() if len(parts) > 3 else "Ручний бан"
+    reason = parts[3].strip() if len(parts) > 3 else "Ручний бан"
 
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
@@ -1751,18 +2004,18 @@ async def on_mute(call: CallbackQuery) -> None:
 
 _DISPLAY_LABELS = {
     "show_ai_terms_summary": "🔘 Вижимка умов (AI)",
-    "show_full_terms":       "🔘 Повні умови (спойлер)",
-    "show_ai_logic":         "🔘 Логіка AI (спойлер)",
-    "show_bank_details":     "🔘 Деталі банків (спойлер)",
-    "show_llm_summary":      "🔘 Вердикт AI в алерті",
+    "show_full_terms": "🔘 Повні умови (спойлер)",
+    "show_ai_logic": "🔘 Логіка AI (спойлер)",
+    "show_bank_details": "🔘 Деталі банків (спойлер)",
+    "show_llm_summary": "🔘 Вердикт AI в алерті",
 }
 
 _DISPLAY_DESCRIPTIONS = {
     "show_ai_terms_summary": "ШІ генерує коротку вижимку умов мерчанта (ключові вимоги, нюанси). Показується прямо в тілі повідомлення.",
-    "show_full_terms":       "Сирий текст умов мерчанта ховається під спойлер. Завжди можна розгорнути і прочитати оригінал.",
-    "show_ai_logic":         "Думки нейромережі (reason) ховаються під розгортання. Якщо вимкнено — лише бейдж (✅/⚡/🚫).",
-    "show_bank_details":     "Деталі банків, фільтрів та варіантів зв'язки показуються у спойлері.",
-    "show_llm_summary":      "Повний блок вердикту AI (рекомендація + причина) показується в алерті.",
+    "show_full_terms": "Сирий текст умов мерчанта ховається під спойлер. Завжди можна розгорнути і прочитати оригінал.",
+    "show_ai_logic": "Думки нейромережі (reason) ховаються під розгортання. Якщо вимкнено — лише бейдж (✅/⚡/🚫).",
+    "show_bank_details": "Деталі банків, фільтрів та варіантів зв'язки показуються у спойлері.",
+    "show_llm_summary": "Повний блок вердикту AI (рекомендація + причина) показується в алерті.",
 }
 
 
@@ -1796,8 +2049,8 @@ async def on_display_toggle(call: CallbackQuery) -> None:
 
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        f"SELECT COALESCE({key}, 1) FROM scanner_users WHERE user_id=?",
-        (call.from_user.id,)
+            f"SELECT COALESCE({key}, 1) FROM scanner_users WHERE user_id=?",
+            (call.from_user.id,)
     ) as cur:
         row = await cur.fetchone()
     current = int(row[0]) if row else 1
@@ -1836,8 +2089,8 @@ async def _load_merchant_filters(user_id: int) -> tuple[dict, dict]:
     import json
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        "SELECT merchant_filters_json, COALESCE(exchange_merchant_filters_json, '{}') as emf FROM scanner_users WHERE user_id=?",
-        (user_id,)
+            "SELECT merchant_filters_json, COALESCE(exchange_merchant_filters_json, '{}') as emf FROM scanner_users WHERE user_id=?",
+            (user_id,)
     ) as cur:
         row = await cur.fetchone()
     if not row:
@@ -2069,7 +2322,7 @@ async def on_mf_ex_reset(call: CallbackQuery) -> None:
     import json
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (call.from_user.id,)
+            "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (call.from_user.id,)
     ) as cur:
         row = await cur.fetchone()
     emf = json.loads((row[0] if row else None) or "{}")
@@ -2091,7 +2344,7 @@ async def _save_merchant_filter(user_id: int, key: str, value) -> None:
     import json
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
+            "SELECT merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
     ) as cur:
         row = await cur.fetchone()
     mf = json.loads((row[0] if row else None) or "{}")
@@ -2113,7 +2366,7 @@ async def _save_exchange_merchant_filter(user_id: int, exchange: str, key: str, 
     import json
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     async with conn.execute(
-        "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
+            "SELECT exchange_merchant_filters_json FROM scanner_users WHERE user_id=?", (user_id,)
     ) as cur:
         row = await cur.fetchone()
     emf = json.loads((row[0] if row else None) or "{}")
@@ -2161,84 +2414,480 @@ async def on_scanner_mode_menu(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("smode:"))
-async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
-    """Зберігає обраний режим. Cleanup при виході з MAKER, промпт buy_price для MAKER_SELL."""
-    mode = call.data.split(":")[1]
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🔧 TAKER FSM — Helper Functions
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    # ── Дізнаємось попередній режим для cleanup ──
-    old_mode = "SPREAD"
-    if _db:
-        users = await _db.get_active_users()
-        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
-        if user:
-            old_mode = user.get("scanner_mode", "SPREAD")
+async def _set_scanner_mode_db(user_id: int, mode: str) -> None:
+    """Атомарно записує режим і вмикає сканер. Викликати ТІЛЬКИ після підтвердження."""
+    if not _db:
+        return
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    await conn.execute(
+        "UPDATE scanner_users SET scanner_mode = ?, is_alerts_active = 1 WHERE user_id = ?",
+        (mode, user_id),
+    )
+    await conn.commit()
+    logger.info("✅ Mode set → user=%s mode=%s", user_id, mode)
 
-    # ── Зберігаємо новий режим ──
-    if _db:
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute(
-            "UPDATE scanner_users SET scanner_mode = ? WHERE user_id = ?",
-            (mode, call.from_user.id),
+
+async def _save_taker_sell_db(user_id: int, d: dict, roi: dict) -> None:
+    if not _db:
+        return
+    conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
+    strategy = d.get("price_strategy", "roi")
+    # min_sell_price — або ROI-розрахунок, або ручний ввід
+    min_price = roi["min_sell_price"] if strategy == "roi" else d.get("price_input", 0.0)
+    price_to  = d.get("price_to", 0.0)  # для range
+
+    await conn.execute(
+        """UPDATE scanner_users SET
+               scanner_mode              = 'TAKER_SELL',
+               is_alerts_active          = 1,
+               taker_sell_amount         = ?,
+               taker_sell_price          = ?,
+               taker_sell_exchange       = ?,
+               taker_sell_profit         = ?,
+               taker_sell_min_price      = ?,
+               taker_sell_price_strategy = ?,
+               taker_sell_price_to       = ?,
+               taker_sell_speed          = ?
+           WHERE user_id = ?""",
+        (
+            d["amount"],
+            d.get("buy_price", 0.0),
+            d.get("exchange", ""),
+            d.get("profit", 0.0) / 100.0,
+            min_price,
+            strategy,
+            price_to,
+            d.get("speed", "ANY"),
+            user_id,
+        ),
+    )
+    await conn.commit()
+
+
+async def _save_taker_buy_db(user_id: int, d: dict) -> None:
+    if not _db:
+        return
+    conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
+    banks_csv = ",".join(str(c) for c in d.get("banks", []))
+    await conn.execute(
+        """UPDATE scanner_users SET
+               scanner_mode              = 'TAKER_BUY',
+               is_alerts_active          = 1,
+               taker_buy_amount          = ?,
+               taker_buy_price_strategy  = ?,
+               taker_buy_price_from      = ?,
+               taker_buy_max_price       = ?,
+               taker_buy_limit_min       = ?,
+               taker_buy_limit_max       = ?,
+               taker_buy_speed           = ?,
+               buy_bank_codes            = ?
+            
+            
+           WHERE user_id = ?""",
+        (
+            d["amount"],
+            d.get("price_strategy", "any"),
+            d.get("price_from", 0.0),
+            d.get("price_to", 0.0),       # max_price або exact/range-max
+            d.get("limit_min", 0.0),
+            d.get("limit_max", 0.0),
+            d.get("speed", "ANY"),
+            banks_csv,
+            user_id,
+        ),
+    )
+    await conn.commit()
+
+
+def _tbuy_price_strategy_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Будь-яка ціна",         callback_data="tbuy_ps:any")],
+        [InlineKeyboardButton(text="⬇️ Не дорожче ніж...",      callback_data="tbuy_ps:max")],
+        [InlineKeyboardButton(text="↔️ Ціновий діапазон",       callback_data="tbuy_ps:range")],
+        [InlineKeyboardButton(text="🎯 Точно по ціні (Снайпер)", callback_data="tbuy_ps:exact")],
+    ])
+
+def _tsell_price_strategy_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧮 ROI Калькулятор",         callback_data="tsell_ps:roi")],
+        [InlineKeyboardButton(text="⬆️ Не дешевше ніж...",       callback_data="tsell_ps:min")],
+        [InlineKeyboardButton(text="↔️ Ціновий діапазон",        callback_data="tsell_ps:range")],
+        [InlineKeyboardButton(text="🎯 Точно по ціні (Снайпер)", callback_data="tsell_ps:exact")],
+    ])
+
+def _calc_roi(amount: float, buy_price: float, profit_pct: float, network_fee: float) -> dict:
+    """ROI Калькулятор для Taker Sell."""
+    invest_uah = amount * buy_price
+    target_fiat = invest_uah * (1.0 + profit_pct / 100.0)
+    usable_volume = max(amount - network_fee, 0.001)
+    min_sell_price = target_fiat / usable_volume
+    net_profit_uah = target_fiat - invest_uah
+    return {
+        "invest_uah": round(invest_uah, 2),
+        "target_fiat": round(target_fiat, 2),
+        "network_fee": network_fee,
+        "usable_volume": round(usable_volume, 4),
+        "min_sell_price": round(min_sell_price, 4),
+        "net_profit_uah": round(net_profit_uah, 2),
+    }
+
+
+def _get_network_fee(exchange: str) -> tuple[float, str]:
+    """Повертає (fee_usdt, network_name) для найдешевшої мережі біржі."""
+    if exchange == "INTERNAL":
+        return 0.0, "внутрішній переказ"
+    try:
+        from core.engine.network_fee_engine import EXCHANGE_NETS, NETWORK_FEES
+        nets = EXCHANGE_NETS.get(exchange, ["TRC20"])
+        best = min(nets, key=lambda n: NETWORK_FEES.get(n, 999.0))
+        return NETWORK_FEES.get(best, 1.0), best
+    except Exception as e:
+        logger.warning("NetworkFee fallback: %s", e)
+        return 1.0, "TRC20 (fallback)"
+
+
+def _get_taker_sell_preset(user_row: dict | None) -> dict | None:
+    if not user_row:
+        return None
+    amount = float(user_row.get("taker_sell_amount", 0))
+    price = float(user_row.get("taker_sell_price", 0))
+    profit = float(user_row.get("taker_sell_profit", 0))
+    if amount > 0 and price > 0 and profit > 0:
+        return {
+            "amount": amount,
+            "buy_price": price,
+            "profit": round(profit * 100, 2),
+            "exchange": user_row.get("taker_sell_exchange", "—"),
+            "min_sell_price": float(user_row.get("taker_sell_min_price", 0)),
+            "speed": user_row.get("taker_sell_speed", "ANY"),
+            "price_strategy": user_row.get("taker_sell_price_strategy", "roi"),
+        }
+    return None
+
+
+def _get_taker_buy_preset(user_row: dict | None) -> dict | None:
+    if not user_row:
+        return None
+    amount = float(user_row.get("taker_buy_amount", 0))
+    if amount > 0:
+        return {
+            "amount":         amount,
+            "max_price":      float(user_row.get("taker_buy_max_price", 0)),
+            "limit_min":      float(user_row.get("taker_buy_limit_min", 0)),
+            "limit_max":      float(user_row.get("taker_buy_limit_max", 0)),
+            "speed":          user_row.get("taker_buy_speed", "ANY"),
+            "price_strategy": user_row.get("taker_buy_price_strategy", "any"),  # ← додати
+            "price_from":     float(user_row.get("taker_buy_price_from", 0)),   # ← додати
+        }
+    return None
+
+
+def _taker_preset_kb(mode: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🚀 Швидкий старт", callback_data=f"taker_qs:{mode}"),
+        InlineKeyboardButton(text="⚙️ Налаштувати вручну", callback_data=f"taker_manual:{mode}"),
+    ]])
+
+
+def _sell_final_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Запустити", callback_data="tsell:launch")],
+        [InlineKeyboardButton(text="💾 Зберегти пресет і Запустити", callback_data="tsell:save_and_launch")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="menu:main")],
+    ])
+
+
+def _buy_final_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚀 Запустити", callback_data="tbuy:launch")],
+        [InlineKeyboardButton(text="💾 Зберегти пресет і Запустити", callback_data="tbuy:save_and_launch")],
+        [InlineKeyboardButton(text="❌ Скасувати", callback_data="menu:main")],
+    ])
+
+
+def _tbuy_banks_kb(selected: list) -> InlineKeyboardMarkup:
+    selected_set = set(str(s) for s in selected)
+    buttons, row = [], []
+    for code, name in BANK_NAMES.items():
+        icon = "✅" if str(code) in selected_set else "☐"
+        row.append(InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"tbuy_bank:{code}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="✅ Підтвердити вибір", callback_data="tbuy_bank:done")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _sell_preset_text(p: dict) -> str:
+    strategy_labels = {
+        "roi":   "🧮 ROI авто",
+        "min":   "⬆️ Мінімальна",
+        "range": "↔️ Діапазон",
+        "exact": "🎯 Точна",
+    }
+    strategy = p.get("price_strategy", "roi")
+    strat_line = f"  • Стратегія: <b>{strategy_labels.get(strategy, strategy)}</b>\n"
+
+    mp_line = f"  • Мін. ціна: <b>{p['min_sell_price']:.4f} ₴</b>\n" if p.get("min_sell_price", 0) > 0 else ""
+    speed = "⚡ FAST" if p.get("speed") == "FAST" else "🐢 ANY"
+    return (
+        f"💾 <b>TAKER SELL — збережені налаштування</b>\n\n"
+        f"  • Об'єм: <b>{p['amount']:.1f} USDT</b>\n"
+        f"  • Купівля: <b>{p['buy_price']:.4f} ₴</b>\n"
+        f"  • Біржа: <b>{p['exchange']}</b>\n"
+        f"  • Прибуток: <b>{p['profit']:.2f}%</b>\n"
+        f"{strat_line}{mp_line}"
+        f"  • Швидкість: {speed}\n\n"
+        f"Що робимо?"
+    )
+
+def _buy_preset_text(p: dict) -> str:
+    strategy_labels = {
+        "any":   "🔓 Будь-яка",
+        "max":   "⬇️ Макс. ціна",
+        "range": "↔️ Діапазон",
+        "exact": "🎯 Точна",
+    }
+    strategy = p.get("price_strategy", "any")
+    strat_line = f"  • Стратегія: <b>{strategy_labels.get(strategy, strategy)}</b>\n"
+
+    # range — показуємо price_from теж
+    if strategy == "range" and p.get("price_from", 0) > 0:
+        strat_line += f"  • Від: <b>{p['price_from']:.4f} ₴</b>\n"
+
+    mp_line  = f"  • До: <b>{p['max_price']:.4f} ₴</b>\n" if p.get("max_price", 0) > 0 else ""
+    lim_line = (f"  • Ліміти: <b>{p['limit_min']:.0f}–{p['limit_max']:.0f} ₴</b>\n"
+                if p.get("limit_min", 0) > 0 or p.get("limit_max", 0) > 0 else "")
+    speed = "⚡ FAST" if p.get("speed") == "FAST" else "🐢 ANY"
+    return (
+        f"💾 <b>TAKER BUY — збережені налаштування</b>\n\n"
+        f"  • Об'єм: <b>{p['amount']:.1f} USDT</b>\n"
+        f"{strat_line}{mp_line}{lim_line}"
+        f"  • Швидкість: {speed}\n\n"
+        f"Що робимо?"
+    )
+
+
+def _sell_roi_text(d: dict, roi: dict) -> str:
+    speed_text = "⚡ Важлива (лише великі ордери)" if d.get("speed") == "FAST" else "🐢 Не важлива"
+    return (
+        "🧮 <b>ROI КАЛЬКУЛЯТОР | Результат:</b>\n\n"
+        f"📦 Продаю: <b>{d['amount']:.1f} USDT</b>\n"
+        f"💲 Ціна входу: <b>{d['buy_price']:.4f} ₴</b>\n"
+        f"📤 Біржа відправки: <b>{d.get('exchange', '—')}</b>\n"
+        f"🌐 Network Fee: <b>{roi['network_fee']:.2f} USDT</b> ({d.get('network_name', '')})\n"
+        f"⚡ Корисний об'єм: <b>{roi['usable_volume']:.2f} USDT</b>\n\n"
+        f"💸 Вкладено: <b>{roi['invest_uah']:.2f} ₴</b>\n"
+        f"🎯 Цільовий виторг: <b>{roi['target_fiat']:.2f} ₴</b>\n"
+        f"💰 Чистий профіт: <b>+{roi['net_profit_uah']:.2f} ₴</b>\n\n"
+        f"🔒 <b>Мін. ціна продажу: {roi['min_sell_price']:.4f} ₴</b>\n"
+        f"<i>Жорсткий фільтр — ордери нижче цієї ціни ігноруються</i>\n\n"
+        f"⏱ Швидкість: {speed_text}"
+    )
+
+
+def _buy_confirm_text(d: dict) -> str:
+    speed_text = "⚡ Важлива (ордер ≥ мій об'єм)" if d.get("speed") == "FAST" else "🐢 Не важлива"
+    bank_names = [BANK_NAMES.get(str(c), str(c)) for c in d.get("banks", [])]
+    banks_str = ", ".join(bank_names) if bank_names else "не обрано"
+    mp_line = f"\n├ 💰 Макс. ціна входу: <b>{d['max_price']:.2f} ₴</b>" if d.get("max_price", 0) > 0 else ""
+    lim_line = (
+        f"\n├ 📏 Ліміти ордерів: <b>{d.get('limit_min', 0):.0f}–{d.get('limit_max', 0):.0f} ₴</b>"
+        if d.get("limit_min", 0) > 0 or d.get("limit_max", 0) > 0 else ""
+    )
+    return (
+        "🛒 <b>TAKER BUY | Підтвердження:</b>\n\n"
+        f"├ 📦 Об'єм: <b>{d['amount']:.1f} USDT</b>"
+        f"{mp_line}{lim_line}"
+        f"\n├ 🏦 Банки: <b>{banks_str}</b>"
+        f"\n└ ⏱ Швидкість: {speed_text}\n\n"
+        "🚀 Запустити сканер?"
+    )
+
+
+async def _start_taker_sell_fsm(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(pending_mode="TAKER_SELL")
+    await state.set_state(TakerSellSettingsStates.waiting_amount)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "💸 <b>TAKER SELL — Крок 1/4</b>\n\n"
+            "📦 <b>Скільки USDT ти хочеш продати?</b>\n"
+            "<i>Наприклад: 500</i>",
+            reply_markup=back_to_main_kb(),
         )
-        await conn.commit()
 
-    # ── Cleanup: зупиняємо мейкер-сервіси якщо виходимо з MAKER режиму ──
-    if old_mode in ("MAKER_SELL", "MAKER_BUY") and mode not in ("MAKER_SELL", "MAKER_BUY"):
-        user_repricers = [k for k in _active_repricers if str(call.from_user.id) in str(k)]
-        for key in user_repricers:
-            task = _active_repricers.pop(key, None)
-            if task and not task.done():
-                task.cancel()
-                logger.info("🛑 AdRepricer зупинено: %s (mode switch)", key)
-        if _maker_monitor:
-            try:
-                _maker_monitor.stop_all()
-            except Exception:
-                pass
 
-    # ── Якщо MAKER_SELL — перевіряємо чи є ціна купівлі ──
-    if mode == "MAKER_SELL" and _db:
-        users = await _db.get_active_users()
-        user = next((u for u in users if u["user_id"] == call.from_user.id), None)
-        if user and float(user.get("maker_buy_price", 0)) <= 0:
-            await state.set_state(MakerSettingsStates.waiting_buy_price)
-            with suppress(TelegramBadRequest):
-                await call.message.edit_text(
-                    f"✅ Режим: <b>{mode}</b>\n\n"
-                    "💲 <b>За скільки ти купив USDT?</b>\n"
-                    "Введи ціну купівлі (UAH/USDT), щоб розрахувати мін. ціну продажу:",
-                    reply_markup=back_to_main_kb(),
-                )
-            return await call.answer()
+async def _start_taker_buy_fsm(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.update_data(pending_mode="TAKER_BUY")
+    await state.set_state(TakerBuySettingsStates.waiting_amount)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🛒 <b>TAKER BUY — Крок 1/5</b>\n\n"
+            "📦 <b>Скільки USDT ти хочеш купити?</b>\n"
+            "<i>Наприклад: 500</i>",
+            reply_markup=back_to_main_kb(),
+        )
 
-    # ── Якщо TAKER_SELL — запитуємо параметри розпродажу ──
-    if mode == "TAKER_SELL":
-        await state.set_state(TakerSellSettingsStates.waiting_amount)
-        with suppress(TelegramBadRequest):
-            await call.message.edit_text(
-                f"✅ Режим: <b>{mode}</b>\n\n"
-                "📦 <b>Скільки USDT ти хочеш розпродати?</b>\n"
-                "Введи об'єм крипти (наприклад: 500):",
-                reply_markup=back_to_main_kb(),
-            )
-        return await call.answer()
 
+async def _show_mode_success(call: CallbackQuery, mode: str) -> None:
     from bot.keyboards import scanner_mode_kb
-    mode_desc = {
-        "SPREAD": "🔄 Класичний пошук зв'язок",
+    desc = {
+        "SPREAD": "🔄 Класичний пошук зв'язок Купівля→Продаж",
         "TAKER_BUY": "🛒 Тейкер: пошук sell-ордерів для купівлі",
         "TAKER_SELL": "💸 Тейкер: пошук buy-ордерів для продажу",
         "MAKER_BUY": "📥 Мейкер: аналіз ринку + підказки ціни",
-        "MAKER_SELL": "📤 Мейкер: розрахунок ціни продажу",
+        "MAKER_SELL": "📤 Мейкер: розрахунок мін. ціни продажу",
     }
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"✅ Режим змінено на <b>{mode}</b>\n"
-            f"<i>{mode_desc.get(mode, '')}</i>",
+            f"✅ Режим змінено на <b>{mode}</b>\n<i>{desc.get(mode, '')}</i>",
             reply_markup=scanner_mode_kb(mode),
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 MODE ENTRY POINT — on_scanner_mode_set (REFACTORED)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("smode:"))
+async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
+    """
+    ✅ ФІКС Bug 1: НЕ пише режим у БД при вході!
+    Для TAKER_BUY / TAKER_SELL — перевіряє пресети, потім FSM.
+    Запис у БД відбувається ТІЛЬКИ після натискання 🚀 Запустити.
+    """
+    mode = call.data.split(":")[1]
+
+    old_mode = "SPREAD"
+    user_row = None
+    if _db:
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        if user_row:
+            old_mode = user_row.get("scanner_mode", "SPREAD")
+
+    # ── Cleanup: зупиняємо мейкер-сервіси при виході з MAKER ──
+    if old_mode in ("MAKER_SELL", "MAKER_BUY") and mode not in ("MAKER_SELL", "MAKER_BUY"):
+        for key in list(_active_repricers):
+            if str(call.from_user.id) in str(key):
+                task = _active_repricers.pop(key, None)
+                if task and not task.done():
+                    task.cancel()
+                    logger.info("🛑 AdRepricer зупинено (mode switch): %s", key)
+        if _maker_monitor:
+            with suppress(Exception):
+                _maker_monitor.stop_all()
+
+    # ── MAKER_SELL ──
+    if mode == "MAKER_SELL":
+        if user_row and float(user_row.get("maker_buy_price", 0)) <= 0:
+            await state.set_state(MakerSettingsStates.waiting_buy_price)
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(
+                    "📤 <b>MAKER SELL | Ціна входу</b>\n\n"
+                    "💲 За скільки ти купив USDT? (UAH/USDT)\n"
+                    "<i>Наприклад: 41.25</i>",
+                    reply_markup=back_to_main_kb(),
+                )
+            return await call.answer()
+        await _set_scanner_mode_db(call.from_user.id, mode)
+        await _show_mode_success(call, mode)
+        return
+
+    # ── TAKER_SELL — Smart Presets ──
+    if mode == "TAKER_SELL":
+        preset = _get_taker_sell_preset(user_row)
+        if preset:
+            await state.update_data(pending_mode="TAKER_SELL")
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(
+                    _sell_preset_text(preset),
+                    reply_markup=_taker_preset_kb("TAKER_SELL"),
+                )
+            return await call.answer()
+        await _start_taker_sell_fsm(call, state)
+        return await call.answer()
+
+    # ── TAKER_BUY — Smart Presets ──
+    if mode == "TAKER_BUY":
+        preset = _get_taker_buy_preset(user_row)
+        if preset:
+            await state.update_data(pending_mode="TAKER_BUY")
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(
+                    _buy_preset_text(preset),
+                    reply_markup=_taker_preset_kb("TAKER_BUY"),
+                )
+            return await call.answer()
+        await _start_taker_buy_fsm(call, state)
+        return await call.answer()
+
+    # ── SPREAD / MAKER_BUY / решта ──
+    await _set_scanner_mode_db(call.from_user.id, mode)
+    await _show_mode_success(call, mode)
     await call.answer(f"✅ {mode}")
+
+
+# ── Smart Presets: Швидкий старт / Вручну ──────────────────────────────────
+
+@router.callback_query(F.data.startswith("taker_qs:"))
+async def on_taker_quick_start(call: CallbackQuery, state: FSMContext) -> None:
+    """Швидкий старт — параметри вже в БД, просто активуємо режим."""
+    mode = call.data.split(":")[1]
+    await state.clear()
+    if not _db:
+        return await call.answer("❌ БД не підключена", show_alert=True)
+
+    users = await _db.get_active_users()
+    user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+    from bot.keyboards import scanner_mode_kb
+
+    if mode == "TAKER_SELL":
+        preset = _get_taker_sell_preset(user_row)
+        if not preset:
+            return await call.answer("❌ Пресет не знайдено", show_alert=True)
+        await _set_scanner_mode_db(call.from_user.id, "TAKER_SELL")
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🚀 <b>TAKER SELL запущено!</b>\n\n"
+                f"🔒 Мін. ціна продажу: <b>{preset.get('min_sell_price', 0):.4f} ₴</b>\n"
+                f"📦 Об'єм: <b>{preset['amount']:.1f} USDT</b>\n\n"
+                "<i>Алерти надходять як тільки з'являються ордери вище мін. ціни.</i>",
+                reply_markup=scanner_mode_kb("TAKER_SELL"),
+            )
+    elif mode == "TAKER_BUY":
+        preset = _get_taker_buy_preset(user_row)
+        if not preset:
+            return await call.answer("❌ Пресет не знайдено", show_alert=True)
+        await _set_scanner_mode_db(call.from_user.id, "TAKER_BUY")
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🚀 <b>TAKER BUY запущено!</b>\n\n"
+                f"📦 Шукаю ордери для купівлі <b>{preset['amount']:.1f} USDT</b>\n"
+                + (f"💰 Макс. ціна: <b>{preset['max_price']:.2f} ₴</b>\n" if preset.get("max_price", 0) > 0 else "")
+                + "\n<i>Алерти надходять одразу.</i>",
+                reply_markup=scanner_mode_kb("TAKER_BUY"),
+            )
+    await call.answer("🚀 Запущено!")
+
+
+@router.callback_query(F.data.startswith("taker_manual:"))
+async def on_taker_manual(call: CallbackQuery, state: FSMContext) -> None:
+    """Ручне налаштування — запускаємо FSM."""
+    mode = call.data.split(":")[1]
+    if mode == "TAKER_SELL":
+        await _start_taker_sell_fsm(call, state)
+    elif mode == "TAKER_BUY":
+        await _start_taker_buy_fsm(call, state)
+    await call.answer()
 
 
 # =========================================================================
@@ -2774,6 +3423,7 @@ async def on_ad_cancel(call: CallbackQuery, state: FSMContext) -> None:
 # =========================================================================
 
 from core.utils.cache import TTLCache as _TTLCache
+
 _taker_order_cache: _TTLCache = _TTLCache(ttl_seconds=300.0, max_size=500)
 
 
@@ -3178,106 +3828,429 @@ async def on_target_margin_input(message: Message, state: FSMContext) -> None:
 
 
 # =========================================================================
-# 🎯 TAKER SELL РЕЖИМ (Діалоги)
+# 💸 TAKER SELL FSM  (4 кроки → ROI → підтвердження)
 # =========================================================================
 
 @router.message(TakerSellSettingsStates.waiting_amount)
-async def on_taker_sell_amount(message: Message, state: FSMContext) -> None:
+async def on_tsell_amount(message: Message, state: FSMContext) -> None:
     try:
         val = float(message.text.strip().replace(",", "."))
-        if val <= 0: raise ValueError
+        if val <= 0:
+            raise ValueError
     except ValueError:
-        return await message.answer("❌ Будь ласка, введи додатнє число:")
-
-    if _db:
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute("UPDATE scanner_users SET taker_sell_amount = ? WHERE user_id = ?", (val, message.from_user.id))
-        await conn.commit()
-
+        return await message.answer("❌ Введи число > 0. Наприклад: <code>500</code>")
+    await state.update_data(amount=val)
     await state.set_state(TakerSellSettingsStates.waiting_buy_price)
     await message.answer(
-        "💲 <b>За якою ціною ти купував ці USDT?</b>\n"
-        "Введи курс закупівлі (напр: 41.25):",
+        f"📦 Об'єм: <b>{val:.1f} USDT</b>\n\n"
+        "💹 <b>TAKER SELL — крок 2/5</b>\n\n"
+        "💲 За скільки ти купував ці USDT?\n"
+        "<i>Введи курс купівлі в UAH/USDT (наприклад: 41.25)</i>",
         reply_markup=back_to_main_kb(),
     )
 
 
 @router.message(TakerSellSettingsStates.waiting_buy_price)
-async def on_taker_sell_price(message: Message, state: FSMContext) -> None:
+async def on_tsell_buy_price(message: Message, state: FSMContext) -> None:
     try:
         val = float(message.text.strip().replace(",", "."))
-        if val <= 0: raise ValueError
+        if val <= 0:
+            raise ValueError
     except ValueError:
-        return await message.answer("❌ Будь ласка, введи коректний курс:")
-
-    if _db:
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute("UPDATE scanner_users SET taker_sell_price = ? WHERE user_id = ?", (val, message.from_user.id))
-        await conn.commit()
-
-    await state.set_state(TakerSellSettingsStates.waiting_profit)
-    await message.answer(
-        "📈 <b>Який цільовий профіт бажаєш?</b>\n"
-        "Введи у відсотках від суми закупівлі (напр: 0.5):",
-        reply_markup=back_to_main_kb(),
-    )
-
-
-@router.message(TakerSellSettingsStates.waiting_profit)
-async def on_taker_sell_profit(message: Message, state: FSMContext) -> None:
-    try:
-        val = float(message.text.strip().replace(",", "."))
-        if val <= 0: raise ValueError
-    except ValueError:
-        return await message.answer("❌ Введи коректний відсоток:")
-    
-    # Конвертуємо у десятковий дріб (0.5% = 0.005)
-    margin = val / 100.0
-
-    if _db:
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute("UPDATE scanner_users SET taker_sell_profit = ? WHERE user_id = ?", (margin, message.from_user.id))
-        await conn.commit()
-
-    await state.set_state(TakerSellSettingsStates.waiting_speed)
-    
+        return await message.answer("❌ Наприклад: <code>41.25</code>")
+    await state.update_data(buy_price=val)
+    await state.set_state(TakerSellSettingsStates.waiting_exchange)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="⚡ Швидко (зважаємо на обсяг)", callback_data="tsell_speed:FAST"),
-            InlineKeyboardButton(text="🐢 Не важливо (просто найкр. ціна)", callback_data="tsell_speed:ANY")
-        ]
+            InlineKeyboardButton(text="Binance", callback_data="tsell_ex:Binance"),
+            InlineKeyboardButton(text="Bybit",   callback_data="tsell_ex:Bybit"),
+        ],
+        [
+            InlineKeyboardButton(text="OKX",     callback_data="tsell_ex:OKX"),
+            InlineKeyboardButton(text="MEXC",    callback_data="tsell_ex:MEXC"),
+        ],
+        [
+            InlineKeyboardButton(text="⚡ P2P (без комісії)", callback_data="tsell_ex:INTERNAL"),
+        ],
     ])
-    
     await message.answer(
-        "🚀 <b>Для тебе важлива швидкість розпродажу?</b>\n\n"
-        "⚡ <b>Швидко:</b> Бот аналізуватиме стакан: якщо на першому місці стоїть ордер на 10 USDT, ми його проігноруємо і встанемо за реальним об'ємом, щоб швидко продати.\n"
-        "🐢 <b>Не важливо:</b> Бот просто радитиме найвигіднішу ціну навіть якщо доведеться чекати.",
+        f"💲 Ціна купівлі: <b>{val:.4f} ₴</b>\n\n"
+        "🏦 <b>TAKER SELL — крок 3/5</b>\n\n"
+        "З якої біржі виводитимеш USDT?\n"
+        "<i>(потрібно для розрахунку Network Fee)</i>",
         reply_markup=kb,
     )
 
 
-@router.callback_query(TakerSellSettingsStates.waiting_speed, F.data.startswith("tsell_speed:"))
-async def on_taker_sell_speed(call: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(TakerSellSettingsStates.waiting_exchange, F.data.startswith("tsell_ex:"))
+async def on_tsell_exchange(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[1]
+    await state.update_data(exchange=exchange)
+    await call.answer()
+
+    data = await state.get_data()
+    amount    = float(data["amount"])
+    buy_price = float(data["buy_price"])
+
+    # Рахуємо breakeven прямо тут
+    network_fee, network_name = _get_network_fee(exchange)
+    usable_volume   = max(amount - network_fee, 0.001)
+    breakeven_price = (amount * buy_price) / usable_volume
+    breakeven_pct   = (breakeven_price / buy_price - 1) * 100
+
+    await state.update_data(network_fee=network_fee, network_name=network_name)
+    await state.set_state(TakerSellSettingsStates.waiting_profit)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"🏦 Біржа: <b>{exchange}</b>  |  Network Fee: <b>{network_fee:.2f} USDT</b> ({network_name})\n"
+            f"📦 Робочий об'єм: <b>{usable_volume:.2f} USDT</b>\n\n"
+            "📈 <b>TAKER SELL — крок 4/5</b>\n\n"
+            "Який прибуток (спред %) хочеш отримати?\n\n"
+            f"⚠️ <i>Щоб не вийти в мінус — потрібно мінімум "
+            f"<b>{breakeven_pct:.2f}%</b> спреду</i>\n\n"
+            "<i>Введи число, наприклад: <code>0.8</code></i>",
+            reply_markup=back_to_main_kb(),
+        )
+
+
+@router.message(TakerSellSettingsStates.waiting_profit)
+async def on_tsell_profit(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", ".").replace("%", ""))
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи число > 0. Наприклад: <code>0.8</code>")
+
+    data = await state.get_data()
+    network_fee = float(data.get("network_fee", 1.0))
+    roi = _calc_roi(data["amount"], data["buy_price"], val, network_fee)
+
+    await state.update_data(profit=val, roi=roi)
+    # Стан залишається waiting_profit → speed-кнопки підхоплюються нижче
+
+    speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⚡ Так, швидко!",    callback_data="tsell_speed:FAST"),
+        InlineKeyboardButton(text="🐢 Ні, чекатиму",   callback_data="tsell_speed:ANY"),
+    ]])
+    await message.answer(
+        f"{_sell_roi_text(data | {'profit': val, 'network_name': data.get('network_name','')}, roi)}\n\n"
+        "⏱ <b>Крок 5/5 — Час важливий?</b>\n\n"
+        "⚡ <b>Швидко</b> — беремо тільки ордери які можуть повністю покрити наш обʼєм\n"
+        "🐢 <b>Чекатиму</b> — беремо будь-які ордери, навіть якщо частковий обʼєм",
+        reply_markup=speed_kb,
+    )
+
+
+@router.callback_query(TakerSellSettingsStates.waiting_profit, F.data.startswith("tsell_speed:"))
+async def on_tsell_speed(call: CallbackQuery, state: FSMContext) -> None:
     speed = call.data.split(":")[1]
-    
-    if _db:
-        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-        await conn.execute("UPDATE scanner_users SET taker_sell_speed = ? WHERE user_id = ?", (speed, call.fromuser.id)) # Фікс помилки fromuser->from_user
-        await conn.commit()
-        
+    await state.update_data(speed=speed)
+    data = await state.get_data()
+    roi  = data.get("roi", {})
+    await call.answer()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            _sell_roi_text(data, roi),
+            reply_markup=_sell_final_kb(),
+        )
+
+
+@router.callback_query(F.data.in_({"tsell:launch", "tsell:save_and_launch"}))
+async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
+    """✅ ФІКС Bug 1: ТІЛЬКИ тут записуємо scanner_mode і параметри в БД."""
+    data = await state.get_data()
+    roi = data.get("roi")
+    if not roi or not data.get("amount"):
+        return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
+
+    await _save_taker_sell_db(call.from_user.id, data, roi)
     await state.clear()
-    
-    speed_text = "⚡ Швидко" if speed == "FAST" else "🐢 Не важливо"
-    
+
     from bot.keyboards import scanner_mode_kb
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"✅ <b>Налаштування TAKER_SELL збережено!</b>\n\n"
-            f"Швидкість: <b>{speed_text}</b>\n\n"
-            f"Увімкнено режим: <b>TAKER_SELL</b>",
-            reply_markup=scanner_mode_kb("TAKER_SELL")
+            "🚀 <b>TAKER SELL запущено!</b>\n\n"
+            f"🔒 Мін. ціна продажу: <b>{roi['min_sell_price']:.4f} ₴</b>\n"
+            f"📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n"
+            f"💰 Цільовий профіт: <b>+{roi['net_profit_uah']:.2f} ₴</b>\n\n"
+            "<i>Сканер шукає ордери — алерт прийде як тільки знайдеться підходящий.</i>",
+            reply_markup=scanner_mode_kb("TAKER_SELL"),
         )
+    await call.answer("🚀 Запущено!")
+# =========================================================================
+# 🛒 TAKER BUY FSM  (5 кроків + підтвердження)
+# =========================================================================
+
+@router.message(TakerBuySettingsStates.waiting_amount)
+async def on_tbuy_amount(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи коректну суму USDT. Наприклад: <code>500</code>")
+
+    await state.update_data(amount=val)
+    await state.set_state(TakerBuySettingsStates.waiting_price_strategy)
+    await message.answer(
+        f"📦 Обʼєм: <b>{val:.1f} USDT</b>\n\n"
+        f"💹 <b>TAKER BUY — крок 2/6</b>\n\n"
+        f"Обери <b>стратегію ціни</b> для цього закупу:",
+        reply_markup=_tbuy_price_strategy_kb(),
+    )
+
+
+async def _ask_tbuy_limits_msg(message: Message, state: FSMContext) -> None:
+    await state.set_state(TakerBuySettingsStates.waiting_limit_min)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⏭ Пропустити ліміти", callback_data="tbuy_skip:limits")
+    ]])
+    await message.answer(
+        "🛒 <b>TAKER BUY — Крок 3/5</b>\n\n"
+        "📏 <b>Мінімальний ліміт ордерів (UAH)?</b>\n"
+        "<i>Ордери з меншим лімітом ігноруються. Наприклад: 5000\nПропусти якщо не важливо.</i>",
+        reply_markup=kb,
+    )
+
+
+@router.message(TakerBuySettingsStates.waiting_limit_min)
+async def on_tbuy_limit_min(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи число (наприклад: 5000):")
+    await state.update_data(limit_min=val)
+    await state.set_state(TakerBuySettingsStates.waiting_limit_max)
+    await message.answer(
+        f"✅ Мін. ліміт: <b>{val:.0f} ₴</b>\n\n"
+        "🛒 <b>TAKER BUY — Крок 3b/5</b>\n\n"
+        "📏 <b>Максимальний ліміт ордерів (UAH)?</b>\n"
+        "<i>Ордери з більшим лімітом ігноруються. Наприклад: 50000</i>",
+        reply_markup=back_to_main_kb(),
+    )
+
+
+@router.message(TakerBuySettingsStates.waiting_limit_max)
+async def on_tbuy_limit_max(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи число:")
+    await state.update_data(limit_max=val)
+    await _show_tbuy_banks_msg(message.from_user.id, state, message.answer)
+
+
+@router.callback_query(
+    TakerBuySettingsStates.waiting_price_strategy,
+    F.data.startswith("tbuy_ps:")
+)
+async def on_tbuy_price_strategy(call: CallbackQuery, state: FSMContext) -> None:
+    strategy = call.data.split(":")[1]  # any | max | range | exact
+    await state.update_data(price_strategy=strategy)
+
+    if strategy == "any":
+        # Пропускаємо введення ціни → одразу до лімітів
+        await state.set_state(TakerBuySettingsStates.waiting_limit_min)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🌐 Ціновий фільтр вимкнено.\n\n"
+                "💰 <b>TAKER BUY — крок 4/6</b>\n\n"
+                "Мінімальний ліміт ордера (UAH)?\n"
+                "<i>0 — без обмеження</i>",
+                reply_markup=keyboards.back_to_main_kb(),
+            )
+    elif strategy == "max":
+        await state.set_state(TakerBuySettingsStates.waiting_price_to)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "⬇️ <b>Макс. ціна купівлі</b>\n\n"
+                "Введи максимальну ціну (UAH/USDT):\n"
+                "<i>Наприклад: 41.50</i>",
+                reply_markup=keyboards.back_to_main_kb(),
+            )
+    elif strategy == "range":
+        await state.set_state(TakerBuySettingsStates.waiting_price_from)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "↔️ <b>Ціновий діапазон — нижня межа</b>\n\n"
+                "Введи мінімальну ціну (UAH/USDT):\n"
+                "<i>Наприклад: 41.20</i>",
+                reply_markup=keyboards.back_to_main_kb(),
+            )
+    elif strategy == "exact":
+        await state.set_state(TakerBuySettingsStates.waiting_price_to)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🎯 <b>Точна ціна (Снайпер)</b>\n\n"
+                "Введи точну ціну (UAH/USDT):\n"
+                "<i>Бот реагуватиме лише на ордери з цією ціною ±0.005₴</i>",
+                reply_markup=keyboards.back_to_main_kb(),
+            )
     await call.answer()
+
+
+@router.message(TakerBuySettingsStates.waiting_price_from)
+async def on_tbuy_price_from(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи коректну ціну. Наприклад: <code>41.20</code>")
+
+    await state.update_data(price_from=val)
+    await state.set_state(TakerBuySettingsStates.waiting_price_to)
+    await message.answer(
+        f"↔️ Від: <b>{val:.4f} ₴</b>\n\n"
+        "Тепер введи <b>верхню межу</b> діапазону:",
+    )
+
+
+@router.message(TakerBuySettingsStates.waiting_price_to)
+async def on_tbuy_price_to(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0: raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введи коректну ціну. Наприклад: <code>41.50</code>")
+
+    data = await state.get_data()
+    strategy = data.get("price_strategy", "max")
+    price_from = data.get("price_from", 0.0)
+
+    if strategy == "range" and val < price_from:
+        return await message.answer(
+            f"❌ Верхня межа <b>{val:.4f}</b> менша за нижню <b>{price_from:.4f}</b>"
+        )
+
+    await state.update_data(price_to=val)
+    await state.set_state(TakerBuySettingsStates.waiting_limit_min)
+
+    labels = {"max": f"макс. {val:.4f} ₴", "exact": f"точно {val:.4f} ₴",
+              "range": f"{price_from:.4f}–{val:.4f} ₴"}
+    await message.answer(
+        f"✅ Ціна: <b>{labels.get(strategy, str(val))}</b>\n\n"
+        "💰 <b>TAKER BUY — крок 4/6</b>\n\n"
+        "Мінімальний ліміт ордера (UAH)?\n"
+        "<i>0 — без обмеження</i>",
+        reply_markup=keyboards.back_to_main_kb(),
+    )
+
+
+
+@router.callback_query(F.data == "tbuy_skip:limits")
+async def on_tbuy_skip_limits(call: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(limit_min=0.0, limit_max=0.0)
+    await call.answer()
+    await state.set_state(TakerBuySettingsStates.waiting_banks)
+    selected = await _get_user_buy_banks_db(call.from_user.id)
+    await state.update_data(selected_banks=selected)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🛒 <b>TAKER BUY — Крок 4/5</b>\n\n"
+            "🏦 <b>Обери банки для купівлі:</b>\n"
+            "<i>Позначені банки вже з твоїх глобальних налаштувань</i>",
+            reply_markup=_tbuy_banks_kb(selected),
+        )
+
+
+async def _show_tbuy_banks_msg(user_id: int, state: FSMContext, send_fn) -> None:
+    await state.set_state(TakerBuySettingsStates.waiting_banks)
+    selected = await _get_user_buy_banks_db(user_id)
+    await state.update_data(selected_banks=selected)
+    await send_fn(
+        "🛒 <b>TAKER BUY — Крок 4/5</b>\n\n"
+        "🏦 <b>Обери банки для купівлі:</b>\n"
+        "<i>Позначені банки вже з твоїх глобальних налаштувань</i>",
+        reply_markup=_tbuy_banks_kb(selected),
+    )
+
+
+async def _get_user_buy_banks_db(user_id: int) -> list:
+    if not _db:
+        return []
+    users = await _db.get_active_users()
+    user = next((u for u in users if u["user_id"] == user_id), None)
+    if user:
+        return list(user.get("buy_bank_codes") or user.get("bank_codes") or [])
+    return []
+
+
+@router.callback_query(TakerBuySettingsStates.waiting_banks, F.data.startswith("tbuy_bank:"))
+async def on_tbuy_bank_action(call: CallbackQuery, state: FSMContext) -> None:
+    code = call.data.split(":")[1]
+
+    if code == "done":
+        data = await state.get_data()
+        if not data.get("selected_banks"):
+            return await call.answer("⚠️ Обери хоча б один банк!", show_alert=True)
+        await state.set_state(TakerBuySettingsStates.waiting_speed)
+        await call.answer()
+        speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⚡ Важлива (ордер ≥ мій об'єм)", callback_data="tbuy_speed:FAST"),
+            InlineKeyboardButton(text="🐢 Не важлива (частинами теж ок)", callback_data="tbuy_speed:ANY"),
+        ]])
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🛒 <b>TAKER BUY — Крок 5/5</b>\n\n"
+                "⏱ <b>Чи важлива швидкість купівлі?</b>\n\n"
+                "⚡ <b>Важлива:</b> шукаємо ордери де ліміт ≥ твій об'єм (купиш одним ордером)\n"
+                "🐢 <b>Не важлива:</b> показуємо всі підходящі ордери, навіть якщо частинами",
+                reply_markup=speed_kb,
+            )
+        return
+
+    data = await state.get_data()
+    selected = list(data.get("selected_banks", []))
+    code_str = str(code)
+    if code_str in [str(s) for s in selected]:
+        selected = [s for s in selected if str(s) != code_str]
+    else:
+        selected.append(code_str)
+    await state.update_data(selected_banks=selected)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_reply_markup(reply_markup=_tbuy_banks_kb(selected))
+    await call.answer()
+
+
+@router.callback_query(TakerBuySettingsStates.waiting_speed, F.data.startswith("tbuy_speed:"))
+async def on_tbuy_speed(call: CallbackQuery, state: FSMContext) -> None:
+    speed = call.data.split(":")[1]
+    await state.update_data(speed=speed)
+    data = await state.get_data()
+    await call.answer()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            _buy_confirm_text(data),
+            reply_markup=_buy_final_kb(),
+        )
+
+
+@router.callback_query(F.data.in_({"tbuy:launch", "tbuy:save_and_launch"}))
+async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
+    """✅ ФІКС Bug 1: ТІЛЬКИ тут записуємо scanner_mode і параметри в БД."""
+    data = await state.get_data()
+    if not data.get("amount"):
+        return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
+
+    data["banks"] = [str(b) for b in data.get("selected_banks", [])]
+    await _save_taker_buy_db(call.from_user.id, data)
+    await state.clear()
+
+    from bot.keyboards import scanner_mode_kb
+    mp_line = f"💰 Макс. ціна: <b>{data['max_price']:.2f} ₴</b>\n" if data.get("max_price", 0) > 0 else ""
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "🚀 <b>TAKER BUY запущено!</b>\n\n"
+            f"📦 Шукаю ордери для купівлі <b>{data['amount']:.1f} USDT</b>\n"
+            + mp_line
+            + "\n<i>Алерти надходять одразу як з'являються підходящі ордери.</i>",
+            reply_markup=scanner_mode_kb("TAKER_BUY"),
+        )
+    await call.answer("🚀 Запущено!")
 
 
 # =========================================================================
@@ -3288,22 +4261,23 @@ async def on_taker_sell_speed(call: CallbackQuery, state: FSMContext) -> None:
 async def cmd_sniper(message: Message) -> None:
     if not _db:
         return await message.answer("❌ База даних недоступна.")
-        
+
     rules = await _db.get_sniper_rules(message.from_user.id)
     text = "🎯 <b>Снайпер-правила (Volume Sweeper)</b>\n\nБот повідомить зі звуком, якщо знайде об'ємну угоду з великим спредом, навіть в беззвучному режимі.\n\n"
-    
+
     if not rules:
         text += "<i>У тебе ще немає правил.</i>"
     else:
         for idx, r in enumerate(rules, start=1):
             text += f"{idx}. {r['exchange']} | {r['direction']} | Спред: >{r['min_spread']}% | Об'єм: >{r['min_volume']}$\n"
-            
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Додати правило", callback_data="sniper_add")],
         [InlineKeyboardButton(text="🗑 Очистити правила", callback_data="sniper_clear")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="system_status")]
     ])
     await message.answer(text, reply_markup=kb)
+
 
 @router.callback_query(F.data == "sniper_clear")
 async def on_sniper_clear(call: CallbackQuery) -> None:
@@ -3312,15 +4286,19 @@ async def on_sniper_clear(call: CallbackQuery) -> None:
     await call.message.edit_text("✅ Всі снайпер-правила видалено.")
     await call.answer()
 
+
 @router.callback_query(F.data == "sniper_add")
 async def on_sniper_add(call: CallbackQuery, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Binance", callback_data="sn_ex:Binance"), InlineKeyboardButton(text="Bybit", callback_data="sn_ex:Bybit")],
-        [InlineKeyboardButton(text="OKX", callback_data="sn_ex:OKX"), InlineKeyboardButton(text="MEXC", callback_data="sn_ex:MEXC")]
+        [InlineKeyboardButton(text="Binance", callback_data="sn_ex:Binance"),
+         InlineKeyboardButton(text="Bybit", callback_data="sn_ex:Bybit")],
+        [InlineKeyboardButton(text="OKX", callback_data="sn_ex:OKX"),
+         InlineKeyboardButton(text="MEXC", callback_data="sn_ex:MEXC")]
     ])
     await state.set_state(SniperStates.waiting_exchange)
     await call.message.edit_text("🎯 Обери біржу для снайпер-ордера:", reply_markup=kb)
     await call.answer()
+
 
 @router.callback_query(SniperStates.waiting_exchange, F.data.startswith("sn_ex:"))
 async def on_sniper_exchange(call: CallbackQuery, state: FSMContext) -> None:
@@ -3334,6 +4312,7 @@ async def on_sniper_exchange(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(f"Біржа {exchange}. Який твій напрямок?", reply_markup=kb)
     await call.answer()
 
+
 @router.callback_query(SniperStates.waiting_direction, F.data.startswith("sn_dir:"))
 async def on_sniper_dir(call: CallbackQuery, state: FSMContext) -> None:
     direction = call.data.split(":")[1]
@@ -3341,6 +4320,7 @@ async def on_sniper_dir(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SniperStates.waiting_min_spread)
     await call.message.edit_text("Від якого спреду подавати алерт? (напр. 1.5):")
     await call.answer()
+
 
 @router.message(SniperStates.waiting_min_spread)
 async def on_sniper_spread(message: Message, state: FSMContext) -> None:
@@ -3352,13 +4332,14 @@ async def on_sniper_spread(message: Message, state: FSMContext) -> None:
     await state.set_state(SniperStates.waiting_min_volume)
     await message.answer("Від якого об'єму? (в USDT/еквіваленті):")
 
+
 @router.message(SniperStates.waiting_min_volume)
 async def on_sniper_volume(message: Message, state: FSMContext) -> None:
     try:
         val = float(message.text.strip().replace(",", "."))
     except ValueError:
         return await message.answer("❌ Будь ласка, введи число:")
-        
+
     data = await state.get_data()
     rule = {
         "exchange": data.get("exchange"),
@@ -3366,12 +4347,12 @@ async def on_sniper_volume(message: Message, state: FSMContext) -> None:
         "min_spread": data.get("min_spread"),
         "min_volume": val
     }
-    
+
     if _db:
         rules = await _db.get_sniper_rules(message.from_user.id)
         rules.append(rule)
         await _db.update_sniper_rules(message.from_user.id, rules)
-        
+
     await state.clear()
     await message.answer("✅ Снайпер-правило додано! Переглянути: /sniper")
 
@@ -3384,11 +4365,11 @@ async def on_sniper_volume(message: Message, state: FSMContext) -> None:
 async def cmd_orders(message: Message) -> None:
     if not _db:
         return await message.answer("❌ БД не підключена.")
-    
+
     trades = await _db.get_user_active_trades(message.from_user.id)
     if not trades:
         return await message.answer("📭 У тебе немає активних P2P угод на даний момент.")
-        
+
     lines = ["📋 <b>Мої активні P2P угоди:</b>\n"]
     for idx, t in enumerate(trades, 1):
         strategy = t.get("session_strategy", "—")
@@ -3396,19 +4377,19 @@ async def cmd_orders(message: Message) -> None:
         role = t.get("leg", "—")
         status = t.get("status", "—")
         fiat = t.get("fiat_amount", 0.0)
-        
+
         status_text = status
         if status == "PENDING_PAYMENT":
             status_text = "⏳ Очікує твоєї оплати" if role == "BUY" else "⏳ Чекаємо оплату покупця"
         elif status == "WAITING_COUNTERPARTY" or status == "WAITING_BUYER":
             status_text = "👀 Чекаємо зустрічного мейкера/тейкера"
-            
+
         lines.append(
             f"{idx}. <b>{exchange} ({strategy})</b> | {role}\n"
             f"   💰 Сума: <code>{fiat:.2f} UAH</code>\n"
             f"   📊 Статус: <i>{status_text}</i>\n"
         )
-        
+
     await message.answer("\n".join(lines), reply_markup=back_to_main_kb())
 
 
@@ -3420,15 +4401,15 @@ async def cmd_orders(message: Message) -> None:
 async def cmd_features(message: Message) -> None:
     if not _db:
         return await message.answer("❌ БД не підключена.")
-        
+
     settings = await _db.get_user_display_settings(message.chat.id)
     state_flag = settings.get("is_hybrid_routes_enabled", False)
     status_str = "🟢 УВІМКНЕНО" if state_flag else "🔴 ВИМКНЕНО"
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
     ])
-    
+
     text = (
         "🛠 <b>Експериментальні функції</b>\n\n"
         "<b>Гібридні маршрути (T→M / M→T)</b>\n"
@@ -3438,12 +4419,13 @@ async def cmd_features(message: Message) -> None:
     )
     await message.answer(text, reply_markup=kb)
 
+
 @router.callback_query(F.data == "toggle_hybrid")
 async def on_toggle_hybrid(call: CallbackQuery) -> None:
     if not _db: return await call.answer("Помилка БД", show_alert=True)
     new_val = await _db.toggle_hybrid_routes(call.from_user.id)
     status_str = "🟢 УВІМКНЕНО" if new_val else "🔴 ВИМКНЕНО"
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
     ])
@@ -3460,6 +4442,7 @@ async def on_toggle_hybrid(call: CallbackQuery) -> None:
         await call.message.edit_text(text, reply_markup=kb)
     await call.answer(f"Гібриди {'включено' if new_val else 'вимкнено'}")
 
+
 # =========================================================================
 # 📢 КЕРУВАННЯ ОГОЛОШЕННЯМИ (ADS)
 # =========================================================================
@@ -3475,11 +4458,12 @@ async def cmd_ads(message: Message) -> None:
     for key, task in user_ads.items():
         ad_id = key.split("_")[1]
         text = f"📢 <b>Оголошення {ad_id}</b>\nСтатус: {'🛑 Зупинено' if task.done() else '🟢 Оновлюється'}"
-        
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Зупинити бота", callback_data=f"stop_ad:{key}")]
         ])
         await message.answer(text, reply_markup=kb)
+
 
 @router.callback_query(F.data.startswith("stop_ad:"))
 async def on_stop_ad(call: CallbackQuery) -> None:
@@ -3488,10 +4472,14 @@ async def on_stop_ad(call: CallbackQuery) -> None:
     if task:
         if not task.done():
             task.cancel()
-        await call.message.edit_text(call.message.html_text + "\n\n✅ <i>Репрайсер успішно зупинено. Оголошення залишається на біржі, але більше не оновлюється.</i>", reply_markup=None)
+        await call.message.edit_text(
+            call.message.html_text + "\n\n✅ <i>Репрайсер успішно зупинено. Оголошення залишається на біржі, але більше не оновлюється.</i>",
+            reply_markup=None)
     else:
         await call.answer("Завдання не знайдено або вже зупинено.", show_alert=True)
-        await call.message.edit_text(call.message.html_text + "\n\n❌ <i>Завдання вже було зупинено.</i>", reply_markup=None)
+        await call.message.edit_text(call.message.html_text + "\n\n❌ <i>Завдання вже було зупинено.</i>",
+                                     reply_markup=None)
+
 
 # =========================================================================
 # 🔄 ГІБРИДНІ МАРШРУТИ (T→M / M→T)
@@ -3501,7 +4489,7 @@ async def on_stop_ad(call: CallbackQuery) -> None:
 async def on_trade_tm(call: CallbackQuery, state: FSMContext) -> None:
     if not _trade_worker:
         return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
-        
+
     cache_key = call.data.split(":", 2)[2]
     spread_data = _spread_cache.get(cache_key)
     if not spread_data:
@@ -3519,7 +4507,7 @@ async def on_trade_tm(call: CallbackQuery, state: FSMContext) -> None:
     max_usdt = buy_leg["max_limit"] / buy_leg["price"] if buy_leg["price"] > 0 else 0
 
     await state.update_data(
-        tm_buy_leg=buy_leg, 
+        tm_buy_leg=buy_leg,
         tm_sell_exchange=alert.sell_exchange,
         tm_min_usdt=min_usdt, tm_max_usdt=max_usdt
     )
@@ -3534,6 +4522,7 @@ async def on_trade_tm(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.answer(text)
     await call.answer()
 
+
 @router.message(HybridTradeStates.waiting_tm_amount)
 async def process_tm_amount(message: Message, state: FSMContext) -> None:
     try:
@@ -3547,10 +4536,10 @@ async def process_tm_amount(message: Message, state: FSMContext) -> None:
 
     if amount_usdt < min_u or (max_u > 0 and amount_usdt > max_u):
         return await message.answer(f"❌ Сума не відповідає лімітам {min_u:.1f} - {max_u:.1f} USDT.")
-        
+
     await state.clear()
     await message.answer("⏳ Запускаю гібридний маршрут T→M...\nОчікуй сповіщення про створення угоди.")
-    
+
     import asyncio
     asyncio.create_task(_trade_worker.execute_tm_route(
         buy_leg=data["tm_buy_leg"],
@@ -3558,6 +4547,7 @@ async def process_tm_amount(message: Message, state: FSMContext) -> None:
         amount_usdt=amount_usdt,
         owner_user_id=message.from_user.id
     ))
+
 
 # =========================================================================
 # 📱 РУЧНЕ ПЕРЕХОПЛЕННЯ СЕСІЙ (Bookmarklet)
@@ -3567,15 +4557,11 @@ async def process_tm_amount(message: Message, state: FSMContext) -> None:
 async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
     exchange = call.data.split(":")[1]
     user_id = call.from_user.id
-    
+
     # Визначаємо хост. Поки бекенд без домену, використовуємо ngrok або локалку.
-    domain = "http://192.168.1.100:8000" # TODO: replace with config domain or env bot IP
-    try:
-        from core.utils.config import runtime_config
-        domain = runtime_config.get("api_domain", domain)
-    except:
-        pass
-    
+    domain = "http://192.168.1.100:8000"  # TODO: replace with config domain or env bot IP
+    domain = runtime_config.get("api_domain", domain)
+
     js_code = f"""javascript:(function(){{
     let c = document.cookie;
     fetch('{domain}/api/v1/session/receive', {{
@@ -3589,7 +4575,7 @@ async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
     }}).then(r => alert('Сесія {exchange} успішно передана боту!'))
       .catch(e => alert('Помилка: ' + e));
 }})();"""
-    
+
     # Видаляємо зайві пробіли (Bookmarklet має бути 1 рядком)
     js_code_inline = "".join(line.strip() for line in js_code.splitlines())
 
@@ -3603,9 +4589,10 @@ async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
         f"🖥 <i>Код скрипта (натисни щоб скопіювати):</i>\n\n"
         f"<code>{js_code_inline}</code>"
     )
-    
+
     await call.message.answer(text)
     await call.answer()
+
 
 @router.message(Command("intercept"))
 async def cmd_intercept(message: Message) -> None:
@@ -3616,13 +4603,14 @@ async def cmd_intercept(message: Message) -> None:
     ])
     await message.answer("📲 Вибери біржу для якої згенерувати скрипт-закладку (Bookmarklet):", reply_markup=kb)
 
+
 @router.callback_query(F.data == "boot_ignore_sessions")
 async def on_boot_ignore_sessions(call: CallbackQuery) -> None:
     # Запускаємо сканер навіть без сесій
     await runtime_config.set("is_scanner_active", "true")
     # Відключаємо перевірку при наступному рестарті до ручного вмикання
     await runtime_config.set("require_sessions", "false")
-    
+
     await call.message.edit_text(
         "🏃‍♂️ <b>Запуск без сесій</b>\n\n"
         "Сканер активовано! Збираємо мерчантів без глибокого аналізу репутації.\n"
@@ -3631,11 +4619,12 @@ async def on_boot_ignore_sessions(call: CallbackQuery) -> None:
     )
     await call.answer("Сканер запущено!")
 
+
 @router.callback_query(F.data.startswith("trade:mt:"))
 async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
     if not _trade_worker:
         return await call.answer("❌ TradeWorker не підключено!", show_alert=True)
-        
+
     cache_key = call.data.split(":", 2)[2]
     spread_data = _spread_cache.get(cache_key)
     if not spread_data:
@@ -3653,7 +4642,7 @@ async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
     max_usdt = sell_leg["max_limit"] / sell_leg["price"] if sell_leg["price"] > 0 else 0
 
     await state.update_data(
-        mt_sell_leg=sell_leg, 
+        mt_sell_leg=sell_leg,
         mt_buy_exchange=alert.buy_exchange,
         mt_buy_price=alert.buy_price,
         mt_min_usdt=min_usdt, mt_max_usdt=max_usdt
@@ -3669,6 +4658,7 @@ async def on_trade_mt(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.answer(text)
     await call.answer()
 
+
 @router.message(HybridTradeStates.waiting_mt_amount)
 async def process_mt_amount(message: Message, state: FSMContext) -> None:
     try:
@@ -3681,10 +4671,10 @@ async def process_mt_amount(message: Message, state: FSMContext) -> None:
 
     if max_u > 0 and amount_usdt > max_u:
         return await message.answer(f"❌ Ти не зможеш злити стільки крипти, Taker приймає максимум {max_u:.1f} USDT.")
-        
+
     await state.clear()
     await message.answer("⏳ Запускаю гібридний маршрут M→T...\nОголошення скоро з'явиться у стакані.")
-    
+
     import asyncio
     asyncio.create_task(_trade_worker.execute_mt_route(
         buy_exchange=data["mt_buy_exchange"],
@@ -3693,3 +4683,652 @@ async def process_mt_amount(message: Message, state: FSMContext) -> None:
         amount_usdt=amount_usdt,
         owner_user_id=message.from_user.id
     ))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CARD MANAGEMENT SYSTEM UI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("cards"))
+async def cmd_cards_dashboard(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    await _show_cards_dashboard(message.from_user.id, message)
+
+async def _show_cards_dashboard(user_id: int, message_or_call) -> None:
+    settings = await _db.get_user_card_settings(user_id)
+    if not settings:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("INSERT INTO user_card_settings (user_id) VALUES (?)", (user_id,))
+        await conn.commit()
+        settings = {"card_module_mode": "off"}
+        
+    cards = await _db.get_cards(user_id)
+    
+    text = (
+        "💳 <b>Управління картками</b>\n\n"
+        "Тут ви можете додати свої банківські картки або картки дропів для автоматичного спліту ордерів і контролю лімітів.\n\n"
+        f"У вас додано карток: <b>{len(cards)}</b>\n"
+    )
+    
+    kb = keyboards.cards_dashboard_kb(cards, settings.get("card_module_mode", "off"))
+    
+    if isinstance(message_or_call, Message):
+        await message_or_call.answer(text, reply_markup=kb)
+    else:
+        await message_or_call.message.edit_text(text, reply_markup=kb)
+        await message_or_call.answer()
+
+@router.callback_query(F.data == "card:dashboard")
+async def cb_cards_dashboard(call: CallbackQuery) -> None:
+    await _show_cards_dashboard(call.from_user.id, call)
+
+@router.callback_query(F.data == "card:toggle_module")
+async def cb_card_toggle_module(call: CallbackQuery) -> None:
+    if not _db:
+        return await call.answer("❌ БД не підключена.")
+    settings = await _db.get_user_card_settings(call.from_user.id)
+    new_mode = "full" if settings.get("card_module_mode") == "off" else "off"
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    await conn.execute("UPDATE user_card_settings SET card_module_mode=? WHERE user_id=?", (new_mode, call.from_user.id))
+    await conn.commit()
+    await _show_cards_dashboard(call.from_user.id, call)
+
+@router.callback_query(F.data == "card:add_start")
+async def cb_card_add_start(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await call.message.edit_text("Виберіть банк для нової картки:", reply_markup=keyboards.card_banks_kb())
+    await state.set_state(CardAddStates.waiting_bank)
+    await call.answer()
+
+@router.callback_query(CardAddStates.waiting_bank, F.data.startswith("card_add:bank:"))
+async def cb_card_add_bank(call: CallbackQuery, state: FSMContext) -> None:
+    bank = call.data.split(":")[2]
+    await state.update_data(bank=bank)
+    await call.message.edit_text(f"Вибрано банк: <b>{bank.capitalize()}</b>\n\nВведіть останні 4 цифри картки:")
+    await state.set_state(CardAddStates.waiting_last_four)
+    await call.answer()
+
+@router.message(CardAddStates.waiting_last_four)
+async def process_card_add_last_four(message: Message, state: FSMContext) -> None:
+    last_four = message.text.strip()
+    if len(last_four) != 4 or not last_four.isdigit():
+        return await message.answer("❌ Останні 4 цифри мають складатися рівно з 4 цифр. Спробуйте ще раз:")
+    await state.update_data(last_four=last_four)
+    await message.answer("Введіть поточний баланс картки (грн):")
+    await state.set_state(CardAddStates.waiting_balance)
+
+@router.message(CardAddStates.waiting_balance)
+async def process_card_add_balance(message: Message, state: FSMContext) -> None:
+    try:
+        balance = float(message.text.strip().replace(',', '.'))
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа. Спробуйте ще раз:")
+    await state.update_data(balance=balance)
+    await message.answer("Введіть мітку (Label) для картки (напр. 'Власна', 'Дроп Іван'):")
+    await state.set_state(CardAddStates.waiting_label)
+
+@router.message(CardAddStates.waiting_label)
+async def process_card_add_label(message: Message, state: FSMContext) -> None:
+    label = message.text.strip()
+    await state.update_data(label=label)
+    await message.answer("Ця картка належить вам (Власна) чи дропу?", reply_markup=keyboards.card_is_own_kb())
+    await state.set_state(CardAddStates.waiting_is_own)
+
+@router.callback_query(CardAddStates.waiting_is_own, F.data.startswith("card_add:is_own:"))
+async def cb_card_add_is_own(call: CallbackQuery, state: FSMContext) -> None:
+    is_own = int(call.data.split(":")[2])
+    data = await state.get_data()
+    
+    import uuid
+    card_id = str(uuid.uuid4())
+    card_data = {
+        "id": card_id,
+        "owner_id": call.from_user.id,
+        "bank_name": data["bank"],
+        "last_four": data["last_four"],
+        "label": data["label"],
+        "is_own": is_own,
+        "balance": data["balance"],
+        "status": "active"
+    }
+    
+    if _db:
+        await _db.add_card(card_data)
+        
+        # Auto-map Monobank if token is linked
+        if data["bank"].lower() == "monobank":
+            mono_settings = await _db.get_user_mono_settings(call.from_user.id)
+            if mono_settings and mono_settings.get("x_token_encrypted"):
+                from core.security.crypto_utils import CryptoUtils
+                from infrastructure.api.mono_client import MonoApiClient
+                token = CryptoUtils.decrypt(mono_settings["x_token_encrypted"])
+                if token:
+                    client = MonoApiClient(token)
+                    info = await client.get_client_info()
+                    if info and "accounts" in info:
+                        for acc in info["accounts"]:
+                            pan = acc.get("maskedPan", [])
+                            if pan and len(pan) > 0 and pan[0].endswith(data["last_four"]):
+                                await _db.update_card_mono_account(card_id, acc["id"])
+                                break
+        
+    await state.clear()
+    await call.message.edit_text("✅ Картку успішно додано!")
+    await _show_cards_dashboard(call.from_user.id, call.message)
+    await call.answer()
+
+@router.callback_query(F.data == "card:cancel")
+async def cb_card_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await _show_cards_dashboard(call.from_user.id, call)
+
+@router.callback_query(F.data.startswith("card:view:"))
+async def cb_card_view(call: CallbackQuery) -> None:
+    card_id = call.data.split(":")[2]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+        
+    import time
+    used_daily_in = await _db.get_rolling_used(card_id, "in", 24)
+    used_daily_out = await _db.get_rolling_used(card_id, "out", 24)
+    tx_count = await _db.get_card_transactions_count(card_id, 24)
+    
+    import datetime
+    cooldown_str = "Немає"
+    if card["cooldown_until"] > time.time():
+        dt = datetime.datetime.fromtimestamp(card["cooldown_until"])
+        cooldown_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+    text = (
+        f"💳 <b>Картка:</b> {card['bank_name'].capitalize()} {card['last_four']}\n"
+        f"🏷 <b>Мітка:</b> {card['label']}\n"
+        f"👤 <b>Тип:</b> {'Власна' if card['is_own'] else 'Дроп'}\n"
+        f"💰 <b>Баланс:</b> {card['balance']:.2f} ₴\n\n"
+        f"📊 <b>Статистика за 24г:</b>\n"
+        f"📥 Надходження: {used_daily_in:.0f} ₴\n"
+        f"📤 Витрати: {used_daily_out:.0f} ₴\n"
+        f"🔄 Транзакцій: {tx_count}\n\n"
+        f"📌 <b>Статус:</b> {card['status']}\n"
+        f"⏳ <b>Cooldown до:</b> {cooldown_str}"
+    )
+    
+    # Якщо викликано з FakeCall (message), то треба відповісти або відредагувати існуюче
+    if hasattr(call, "message") and hasattr(call.message, "edit_text"):
+        await call.message.edit_text(text, reply_markup=keyboards.card_details_kb(card_id, card["status"]))
+    else:
+        # Для фейкового call
+        await call.message.answer(text, reply_markup=keyboards.card_details_kb(card_id, card["status"]))
+        
+    if hasattr(call, "answer"):
+        await call.answer()
+
+@router.callback_query(F.data.startswith("card:toggle:"))
+async def cb_card_toggle(call: CallbackQuery) -> None:
+    card_id = call.data.split(":")[2]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+        
+    new_status = "frozen_funds" if card["status"] == "active" else "active"
+    await _db.update_card(card_id, {"status": new_status})
+    
+    await call.answer(f"Статус змінено на {new_status}")
+    # Refresh view
+    call.data = f"card:view:{card_id}"
+    await cb_card_view(call)
+
+# ── D3: Редагування полів картки (label / note / category) ──────────────
+
+@router.callback_query(F.data.startswith("card:edit:label:"))
+async def cb_card_edit_label(call: CallbackQuery, state: FSMContext) -> None:
+    card_id = call.data.split(":")[3]
+    await state.update_data(edit_card_id=card_id)
+    await call.message.edit_text(
+        "🏷 Введіть нову мітку (Label) для картки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+    )
+    await state.set_state(CardEditStates.waiting_label)
+    await call.answer()
+
+@router.message(CardEditStates.waiting_label)
+async def process_card_edit_label(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    card_id = data["edit_card_id"]
+    new_label = message.text.strip()
+    await _db.update_card(card_id, {"label": new_label})
+    await state.clear()
+    await message.answer(f"✅ Мітку змінено на: <b>{new_label}</b>")
+    # Refresh card view
+    class FakeCall:
+        data = f"card:view:{card_id}"
+        from_user = message.from_user
+    fc = FakeCall()
+    fc.message = message
+    async def noop(*a, **k): pass
+    fc.answer = noop
+    await cb_card_view(fc)
+
+@router.callback_query(F.data.startswith("card:edit:note:"))
+async def cb_card_edit_note(call: CallbackQuery, state: FSMContext) -> None:
+    card_id = call.data.split(":")[3]
+    await state.update_data(edit_card_id=card_id)
+    await call.message.edit_text(
+        "📝 Введіть нову нотатку (Note) для картки:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+    )
+    await state.set_state(CardEditStates.waiting_note)
+    await call.answer()
+
+@router.message(CardEditStates.waiting_note)
+async def process_card_edit_note(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    card_id = data["edit_card_id"]
+    new_note = message.text.strip()
+    await _db.update_card(card_id, {"note": new_note})
+    await state.clear()
+    await message.answer(f"✅ Нотатку змінено.")
+    class FakeCall:
+        data = f"card:view:{card_id}"
+        from_user = message.from_user
+    fc = FakeCall()
+    fc.message = message
+    async def noop(*a, **k): pass
+    fc.answer = noop
+    await cb_card_view(fc)
+
+@router.callback_query(F.data.startswith("card:edit:category:"))
+async def cb_card_edit_category(call: CallbackQuery) -> None:
+    card_id = call.data.split(":")[3]
+    await call.message.edit_text(
+        "👥 Оберіть категорію картки:",
+        reply_markup=keyboards.card_category_kb(card_id)
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("card:set_cat:"))
+async def cb_card_set_category(call: CallbackQuery) -> None:
+    parts = call.data.split(":")
+    card_id = parts[2]
+    category = parts[3]
+    is_own = 1 if category == "self" else 0
+    await _db.update_card(card_id, {"category": category, "is_own": is_own})
+    await call.answer(f"✅ Категорію змінено")
+    call.data = f"card:view:{card_id}"
+    await cb_card_view(call)
+
+@router.callback_query(F.data.startswith("card:delete:"))
+async def cb_card_delete(call: CallbackQuery) -> None:
+    card_id = call.data.split(":")[2]
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    await conn.execute("DELETE FROM cards WHERE id=?", (card_id,))
+    await conn.commit()
+    await call.answer("🗑 Картку видалено")
+    await _show_cards_dashboard(call.from_user.id, call)
+
+@router.callback_query(F.data.startswith("card:update_bal:"))
+async def cb_card_update_bal_start(call: CallbackQuery, state: FSMContext) -> None:
+    card_id = call.data.split(":")[2]
+    await state.update_data(card_id=card_id)
+    await call.message.edit_text(
+        "Введіть точний актуальний баланс картки (грн):\n\n"
+        "<i>Ця дія просто оновить баланс у системі без створення транзакції.</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+    )
+    await state.set_state(CardUpdateStates.waiting_true_balance)
+    await call.answer()
+
+@router.message(CardUpdateStates.waiting_true_balance)
+async def process_card_update_bal(message: Message, state: FSMContext) -> None:
+    try:
+        balance = float(message.text.strip().replace(',', '.'))
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа.")
+        
+    data = await state.get_data()
+    card_id = data["card_id"]
+    
+    await _db.update_card_balance(card_id, balance)
+    
+    await state.clear()
+    await message.answer("✅ Баланс успішно оновлено!")
+    
+    class FakeCall:
+        data = f"card:view:{card_id}"
+        from_user = message.from_user
+        message = message
+        async def answer(self, *args, **kwargs): pass
+        
+    await cb_card_view(FakeCall())
+
+@router.callback_query(F.data.startswith("card_match:confirm:"))
+async def cb_card_match_confirm(call: CallbackQuery):
+    cache_key = call.data.split(":", 2)[2]
+    from bot.card_notifier import _card_matching_cache
+    
+    if cache_key not in _card_matching_cache:
+        return await call.answer("❌ Дані застаріли", show_alert=True)
+        
+    data = _card_matching_cache[cache_key]
+    cards = data.get("found_cards", [])
+    if not cards:
+        return await call.answer("❌ Картки не знайдено", show_alert=True)
+        
+    amount_per_card = data["target_amount"] / len(cards)
+    for c in cards:
+        await _db.reserve_card_amount(c["id"], amount_per_card, data["order_id"])
+        
+    await call.message.edit_text(f"✅ Успішно зарезервовано {data['target_amount']:.0f} ₴ на {len(cards)} картках для ордеру {data['order_id'][:8]}")
+    del _card_matching_cache[cache_key]
+    await call.answer()
+
+@router.callback_query(F.data.startswith("card_match:other:"))
+async def cb_card_match_other(call: CallbackQuery):
+    cache_key = call.data.split(":", 2)[2]
+    from bot.card_notifier import _card_matching_cache
+    
+    if cache_key not in _card_matching_cache:
+        return await call.answer("❌ Дані застаріли", show_alert=True)
+        
+    data = _card_matching_cache[cache_key]
+    cards = data.get("found_cards", [])
+    
+    for c in cards:
+        if c["id"] not in data["excluded_cards"]:
+            data["excluded_cards"].append(c["id"])
+            
+    if _notifier and hasattr(_notifier, "card_notifier"):
+        await call.answer("🔄 Шукаю інший варіант...")
+        await _notifier.card_notifier.send_card_recommendation(
+            chat_id=call.from_user.id,
+            target_amount=data["target_amount"],
+            direction=data["direction"],
+            bank=data["bank"],
+            order_id=data["order_id"],
+            cache_key=cache_key,
+            message_id=call.message.message_id
+        )
+    else:
+        await call.answer("❌ Модуль не підключено")
+
+@router.callback_query(F.data.startswith("card_match:cancel:"))
+async def cb_card_match_cancel(call: CallbackQuery):
+    cache_key = call.data.split(":", 2)[2]
+    from bot.card_notifier import _card_matching_cache
+    if cache_key in _card_matching_cache:
+        del _card_matching_cache[cache_key]
+    await call.message.edit_text("❌ Підбір картки скасовано.")
+    await call.answer()
+
+@router.message(Command("mono"))
+async def cmd_mono(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    settings = await _db.get_user_mono_settings(user_id)
+    if settings:
+        secret = settings.get("webhook_secret")
+        await message.answer(
+            f"🐈 <b>Налаштування Monobank Webhook</b>\n\n"
+            f"Токен вже підключений.\n"
+            f"Webhook URL для Monobank:\n"
+            f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/{user_id}/{secret}</code>\n\n"
+            f"Щоб змінити токен, відправте новий X-Token нижче, або /cancel."
+        )
+    else:
+        await message.answer(
+            "🐈 <b>Інтеграція Monobank</b>\n\n"
+            "Щоб налаштувати автоматичне підтвердження транзакцій, введіть ваш X-Token.\n"
+            "Ви можете отримати його тут: https://api.monobank.ua/ \n\n"
+            "<i>Токен буде зашифровано.</i>"
+        )
+    await state.set_state(MonoStates.waiting_token)
+
+@router.message(MonoStates.waiting_token)
+async def process_mono_token(message: Message, state: FSMContext):
+    token = message.text.strip()
+    
+    from infrastructure.api.mono_client import MonoApiClient
+    from core.security.crypto_utils import CryptoUtils
+    import secrets
+    
+    msg = await message.answer("⏳ Перевіряю токен...")
+    
+    client = MonoApiClient(token)
+    info = await client.get_client_info()
+    if not info:
+        return await msg.edit_text("❌ Помилка: невірний токен або збій API Mono.")
+        
+    user_id = message.from_user.id
+    secret = secrets.token_urlsafe(16)
+    encrypted_token = CryptoUtils.encrypt(token)
+    
+    await _db.save_user_mono_settings(user_id, encrypted_token, secret)
+    
+    # Auto-map existing cards
+    accounts = info.get("accounts", [])
+    mapped = 0
+    cards = await _db.get_cards(user_id, bank_name="Monobank", status="active")
+    for c in cards:
+        last_four = c["last_four"]
+        for acc in accounts:
+            pan = acc.get("maskedPan", [])
+            if pan and len(pan) > 0 and pan[0].endswith(last_four):
+                await _db.update_card_mono_account(c["id"], acc["id"])
+                mapped += 1
+                break
+                
+    await state.clear()
+    await message.delete() # hide token
+    await msg.edit_text(
+        f"✅ <b>Monobank успішно підключено!</b>\n"
+        f"Знайдено та прив'язано карток: {mapped} / {len(cards)}\n\n"
+        f"Встановіть цей Webhook URL у налаштуваннях Mono:\n"
+        f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/{user_id}/{secret}</code>\n\n"
+        f"<i>Прив'язка нових карток Monobank буде відбуватись автоматично, якщо ви додали їх через /cards.</i>"
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /report — Звіт по картках
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("report"))
+async def cmd_report(message: Message) -> None:
+    """Відображає вибір періоду для звіту по картках."""
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    await message.answer(
+        "📊 <b>Звіт по картках</b>\n\nОберіть період для формування звіту:",
+        reply_markup=keyboards.report_period_kb()
+    )
+
+@router.callback_query(F.data.startswith("report:period:"))
+async def cb_report_period(call: CallbackQuery) -> None:
+    """Генерує повний звіт по кожній картці за вибраний період."""
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+
+    hours = int(call.data.split(":")[2])
+    period_label = {24: "24 години", 168: "7 днів", 720: "30 днів"}.get(hours, f"{hours}г")
+    user_id = call.from_user.id
+
+    cards = await _db.get_cards(user_id)
+    if not cards:
+        return await call.message.edit_text("У вас ще немає доданих карток. Скористайтесь /cards для додавання.")
+
+    import time
+    cutoff = time.time() - (hours * 3600)
+
+    # Агрегація по кожній картці
+    total_work_in = 0.0
+    total_work_out = 0.0
+    total_personal_in = 0.0
+    total_personal_out = 0.0
+    total_tx = 0
+    card_blocks = []
+
+    for card in cards:
+        card_id = card["id"]
+        conn = getattr(_db, "_db", _db)
+
+        async with conn.execute(
+            """
+            SELECT 
+                COUNT(*) as tx_count,
+                SUM(CASE WHEN direction='in' AND type='work' THEN amount ELSE 0 END) as work_in,
+                SUM(CASE WHEN direction='out' AND type='work' THEN amount ELSE 0 END) as work_out,
+                SUM(CASE WHEN direction='in' AND type='personal' THEN amount ELSE 0 END) as pers_in,
+                SUM(CASE WHEN direction='out' AND type='personal' THEN amount ELSE 0 END) as pers_out
+            FROM card_transactions
+            WHERE card_id=? AND timestamp > ?
+            """,
+            (card_id, cutoff)
+        ) as cur:
+            row = await cur.fetchone()
+            s = dict(row) if row else {}
+
+        tx_count = s.get("tx_count", 0) or 0
+        work_in = s.get("work_in", 0.0) or 0.0
+        work_out = s.get("work_out", 0.0) or 0.0
+        pers_in = s.get("pers_in", 0.0) or 0.0
+        pers_out = s.get("pers_out", 0.0) or 0.0
+
+        total_work_in += work_in
+        total_work_out += work_out
+        total_personal_in += pers_in
+        total_personal_out += pers_out
+        total_tx += tx_count
+
+        # Ліміти
+        limits = await _db.get_user_bank_limits(user_id, card["bank_name"])
+        limit_line = ""
+        if limits and hours <= 24:
+            used_in_24 = await _db.get_rolling_used(card_id, "in", 24)
+            used_out_24 = await _db.get_rolling_used(card_id, "out", 24)
+            daily_in_max = limits.get("daily_in_max", 150000)
+            daily_out_max = limits.get("daily_out_max", 150000)
+            tx_today = await _db.get_card_transactions_count(card_id, 24)
+            max_tx = limits.get("max_tx_per_day", 15)
+            limit_line = (
+                f"\n   📏 Ліміти: IN {used_in_24:.0f}/{daily_in_max:.0f} | "
+                f"OUT {used_out_24:.0f}/{daily_out_max:.0f} | "
+                f"TX {tx_today}/{max_tx}"
+            )
+
+        icon = "🟢" if card["status"] == "active" else ("❄️" if card["status"] == "frozen_funds" else "🔴")
+        drop = " (Дроп)" if not card.get("is_own", 1) else ""
+        work_total = work_in + work_out
+        pers_total = pers_in + pers_out
+
+        block = (
+            f"{icon} <b>{card['bank_name'].capitalize()} •{card['last_four']}</b>{drop}\n"
+            f"   💰 Баланс: {card['balance']:.0f} ₴\n"
+            f"   🔄 TX: {tx_count} | Робоча: {work_total:.0f} ₴ | Особиста: {pers_total:.0f} ₴\n"
+            f"   📥 Work IN: {work_in:.0f} ₴ | 📤 Work OUT: {work_out:.0f} ₴"
+            f"{limit_line}"
+        )
+        card_blocks.append(block)
+
+    total_work = total_work_in + total_work_out
+    total_pers = total_personal_in + total_personal_out
+
+    header = (
+        f"📊 <b>Звіт по картках за {period_label}</b>\n"
+        f"{'━' * 30}\n\n"
+        f"💼 Робочий оборот: <b>{total_work:.0f} ₴</b> (IN: {total_work_in:.0f} | OUT: {total_work_out:.0f})\n"
+        f"🏠 Особистий: <b>{total_pers:.0f} ₴</b>\n"
+        f"🔄 Транзакцій: <b>{total_tx}</b>\n"
+        f"{'━' * 30}\n\n"
+    )
+
+    text = header + "\n\n".join(card_blocks)
+
+    await call.message.edit_text(text)
+    await call.answer()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D6: /set_bank_limits — Налаштування лімітів банку
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.message(Command("set_bank_limits"))
+async def cmd_set_bank_limits(message: Message) -> None:
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+    await message.answer(
+        "⚙️ <b>Налаштування лімітів банку</b>\n\nОберіть банк:",
+        reply_markup=keyboards.bank_limits_bank_kb()
+    )
+
+@router.callback_query(F.data == "limits:back")
+async def cb_limits_back(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await call.message.edit_text(
+        "⚙️ <b>Налаштування лімітів банку</b>\n\nОберіть банк:",
+        reply_markup=keyboards.bank_limits_bank_kb()
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("limits:bank:"))
+async def cb_limits_bank(call: CallbackQuery) -> None:
+    bank = call.data.split(":")[2]
+    user_id = call.from_user.id
+    limits = await _db.get_user_bank_limits(user_id, bank)
+    if not limits:
+        # Показуємо дефолтні значення
+        limits = {
+            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
+            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
+            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
+            "max_tx_per_day": 15, "cooldown_hours": 24
+        }
+    await call.message.edit_text(
+        f"⚙️ <b>Ліміти: {bank.capitalize()}</b>\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("limits:field:"))
+async def cb_limits_field(call: CallbackQuery, state: FSMContext) -> None:
+    parts = call.data.split(":")
+    bank = parts[2]
+    field = parts[3]
+    label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
+    await state.update_data(limit_bank=bank, limit_field=field)
+    is_int = field in ("max_tx_per_day", "cooldown_hours")
+    hint = "ціле число" if is_int else "сума в грн"
+    await call.message.edit_text(
+        f"⚙️ <b>{label}</b> ({bank.capitalize()})\n\nВведіть нове значення ({hint}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"limits:bank:{bank}")]
+        ])
+    )
+    await state.set_state(BankLimitStates.waiting_value)
+    await call.answer()
+
+@router.message(BankLimitStates.waiting_value)
+async def process_limit_value(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    bank = data["limit_bank"]
+    field = data["limit_field"]
+    
+    try:
+        value = float(message.text.strip().replace(',', '.'))
+        if field in ("max_tx_per_day", "cooldown_hours"):
+            value = int(value)
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа. Спробуйте ще раз:")
+    
+    await _db.set_user_bank_limit(message.from_user.id, bank, field, value)
+    label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
+    await state.clear()
+    await message.answer(f"✅ <b>{label}</b> для {bank.capitalize()} змінено на <b>{value}</b>")
+    
+    # Показати оновлені ліміти
+    limits = await _db.get_user_bank_limits(message.from_user.id, bank)
+    await message.answer(
+        f"⚙️ <b>Ліміти: {bank.capitalize()}</b>\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
+    )

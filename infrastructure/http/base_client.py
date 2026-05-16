@@ -86,10 +86,14 @@ class BaseHttpClient:
                     continue
 
                 if response.status_code != 200:
-                    # 🚀 ХОТФІКС: Викидаємо помилку замість return {}
-                    raise RuntimeError(f"Unexpected Status {response.status_code}: {response.text}")
+                    # 🚀 ХОТФІКС: Викидаємо помилку, але обрізаємо HTML, щоб не забивати логи
+                    error_text = response.text.strip()
+                    if len(error_text) > 250:
+                        error_text = error_text[:250] + "... [TRUNCATED HTML]"
+                    raise RuntimeError(f"Unexpected Status {response.status_code}: {error_text}")
 
                 return response.json()
+
 
             except errors.RequestsError as e:
                 last_exc = e
