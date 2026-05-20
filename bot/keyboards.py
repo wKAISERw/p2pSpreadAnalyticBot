@@ -150,6 +150,11 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         text=f"{_icon('show_llm_summary')} Вердикт AI в алерті",
         callback_data="disp:toggle:show_llm_summary",
     ))
+    # Допиши у функцію display_settings_kb у keyboards.py:
+    builder.row(InlineKeyboardButton(
+        text="💳 Налаштування карткового модуля →",
+        callback_data="set:card_display_menu",
+    ))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
     return builder.as_markup()
 
@@ -193,6 +198,35 @@ def global_settings_kb(settings_dict: dict) -> InlineKeyboardMarkup:
     # Навігаційна кнопка повернення на головну сторінку бота
     builder.row(InlineKeyboardButton(text="⬅️ Назад в Головне Меню", callback_data="menu:main"))
 
+    return builder.as_markup()
+
+def card_display_settings_kb(current: dict) -> InlineKeyboardMarkup:
+    """
+    Категоризоване меню налаштувань відображення карткового модуля.
+    """
+    builder = InlineKeyboardBuilder()
+
+    # 1. Формат виводу
+    mode = current.get("card_output_mode", "inline")
+    mode_text = "📥 В одному повідомленні" if mode == "inline" else "🔀 Окремою відповіддю (Reply)"
+    builder.row(InlineKeyboardButton(text=f"📦 Вивід карт: {mode_text}", callback_data="disp:toggle:card_output_mode"))
+
+    # 2. Логіка спойлера
+    ss = current.get("enable_smart_spoiler", True)
+    ss_text = "🧠 Смарт-спойлер (ON)" if ss else "⚪ Звичайний спойлер"
+    builder.row(InlineKeyboardButton(text=f"Логіка: {ss_text}", callback_data="disp:toggle:enable_smart_spoiler"))
+
+    # 3. Рівень деталізації
+    dl = current.get("card_detail_level", "full")
+    dl_text = "📝 Повний (всі ліміти)" if dl == "full" else "⚡ Компактний (суто баланс)"
+    builder.row(InlineKeyboardButton(text=f"📊 Деталізація: {dl_text}", callback_data="disp:toggle:card_detail_level"))
+
+    # 🚀 4. НОВИЙ ПУНКТ: Активація модуля для поодиноких режимів Taker/Maker
+    esm = current.get("enable_in_single_modes", False) or current.get("enable_in_single_modes") == 1
+    esm_text = "🔌 В окремих режимах: ✅ Увімк" if esm else "🔌 В окремих режимах: ❌ Вимк"
+    builder.row(InlineKeyboardButton(text=esm_text, callback_data="disp:toggle:enable_in_single_modes"))
+
+    builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="set:display_menu"))
     return builder.as_markup()
 
 

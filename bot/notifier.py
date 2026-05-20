@@ -500,24 +500,19 @@ class TelegramNotifier:
     async def _get_display_settings(self, chat_id: int) -> dict:
         if not self._db:
             return {
-                "show_ai_terms_summary": True,
-                "show_full_terms": True,
-                "show_ai_logic": True,
-                "show_bank_details": True,
-                "show_llm_summary": True,
-                "show_card_recommendation": True,   # ← ДОДАТИ
+                "show_ai_terms_summary": True, "show_full_terms": True,
+                "show_ai_logic": True, "show_bank_details": True,
+                "show_llm_summary": True, "show_card_recommendation": True
             }
-        try:
-            return await self._db.get_user_display_settings(chat_id)
-        except Exception:
+        # ПЕРЕВІР, ЩО ТУТ НЕМАЄ ПОМИЛКОВОГО ВИКЛИКУ settings.get()
+        settings_dict = await self._db.get_user_display_settings(chat_id)
+        if not settings_dict:
             return {
-                "show_ai_terms_summary": True,
-                "show_full_terms": True,
-                "show_ai_logic": True,
-                "show_bank_details": True,
-                "show_llm_summary": True,
-                "show_card_recommendation": True,   # ← ДОДАТИ
+                "show_ai_terms_summary": True, "show_full_terms": True,
+                "show_ai_logic": True, "show_bank_details": True,
+                "show_llm_summary": True, "show_card_recommendation": True
             }
+        return settings_dict
 
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert", is_sniper_match: bool = False) -> None:
         """
@@ -636,13 +631,13 @@ class TelegramNotifier:
                 logger.error("send_taker_to_user [%d] order #%d: %s", chat_id, i, e)
 
     async def _send_taker_single(
-        self, order: Order, mode: str,
-        chat_id: int | None = None,
-        display_settings: dict | None = None,
+            self, order: Order, mode: str,
+            chat_id: int | None = None,
+            display_settings: dict | None = None,
     ) -> None:
         """
-        Відправляє ОДИН тейкер-ордер як повноцінне повідомлення
-        у стилі spread-алерту (ризики, LLM вердикт, умови, банки, кнопки).
+        Відправляє ОДИН тейкер-ордер як повноцінне повідомлення.
+        Повністю інтегровано з кастомізацією карткового модуля (Inline/Reply, Smart-Spoilers, Compact).
         """
         import time
 
@@ -798,32 +793,78 @@ class TelegramNotifier:
                 InlineKeyboardButton(text="ТГ", callback_data=f"fb:{order.exchange}:{mid}:chat"),
             ])
 
-        # ── Картковий блок (вбудований) ──
+        # ── КАРТКОВИЙ БЛОК З СИНХРОНІЗАЦІЄЮ НАЛАШТУВАНЬ ВИТЯГУ (Для TAKER) ──
+        card_text_combined = ""
+        card_keyboard_rows = []
+        output_mode = "inline"
+
         if ds.get("show_card_recommendation", True) and getattr(self, "card_notifier", None):
-            bank_code = order.bank_codes[0] if order.bank_codes else ""
-            card_bank = _bank_code_to_db(bank_code)
-            card_direction = "buy" if is_buy else "sell"
-            card_order_id = str(ad_id) if ad_id else ""
-            card_text, card_rows = await self.card_notifier.get_card_block(
-                chat_id=chat_id or self._chat_id,
-                target_amount=float(order.min_limit),
-                direction=card_direction,
-                bank=card_bank,
-                order_id=card_order_id,
-            )
-            if card_text:
-                text += f"\n{card_text}"
-                kb.extend(card_rows)
- 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
-        chunks = self._split_message(text)
-        for i, chunk in enumerate(chunks):
-            await self._send_with_retry(
-                chunk,
-                keyboard=keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            card_settings = await self._db.get_user_card_settings(chat_id or self._chat_id) or {}
+
+            # 🔌 СУВОРИЙ ГАРД-КЛАУЗ: Перевіряємо чи дозволив користувач вивід карт в одиночних режимах
+            if card_settings.get("enable_in_single_modes"):
+                bank_code = order.bank_codes[0] if order.bank_codes else ""
+                card_bank = _bank_code_to_db(bank_code)
+                card_direction = "buy" if is_buy else "sell"
+                card_order_id = str(ad_id) if ad_id else ""
+
+                # 🚀 ФІКС ТУПЛА: Розпаковуємо 3 значення, ігноруючи словник карти через "_"
+                card_text, card_rows, _ = await self.card_notifier.get_card_block(
+                    chat_id=chat_id or self._chat_id,
+                    target_amount=float(order.min_limit),
+                    direction=card_direction,
+                    bank=card_bank,
+                    order_id=card_order_id,
+                )
+
+                if card_text:
+                    card_text_combined = card_text
+                    card_keyboard_rows = card_rows
+                    output_mode = card_settings.get("card_output_mode", "inline")
+
+                    # Якщо режим inline — інжектуємо дані прямо в тіло та клавіатуру
+                    if output_mode == "inline":
+                        text += f"\n{card_text_combined}"
+                        kb.extend(card_keyboard_rows)
+
+        # ── ФІНАЛЬНА СЕЛЕКЦІЯ І НАДШИЛАННЯ В ТЕЛЕГРАМ ──
+        if card_text_combined and output_mode == "reply":
+            # 🔀 РЕЖИМ REPLY: Відокремлюємо карти в окремий зв'язаний потік (thread)
+            main_keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+            card_keyboard = InlineKeyboardMarkup(inline_keyboard=card_keyboard_rows)
+
+            # 1. Запускаємо основне тіло Тейкер-алерта (чисте, без карткового контенту)
+            main_chunks = self._split_message(text)
+            main_msg = None
+            for i, chunk in enumerate(main_chunks):
+                main_msg = await self._send_with_retry(
+                    chunk,
+                    keyboard=main_keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+
+            # 2. Стріляємо реплаєм суто по картках з прив'язкою до початкового повідомлення
+            if main_msg and hasattr(main_msg, "message_id"):
+                reply_text = f"💳 <b>Рекомендована картка під Тейкер-операцію:</b>\n\n{card_text_combined}"
+                await self._send_with_retry(
+                    reply_text,
+                    keyboard=card_keyboard,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                    reply_to_message_id=main_msg.message_id
+                )
+        else:
+            # 📥 ДЕФОЛТНИЙ INLINE АБО СТАН БЕЗ КАРТ
+            keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+            chunks = self._split_message(text)
+            for i, chunk in enumerate(chunks):
+                await self._send_with_retry(
+                    chunk,
+                    keyboard=keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
 
 
     async def send_maker_order_alert(
@@ -1381,21 +1422,29 @@ class TelegramNotifier:
                 InlineKeyboardButton(text="🔵 ТГ", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:chat"),
             ])
 
+        # 🚀 ФІКС: Блок винесено з-під умови if s_mid. Тепер він відпрацьовує завжди!
         # ── КАРТКОВИЙ БЛОК З ДИНАМІЧНИМ ПРОРАХУНКОМ АСИМЕТРІЇ ──
-        if ds.get("show_card_recommendation", True) and getattr(self, "card_notifier", None):
+        card_text_combined = ""
+        buy_card_rows = []
+        sell_card_rows = []
+        output_mode = "inline"
+
+        if getattr(self, "card_notifier", None):
+            # Читаємо словник конфігурації карткової таблиці
+            card_settings = await self._db.get_user_card_settings(chat_id or self._chat_id) or {}
+            output_mode = card_settings.get("card_output_mode", "inline")
+
             b_ad_id = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
             s_ad_id = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
 
-            # 🧠 РОЗУМНИЙ РОЗПОДІЛ СУМ:
-            # Для BUY ноги сума завжди дорівнює повній сумі ордера входу
+            # Розумний розподіл сум угоди
             buy_target = alert.deal_amount_uah
-
-            # Для SELL ноги сума міняється залежно від активності асиметричного режиму
             if getattr(alert, "is_asymmetric", False) and getattr(alert, "asymmetric_details", None):
                 sell_target = alert.asymmetric_details["sell_executed"]
             else:
                 sell_target = alert.deal_amount_uah + alert.profit_uah
 
+            # Прораховуємо BUY ногу
             buy_card_text, buy_card_rows, buy_card_obj = await self.card_notifier.get_card_block(
                 chat_id=chat_id or self._chat_id,
                 target_amount=buy_target,
@@ -1404,7 +1453,7 @@ class TelegramNotifier:
                 order_id=str(b_ad_id) if b_ad_id else "",
             )
 
-            # Нога SELL — приймає ID та об'єм закупівлі для корекції
+            # Прораховуємо SELL ногу
             buy_card_id = buy_card_obj.get("id") if buy_card_obj else None
             sell_card_text, sell_card_rows, _ = await self.card_notifier.get_card_block(
                 chat_id=chat_id or self._chat_id,
@@ -1416,23 +1465,59 @@ class TelegramNotifier:
                 buy_card_id=buy_card_id
             )
 
+            # Зшиваємо результати через очищення від None/порожнечі
             card_text_combined = "\n".join(filter(None, [buy_card_text, sell_card_text]))
-            if card_text_combined:
+
+            # Модифікуємо текст і кнопки ТІЛЬКИ якщо обрано старий inline-режим
+            if card_text_combined and output_mode == "inline":
                 text += f"\n{card_text_combined}"
                 kb.extend(buy_card_rows)
                 if sell_card_rows != buy_card_rows:
                     kb.extend(sell_card_rows)
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+        # ── ФІНАЛЬНИЙ ПУШ У TELEGRAM З ПІДТРИМКОЮ SINGLE-LEG REPLY-ВІДПОВІДЕЙ ──
+        if card_text_combined and output_mode == "reply":
+            # 🔀 РЕЖИМ REPLY: Відокремлюємо карти. Текст спреду лишається ідеально чистим.
+            main_keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
-        chunks = self._split_message(text)
-        for i, chunk in enumerate(chunks):
-            await self._send_with_retry(
-                chunk,
-                keyboard=keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            # Збираємо унікальні кнопки карт
+            combined_card_rows = buy_card_rows + [r for r in sell_card_rows if r not in buy_card_rows]
+            card_keyboard = InlineKeyboardMarkup(inline_keyboard=combined_card_rows)
+
+            # 1. Надсилаємо базовий алерт чистого спреду
+            main_chunks = self._split_message(text)
+            main_msg = None
+
+            for i, chunk in enumerate(main_chunks):
+                main_msg = await self._send_with_retry(
+                    chunk,
+                    keyboard=main_keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+
+            # 2. Якщо алерт пройшов — стріляємо реплаєм з картою
+            if main_msg and hasattr(main_msg, "message_id"):
+                card_text_header = "💳 <b>Рекомендований пластик під угоду:</b>\n\n"
+                await self._send_with_retry(
+                    f"{card_text_header}{card_text_combined}",
+                    keyboard=card_keyboard,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                    reply_to_message_id=main_msg.message_id
+                )
+
+        else:
+            # 📥 ДЕФОЛТНИЙ INLINE РЕЖИМ (Або випадок, коли взагалі немає підходящих карток)
+            keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+            chunks = self._split_message(text)
+            for i, chunk in enumerate(chunks):
+                await self._send_with_retry(
+                    chunk,
+                    keyboard=keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
 
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
@@ -1481,19 +1566,21 @@ class TelegramNotifier:
             max_attempts: int = 3,
             disable_notification: bool = False,
             chat_id: int | None = None,
-    ) -> None:
+            reply_to_message_id: int | None = None,
+    ):
         target_chat = chat_id or self._chat_id
         for attempt in range(max_attempts):
             try:
-                await self._bot.send_message(
+                msg = await self._bot.send_message(
                     chat_id=target_chat,
                     text=text,
                     reply_markup=keyboard,
                     disable_web_page_preview=True,
                     disable_notification=disable_notification,
+                    reply_to_message_id=reply_to_message_id,
                 )
                 logger.debug("✅ TG sent → chat_id=%s (len=%d)", target_chat, len(text))
-                return
+                return msg
             except TelegramRetryAfter as e:
                 await asyncio.sleep(e.retry_after + 0.5)
             except Exception as e:

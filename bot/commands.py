@@ -59,6 +59,8 @@ EXPERIMENTAL_FEATURES = {
         }
     }
 }
+
+
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -157,27 +159,30 @@ class MakerSettingsStates(StatesGroup):
 
 
 class TakerBuySettingsStates(StatesGroup):
-    waiting_amount          = State()  # 1 — обʼєм USDT
-    waiting_price_strategy  = State()  # 2 — стратегія ціни (inline-меню)
-    waiting_price_to        = State()  # 3 — max/exact ціна (або range-max)
-    waiting_price_from      = State()  # 3b — range-min ціна
-    waiting_limit_min       = State()  # 4 — мін ліміт UAH
-    waiting_limit_max       = State()  # 4b — макс ліміт UAH
-    waiting_banks           = State()  # 5 — банки (inline-чекбокси)
-    waiting_speed           = State()  # 6 — швидкість
+    waiting_amount = State()  # 1 — обʼєм USDT
+    waiting_price_strategy = State()  # 2 — стратегія ціни (inline-меню)
+    waiting_price_to = State()  # 3 — max/exact ціна (або range-max)
+    waiting_price_from = State()  # 3b — range-min ціна
+    waiting_limit_min = State()  # 4 — мін ліміт UAH
+    waiting_limit_max = State()  # 4b — макс ліміт UAH
+    waiting_banks = State()  # 5 — банки (inline-чекбокси)
+    waiting_speed = State()  # 6 — швидкість
+
 
 class TakerSellSettingsStates(StatesGroup):
-    waiting_amount    = State()   # крок 1 — об'єм
-    waiting_buy_price = State()   # крок 2 — ціна купівлі
-    waiting_exchange  = State()   # крок 3 — біржа (Network Fee)
-    waiting_profit    = State()   # крок 4 — спред % (з breakeven підказкою)
-    waiting_speed     = State()   # крок 5 — час важливий?
+    waiting_amount = State()  # крок 1 — об'єм
+    waiting_buy_price = State()  # крок 2 — ціна купівлі
+    waiting_exchange = State()  # крок 3 — біржа (Network Fee)
+    waiting_profit = State()  # крок 4 — спред % (з breakeven підказкою)
+    waiting_speed = State()  # крок 5 — час важливий?
+
 
 class SniperStates(StatesGroup):
     waiting_exchange = State()
     waiting_direction = State()
     waiting_min_spread = State()
     waiting_min_volume = State()
+
 
 class CardAddStates(StatesGroup):
     waiting_bank = State()
@@ -186,21 +191,27 @@ class CardAddStates(StatesGroup):
     waiting_label = State()
     waiting_is_own = State()
 
+
 class CardUpdateStates(StatesGroup):
     waiting_true_balance = State()
+
 
 class CardEditStates(StatesGroup):
     waiting_label = State()
     waiting_note = State()
 
+
 class MonoStates(StatesGroup):
     waiting_token = State()
+
 
 class BankLimitStates(StatesGroup):
     waiting_value = State()
 
+
 class CardLimitStates(StatesGroup):
     waiting_value = State()
+
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
 # Тільки системні параметри (персональні - в scanner_users через меню)
@@ -688,6 +699,7 @@ async def cmd_users(message: Message) -> None:
 
     await message.answer("\n".join(lines))
 
+
 # ═══════════════════════════════════════════════════════
 # 🔍 /debugfilters — admin-only діагностика розсилки
 # ═══════════════════════════════════════════════════════
@@ -695,6 +707,7 @@ async def cmd_users(message: Message) -> None:
 @router.message(Command("debugfilters"))
 async def cmd_debugfilters(message: Message) -> None:
     """Показує фільтри кожного юзера + симулює dispatch на поточних алертах."""
+    import html as _html
     if not _is_admin(message.from_user.id):
         return await message.answer("⛔ Тільки для адміна.")
     if not _db:
@@ -719,17 +732,19 @@ async def cmd_debugfilters(message: Message) -> None:
 
     for u in users:
         uid = u.get("user_id") or u.get("userid") or "?"
-        mode      = u.get("scanner_mode", "SPREAD")
-        capital   = float(u.get("capital", 0))
+        mode = u.get("scanner_mode", "SPREAD")
+        capital = float(u.get("capital", 0))
         minamount = float(u.get("min_amount", 0))
         minspread = float(u.get("min_spread", 0))
         is_active = bool(u.get("is_alerts_active", 1))
-        buy_banks = set(u.get("buy_bank_codes") or u.get("bank_codes") or [])
-        sell_banks = set(u.get("sell_bank_codes") or u.get("bank_codes") or [])
-        mf  = u.get("merchant_filters") or {}
+        # Нормалізуємо так само як AlertDispatcher._clean_and_normalize_banks
+        from scanner import AlertDispatcher as _AD
+        buy_banks = _AD._clean_and_normalize_banks(u.get("buy_bank_codes") or u.get("bank_codes"))
+        sell_banks = _AD._clean_and_normalize_banks(u.get("sell_bank_codes") or u.get("bank_codes"))
+        mf = u.get("merchant_filters") or {}
         emf = u.get("exchange_merchant_filters") or {}
 
-        buy_bank_names  = [BANK_NAMES.get(str(b), str(b)) for b in buy_banks]
+        buy_bank_names = [BANK_NAMES.get(str(b), str(b)) for b in buy_banks]
         sell_bank_names = [BANK_NAMES.get(str(b), str(b)) for b in sell_banks]
 
         lines.append(f"👤 <code>{uid}</code>  {'✅' if is_active else '🔕 ВИМКНЕНО'}")
@@ -741,10 +756,10 @@ async def cmd_debugfilters(message: Message) -> None:
         lines.append(f"  sell банки: {', '.join(sell_bank_names) if sell_bank_names else '⚠️ ПОРОЖНЬО'}")
 
         if mf:
-            lines.append(f"  mf глобал:  ордери≥{mf.get('min_orders',0):.0f}  рейт≥{mf.get('min_rate',0):.0f}%")
+            lines.append(f"  mf глобал:  ордери≥{mf.get('min_orders', 0):.0f}  рейт≥{mf.get('min_rate', 0):.0f}%")
         if emf:
             for ex, ef in emf.items():
-                lines.append(f"  mf {ex}: ордери≥{ef.get('min_orders',0):.0f}  рейт≥{ef.get('min_rate',0):.0f}%")
+                lines.append(f"  mf {ex}: ордери≥{ef.get('min_orders', 0):.0f}  рейт≥{ef.get('min_rate', 0):.0f}%")
 
         # ── Симуляція фільтру на кожному поточному алерті ──
         if mode != "SPREAD":
@@ -761,12 +776,12 @@ async def cmd_debugfilters(message: Message) -> None:
         passed = 0
 
         for alert in alerts:
-            entry  = float(getattr(alert, "deal_amount_uah", 0))
+            entry = float(getattr(alert, "deal_amount_uah", 0))
             spread = float(getattr(alert, "spread_pct", 0))
-            ob     = set(getattr(alert, "buy_banks_fit", None) or [])
-            os_    = set(getattr(alert, "sell_banks_fit", None) or [])
-            bo     = getattr(alert, "buy_order", None)
-            so     = getattr(alert, "sell_order", None)
+            ob = _AD._clean_and_normalize_banks(getattr(alert, "buy_banks_fit", None) or [])
+            os_ = _AD._clean_and_normalize_banks(getattr(alert, "sell_banks_fit", None) or [])
+            bo = getattr(alert, "buy_order", None)
+            so = getattr(alert, "sell_order", None)
 
             if entry > capital:
                 failed_reasons["entry > capital"] = failed_reasons.get("entry > capital", 0) + 1
@@ -775,7 +790,8 @@ async def cmd_debugfilters(message: Message) -> None:
                 failed_reasons["entry < min_amount"] = failed_reasons.get("entry < min_amount", 0) + 1
                 continue
             if spread < minspread:
-                failed_reasons[f"spread {spread:.2f}% < min {minspread:.2f}%"] = failed_reasons.get(f"spread {spread:.2f}% < min {minspread:.2f}%", 0) + 1
+                failed_reasons[f"spread {spread:.2f}% < min {minspread:.2f}%"] = failed_reasons.get(
+                    f"spread {spread:.2f}% < min {minspread:.2f}%", 0) + 1
                 continue
             if not (ob & buy_banks):
                 failed_reasons["buy banks no match"] = failed_reasons.get("buy banks no match", 0) + 1
@@ -790,18 +806,20 @@ async def cmd_debugfilters(message: Message) -> None:
             # merchant filters
             mf_fail = False
             for side_label, order_obj in [("buy", bo), ("sell", so)]:
-                ex_name   = getattr(order_obj, "exchange", "")
-                ex_filt   = emf.get(ex_name, {})
-                min_ord   = float(ex_filt.get("min_orders", 0) or mf.get("min_orders", 0) or DEF_ORDERS.get(ex_name, 0))
-                min_rate  = float(ex_filt.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or DEF_RATE.get(ex_name, 0.0))
+                ex_name = getattr(order_obj, "exchange", "")
+                ex_filt = emf.get(ex_name, {})
+                min_ord = float(ex_filt.get("min_orders", 0) or mf.get("min_orders", 0) or DEF_ORDERS.get(ex_name, 0))
+                min_rate = float(ex_filt.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or DEF_RATE.get(ex_name, 0.0))
                 if min_ord > 0 and getattr(order_obj, "month_order_count", 0) < min_ord:
                     r = f"{side_label} merchant orders < {min_ord:.0f}"
                     failed_reasons[r] = failed_reasons.get(r, 0) + 1
-                    mf_fail = True; break
+                    mf_fail = True;
+                    break
                 if min_rate > 0 and getattr(order_obj, "finish_rate_pct", 0.0) < min_rate:
                     r = f"{side_label} merchant rate < {min_rate:.1f}%"
                     failed_reasons[r] = failed_reasons.get(r, 0) + 1
-                    mf_fail = True; break
+                    mf_fail = True;
+                    break
             if mf_fail:
                 continue
 
@@ -813,7 +831,7 @@ async def cmd_debugfilters(message: Message) -> None:
         else:
             lines.append(f"  ❌ Жоден алерт не пройшов ({total} перевірено)")
             for reason, cnt in sorted(failed_reasons.items(), key=lambda x: -x[1]):
-                lines.append(f"    └ <code>{reason}</code> × {cnt}")
+                lines.append(f"    └ <code>{_html.escape(reason)}</code> × {cnt}")
 
             # ── Детальний дамп першого алерту ──
             a0 = alerts[0]
@@ -824,17 +842,19 @@ async def cmd_debugfilters(message: Message) -> None:
             lines.append(f"\n  📋 <i>Перший алерт:</i>")
             lines.append(f"    deal_amount_uah = <b>{e0:.0f} ₴</b>  (capital = {capital:.0f} ₴)")
             lines.append(f"    spread_pct = <b>{s0:.2f}%</b>  (min = {minspread:.2f}%)")
-            lines.append(f"    buy_banks_fit  = <code>{ob0 or 'ПОРОЖНЬО'}</code>")
-            lines.append(f"    sell_banks_fit = <code>{os0 or 'ПОРОЖНЬО'}</code>")
-            lines.append(f"    user buy_banks  = <code>{buy_banks or 'ПОРОЖНЬО'}</code>")
-            lines.append(f"    user sell_banks = <code>{sell_banks or 'ПОРОЖНЬО'}</code>")
+            lines.append(f"    buy_banks_fit  = <code>{_html.escape(str(ob0 or 'ПОРОЖНЬО'))}</code>")
+            lines.append(f"    sell_banks_fit = <code>{_html.escape(str(os0 or 'ПОРОЖНЬО'))}</code>")
+            lines.append(f"    user buy_banks  = <code>{_html.escape(str(buy_banks or 'ПОРОЖНЬО'))}</code>")
+            lines.append(f"    user sell_banks = <code>{_html.escape(str(sell_banks or 'ПОРОЖНЬО'))}</code>")
 
         lines.append("")
 
     text = "\n".join(lines)
     # Telegram обмеження — ріжемо якщо > 4096
-    for chunk in [text[i:i+4096] for i in range(0, len(text), 4096)]:
+    for chunk in [text[i:i + 4096] for i in range(0, len(text), 4096)]:
         await message.answer(chunk, parse_mode="HTML")
+
+
 # ── /keys ──────────────────────────────────────────────────────────────────
 @router.message(Command("keys"))
 async def cmd_keys(message: Message) -> None:
@@ -2060,44 +2080,53 @@ async def on_display_menu(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("disp:toggle:"))
-async def on_display_toggle(call: CallbackQuery) -> None:
-    """Перемикає одне з налаштувань виводу."""
-    if not _db:
-        return await call.answer("БД не підключена", show_alert=True)
+async def cb_unified_display_toggle(call: CallbackQuery):
+    """
+    Універсальний обробник перемикачів відображення.
+    Захищений від Unknown Option та підтримує конфігуратор поодиноких режимів.
+    """
+    try:
+        await call.answer("⚙️ Параметр змінено")
+        chat_id = call.message.chat.id
+        field = call.data.split(":")[-1]
 
-    key = call.data.split(":", 2)[2]  # e.g. "show_ai_terms_summary"
-    valid_keys = {"show_ai_terms_summary", "show_full_terms", "show_ai_logic", "show_bank_details", "show_llm_summary"}
-    if key not in valid_keys:
-        return await call.answer("Невідома опція", show_alert=True)
+        # Реєстр полів карткового модуля
+        CARD_FIELDS = {"card_output_mode", "enable_smart_spoiler", "card_detail_level", "enable_in_single_modes"}
 
-    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-    async with conn.execute(
-            f"SELECT COALESCE({key}, 1) FROM scanner_users WHERE user_id=?",
-            (call.from_user.id,)
-    ) as cur:
-        row = await cur.fetchone()
-    current = int(row[0]) if row else 1
-    new_val = 0 if current else 1
-    await conn.execute(
-        f"UPDATE scanner_users SET {key} = ? WHERE user_id = ?",
-        (new_val, call.from_user.id),
-    )
-    await conn.commit()
+        if field in CARD_FIELDS:
+            current_settings = await _db.get_user_card_settings(chat_id) or {}
 
-    label = _DISPLAY_LABELS.get(key, key)
-    status = "увімкнено ✅" if new_val else "вимкнено ❌"
+            if field == "card_output_mode":
+                current_settings["card_output_mode"] = (
+                    "reply" if current_settings.get("card_output_mode", "inline") == "inline" else "inline"
+                )
+            elif field == "enable_smart_spoiler":
+                current_settings["enable_smart_spoiler"] = not current_settings.get("enable_smart_spoiler", True)
 
-    # Перечитуємо всі налаштування і оновлюємо клавіатуру
-    display = await _db.get_user_display_settings(call.message.chat.id)
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(
-            "🖥 <b>Налаштування виводу повідомлень</b>\n\n"
-            f"{label}: <b>{status}</b>\n"
-            f"<i>{_DISPLAY_DESCRIPTIONS.get(key, '')}</i>\n\n"
-            "✅ = увімкнено, ❌ = вимкнено",
-            reply_markup=display_settings_kb(display),
-        )
-    await call.answer(f"{label}: {status}")
+            elif field == "card_detail_level":
+                current_settings["card_detail_level"] = (
+                    "compact" if current_settings.get("card_detail_level", "full") == "full" else "full"
+                )
+            # 🚀 Обробка булевого перемикача для Taker/Maker режимів
+            elif field == "enable_in_single_modes":
+                current_settings["enable_in_single_modes"] = not current_settings.get("enable_in_single_modes", False)
+
+            await _db.update_user_card_settings(chat_id, current_settings)
+
+            from bot.keyboards import card_display_settings_kb
+            await call.message.edit_reply_markup(reply_markup=card_display_settings_kb(current_settings))
+
+        else:
+            # Твоя класична логіка для звичайних display_settings алертів
+            current_display = await _db.get_user_display_settings(chat_id) or {}
+            current_display[field] = not current_display.get(field, True)
+            await _db.update_user_display_settings(chat_id, current_display)
+
+            from bot.keyboards import display_settings_kb
+            await call.message.edit_reply_markup(reply_markup=display_settings_kb(current_display))
+
+    except Exception as e:
+        logging.getLogger("Commands").error(f"💥 Помилка перемикача виводу: {e}", exc_info=True)
 
 
 # ── Фільтри мерчантів ─────────────────────────────────────────────────────
@@ -2461,11 +2490,11 @@ async def _save_taker_sell_db(user_id: int, d: dict, roi: dict) -> None:
     strategy = d.get("price_strategy", "roi")
     # min_sell_price — або ROI-розрахунок, або ручний ввід
     min_price = roi["min_sell_price"] if strategy == "roi" else d.get("price_input", 0.0)
-    price_to  = d.get("price_to", 0.0)  # для range
+    price_to = d.get("price_to", 0.0)  # для range
 
     await conn.execute(
-        """UPDATE scanner_users SET
-               scanner_mode              = 'TAKER_SELL',
+        """UPDATE scanner_users
+           SET scanner_mode              = 'TAKER_SELL',
                is_alerts_active          = 1,
                taker_sell_amount         = ?,
                taker_sell_price          = ?,
@@ -2497,25 +2526,25 @@ async def _save_taker_buy_db(user_id: int, d: dict) -> None:
     conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
     banks_csv = ",".join(str(c) for c in d.get("banks", []))
     await conn.execute(
-        """UPDATE scanner_users SET
-               scanner_mode              = 'TAKER_BUY',
-               is_alerts_active          = 1,
-               taker_buy_amount          = ?,
-               taker_buy_price_strategy  = ?,
-               taker_buy_price_from      = ?,
-               taker_buy_max_price       = ?,
-               taker_buy_limit_min       = ?,
-               taker_buy_limit_max       = ?,
-               taker_buy_speed           = ?,
-               buy_bank_codes            = ?
-            
-            
+        """UPDATE scanner_users
+           SET scanner_mode             = 'TAKER_BUY',
+               is_alerts_active         = 1,
+               taker_buy_amount         = ?,
+               taker_buy_price_strategy = ?,
+               taker_buy_price_from     = ?,
+               taker_buy_max_price      = ?,
+               taker_buy_limit_min      = ?,
+               taker_buy_limit_max      = ?,
+               taker_buy_speed          = ?,
+               buy_bank_codes           = ?
+
+
            WHERE user_id = ?""",
         (
             d["amount"],
             d.get("price_strategy", "any"),
             d.get("price_from", 0.0),
-            d.get("price_to", 0.0),       # max_price або exact/range-max
+            d.get("price_to", 0.0),  # max_price або exact/range-max
             d.get("limit_min", 0.0),
             d.get("limit_max", 0.0),
             d.get("speed", "ANY"),
@@ -2528,19 +2557,21 @@ async def _save_taker_buy_db(user_id: int, d: dict) -> None:
 
 def _tbuy_price_strategy_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Будь-яка ціна",         callback_data="tbuy_ps:any")],
-        [InlineKeyboardButton(text="⬇️ Не дорожче ніж...",      callback_data="tbuy_ps:max")],
-        [InlineKeyboardButton(text="↔️ Ціновий діапазон",       callback_data="tbuy_ps:range")],
+        [InlineKeyboardButton(text="🌐 Будь-яка ціна", callback_data="tbuy_ps:any")],
+        [InlineKeyboardButton(text="⬇️ Не дорожче ніж...", callback_data="tbuy_ps:max")],
+        [InlineKeyboardButton(text="↔️ Ціновий діапазон", callback_data="tbuy_ps:range")],
         [InlineKeyboardButton(text="🎯 Точно по ціні (Снайпер)", callback_data="tbuy_ps:exact")],
     ])
 
+
 def _tsell_price_strategy_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧮 ROI Калькулятор",         callback_data="tsell_ps:roi")],
-        [InlineKeyboardButton(text="⬆️ Не дешевше ніж...",       callback_data="tsell_ps:min")],
-        [InlineKeyboardButton(text="↔️ Ціновий діапазон",        callback_data="tsell_ps:range")],
+        [InlineKeyboardButton(text="🧮 ROI Калькулятор", callback_data="tsell_ps:roi")],
+        [InlineKeyboardButton(text="⬆️ Не дешевше ніж...", callback_data="tsell_ps:min")],
+        [InlineKeyboardButton(text="↔️ Ціновий діапазон", callback_data="tsell_ps:range")],
         [InlineKeyboardButton(text="🎯 Точно по ціні (Снайпер)", callback_data="tsell_ps:exact")],
     ])
+
 
 def _calc_roi(amount: float, buy_price: float, profit_pct: float, network_fee: float) -> dict:
     """ROI Калькулятор для Taker Sell."""
@@ -2598,13 +2629,13 @@ def _get_taker_buy_preset(user_row: dict | None) -> dict | None:
     amount = float(user_row.get("taker_buy_amount", 0))
     if amount > 0:
         return {
-            "amount":         amount,
-            "max_price":      float(user_row.get("taker_buy_max_price", 0)),
-            "limit_min":      float(user_row.get("taker_buy_limit_min", 0)),
-            "limit_max":      float(user_row.get("taker_buy_limit_max", 0)),
-            "speed":          user_row.get("taker_buy_speed", "ANY"),
+            "amount": amount,
+            "max_price": float(user_row.get("taker_buy_max_price", 0)),
+            "limit_min": float(user_row.get("taker_buy_limit_min", 0)),
+            "limit_max": float(user_row.get("taker_buy_limit_max", 0)),
+            "speed": user_row.get("taker_buy_speed", "ANY"),
             "price_strategy": user_row.get("taker_buy_price_strategy", "any"),  # ← додати
-            "price_from":     float(user_row.get("taker_buy_price_from", 0)),   # ← додати
+            "price_from": float(user_row.get("taker_buy_price_from", 0)),  # ← додати
         }
     return None
 
@@ -2649,8 +2680,8 @@ def _tbuy_banks_kb(selected: list) -> InlineKeyboardMarkup:
 
 def _sell_preset_text(p: dict) -> str:
     strategy_labels = {
-        "roi":   "🧮 ROI авто",
-        "min":   "⬆️ Мінімальна",
+        "roi": "🧮 ROI авто",
+        "min": "⬆️ Мінімальна",
         "range": "↔️ Діапазон",
         "exact": "🎯 Точна",
     }
@@ -2670,10 +2701,11 @@ def _sell_preset_text(p: dict) -> str:
         f"Що робимо?"
     )
 
+
 def _buy_preset_text(p: dict) -> str:
     strategy_labels = {
-        "any":   "🔓 Будь-яка",
-        "max":   "⬇️ Макс. ціна",
+        "any": "🔓 Будь-яка",
+        "max": "⬇️ Макс. ціна",
         "range": "↔️ Діапазон",
         "exact": "🎯 Точна",
     }
@@ -2684,7 +2716,7 @@ def _buy_preset_text(p: dict) -> str:
     if strategy == "range" and p.get("price_from", 0) > 0:
         strat_line += f"  • Від: <b>{p['price_from']:.4f} ₴</b>\n"
 
-    mp_line  = f"  • До: <b>{p['max_price']:.4f} ₴</b>\n" if p.get("max_price", 0) > 0 else ""
+    mp_line = f"  • До: <b>{p['max_price']:.4f} ₴</b>\n" if p.get("max_price", 0) > 0 else ""
     lim_line = (f"  • Ліміти: <b>{p['limit_min']:.0f}–{p['limit_max']:.0f} ₴</b>\n"
                 if p.get("limit_min", 0) > 0 or p.get("limit_max", 0) > 0 else "")
     speed = "⚡ FAST" if p.get("speed") == "FAST" else "🐢 ANY"
@@ -3886,11 +3918,11 @@ async def on_tsell_buy_price(message: Message, state: FSMContext) -> None:
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="Binance", callback_data="tsell_ex:Binance"),
-            InlineKeyboardButton(text="Bybit",   callback_data="tsell_ex:Bybit"),
+            InlineKeyboardButton(text="Bybit", callback_data="tsell_ex:Bybit"),
         ],
         [
-            InlineKeyboardButton(text="OKX",     callback_data="tsell_ex:OKX"),
-            InlineKeyboardButton(text="MEXC",    callback_data="tsell_ex:MEXC"),
+            InlineKeyboardButton(text="OKX", callback_data="tsell_ex:OKX"),
+            InlineKeyboardButton(text="MEXC", callback_data="tsell_ex:MEXC"),
         ],
         [
             InlineKeyboardButton(text="⚡ P2P (без комісії)", callback_data="tsell_ex:INTERNAL"),
@@ -3912,14 +3944,14 @@ async def on_tsell_exchange(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
     data = await state.get_data()
-    amount    = float(data["amount"])
+    amount = float(data["amount"])
     buy_price = float(data["buy_price"])
 
     # Рахуємо breakeven прямо тут
     network_fee, network_name = _get_network_fee(exchange)
-    usable_volume   = max(amount - network_fee, 0.001)
+    usable_volume = max(amount - network_fee, 0.001)
     breakeven_price = (amount * buy_price) / usable_volume
-    breakeven_pct   = (breakeven_price / buy_price - 1) * 100
+    breakeven_pct = (breakeven_price / buy_price - 1) * 100
 
     await state.update_data(network_fee=network_fee, network_name=network_name)
     await state.set_state(TakerSellSettingsStates.waiting_profit)
@@ -3953,11 +3985,11 @@ async def on_tsell_profit(message: Message, state: FSMContext) -> None:
     # Стан залишається waiting_profit → speed-кнопки підхоплюються нижче
 
     speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="⚡ Так, швидко!",    callback_data="tsell_speed:FAST"),
-        InlineKeyboardButton(text="🐢 Ні, чекатиму",   callback_data="tsell_speed:ANY"),
+        InlineKeyboardButton(text="⚡ Так, швидко!", callback_data="tsell_speed:FAST"),
+        InlineKeyboardButton(text="🐢 Ні, чекатиму", callback_data="tsell_speed:ANY"),
     ]])
     await message.answer(
-        f"{_sell_roi_text(data | {'profit': val, 'network_name': data.get('network_name','')}, roi)}\n\n"
+        f"{_sell_roi_text(data | {'profit': val, 'network_name': data.get('network_name', '')}, roi)}\n\n"
         "⏱ <b>Крок 5/5 — Час важливий?</b>\n\n"
         "⚡ <b>Швидко</b> — беремо тільки ордери які можуть повністю покрити наш обʼєм\n"
         "🐢 <b>Чекатиму</b> — беремо будь-які ордери, навіть якщо частковий обʼєм",
@@ -3970,7 +4002,7 @@ async def on_tsell_speed(call: CallbackQuery, state: FSMContext) -> None:
     speed = call.data.split(":")[1]
     await state.update_data(speed=speed)
     data = await state.get_data()
-    roi  = data.get("roi", {})
+    roi = data.get("roi", {})
     await call.answer()
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
@@ -4001,6 +4033,8 @@ async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
             reply_markup=scanner_mode_kb("TAKER_SELL"),
         )
     await call.answer("🚀 Запущено!")
+
+
 # =========================================================================
 # 🛒 TAKER BUY FSM  (5 кроків + підтвердження)
 # =========================================================================
@@ -4161,7 +4195,6 @@ async def on_tbuy_price_to(message: Message, state: FSMContext) -> None:
         "<i>0 — без обмеження</i>",
         reply_markup=keyboards.back_to_main_kb(),
     )
-
 
 
 @router.callback_query(F.data == "tbuy_skip:limits")
@@ -4754,6 +4787,7 @@ async def cmd_cards_dashboard(message: Message) -> None:
         return await message.answer("❌ БД не підключена.")
     await _show_cards_dashboard(message.from_user.id, message)
 
+
 async def _show_cards_dashboard(user_id: int, message_or_call) -> None:
     settings = await _db.get_user_card_settings(user_id)
     if not settings:
@@ -4761,30 +4795,33 @@ async def _show_cards_dashboard(user_id: int, message_or_call) -> None:
         await conn.execute("INSERT INTO user_card_settings (user_id) VALUES (?)", (user_id,))
         await conn.commit()
         settings = {"card_module_mode": "off"}
-        
+
     cards = await _db.get_cards(user_id)
-    
+
     text = (
         "💳 <b>Управління картками</b>\n\n"
         "Тут ви можете додати свої банківські картки або картки дропів для автоматичного спліту ордерів і контролю лімітів.\n\n"
         f"У вас додано карток: <b>{len(cards)}</b>\n"
     )
-    
+
     kb = keyboards.cards_dashboard_kb(cards, settings.get("card_module_mode", "off"))
-    
+
     if isinstance(message_or_call, Message):
         await message_or_call.answer(text, reply_markup=kb)
     else:
         await message_or_call.message.edit_text(text, reply_markup=kb)
         await message_or_call.answer()
 
+
 @router.callback_query(F.data == "card:dashboard")
 async def cb_cards_dashboard(call: CallbackQuery) -> None:
     await _show_cards_dashboard(call.from_user.id, call)
 
+
 @router.callback_query(F.data == "menu:cards")
 async def cb_menu_cards(call: CallbackQuery) -> None:
     await _show_cards_dashboard(call.from_user.id, call)
+
 
 @router.callback_query(F.data == "menu:report")
 async def cb_menu_report(call: CallbackQuery) -> None:
@@ -4794,6 +4831,7 @@ async def cb_menu_report(call: CallbackQuery) -> None:
     )
     await call.answer()
 
+
 @router.callback_query(F.data == "card:toggle_module")
 async def cb_card_toggle_module(call: CallbackQuery) -> None:
     if not _db:
@@ -4801,9 +4839,11 @@ async def cb_card_toggle_module(call: CallbackQuery) -> None:
     settings = await _db.get_user_card_settings(call.from_user.id)
     new_mode = "full" if settings.get("card_module_mode") == "off" else "off"
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-    await conn.execute("UPDATE user_card_settings SET card_module_mode=? WHERE user_id=?", (new_mode, call.from_user.id))
+    await conn.execute("UPDATE user_card_settings SET card_module_mode=? WHERE user_id=?",
+                       (new_mode, call.from_user.id))
     await conn.commit()
     await _show_cards_dashboard(call.from_user.id, call)
+
 
 @router.callback_query(F.data == "card:add_start")
 async def cb_card_add_start(call: CallbackQuery, state: FSMContext) -> None:
@@ -4811,6 +4851,7 @@ async def cb_card_add_start(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text("Виберіть банк для нової картки:", reply_markup=keyboards.card_banks_kb())
     await state.set_state(CardAddStates.waiting_bank)
     await call.answer()
+
 
 @router.callback_query(CardAddStates.waiting_bank, F.data.startswith("card_add:bank:"))
 async def cb_card_add_bank(call: CallbackQuery, state: FSMContext) -> None:
@@ -4820,6 +4861,7 @@ async def cb_card_add_bank(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(CardAddStates.waiting_card_number)
     await call.answer()
 
+
 @router.message(CardAddStates.waiting_card_number)
 async def process_card_add_number(message: Message, state: FSMContext) -> None:
     card_number = message.text.strip().replace(" ", "")
@@ -4828,6 +4870,7 @@ async def process_card_add_number(message: Message, state: FSMContext) -> None:
     await state.update_data(card_number=card_number, last_four=card_number[-4:])
     await message.answer("Введіть поточний баланс картки (грн):")
     await state.set_state(CardAddStates.waiting_balance)
+
 
 @router.message(CardAddStates.waiting_balance)
 async def process_card_add_balance(message: Message, state: FSMContext) -> None:
@@ -4839,6 +4882,7 @@ async def process_card_add_balance(message: Message, state: FSMContext) -> None:
     await message.answer("Введіть мітку (Label) для картки (напр. 'Власна', 'Дроп Іван'):")
     await state.set_state(CardAddStates.waiting_label)
 
+
 @router.message(CardAddStates.waiting_label)
 async def process_card_add_label(message: Message, state: FSMContext) -> None:
     label = message.text.strip()
@@ -4846,11 +4890,12 @@ async def process_card_add_label(message: Message, state: FSMContext) -> None:
     await message.answer("Ця картка належить вам (Власна) чи дропу?", reply_markup=keyboards.card_is_own_kb())
     await state.set_state(CardAddStates.waiting_is_own)
 
+
 @router.callback_query(CardAddStates.waiting_is_own, F.data.startswith("card_add:is_own:"))
 async def cb_card_add_is_own(call: CallbackQuery, state: FSMContext) -> None:
     is_own = int(call.data.split(":")[2])
     data = await state.get_data()
-    
+
     import uuid
     card_id = str(uuid.uuid4())
     card_data = {
@@ -4864,23 +4909,25 @@ async def cb_card_add_is_own(call: CallbackQuery, state: FSMContext) -> None:
         "balance": data["balance"],
         "status": "active"
     }
-    
+
     if _db:
         await _db.add_card(card_data)
-        
+
         # Note: We no longer auto-map Mono here using a global token.
         # User must set up webhook per card.
         pass
-        
+
     await state.clear()
     await call.message.edit_text("✅ Картку успішно додано!")
     await _show_cards_dashboard(call.from_user.id, call.message)
     await call.answer()
 
+
 @router.callback_query(F.data == "card:cancel")
 async def cb_card_cancel(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await _show_cards_dashboard(call.from_user.id, call)
+
 
 @router.callback_query(F.data.startswith("card:view:"))
 async def cb_card_view(call: CallbackQuery) -> None:
@@ -4889,28 +4936,28 @@ async def cb_card_view(call: CallbackQuery) -> None:
     card = next((c for c in cards if c["id"] == card_id), None)
     if not card:
         return await call.answer("❌ Картку не знайдено", show_alert=True)
-        
+
     import time
     used_daily_in = await _db.get_rolling_used(card_id, "in", 24)
     used_daily_out = await _db.get_rolling_used(card_id, "out", 24)
     tx_count = await _db.get_card_transactions_count(card_id, 24)
-    
+
     limits = await _db.get_card_effective_limits(card_id, call.from_user.id, card['bank_name'])
     limit_daily_in = limits["daily_in_max"]
     limit_daily_out = limits["daily_out_max"]
-    
+
     rem_in = max(0, limit_daily_in - used_daily_in)
     rem_out = max(0, limit_daily_out - used_daily_out)
-    
+
     is_custom = card.get("is_custom_limits", 0)
     limits_label = "🟢 Локальні" if is_custom else "⚪ Глобальні"
-    
+
     import datetime
     cooldown_str = "Немає"
     if card["cooldown_until"] > time.time():
         dt = datetime.datetime.fromtimestamp(card["cooldown_until"])
         cooldown_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        
+
     text = (
         f"💳 <b>Картка:</b> {card['bank_name'].capitalize()} {card['last_four']}\n"
         f"🏷 <b>Мітка:</b> {card['label']}\n"
@@ -4924,16 +4971,19 @@ async def cb_card_view(call: CallbackQuery) -> None:
         f"⚙️ <b>Ліміти:</b> {limits_label}\n"
         f"⏳ <b>Cooldown до:</b> {cooldown_str}"
     )
-    
+
     # Якщо викликано з FakeCall (message), то треба відповісти або відредагувати існуюче
     if hasattr(call, "message") and hasattr(call.message, "edit_text"):
-        await call.message.edit_text(text, reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
+        await call.message.edit_text(text,
+                                     reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
     else:
         # Для фейкового call
-        await call.message.answer(text, reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
-        
+        await call.message.answer(text,
+                                  reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
+
     if hasattr(call, "answer"):
         await call.answer()
+
 
 @router.callback_query(F.data.startswith("card:toggle:"))
 async def cb_card_toggle(call: CallbackQuery) -> None:
@@ -4942,14 +4992,15 @@ async def cb_card_toggle(call: CallbackQuery) -> None:
     card = next((c for c in cards if c["id"] == card_id), None)
     if not card:
         return await call.answer("❌ Картку не знайдено", show_alert=True)
-        
+
     new_status = "frozen_funds" if card["status"] == "active" else "active"
     await _db.update_card(card_id, {"status": new_status})
-    
+
     await call.answer(f"Статус змінено на {new_status}")
     # Refresh view
     call.data = f"card:view:{card_id}"
     await cb_card_view(call)
+
 
 # ── D3: Редагування полів картки (label / note / category) ──────────────
 
@@ -4959,10 +5010,12 @@ async def cb_card_edit_label(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(edit_card_id=card_id)
     await call.message.edit_text(
         "🏷 Введіть нову мітку (Label) для картки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
     )
     await state.set_state(CardEditStates.waiting_label)
     await call.answer()
+
 
 @router.message(CardEditStates.waiting_label)
 async def process_card_edit_label(message: Message, state: FSMContext) -> None:
@@ -4972,15 +5025,20 @@ async def process_card_edit_label(message: Message, state: FSMContext) -> None:
     await _db.update_card(card_id, {"label": new_label})
     await state.clear()
     await message.answer(f"✅ Мітку змінено на: <b>{new_label}</b>")
+
     # Refresh card view
     class FakeCall:
         data = f"card:view:{card_id}"
         from_user = message.from_user
+
     fc = FakeCall()
     fc.message = message
+
     async def noop(*a, **k): pass
+
     fc.answer = noop
     await cb_card_view(fc)
+
 
 @router.callback_query(F.data.startswith("card:edit:note:"))
 async def cb_card_edit_note(call: CallbackQuery, state: FSMContext) -> None:
@@ -4988,10 +5046,12 @@ async def cb_card_edit_note(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(edit_card_id=card_id)
     await call.message.edit_text(
         "📝 Введіть нову нотатку (Note) для картки:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
     )
     await state.set_state(CardEditStates.waiting_note)
     await call.answer()
+
 
 @router.message(CardEditStates.waiting_note)
 async def process_card_edit_note(message: Message, state: FSMContext) -> None:
@@ -5001,14 +5061,19 @@ async def process_card_edit_note(message: Message, state: FSMContext) -> None:
     await _db.update_card(card_id, {"note": new_note})
     await state.clear()
     await message.answer(f"✅ Нотатку змінено.")
+
     class FakeCall:
         data = f"card:view:{card_id}"
         from_user = message.from_user
+
     fc = FakeCall()
     fc.message = message
+
     async def noop(*a, **k): pass
+
     fc.answer = noop
     await cb_card_view(fc)
+
 
 @router.callback_query(F.data.startswith("card:edit:category:"))
 async def cb_card_edit_category(call: CallbackQuery) -> None:
@@ -5018,6 +5083,7 @@ async def cb_card_edit_category(call: CallbackQuery) -> None:
         reply_markup=keyboards.card_category_kb(card_id)
     )
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("card:set_cat:"))
 async def cb_card_set_category(call: CallbackQuery) -> None:
@@ -5030,6 +5096,7 @@ async def cb_card_set_category(call: CallbackQuery) -> None:
     call.data = f"card:view:{card_id}"
     await cb_card_view(call)
 
+
 @router.callback_query(F.data.startswith("card:delete:"))
 async def cb_card_delete(call: CallbackQuery) -> None:
     card_id = call.data.split(":")[2]
@@ -5039,6 +5106,7 @@ async def cb_card_delete(call: CallbackQuery) -> None:
     await call.answer("🗑 Картку видалено")
     await _show_cards_dashboard(call.from_user.id, call)
 
+
 @router.callback_query(F.data.startswith("card:update_bal:"))
 async def cb_card_update_bal_start(call: CallbackQuery, state: FSMContext) -> None:
     card_id = call.data.split(":")[2]
@@ -5046,10 +5114,12 @@ async def cb_card_update_bal_start(call: CallbackQuery, state: FSMContext) -> No
     await call.message.edit_text(
         "Введіть точний актуальний баланс картки (грн):\n\n"
         "<i>Ця дія просто оновить баланс у системі без створення транзакції.</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
     )
     await state.set_state(CardUpdateStates.waiting_true_balance)
     await call.answer()
+
 
 @router.message(CardUpdateStates.waiting_true_balance)
 async def process_card_update_bal(message: Message, state: FSMContext) -> None:
@@ -5057,12 +5127,12 @@ async def process_card_update_bal(message: Message, state: FSMContext) -> None:
         balance = float(message.text.strip().replace(',', '.'))
     except ValueError:
         return await message.answer("❌ Некоректний формат числа.")
-        
+
     data = await state.get_data()
     card_id = data["card_id"]
-    
+
     await _db.update_card_balance(card_id, balance)
-    
+
     await state.clear()
     await message.answer("✅ Баланс успішно оновлено!")
 
@@ -5078,42 +5148,45 @@ async def process_card_update_bal(message: Message, state: FSMContext) -> None:
     # Бойовий виклик (message тепер летить у конструктор і скоуп не ламається):
     await cb_card_view(FakeCall(message, card_id))
 
+
 @router.callback_query(F.data.startswith("card_match:confirm:"))
 async def cb_card_match_confirm(call: CallbackQuery):
     cache_key = call.data.split(":", 2)[2]
     from bot.card_notifier import _card_matching_cache
-    
+
     if cache_key not in _card_matching_cache:
         return await call.answer("❌ Дані застаріли", show_alert=True)
-        
+
     data = _card_matching_cache[cache_key]
     cards = data.get("found_cards", [])
     if not cards:
         return await call.answer("❌ Картки не знайдено", show_alert=True)
-        
+
     amount_per_card = data["target_amount"] / len(cards)
     for c in cards:
         await _db.reserve_card_amount(c["id"], amount_per_card, data["order_id"])
-        
-    await call.message.edit_text(f"✅ Успішно зарезервовано {data['target_amount']:.0f} ₴ на {len(cards)} картках для ордеру {data['order_id'][:8]}")
+
+    await call.message.edit_text(
+        f"✅ Успішно зарезервовано {data['target_amount']:.0f} ₴ на {len(cards)} картках для ордеру {data['order_id'][:8]}")
     del _card_matching_cache[cache_key]
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("card_match:other:"))
 async def cb_card_match_other(call: CallbackQuery):
     cache_key = call.data.split(":", 2)[2]
     from bot.card_notifier import _card_matching_cache
-    
+
     if cache_key not in _card_matching_cache:
         return await call.answer("❌ Дані застаріли", show_alert=True)
-        
+
     data = _card_matching_cache[cache_key]
     cards = data.get("found_cards", [])
-    
+
     for c in cards:
         if c["id"] not in data["excluded_cards"]:
             data["excluded_cards"].append(c["id"])
-            
+
     if _notifier and hasattr(_notifier, "card_notifier"):
         await call.answer("🔄 Шукаю інший варіант...")
         await _notifier.card_notifier.send_card_recommendation(
@@ -5128,6 +5201,7 @@ async def cb_card_match_other(call: CallbackQuery):
     else:
         await call.answer("❌ Модуль не підключено")
 
+
 @router.callback_query(F.data.startswith("card_match:cancel:"))
 async def cb_card_match_cancel(call: CallbackQuery):
     cache_key = call.data.split(":", 2)[2]
@@ -5136,6 +5210,7 @@ async def cb_card_match_cancel(call: CallbackQuery):
         del _card_matching_cache[cache_key]
     await call.message.edit_text("❌ Підбір картки скасовано.")
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("card:mono_setup:"))
 async def cb_card_mono_setup(call: CallbackQuery, state: FSMContext):
@@ -5161,6 +5236,7 @@ async def cb_card_mono_setup(call: CallbackQuery, state: FSMContext):
     await state.set_state(MonoStates.waiting_token)
     await call.answer()
 
+
 @router.message(MonoStates.waiting_token)
 async def process_mono_token(message: Message, state: FSMContext):
     token = message.text.strip()
@@ -5168,61 +5244,62 @@ async def process_mono_token(message: Message, state: FSMContext):
     card_id = data.get("setup_card_id")
     if not card_id:
         return await message.answer("❌ Помилка: картка не знайдена. Спробуйте ще раз через меню карток.")
-        
+
     from infrastructure.api.mono_client import MonoApiClient
     from core.security.crypto_utils import CryptoUtils
     import secrets
-    
+
     msg = await message.answer("⏳ Перевіряю токен...")
-    
+
     client = MonoApiClient(token)
     info = await client.get_client_info()
     if not info:
         return await msg.edit_text("❌ Помилка: невірний токен або збій API Mono.")
-        
+
     secret = secrets.token_urlsafe(16)
     encrypted_token = CryptoUtils.encrypt(token)
-    
+
     await _db.save_card_mono_settings(card_id, encrypted_token, secret)
-    
+
     # Auto-map existing cards
     accounts = info.get("accounts", [])
-    
+
     # We only map THIS specific card now
     cards = await _db.get_cards(message.from_user.id)
     card_obj = next((c for c in cards if c["id"] == card_id), None)
     mapped = False
-    
+
     if card_obj:
         last_four = card_obj["last_four"]
         for acc in accounts:
             pan = acc.get("maskedPan", [])
             if pan and len(pan) > 0 and pan[0].endswith(last_four):
                 await _db.update_card_mono_account(card_id, acc["id"])
-                
+
                 # Автоматично підтягуємо актуальний баланс з АПІ
                 real_balance = acc.get("balance", 0) / 100.0
                 conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
                 await conn.execute("UPDATE cards SET balance=? WHERE id=?", (real_balance, card_id))
                 await conn.commit()
-                
+
                 mapped = True
                 break
-                
+
     await state.clear()
-    await message.delete() # hide token
-    
+    await message.delete()  # hide token
+
     status_text = "✅ <b>Monobank успішно підключено!</b>\n"
     if mapped:
         status_text += "Картку знайдено в API та успішно прив'язано.\n\n"
     else:
         status_text += "⚠️ Увага: Картку з такими останніми цифрами не знайдено в цьому токені.\n\n"
-        
+
     await msg.edit_text(
         status_text +
         f"Встановіть цей Webhook URL у налаштуваннях Mono:\n"
         f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/card/{card_id}/{secret}</code>\n"
     )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # /report — Звіт по картках
@@ -5237,6 +5314,7 @@ async def cmd_report(message: Message) -> None:
         "📊 <b>Звіт по картках</b>\n\nОберіть період для формування звіту:",
         reply_markup=keyboards.report_period_kb()
     )
+
 
 @router.callback_query(F.data.startswith("report:period:"))
 async def cb_report_period(call: CallbackQuery) -> None:
@@ -5268,17 +5346,16 @@ async def cb_report_period(call: CallbackQuery) -> None:
         conn = getattr(_db, "_db", _db)
 
         async with conn.execute(
-            """
-            SELECT 
-                COUNT(*) as tx_count,
-                SUM(CASE WHEN direction='in' AND type='work' THEN amount ELSE 0 END) as work_in,
-                SUM(CASE WHEN direction='out' AND type='work' THEN amount ELSE 0 END) as work_out,
-                SUM(CASE WHEN direction='in' AND type='personal' THEN amount ELSE 0 END) as pers_in,
-                SUM(CASE WHEN direction='out' AND type='personal' THEN amount ELSE 0 END) as pers_out
-            FROM card_transactions
-            WHERE card_id=? AND timestamp > ?
-            """,
-            (card_id, cutoff)
+                """
+                SELECT COUNT(*)                                                                      as tx_count,
+                       SUM(CASE WHEN direction = 'in' AND type = 'work' THEN amount ELSE 0 END)      as work_in,
+                       SUM(CASE WHEN direction = 'out' AND type = 'work' THEN amount ELSE 0 END)     as work_out,
+                       SUM(CASE WHEN direction = 'in' AND type = 'personal' THEN amount ELSE 0 END)  as pers_in,
+                       SUM(CASE WHEN direction = 'out' AND type = 'personal' THEN amount ELSE 0 END) as pers_out
+                FROM card_transactions
+                WHERE card_id = ? AND timestamp > ?
+                """,
+                (card_id, cutoff)
         ) as cur:
             row = await cur.fetchone()
             s = dict(row) if row else {}
@@ -5342,6 +5419,7 @@ async def cb_report_period(call: CallbackQuery) -> None:
     await call.message.edit_text(text)
     await call.answer()
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # D6: /set_bank_limits — Налаштування лімітів банку
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -5350,18 +5428,20 @@ async def cb_report_period(call: CallbackQuery) -> None:
 async def cmd_set_bank_limits(message: Message) -> None:
     await _show_bank_limits_menu(message)
 
+
 @router.callback_query(F.data == "menu:bank_limits")
 async def cb_menu_bank_limits(call: CallbackQuery) -> None:
     await _show_bank_limits_menu(call.message)
     await call.answer()
 
+
 async def _show_bank_limits_menu(message: Message):
     if not _db:
         return await message.answer("❌ БД не підключена.")
-    
+
     text = "⚙️ <b>Налаштування лімітів банку</b>\n\nОберіть банк:"
     reply_markup = keyboards.bank_limits_bank_kb()
-    
+
     if hasattr(message, "edit_text"):
         try:
             await message.edit_text(text, reply_markup=reply_markup)
@@ -5369,6 +5449,7 @@ async def _show_bank_limits_menu(message: Message):
             await message.answer(text, reply_markup=reply_markup)
     else:
         await message.answer(text, reply_markup=reply_markup)
+
 
 @router.callback_query(F.data == "limits:back")
 async def cb_limits_back(call: CallbackQuery, state: FSMContext) -> None:
@@ -5378,6 +5459,7 @@ async def cb_limits_back(call: CallbackQuery, state: FSMContext) -> None:
         reply_markup=keyboards.bank_limits_bank_kb()
     )
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("limits:bank:"))
 async def cb_limits_bank(call: CallbackQuery) -> None:
@@ -5399,6 +5481,7 @@ async def cb_limits_bank(call: CallbackQuery) -> None:
     )
     await call.answer()
 
+
 @router.callback_query(F.data.startswith("limits:field:"))
 async def cb_limits_field(call: CallbackQuery, state: FSMContext) -> None:
     parts = call.data.split(":")
@@ -5417,24 +5500,25 @@ async def cb_limits_field(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(BankLimitStates.waiting_value)
     await call.answer()
 
+
 @router.message(BankLimitStates.waiting_value)
 async def process_limit_value(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     bank = data["limit_bank"]
     field = data["limit_field"]
-    
+
     try:
         value = float(message.text.strip().replace(',', '.'))
         if field in ("max_tx_per_day", "cooldown_hours"):
             value = int(value)
     except ValueError:
         return await message.answer("❌ Некоректний формат числа. Спробуйте ще раз:")
-    
+
     await _db.set_user_bank_limit(message.from_user.id, bank, field, value)
     label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
     await state.clear()
     await message.answer(f"✅ <b>{label}</b> для {bank.capitalize()} змінено на <b>{value}</b>")
-    
+
     # Показати оновлені ліміти
     limits = await _db.get_user_bank_limits(message.from_user.id, bank)
     await message.answer(
@@ -5442,6 +5526,7 @@ async def process_limit_value(message: Message, state: FSMContext) -> None:
         f"<i>Натисніть на поле для зміни значення:</i>",
         reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
     )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # D7: Індивідуальні ліміти картки (локальні override)
@@ -5455,12 +5540,12 @@ async def cb_card_limits(call: CallbackQuery) -> None:
     card = next((c for c in cards if c["id"] == card_id), None)
     if not card:
         return await call.answer("❌ Картку не знайдено", show_alert=True)
-    
+
     is_custom = bool(card.get("is_custom_limits", 0))
     effective = await _db.get_card_effective_limits(card_id, call.from_user.id, card["bank_name"])
-    
+
     mode_text = "🟢 <b>Локальні ліміти</b> (перезаписують глобальні)" if is_custom else "⚪ <b>Глобальні ліміти</b> (з налаштувань банку)"
-    
+
     await call.message.edit_text(
         f"⚙️ <b>Ліміти для {card['bank_name'].capitalize()} {card['last_four']}</b>\n"
         f"{mode_text}\n\n"
@@ -5468,6 +5553,7 @@ async def cb_card_limits(call: CallbackQuery) -> None:
         reply_markup=keyboards.card_limits_fields_kb(card_id, effective, is_custom)
     )
     await call.answer()
+
 
 @router.callback_query(F.data.startswith("card:limits:toggle:"))
 async def cb_card_limits_toggle(call: CallbackQuery) -> None:
@@ -5477,24 +5563,25 @@ async def cb_card_limits_toggle(call: CallbackQuery) -> None:
     card = next((c for c in cards if c["id"] == card_id), None)
     if not card:
         return await call.answer("❌ Картку не знайдено", show_alert=True)
-    
+
     current = bool(card.get("is_custom_limits", 0))
     new_val = not current
     await _db.toggle_card_custom_limits(card_id, new_val)
-    
+
     status = "УВІМКНЕНО 🟢" if new_val else "ВИМКНЕНО ⚪"
     await call.answer(f"Локальні ліміти: {status}", show_alert=True)
-    
+
     # Refresh the menu
     effective = await _db.get_card_effective_limits(card_id, call.from_user.id, card["bank_name"])
     mode_text = "🟢 <b>Локальні ліміти</b> (перезаписують глобальні)" if new_val else "⚪ <b>Глобальні ліміти</b> (з налаштувань банку)"
-    
+
     await call.message.edit_text(
         f"⚙️ <b>Ліміти для {card['bank_name'].capitalize()} {card['last_four']}</b>\n"
         f"{mode_text}\n\n"
         f"<i>Натисніть на поле для зміни значення:</i>",
         reply_markup=keyboards.card_limits_fields_kb(card_id, effective, new_val)
     )
+
 
 @router.callback_query(F.data.startswith("clf:"))
 async def cb_card_limits_field(call: CallbackQuery, state: FSMContext) -> None:
@@ -5515,25 +5602,26 @@ async def cb_card_limits_field(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(CardLimitStates.waiting_value)
     await call.answer()
 
+
 @router.message(CardLimitStates.waiting_value)
 async def process_card_limit_value(message: Message, state: FSMContext) -> None:
     """Зберігає нове значення ліміту для конкретної картки."""
     data = await state.get_data()
     card_id = data["card_limit_card_id"]
     field = data["card_limit_field"]
-    
+
     try:
         value = float(message.text.strip().replace(',', '.'))
         if field in ("max_tx_per_day", "cooldown_hours"):
             value = int(value)
     except ValueError:
         return await message.answer("❌ Некоректний формат числа. Спробуйте ще раз:")
-    
+
     await _db.update_card_limit_override(card_id, field, value)
     label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
     await state.clear()
     await message.answer(f"✅ <b>{label}</b> для цієї картки змінено на <b>{value}</b>")
-    
+
     # Refresh card limits view
     effective = await _db.get_card_effective_limits(card_id)
     cards = await _db.get_cards(message.from_user.id)
@@ -5541,7 +5629,7 @@ async def process_card_limit_value(message: Message, state: FSMContext) -> None:
     is_custom = bool(card.get("is_custom_limits", 0)) if card else True
     bank_label = card["bank_name"].capitalize() if card else ""
     last4 = card["last_four"] if card else ""
-    
+
     mode_text = "🟢 <b>Локальні ліміти</b>" if is_custom else "⚪ <b>Глобальні ліміти</b>"
     await message.answer(
         f"⚙️ <b>Ліміти для {bank_label} {last4}</b>\n"
@@ -5661,3 +5749,87 @@ async def cb_card_force_refresh_api(call: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logging.getLogger("Commands").error(f"Помилка мануального оновлення балансу: {e}")
                 await call.answer("🔥 Внутрішня помилка обробника балансу", show_alert=True)
+
+
+from bot.keyboards import card_display_settings_kb  # Імпортуємо твою нову клавіатуру
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ХЕНДЛЕРИ НАЛАШТУВАННЯ ВІДОБРАЖЕННЯ КАРТКОВОГО МОДУЛЯ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "set:card_display_menu")
+async def cb_open_card_display_menu(call: CallbackQuery):
+    """
+    Точка входу: відкриває підменю конфігурації вмісту та формату виводу карт.
+    """
+    try:
+        chat_id = call.message.chat.id
+
+        # Стягуємо поточний стан налаштувань користувача з SQLite
+        current_settings = await _db.get_user_card_settings(chat_id) or {}
+
+        text = (
+            "💳 <b>Налаштування відображення карткового модуля</b>\n\n"
+            "Конфігурація формату та деталізації виводу карток в алертах сканера:\n\n"
+            "• <b>Вивід карт:</b> інтегрувати картки прямо в текст спреду чи надсилати окремою Reply-відповіддю на повідомлення.\n"
+            "• <b>Логіка спойлера:</b> ховати ліміти під спойлер завжди чи автоматично розгортати та підсвічувати 🚨 картку при загрозі фінмоніторингу.\n"
+            "• <b>Деталізація:</b> відображати повний зріз лімітів банку чи компактний вигляд (суто баланси та добовий залишок)."
+        )
+
+        await call.message.edit_text(
+            text=text,
+            reply_markup=card_display_settings_kb(current_settings)
+        )
+    except Exception as e:
+        logging.getLogger("Commands").error(f"Помилка відкриття меню карт: {e}")
+        await call.answer("🔥 Не вдалося завантажити підменю", show_alert=True)
+
+
+@router.callback_query(F.data.in_({
+    "disp:toggle:card_output_mode",
+    "disp:toggle:enable_smart_spoiler",
+    "disp:toggle:card_detail_level"
+}))
+async def cb_toggle_card_display_fields(call: CallbackQuery):
+    """
+    Обробляє зміну станів для текстових та булевих параметрів карткового модуля.
+    Реалізує циклічне перемикання значень та викликає ререндер.
+    """
+    try:
+        chat_id = call.message.chat.id
+        # Витягуємо назву налаштування (останній елемент рядка)
+        field = call.data.split(":")[-1]
+
+        # 1. Читаємо поточну конфігурацію з бази даних
+        current_settings = await _db.get_user_card_settings(chat_id) or {}
+
+        # 2. Розумно перемикаємо стани залежно від типу даних
+        if field == "card_output_mode":
+            # Зміна рядка: inline 🔄 reply
+            current_settings["card_output_mode"] = (
+                "reply" if current_settings.get("card_output_mode", "inline") == "inline" else "inline"
+            )
+        elif field == "enable_smart_spoiler":
+            # Інверсія булевого прапорця (дефолт True)
+            current_settings["enable_smart_spoiler"] = not current_settings.get("enable_smart_spoiler", True)
+
+        elif field == "card_detail_level":
+            # Зміна рядка: full 🔄 compact
+            current_settings["card_detail_level"] = (
+                "compact" if current_settings.get("card_detail_level", "full") == "full" else "full"
+            )
+
+        # 3. Зберігаємо оновлений словник назад у базу даних
+        # Переконайся, що назва твого методу оновлення саме така, або адаптуй під свій update_user_card_settings
+        await _db.update_user_card_settings(chat_id, current_settings)
+
+        # 4. Робимо моментальний безшовний ререндер клавіатури в ТГ
+        await call.message.edit_reply_markup(
+            reply_markup=card_display_settings_kb(current_settings)
+        )
+        await call.answer("⚙️ Налаштування актуалізовано")
+
+    except Exception as e:
+        logging.getLogger("Commands").error(f"Помилка зміни параметра виводу карт: {e}")
+        await call.answer("🔥 Помилка під час збереження змін", show_alert=True)

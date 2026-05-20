@@ -2,6 +2,7 @@ import time
 import logging
 from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 from core.storage.merchant_db import MerchantDB
 from core.engine.card_matching_engine import CardMatchingEngine
 
@@ -85,8 +86,8 @@ class CardNotifier:
             bank: str,
             order_id: str,
             cache_key: str = None,
-            buy_card_spent_fiat: float = 0.0,  # 🚀 Передаємо об'єм витраченого фіату
-            buy_card_id: str = None            # 🚀 Передаємо ID картки купівлі для зв'язування
+            buy_card_spent_fiat: float = 0.0,
+            buy_card_id: str = None
     ) -> tuple[str, list, Optional[dict]]:
         """
         Повертає (text_block, keyboard_rows, chosen_card_dict) для вбудовування в алерт.
@@ -96,10 +97,11 @@ class CardNotifier:
         if not self._db:
             return "", [], None
 
-        settings = await self._db.get_user_card_settings(chat_id)
-        if not settings or settings.get("card_module_mode") != "full":
-            return "", [], None
+        # 🚀 ФІКС: Читаємо налаштування карткової таблиці
+        card_settings = await self._db.get_user_card_settings(chat_id) or {}
 
+        # Видаляємо стару забаговану перевірку settings.get("card_module_mode") != "full",
+        # оскільки наявність активних карток у базі та прапорці виводу вже є прямим дозволом на роботу.
         prefix = "💸 <b>КУПІВЛЯ (BUY):</b> " if direction == "buy" else "📥 <b>ПРИЙМАЄМО (SELL):</b> "
 
         engine = CardMatchingEngine(self._db)
@@ -148,15 +150,50 @@ class CardNotifier:
         avail_before = max(0.0, daily_max - used_daily)
         avail_after = max(0.0, avail_before - target_amount)
 
-        text = (
-            f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text})\n"
-            f"  ├ 💰 Баланс у боті: <code>{base_bal:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
-            f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code>\n"
-            f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>\n"
-            f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{limits['max_tx_per_day']}</code> ➔ <b>{tx_count + 1}</b>"
-        )
+        is_red_zone = False
+        warning_reasons = []
 
-        rows = [[InlineKeyboardButton(text="✅ Взяти в роботу", callback_data=f"card_match:confirm:{cache_key}"), InlineKeyboardButton(text="🔄 Інша картка", callback_data=f"card_match:other:{cache_key}")]]
+        if tx_count >= limits['max_tx_per_day'] - 2:
+            is_red_zone = True
+            warning_reasons.append(f"Критично мало транзакцій (залишилось {limits['max_tx_per_day'] - tx_count})")
+
+        if avail_after < daily_max * 0.15:
+            is_red_zone = True
+            warning_reasons.append("Добовий ліміт банку залишок < 15%")
+
+        # 🚀 ЗБІРКА ТЕКСТУ ЗА РІВНЕМ ДЕТАЛІЗАЦІЇ (Категоризація вмісту)
+        detail_level = card_settings.get("card_detail_level", "full")
+
+        if detail_level == "compact":
+            # Ультра-короткий вивід для швидкої роботи
+            card_info_body = (
+                f"  ├ 💰 Баланс: <code>{base_bal:,.0f} ₴</code> ➔ <b>{bal_after:,.0f} ₴</b>\n"
+                f"  └ 📅 Ліміт: <code>{avail_before:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>"
+            )
+        else:
+            # Твій повний детальний варіант
+            card_info_body = (
+                f"  ├ 💰 Баланс у боті: <code>{base_bal:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
+                f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code>\n"
+                f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>\n"
+                f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{limits['max_tx_per_day']}</code> ➔ <b>{tx_count + 1}</b>"
+            )
+
+        # Логіка Смарт-спойлера: якщо картка в небезпеці — лишаємо текст повністю ВІДКРИТИМ
+        use_smart_spoiler = card_settings.get("enable_smart_spoiler", True)
+
+        if use_smart_spoiler and is_red_zone:
+            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text}) 🚨\n"
+            warn_msg = f"⚠️ <b>РИЗИК ФІНМОНУ: {', '.join(warning_reasons)}</b>\n"
+            text = f"{prefix_header}{warn_msg}{card_info_body}"  # Без блокуblockquote!
+        else:
+            # Звичайний безпечний режим — ховаємо все під спойлер
+            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text})\n"
+            text = f"{prefix_header}<blockquote expandable>{card_info_body}</blockquote>"
+
+        rows = [[InlineKeyboardButton(text="✅ Взяти в роботу", callback_data=f"card_match:confirm:{cache_key}"),
+                 InlineKeyboardButton(text="🔄 Інша картка", callback_data=f"card_match:other:{cache_key}")]]
+
         return text, rows, c
 
     async def send_card_recommendation(
