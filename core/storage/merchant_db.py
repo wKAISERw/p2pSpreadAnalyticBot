@@ -25,7 +25,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
-
+import aiohttp  # 🚀 ДОДАЙ ЦЕЙ РЯДОК СЮДИ
 import aiosqlite
 from core.utils.crypto import encrypt, decrypt
 
@@ -91,7 +91,26 @@ class MerchantDB:
             await self._db.execute("ALTER TABLE cards ADD COLUMN mono_webhook_secret TEXT")
         except Exception: pass
         await self._db.commit()
-
+        await self._db.execute("""
+                               CREATE TABLE IF NOT EXISTS user_features
+                               (
+                                   user_id
+                                   INTEGER,
+                                   feature_key
+                                   TEXT,
+                                   is_enabled
+                                   INTEGER
+                                   DEFAULT
+                                   0,
+                                   PRIMARY
+                                   KEY
+                               (
+                                   user_id,
+                                   feature_key
+                               )
+                                   );
+                               """)
+        await self._db.commit()
         logger.info("MerchantDB запущено (WAL): %s", self._path)
 
     async def stop(self) -> None:
@@ -2163,6 +2182,104 @@ class MerchantDB:
         )
         await self._db.commit()
 
+    async def get_card_effective_limits(self, card_id: str, owner_id: int = None, bank_name: str = None) -> dict:
+        """Returns the effective limits for a card, merging global bank limits with local overrides.
+        
+        Priority: card-local override > global bank limit > hardcoded default.
+        If owner_id/bank_name are not provided, they are fetched from the card row.
+        """
+        defaults = {
+            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
+            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
+            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
+            "max_tx_per_day": 15, "cooldown_hours": 24
+        }
+        if not self._db:
+            return defaults
+
+        # Resolve owner_id/bank_name if not passed
+        if owner_id is None or bank_name is None:
+            async with self._db.execute(
+                "SELECT owner_id, bank_name, is_custom_limits, limits_override_json FROM cards WHERE id=?",
+                (card_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return defaults
+            owner_id = row["owner_id"]
+            bank_name = row["bank_name"]
+            is_custom = row["is_custom_limits"]
+            override_json = row["limits_override_json"] or "{}"
+        else:
+            async with self._db.execute(
+                "SELECT is_custom_limits, limits_override_json FROM cards WHERE id=?",
+                (card_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            is_custom = row["is_custom_limits"] if row else 0
+            override_json = (row["limits_override_json"] if row else None) or "{}"
+
+        # Layer 1: global bank limits
+        global_limits = await self.get_user_bank_limits(owner_id, bank_name)
+        result = {**defaults}
+        if global_limits:
+            for k in defaults:
+                if k in global_limits and global_limits[k] is not None:
+                    result[k] = global_limits[k]
+
+        # Layer 2: card-local overrides (if enabled)
+        if is_custom:
+            import json
+            try:
+                overrides = json.loads(override_json)
+            except (json.JSONDecodeError, TypeError):
+                overrides = {}
+            for k, v in overrides.items():
+                if k in result and v is not None:
+                    result[k] = v
+
+        return result
+
+    async def update_card_limit_override(self, card_id: str, field: str, value: float) -> None:
+        """Update a single limit field for a specific card (local override)."""
+        if not self._db:
+            return
+        allowed = {
+            "daily_out_max", "daily_in_max", "monthly_out_max", "monthly_in_max",
+            "max_single_tx_out", "max_single_tx_in", "max_tx_per_day", "cooldown_hours"
+        }
+        if field not in allowed:
+            return
+
+        import json
+        async with self._db.execute(
+            "SELECT limits_override_json FROM cards WHERE id=?", (card_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return
+        try:
+            overrides = json.loads(row["limits_override_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            overrides = {}
+        overrides[field] = value
+
+        await self._db.execute(
+            "UPDATE cards SET limits_override_json=?, is_custom_limits=1 WHERE id=?",
+            (json.dumps(overrides), card_id)
+        )
+        await self._db.commit()
+
+    async def toggle_card_custom_limits(self, card_id: str, enable: bool) -> None:
+        """Toggle custom limits on/off for a card. When disabled, global limits apply."""
+        if not self._db:
+            return
+        await self._db.execute(
+            "UPDATE cards SET is_custom_limits=? WHERE id=?",
+            (1 if enable else 0, card_id)
+        )
+        await self._db.commit()
+
     async def add_card(self, card_data: dict) -> None:
         if not self._db:
             return
@@ -2298,14 +2415,9 @@ class MerchantDB:
                     (linked_order_id, card_id)
                 )
 
-            # 4. Авто-cooldown при 95% денного ліміту (C7)
-            async with self._db.execute("SELECT owner_id, bank_name FROM cards WHERE id=?", (card_id,)) as cur:
-                card_row = await cur.fetchone()
-            if card_row:
-                owner_id = card_row["owner_id"]
-                bank_name = card_row["bank_name"]
-                limits = await self.get_user_bank_limits(owner_id, bank_name)
-                if limits:
+            # 4. Авто-cooldown при 95% денного ліміту (C7) — використовує локальні ліміти якщо задано
+            limits = await self.get_card_effective_limits(card_id)
+            if limits:
                     daily_max = limits.get(f"daily_{direction}_max", 150000.0)
                     cooldown_hours = limits.get("cooldown_hours", 24)
                     # Підрахунок rolling used за 24г (включаючи щойно записану TX)
@@ -2478,3 +2590,73 @@ class MerchantDB:
                 stats[k] = 0.0 if "volume" in k or "work" in k or "personal" in k else 0
                 
         return stats
+
+    async def force_refresh_mono_balance(self, card_id: str) -> Optional[float]:
+        """
+        Прямий костиль-запит до API Монобанку для актуалізації балансу картки.
+        Викликається примусово, коли вебхуки не працюють на локалці.
+        """
+        if not self._db:
+            return None
+
+        # 1. Дістаємо зашифрований токен та account_id з бази
+        async with self._db.execute(
+                "SELECT mono_x_token_encrypted, mono_account_id, owner_id FROM cards WHERE id=?",
+                (card_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if not row or not row["mono_x_token_encrypted"] or not row["mono_account_id"]:
+                return None
+
+        try:
+            # Дешифруємо токен (у тебе в merchant_db.py для цього використовується decrypt)
+            x_token = decrypt(row["mono_x_token_encrypted"])
+            account_id = row["mono_account_id"]
+
+            # 2. Стукаємось в API Монобанку за свіжими даними
+            url = "https://api.monobank.ua/personal/client-info"
+            headers = {"X-Token": x_token}
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Mono API returned status {resp.status}")
+                        return None
+                    data = await resp.json()
+
+            # 3. Шукаємо потрібний рахунок серед масиву акаунтів
+            accounts = data.get("accounts", [])
+            for acc in accounts:
+                if acc.get("id") == account_id:
+                    # Баланс Моно повертає в копійках (int), переводимо в гривні
+                    true_balance = float(acc.get("balance", 0)) / 100.0
+
+                    # 4. Оновлюємо баланс прямо в базі даних
+                    await self.update_card_balance(card_id, true_balance)
+                    logger.info(f"🔄 Свіжий баланс для карти {card_id} успішно стягнуто: {true_balance} ₴")
+                    return true_balance
+
+        except Exception as e:
+            logger.error(f"Помилка примусового оновлення балансу Моно: {e}")
+            return None
+
+    async def get_feature_status(self, user_id: int, feature_key: str) -> bool:
+            if not self._db: return False
+            async with self._db.execute(
+                    "SELECT is_enabled FROM user_features WHERE user_id=? AND feature_key=?",
+                    (user_id, feature_key)
+            ) as cur:
+                row = await cur.fetchone()
+                return bool(row["is_enabled"]) if row else False
+
+    async def toggle_feature_status(self, user_id: int, feature_key: str) -> bool:
+            if not self._db: return False
+            current = await self.get_feature_status(user_id, feature_key)
+            new_state = 0 if current else 1
+            await self._db.execute(
+                "INSERT INTO user_features (user_id, feature_key, is_enabled) "
+                "VALUES (?, ?, ?) ON CONFLICT(user_id, feature_key) DO UPDATE SET is_enabled=?",
+                (user_id, feature_key, new_state, new_state)
+            )
+            await self._db.commit()
+            return bool(new_state)

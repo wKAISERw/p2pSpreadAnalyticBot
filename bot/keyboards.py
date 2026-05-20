@@ -160,22 +160,39 @@ def back_to_main_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def global_settings_kb(key_labels: dict[str, str] | list[str]) -> InlineKeyboardMarkup:
+def global_settings_kb(settings_dict: dict) -> InlineKeyboardMarkup:
     """
-    Меню глобальних налаштувань.
-    key_labels: {key: human_label}  або  [key, key, ...]  (legacy)
+    Генерує інтерактивну клавіатуру Глобальних Налаштувань (Global Settings UI).
+    Додано вкладку експериментальних функцій та навігацію.
     """
     builder = InlineKeyboardBuilder()
 
-    if isinstance(key_labels, dict):
-        items = list(key_labels.items())  # [(key, label), ...]
-    else:
-        items = [(k, k) for k in key_labels]
+    # 1. Зчитуємо поточні стани з конфігу (твоя існуюча логіка)
+    min_spread = settings_dict.get("min_spread_pct", 0.5)
+    safety_buffer = settings_dict.get("safety_buffer_pct", 0.3)
+    max_alerts = settings_dict.get("max_alerts_per_cycle", 4)
+    require_sessions = settings_dict.get("require_sessions", "true") == "true"
 
-    for key, label in items:
-        builder.button(text=label, callback_data=f"gset:{key}")
-    builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="🔙 Закрити", callback_data="menu:main"))
+    # Конвертуємо стан сесій у красивий візуальний бейдж
+    session_status = "🟢 Валідувати" if require_sessions else "⚪ Ігнорувати"
+
+    # 2. Будуємо сітку кнопок (як на твоєму скріншоті UI)
+    builder.row(InlineKeyboardButton(text=f"📉 Мін. Спред: {min_spread}%", callback_data="gset:edit:min_spread"))
+    builder.row(
+        InlineKeyboardButton(text=f"🛡️ Буфер безпеки: {safety_buffer}%", callback_data="gset:edit:safety_buffer"))
+    builder.row(InlineKeyboardButton(text=f"📦 Макс. алертів/цикл: {max_alerts}", callback_data="gset:edit:max_alerts"))
+    builder.row(
+        InlineKeyboardButton(text=f"🩺 Стан сесій: {session_status}", callback_data="gset:toggle:require_sessions"))
+
+    # 🚀 ДОДАЄМО НАШУ НОВУ ВКЛАДКУ ЕКСПЕРИМЕНТАЛЬНИХ ФІЧ
+    builder.row(InlineKeyboardButton(
+        text="🛠️ Експериментальні функції",
+        callback_data="feat:main"  # Цей callback веде на категорійне меню, яке ми написали
+    ))
+
+    # Навігаційна кнопка повернення на головну сторінку бота
+    builder.row(InlineKeyboardButton(text="⬅️ Назад в Головне Меню", callback_data="menu:main"))
+
     return builder.as_markup()
 
 
@@ -547,6 +564,8 @@ def card_details_kb(card_id: str, status: str, bank_name: str = "") -> InlineKey
     if bank_name.lower() == "monobank":
         builder.row(InlineKeyboardButton(text="🔗 Підключити Mono Webhook", callback_data=f"card:mono_setup:{card_id}"))
     
+    builder.row(InlineKeyboardButton(text="⚙️ Індивідуальні ліміти", callback_data=f"card:limits:{card_id}"))
+    
     if status in ("active", "frozen_funds"):
         toggle_text = "❄️ Заморозити" if status == "active" else "🟢 Розморозити"
         builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"card:toggle:{card_id}"))
@@ -616,4 +635,26 @@ def bank_limits_fields_kb(bank: str, current: dict) -> InlineKeyboardMarkup:
             callback_data=f"limits:field:{bank}:{field}"
         ))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="limits:back"))
+    return builder.as_markup()
+
+def card_limits_fields_kb(card_id: str, effective_limits: dict, is_custom: bool) -> InlineKeyboardMarkup:
+    """Показує ефективні ліміти конкретної картки з можливістю редагування."""
+    builder = InlineKeyboardBuilder()
+    
+    # Toggle: custom vs global
+    if is_custom:
+        toggle_text = "🟢 Режим: Локальні (натисніть для Глобальних)"
+    else:
+        toggle_text = "⚪ Режим: Глобальні (натисніть для Локальних)"
+    builder.row(InlineKeyboardButton(text=toggle_text, callback_data=f"card:limits:toggle:{card_id}"))
+    
+    for field, label in LIMIT_FIELD_LABELS.items():
+        val = effective_limits.get(field, "—")
+        if isinstance(val, float):
+            val = f"{val:.0f}"
+        builder.row(InlineKeyboardButton(
+            text=f"{label}: {val}",
+            callback_data=f"clf:{card_id}:{field}"
+        ))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до картки", callback_data=f"card:view:{card_id}"))
     return builder.as_markup()

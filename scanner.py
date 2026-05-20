@@ -63,12 +63,15 @@ def safe_float(val) -> float:
 # AlertDispatcher — персоналізована розсилка алертів
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# AlertDispatcher — персоналізована розсилка алертів з урахуванням наявних карт
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class AlertDispatcher:
     """
-    Відповідає ТІЛЬКИ за одне: взяти SpreadAlert і розіслати його
-    правильним людям з правильними фільтрами.
-
-    Кешує список активних юзерів з TTL щоб не смикати БД на кожному алерті.
+    Відповідає за персоналізовану розсилку алертів.
+    Автоматично коригує банк угоди під наявні АКТИВНІ картки користувача
+    та перевіряє стан експериментальних фіч.
     """
 
     def __init__(self, db: MerchantDB, notifier: TelegramNotifier, cache_ttl: float = 5.0):
@@ -88,14 +91,7 @@ class AlertDispatcher:
     def _user_wants(self, user: dict, opp: dict) -> tuple[bool, str]:
         """
         Персональний фільтр юзера. Повертає (True, "") або (False, причина).
-          0. SPREAD алерти — тільки юзерам у режимі SPREAD
-          1. Коридор сум: min_amount ≤ entry ≤ capital
-          2. Мінімальний спред
-          3. Банки перетинаються (окремо для buy/sell з fallback на загальні)
-          4. Фільтри мерчанта (min_orders, min_rate з merchant_filters_json + per-exchange)
         """
-        # 0. SPREAD алерти — тільки для SPREAD-режиму
-        # TAKER/MAKER юзери отримують свої алерти через окремі пайплайни
         mode = user.get("scanner_mode", "SPREAD")
         if mode != "SPREAD":
             return False, f"mode={mode}"
@@ -113,17 +109,49 @@ class AlertDispatcher:
         if float(opp["net_spread_pct"]) < float(user["min_spread"]):
             return False, f"spread {opp['net_spread_pct']:.2f}% < min {user['min_spread']}"
 
-        # 3. Банки — окремо buy та sell з fallback на загальні
-        user_buy_banks = set(user.get("buy_bank_codes") or user["bank_codes"])
-        user_sell_banks = set(user.get("sell_bank_codes") or user["bank_codes"])
-        opp_buy_banks = set(opp.get("buy_banks_fit") or [])
-        opp_sell_banks = set(opp.get("sell_banks_fit") or [])
-        if not (opp_buy_banks & user_buy_banks):
-            return False, f"buy banks no match: user={user_buy_banks} opp={opp_buy_banks}"
-        if not (opp_sell_banks & user_sell_banks):
-            return False, f"sell banks no match: user={user_sell_banks} opp={opp_sell_banks}"
+        # 🚀 3. БОЙОВА СТІЙКА НОРМАЛІЗАЦІЯ БАНКІВ (Рятує від каші в SQLite)
+            # 🚀 СУПЕР-ФІКС: Повне вирівнювання будь-яких вкладених структур та бруду з SQLite
+        def _clean_and_normalize_banks(banks_input) -> set[str]:
+            if not banks_input:
+                return set()
+            import re
 
-        # 4. Персональні фільтри мерчанта (per-exchange → загальні → defaults)
+            # Перетворюємо будь-яку структуру (списки, сети, JSON рядки) у єдиний сирий рядок
+            input_str = str(banks_input)
+            # Миттєво витягуємо суто чисті слова та цифри
+            raw_strings = re.findall(r'[a-zA-Z0-9а-яА-ЯіІёЁєЄїЇґҐ]+', input_str)
+
+            normalized = set()
+            name_map = {
+                    "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank",
+                    "монобанк": "monobank",
+                    "14": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank",
+                    "приватбанк": "privatbank",
+                    "64": "pumb", "pumb": "pumb", "пумб": "pumb",
+                    "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
+                    "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
+                    "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
+            }
+            for s in raw_strings:
+                s_low = s.lower()
+                if s_low in name_map:
+                    normalized.add(name_map[s_low])
+                else:
+                    normalized.add(s_low)
+            return normalized
+
+        # Очищуємо та приводимо до єдиного виду налаштування користувача й дані спреду
+        user_buy_normalized = _clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
+        user_sell_normalized = _clean_and_normalize_banks(user.get("sell_bank_codes") or user.get("bank_codes"))
+        opp_buy_normalized = _clean_and_normalize_banks(opp.get("buy_banks_fit"))
+        opp_sell_normalized = _clean_and_normalize_banks(opp.get("sell_banks_fit"))
+
+        if not (opp_buy_normalized & user_buy_normalized):
+            return False, f"buy banks no match: user={user_buy_normalized} opp={opp_buy_normalized}"
+        if not (opp_sell_normalized & user_sell_normalized):
+            return False, f"sell banks no match: user={user_sell_normalized} opp={opp_sell_normalized}"
+
+        # 4. Персональні фільтри мерчанта (Твоя існуюча логіка)
         from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
         mf = user.get("merchant_filters") or {}
         emf = user.get("exchange_merchant_filters") or {}
@@ -133,39 +161,39 @@ class AlertDispatcher:
         for order_obj in (buy_o, sell_o):
             ex_name = getattr(order_obj, "exchange", "")
             side_label = "buy" if order_obj is buy_o else "sell"
-            # Fallback chain: per_exchange → global user → defaults[exchange] → 0
             ex_filters = emf.get(ex_name, {})
             min_orders = float(
-                ex_filters.get("min_orders", 0)
-                or mf.get("min_orders", 0)
-                or _DEF_ORDERS.get(ex_name, 0)
-            )
-            min_rate = float(
-                ex_filters.get("min_rate", 0.0)
-                or mf.get("min_rate", 0.0)
-                or _DEF_RATE.get(ex_name, 0.0)
-            )
+                ex_filters.get("min_orders", 0) or mf.get("min_orders", 0) or _DEF_ORDERS.get(ex_name, 0))
+            min_rate = float(ex_filters.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or _DEF_RATE.get(ex_name, 0.0))
+
             if min_orders > 0 and order_obj.month_order_count < min_orders:
                 return False, f"{side_label} merchant orders {order_obj.month_order_count} < {min_orders}"
             if min_rate > 0 and order_obj.finish_rate_pct < min_rate:
                 return False, f"{side_label} merchant rate {order_obj.finish_rate_pct:.1f}% < {min_rate}"
 
         return True, ""
-
     async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
-        """Відправляє алерт всім підходящим юзерам з детальним логуванням."""
+        """Відправляє алерт всім підходящим юзерам з динамічною підміною банку під картки."""
         users = await self._get_users()
         if not users:
             logger.info("📬 Dispatch fallback → queue (немає зареєстрованих юзерів)")
             await self._notifier.push(alert)
             return
 
-        matched_count = 0
         logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
+        matched_count = 0
+
+        import copy
 
         for user in users:
             uid = user.get("user_id")
             chat_id = user.get("chat_id")
+
+            if opp.get("is_asymmetric"):
+                is_asym_active = await self._db.get_feature_status(uid, "asymmetric_spread")
+                if not is_asym_active:
+                    logger.debug("  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Фіча asymmetric_spread вимкнена", uid)
+                    continue
 
             is_sniper = False
             for r in user.get("sniper_rules", []):
@@ -188,17 +216,60 @@ class AlertDispatcher:
                 matched_count += 1
                 match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
 
+                # 🧠 АВТОМАТИЧНА АДАПТАЦІЯ БАНКУ ПІД НАЯВНИЙ ПЛАСТИК
                 try:
-                    await self._notifier.send_to_user(chat_id, alert, is_sniper_match=is_sniper)
-                    # ЯВНЕ ЛОГУВАННЯ УСПІХУ
+                    user_cards = await self._db.get_cards(owner_id=uid, status="active")
+                    # Отримуємо назви банків твоїх живих карт: {"monobank"}
+                    user_card_names = {str(c["bank_name"]).lower() for c in user_cards}
+                except Exception as e:
+                    logger.warning("Помилка отримання карток користувача %s: %s", uid, e)
+                    user_card_names = set()
+
+                user_buy_list = user.get("buy_bank_codes") or user.get("bank_codes") or []
+                user_sell_list = user.get("sell_bank_codes") or user.get("bank_codes") or []
+
+                # 🚀 Переводимо всі коди налаштувань та ордера в текстові назви ("43" -> "monobank")
+                user_buy_names = {str(BankRegistry.get_name(b)).lower() for b in user_buy_list}
+                user_sell_names = {str(BankRegistry.get_name(b)).lower() for b in user_sell_list}
+                opp_buy_names = {str(BankRegistry.get_name(b)).lower() for b in (opp.get("buy_banks_fit") or [])}
+                opp_sell_names = {str(BankRegistry.get_name(b)).lower() for b in (opp.get("sell_banks_fit") or [])}
+
+                allowed_buy_names = opp_buy_names & user_buy_names
+                allowed_sell_names = opp_sell_names & user_sell_names
+
+                # Тепер перетин текстових назв працює бездоганно!
+                cards_buy_match = allowed_buy_names & user_card_names
+                cards_sell_match = allowed_sell_names & user_card_names
+
+                # Зворотний мапінг назв у коди для збереження сумісності з калькулятором лімітів
+                NAME_TO_CODE = {"monobank": "43", "privatbank": "14", "pumb": "64", "a-bank": "48", "izibank": "553", "sense": "328"}
+
+                final_buy_name = list(cards_buy_match)[0] if cards_buy_match else (
+                    list(allowed_buy_names)[0] if allowed_buy_names else "monobank")
+                final_sell_name = list(cards_sell_match)[0] if cards_sell_match else (
+                    list(allowed_sell_names)[0] if allowed_sell_names else "monobank")
+
+                chosen_buy = NAME_TO_CODE.get(final_buy_name, "43")
+                chosen_sell = NAME_TO_CODE.get(final_sell_name, "43")
+
+                # Безпечна копія інстансу алерта для юзера
+                local_alert = copy.copy(alert)
+                local_alert.buy_bank = chosen_buy
+                local_alert.sell_bank = chosen_sell
+
+                # Прокидаємо експериментальні деталі в об'єкт алерта
+                local_alert.is_asymmetric = opp.get("is_asymmetric", False)
+                local_alert.asymmetric_details = opp.get("asymmetric_details")
+
+                try:
+                    await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
                     logger.info(
-                        "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Режим: %s",
-                        match_type, uid, user.get("scanner_mode", "UNKNOWN")
+                        "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки скориговано: %s ➔ %s",
+                        match_type, uid, chosen_buy.upper(), chosen_sell.upper()
                     )
                 except Exception as e:
                     logger.warning("  └─ ❌ Помилка відправки юзеру %s: %s", uid, e)
             else:
-                # ЛОГУВАННЯ ПРИЧИНИ ВІДМОВИ (можна залишити в DEBUG або INFO)
                 logger.debug(
                     "  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Причина: %s",
                     uid, skip_reason
@@ -367,7 +438,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="📲 Оновити через скрипт-закладку", callback_data=f"intercept:{exchange}")]
                 ])
-                
+
             # Відправляємо конкретному юзеру або всім адмінам
             target_chat = user_id if user_id else None
             await notifier._send_with_retry(msg, keyboard=kb, chat_id=target_chat)
@@ -415,10 +486,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     # Створюємо TradeWorker першим (бо в нього всередині створюється RouteExecutor)
     trade_worker = TradeWorker(merchant_db)
-    
+
     # Створюємо StrategyManager і передаємо йому RouteExecutor
     strategy_manager = StrategyManager(merchant_db, maker_monitor, trade_worker._executor)
-    
+
     # Інжектимо зв'язок назад у TradeWorker
     trade_worker._strategy_manager = strategy_manager
 
@@ -557,7 +628,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
             # ── Safe Boot Flow ──────────────────────────────────────────────
             await runtime_config.load()
-            
+
             # Перевірялка "здоров'я" при старті
             require_sessions = runtime_config.get("require_sessions", "true") == "true"
             if require_sessions:
@@ -565,7 +636,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                 if invalid_exchanges:
                     # Ставимо сканер на паузу
                     await runtime_config.set("is_scanner_active", "false")
-                    
+
                     # Сповіщаємо адмінів
                     ex_list = ", ".join(invalid_exchanges)
                     msg = (
@@ -688,7 +759,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                     last_cycle_time[0] = time.monotonic()
 
-                    raw_opportunities = matcher.match(buy_grouped, sell_grouped)
+                    raw_opportunities = matcher.match(buy_grouped, sell_grouped, experimental_mode=True)
                     opportunities = matcher.group(raw_opportunities, BANK_NAMES)
                     latency = time.monotonic() - start_time
 
@@ -779,6 +850,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             buy_reason=b_reason,
                             sell_reason=s_reason,
                         )
+
+                        # 🚀 ПРОКИДАЄМО ДАНІ ЕКСПЕРИМЕНТУ В КОРЕНЕВІ ПАРАМЕТРИ АЛЕРТА
+                        alert.is_asymmetric = opp.get("is_asymmetric", False)
+                        alert.asymmetric_details = opp.get("asymmetric_details")
 
                         # 🚀 Пропозиція зберігається ПІСЛЯ фільтрів (see below)
 

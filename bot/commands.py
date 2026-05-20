@@ -38,7 +38,27 @@ _active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 _single_leg_cache: dict = {}  # "b:<key>" / "s:<key>" → {ad_id, exchange, price, ...}
 _spread_cache: dict = {}  # "<key>" → (SpreadAlert, timestamp)
 
-
+# 🧠 РЕЄСТР ЕКСПЕРИМЕНТАЛЬНИХ ФІЧ (Для легкого масштабування)
+EXPERIMENTAL_FEATURES = {
+    "routing": {
+        "title": "🔀 МАРШРУТИЗАЦІЯ",
+        "features": {
+            "hybrid_routes": {
+                "name": "Гібридні маршрути (T→M / M→T)",
+                "desc": "Дозволяє запускати змішані стратегії Taker-Maker або Maker-Taker прямо з алертів сканера. Бот автоматично виставить мейкер-оголошення на потрібній біржі."
+            }
+        }
+    },
+    "analytics": {
+        "title": "📈 АНАЛІТИКА ТА СПРЕДИ",
+        "features": {
+            "asymmetric_spread": {
+                "name": "Асиметричний спред (Inventory)",
+                "desc": "Сканер підтягуватиме суму закупівлі до мінімального ліміту BUY-мерчанта, якщо дзеркальний об'єм замалий. Частина крипти буде продана одразу з шаленим профітом, а залишок осяде у твоєму інвентарі за супер-дешевою ціною закупівлі."
+            }
+        }
+    }
+}
 # ── Admin helper ───────────────────────────────────────────────────────────
 def _is_admin(user_id: int) -> bool:
     """Перевіряє чи юзер є адміном (ADMIN_ID в .env)."""
@@ -177,6 +197,9 @@ class MonoStates(StatesGroup):
     waiting_token = State()
 
 class BankLimitStates(StatesGroup):
+    waiting_value = State()
+
+class CardLimitStates(StatesGroup):
     waiting_value = State()
 
 # ── Словник описів для UI ──────────────────────────────────────────────────
@@ -4397,50 +4420,86 @@ async def cmd_orders(message: Message) -> None:
 # 🛠 ЕКСПЕРИМЕНТАЛЬНІ ФУНКЦІЇ (FEATURES)
 # =========================================================================
 
+# 1. Головна команда
 @router.message(Command("features"))
-async def cmd_features(message: Message) -> None:
-    if not _db:
-        return await message.answer("❌ БД не підключена.")
+async def cmd_experimental_features(message: Message):
+    text = "🛠 <b>Експериментальні функції Arbix Quantum</b>\n\nОберіть категорію для налаштування інструментів розробки:"
+    kb = []
+    for cat_id, cat_data in EXPERIMENTAL_FEATURES.items():
+        kb.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"feat:cat:{cat_id}")])
 
-    settings = await _db.get_user_display_settings(message.chat.id)
-    state_flag = settings.get("is_hybrid_routes_enabled", False)
-    status_str = "🟢 УВІМКНЕНО" if state_flag else "🔴 ВИМКНЕНО"
+    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
-    ])
+
+# 2. Callback: Перегляд категорії
+@router.callback_query(F.data.startswith("feat:cat:"))
+async def cb_features_category(call: CallbackQuery):
+    cat_id = call.data.split(":")[-1]
+    cat_data = EXPERIMENTAL_FEATURES.get(cat_id)
+    if not cat_data: return await call.answer("Категорію не знайдено.")
+
+    text = f"🛠 <b>Категорія: {cat_data['title']}</b>\n\nОберіть функцію для редагування її стану в додатку:"
+    kb = []
+    for feat_key, feat in cat_data["features"].items():
+        status_icon = "🟢" if await _db.get_feature_status(call.from_user.id, feat_key) else "🔴"
+        kb.append([InlineKeyboardButton(text=f"{status_icon} {feat['name']}",
+                                        callback_data=f"feat:view:{cat_id}:{feat_key}")])
+
+    kb.append([InlineKeyboardButton(text="⬅️ Назад до категорій", callback_data="feat:main")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+
+
+# 3. Callback: Перегляд конкретної фічі
+@router.callback_query(F.data.startswith("feat:view:"))
+async def cb_features_view(call: CallbackQuery):
+    parts = call.data.split(":")
+    cat_id, feat_key = parts[2], parts[3]
+
+    cat_data = EXPERIMENTAL_FEATURES.get(cat_id)
+    if not cat_data or feat_key not in cat_data["features"]:
+        return await call.answer("Функцію не знайдено.")
+
+    feat = cat_data["features"][feat_key]
+    is_active = await _db.get_feature_status(call.from_user.id, feat_key)
+
+    status_label = "🟢 УВІМКНЕНО" if is_active else "🔴 ВИМКНЕНО"
+    toggle_label = "🔴 Вимкнути" if is_active else "🟢 Увімкнути"
 
     text = (
-        "🛠 <b>Експериментальні функції</b>\n\n"
-        "<b>Гібридні маршрути (T→M / M→T)</b>\n"
-        "<i>Дозволяє швидко запускати стратегії Taker-Maker або Maker-Taker з алертів. "
-        "Бот автоматично поставить мейкер-оголошення.</i>\n\n"
-        f"Статус: <b>{status_str}</b>"
+        f"⚙️ <b>{feat['name']}</b>\n\n"
+        f"📝 <b>Опис:</b> {feat['desc']}\n\n"
+        f"📌 <b>Поточний статус:</b> {status_label}"
     )
-    await message.answer(text, reply_markup=kb)
+
+    kb = [
+        [InlineKeyboardButton(text=toggle_label, callback_data=f"feat:toggle:{cat_id}:{feat_key}")],
+        [InlineKeyboardButton(text="⬅️ Назад до списку", callback_data=f"feat:cat:{cat_id}")]
+    ]
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
-@router.callback_query(F.data == "toggle_hybrid")
-async def on_toggle_hybrid(call: CallbackQuery) -> None:
-    if not _db: return await call.answer("Помилка БД", show_alert=True)
-    new_val = await _db.toggle_hybrid_routes(call.from_user.id)
-    status_str = "🟢 УВІМКНЕНО" if new_val else "🔴 ВИМКНЕНО"
+# 4. Callback: Перемикач стану (Toggle)
+@router.callback_query(F.data.startswith("feat:toggle:"))
+async def cb_features_toggle(call: CallbackQuery):
+    parts = call.data.split(":")
+    cat_id, feat_key = parts[2], parts[3]
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Перемкнути (T→M / M→T)", callback_data="toggle_hybrid")]
-    ])
-    text = (
-        "🛠 <b>Експериментальні функції</b>\n\n"
-        "<b>Гібридні маршрути (T→M / M→T)</b>\n"
-        "<i>Дозволяє швидко запускати стратегії Taker-Maker або Maker-Taker з алертів. "
-        "Бот автоматично поставить мейкер-оголошення.</i>\n\n"
-        f"Статус: <b>{status_str}</b>"
-    )
-    from contextlib import suppress
-    from aiogram.exceptions import TelegramBadRequest
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=kb)
-    await call.answer(f"Гібриди {'включено' if new_val else 'вимкнено'}")
+    # Змінюємо статус у БД
+    new_state = await _db.toggle_feature_status(call.from_user.id, feat_key)
+    await call.answer(f"Status updated: {'Enabled' if new_state else 'Disabled'}")
+
+    # Перерендерюємо картку фічі зі свіжим статусом
+    return await cb_features_view(call)
+
+
+# 5. Callback: Повернення на головне меню фіч
+@router.callback_query(F.data == "feat:main")
+async def cb_features_main_menu(call: CallbackQuery):
+    text = "🛠 <b>Експериментальні функції Arbix Quantum</b>\n\nОберіть категорію для налаштування інструментів розробки:"
+    kb = []
+    for cat_id, cat_data in EXPERIMENTAL_FEATURES.items():
+        kb.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"feat:cat:{cat_id}")])
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
 # =========================================================================
@@ -4836,12 +4895,15 @@ async def cb_card_view(call: CallbackQuery) -> None:
     used_daily_out = await _db.get_rolling_used(card_id, "out", 24)
     tx_count = await _db.get_card_transactions_count(card_id, 24)
     
-    limits = await _db.get_user_bank_limits(call.from_user.id, card['bank_name'])
-    limit_daily_in = limits["daily_in_max"] if limits else 150000.0
-    limit_daily_out = limits["daily_out_max"] if limits else 150000.0
+    limits = await _db.get_card_effective_limits(card_id, call.from_user.id, card['bank_name'])
+    limit_daily_in = limits["daily_in_max"]
+    limit_daily_out = limits["daily_out_max"]
     
     rem_in = max(0, limit_daily_in - used_daily_in)
     rem_out = max(0, limit_daily_out - used_daily_out)
+    
+    is_custom = card.get("is_custom_limits", 0)
+    limits_label = "🟢 Локальні" if is_custom else "⚪ Глобальні"
     
     import datetime
     cooldown_str = "Немає"
@@ -4859,6 +4921,7 @@ async def cb_card_view(call: CallbackQuery) -> None:
         f"📤 Витрати: {used_daily_out:.0f} ₴ (Залишок: {rem_out:.0f} ₴)\n"
         f"🔄 Транзакцій: {tx_count}\n\n"
         f"📌 <b>Статус:</b> {card['status']}\n"
+        f"⚙️ <b>Ліміти:</b> {limits_label}\n"
         f"⏳ <b>Cooldown до:</b> {cooldown_str}"
     )
     
@@ -5002,14 +5065,18 @@ async def process_card_update_bal(message: Message, state: FSMContext) -> None:
     
     await state.clear()
     await message.answer("✅ Баланс успішно оновлено!")
-    
+
     class FakeCall:
-        data = f"card:view:{card_id}"
-        from_user = message.from_user
-        message = message
-        async def answer(self, *args, **kwargs): pass
-        
-    await cb_card_view(FakeCall())
+        def __init__(self, message, card_id: str):
+            self.data = f"card:view:{card_id}"
+            self.from_user = message.from_user
+            self.message = message
+
+        async def answer(self, *args, **kwargs):
+            pass
+
+    # Бойовий виклик (message тепер летить у конструктор і скоуп не ламається):
+    await cb_card_view(FakeCall(message, card_id))
 
 @router.callback_query(F.data.startswith("card_match:confirm:"))
 async def cb_card_match_confirm(call: CallbackQuery):
@@ -5375,3 +5442,222 @@ async def process_limit_value(message: Message, state: FSMContext) -> None:
         f"<i>Натисніть на поле для зміни значення:</i>",
         reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
     )
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D7: Індивідуальні ліміти картки (локальні override)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.regexp(r"^card:limits:[a-f0-9\-]{36}$"))
+async def cb_card_limits(call: CallbackQuery) -> None:
+    """Показати меню індивідуальних лімітів для конкретної картки."""
+    card_id = call.data.split(":")[2]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+    
+    is_custom = bool(card.get("is_custom_limits", 0))
+    effective = await _db.get_card_effective_limits(card_id, call.from_user.id, card["bank_name"])
+    
+    mode_text = "🟢 <b>Локальні ліміти</b> (перезаписують глобальні)" if is_custom else "⚪ <b>Глобальні ліміти</b> (з налаштувань банку)"
+    
+    await call.message.edit_text(
+        f"⚙️ <b>Ліміти для {card['bank_name'].capitalize()} {card['last_four']}</b>\n"
+        f"{mode_text}\n\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.card_limits_fields_kb(card_id, effective, is_custom)
+    )
+    await call.answer()
+
+@router.callback_query(F.data.startswith("card:limits:toggle:"))
+async def cb_card_limits_toggle(call: CallbackQuery) -> None:
+    """Тумблер локальних/глобальних лімітів."""
+    card_id = call.data.split(":")[3]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+    
+    current = bool(card.get("is_custom_limits", 0))
+    new_val = not current
+    await _db.toggle_card_custom_limits(card_id, new_val)
+    
+    status = "УВІМКНЕНО 🟢" if new_val else "ВИМКНЕНО ⚪"
+    await call.answer(f"Локальні ліміти: {status}", show_alert=True)
+    
+    # Refresh the menu
+    effective = await _db.get_card_effective_limits(card_id, call.from_user.id, card["bank_name"])
+    mode_text = "🟢 <b>Локальні ліміти</b> (перезаписують глобальні)" if new_val else "⚪ <b>Глобальні ліміти</b> (з налаштувань банку)"
+    
+    await call.message.edit_text(
+        f"⚙️ <b>Ліміти для {card['bank_name'].capitalize()} {card['last_four']}</b>\n"
+        f"{mode_text}\n\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.card_limits_fields_kb(card_id, effective, new_val)
+    )
+
+@router.callback_query(F.data.startswith("clf:"))
+async def cb_card_limits_field(call: CallbackQuery, state: FSMContext) -> None:
+    """Запит нового значення ліміту для конкретної картки."""
+    parts = call.data.split(":")
+    card_id = parts[1]
+    field = parts[2]
+    label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
+    await state.update_data(card_limit_card_id=card_id, card_limit_field=field)
+    is_int = field in ("max_tx_per_day", "cooldown_hours")
+    hint = "ціле число" if is_int else "сума в грн"
+    await call.message.edit_text(
+        f"⚙️ <b>{label}</b> (індивідуальний)\n\nВведіть нове значення ({hint}):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:limits:{card_id}")]
+        ])
+    )
+    await state.set_state(CardLimitStates.waiting_value)
+    await call.answer()
+
+@router.message(CardLimitStates.waiting_value)
+async def process_card_limit_value(message: Message, state: FSMContext) -> None:
+    """Зберігає нове значення ліміту для конкретної картки."""
+    data = await state.get_data()
+    card_id = data["card_limit_card_id"]
+    field = data["card_limit_field"]
+    
+    try:
+        value = float(message.text.strip().replace(',', '.'))
+        if field in ("max_tx_per_day", "cooldown_hours"):
+            value = int(value)
+    except ValueError:
+        return await message.answer("❌ Некоректний формат числа. Спробуйте ще раз:")
+    
+    await _db.update_card_limit_override(card_id, field, value)
+    label = keyboards.LIMIT_FIELD_LABELS.get(field, field)
+    await state.clear()
+    await message.answer(f"✅ <b>{label}</b> для цієї картки змінено на <b>{value}</b>")
+    
+    # Refresh card limits view
+    effective = await _db.get_card_effective_limits(card_id)
+    cards = await _db.get_cards(message.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    is_custom = bool(card.get("is_custom_limits", 0)) if card else True
+    bank_label = card["bank_name"].capitalize() if card else ""
+    last4 = card["last_four"] if card else ""
+    
+    mode_text = "🟢 <b>Локальні ліміти</b>" if is_custom else "⚪ <b>Глобальні ліміти</b>"
+    await message.answer(
+        f"⚙️ <b>Ліміти для {bank_label} {last4}</b>\n"
+        f"{mode_text}\n\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.card_limits_fields_kb(card_id, effective, is_custom)
+    )
+
+
+@router.callback_query(F.data.startswith("card:refresh:"))
+async def cb_card_force_refresh_api(call: CallbackQuery, state: FSMContext):
+    """
+    Хендлер примусового полінгу балансу Монобанку через пряме API.
+    Рятує від ліміту 64 байт Telegram, дістаючи ID карти з кешу підбору.
+    """
+    try:
+        # Витягуємо cache_key з callback рядка
+        cache_key = call.data.split(":")[-1]
+
+        # Імпортуємо наш оперативний кеш із модуля нотифікатора
+        from bot.card_notifier import _card_matching_cache
+
+        cache_data = _card_matching_cache.get(cache_key)
+        if not cache_data or not cache_data.get("found_cards"):
+            return await call.answer("❌ Сесія підбору карт застаріла. Оновіть спред.", show_alert=True)
+
+        # Забираємо дані картки безпосередньо з кешу оперативки
+        target_card = cache_data["found_cards"][0]
+        card_id = target_card.get("id") or target_card.get("card_id")
+
+        if not card_id:
+            return await call.answer("❌ Не вдалося визначити ID картки", show_alert=True)
+
+        await call.answer("🔄 Запит до Монобанку відправлено...")
+
+        # Викликаємо твою бойову функцію force_refresh_mono_balance
+        # Переконайся, що об'єкт бази `_db` доступний у цьому модулі
+        new_balance = await _db.force_refresh_mono_balance(card_id)
+
+        if new_balance is not None:
+            await call.answer(f"✅ Баланс успішно актуалізовано через API: {new_balance:,.2f} ₴", show_alert=True)
+
+            # Опціонально: тут можна викликати метод перерендеру повідомлення,
+            # щоб цифра «Баланс у боті» миттєво змінилася на екрані ТГ.
+        else:
+            await call.answer("❌ Монобанк відхилив запит або токен недійсний", show_alert=True)
+
+    except Exception as e:
+        logging.getLogger("Commands").error(f"Помилка кнопки оновлення балансу: {e}")
+        await call.answer("🔥 Внутрішня помилка хендлера", show_alert=True)
+
+        # Шукаємо або додаємо обробник головного екрану налаштувань у commands.py:
+        @router.callback_query(F.data == "gset:main")
+        async def cb_global_settings_main(call: CallbackQuery):
+            """
+            Рендерить головне вікно налаштувань (як на скріншоті).
+            Підтягує актуальний стан конфігу та викликає оновлену клавіатуру.
+            """
+            from config.runtime import runtime_config
+            from bot.keyboards import global_settings_kb
+
+            # Збираємо поточний зріз конфігурації для рендерингу бейджів на кнопках
+            current_settings = {
+                "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+                "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+                "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+                "require_sessions": runtime_config.get("require_sessions", "true"),
+            }
+
+            text = (
+                "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+                "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+                "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+            )
+
+            # Викликаємо клавіатуру з keyboards.py, куди ми вже додали нову кнопку
+            await call.message.edit_text(
+                text=text,
+                reply_markup=global_settings_kb(current_settings)
+            )
+
+        @router.callback_query(F.data.startswith("card:update_bal:"))
+        async def cb_card_update_balance_mexc(call: CallbackQuery):
+            """
+            Обробник кнопки '🔄 Актуалізувати баланс' з меню деталей картки.
+            Стукає в direct API Монобанку, оновлює SQLite та робить ререндер картки.
+            """
+            try:
+                card_id = call.data.split(":")[-1]
+
+                # 1. Повідомляємо юзера про початок сесії
+                await call.answer("🔄 Запит до серверів Monobank API...")
+
+                # 2. Викликаємо наш прямий метод полінгу з MerchantDB
+                # Об'єкт бази даних у твоїх командах зазвичай доступний як _db або self._db
+                new_balance = await _db.force_refresh_mono_balance(card_id)
+
+                if new_balance is not None:
+                    await call.answer(f"✅ Баланс успішно оновлено: {new_balance:,.2f} ₴", show_alert=True)
+
+                    # 3. 🚀 Автоматичний РЕРЕНДЕР: імітуємо повторний клік на перегляд картки,
+                    # щоб юзер одразу побачив нову цифру балансу в ТГ без закриття меню.
+                    call.data = f"card:view:{card_id}"
+                    try:
+                        # Викликаємо твій існуючий хендлер детального перегляду картки
+                        await cb_card_view(call)
+                    except NameError:
+                        # Якщо назва хендлера відрізняється, бот просто оновить сповіщення
+                        pass
+                else:
+                    await call.answer(
+                        "❌ Не вдалося оновити через API.\n\n"
+                        "Перевірте, чи це картка Monobank та чи підключено дійсний X-Token.",
+                        show_alert=True
+                    )
+
+            except Exception as e:
+                logging.getLogger("Commands").error(f"Помилка мануального оновлення балансу: {e}")
+                await call.answer("🔥 Внутрішня помилка обробника балансу", show_alert=True)

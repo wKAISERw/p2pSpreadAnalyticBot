@@ -1,5 +1,6 @@
 import time
 import logging
+from typing import Optional
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from core.storage.merchant_db import MerchantDB
 from core.engine.card_matching_engine import CardMatchingEngine
@@ -9,91 +10,167 @@ logger = logging.getLogger(__name__)
 # Cache schema: cache_key -> { "order_id": str, "target_amount": float, "direction": str, "bank": str, "excluded_cards": list[str], "found_cards": list[dict] }
 _card_matching_cache = {}
 
+
+def _clean_cache():
+    """TTL-очищення кешу (записи старші 30 хвилин)."""
+    now = time.time()
+    expired = [k for k in list(_card_matching_cache.keys())
+               if now - int(k.split("_")[-1]) > 1800]
+    for k in expired:
+        del _card_matching_cache[k]
+
+
 class CardNotifier:
     def __init__(self, db: MerchantDB, bot_instance):
         self._db = db
         self._bot = bot_instance
 
-    async def send_card_recommendation(
-        self, chat_id: int, target_amount: float, direction: str, bank: str, order_id: str, 
-        cache_key: str = None, message_id: int = None
-    ) -> None:
-        # TTL Cleanup
-        now = time.time()
-        expired = [k for k in list(_card_matching_cache.keys()) 
-                   if now - int(k.split("_")[-1]) > 1800]
-        for k in expired:
-            del _card_matching_cache[k]
-            
-        if not self._bot or not self._db:
-            return
-            
+    async def _render_card_projection(self, card_id: str, direction: str, tx_amount: float) -> str:
+        """
+        Генерує детальний блок картки із проєкцією лімітів та балансу за принципом: Поточний ➔ Очікуваний.
+        Гарантує 100% точність за рахунок прямого запиту актуального стану з SQLite.
+        """
+        if not self._db or not self._db._db:
+            return ""
+
+        # Витягуємо найсвіжіший рядок картки з БД
+        async with self._db._db.execute("SELECT * FROM cards WHERE id=?", (card_id,)) as cur:
+            row = await cur.fetchone()
+            if not row:
+                return f"⚠️ Картка {card_id} не знайдена в базі даних\n"
+            c = dict(row)
+
+        # Зчитуємо ліміти й поточні накопичені лічильники з SQLite
+        limits = await self._db.get_card_effective_limits(card_id)
+        used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
+        tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
+
+        # Визначаємо константи залежно від напрямку
+        max_single = limits.get("max_single_tx_out" if direction == "buy" else "max_single_tx_in", 29999.0)
+        daily_max = limits.get("daily_out_max" if direction == "buy" else "daily_in_max", 150000.0)
+        max_tx = limits.get("max_tx_per_day", 15)
+
+        # Прорахунок проєкції Балансу
+        bal_before = c.get("balance", 0.0)
+        bal_after = bal_before - tx_amount if direction == "buy" else bal_before + tx_amount
+
+        # Прорахунок проєкції Лімітів обороту
+        avail_before = max(0.0, daily_max - used_daily)
+        avail_after = max(0.0, avail_before - tx_amount)
+
+        # Прорахунок лічильника транзакцій
+        tx_after = tx_count + 1
+
+        drop_text = "Власна" if c.get("is_own") else "Дроп"
+        bank_name = c.get("bank_name", "unknown").capitalize()
+        last_four = c.get("last_four", "####")
+        label_str = f" [{c['label']}]" if c.get("label") else ""
+
+        dir_label = "💸 КУПІВЛЯ (BUY)" if direction == "buy" else "📥 ПРИЙМАЄМО (SELL)"
+
+        text = (
+            f"💳 <b>{dir_label}: {bank_name} *{last_four}</b> ({drop_text}{label_str})\n"
+            f"  ├ 💰 Баланс у боті: <code>{bal_before:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
+            f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code> (макс. за один переказ)\n"
+            f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> вільних ➔ <b>{avail_after:,.0f} ₴</b>\n"
+            f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{max_tx}</code> операцій ➔ <b>{tx_after}</b>\n"
+        )
+        return text
+
+    async def get_card_block(
+            self,
+            chat_id: int,
+            target_amount: float,
+            direction: str,
+            bank: str,
+            order_id: str,
+            cache_key: str = None,
+            buy_card_spent_fiat: float = 0.0,  # 🚀 Передаємо об'єм витраченого фіату
+            buy_card_id: str = None            # 🚀 Передаємо ID картки купівлі для зв'язування
+    ) -> tuple[str, list, Optional[dict]]:
+        """
+        Повертає (text_block, keyboard_rows, chosen_card_dict) для вбудовування в алерт.
+        Реалізує точний послідовний розрахунок балансу 'Було ➔ Стане'.
+        """
+        _clean_cache()
+        if not self._db:
+            return "", [], None
+
         settings = await self._db.get_user_card_settings(chat_id)
         if not settings or settings.get("card_module_mode") != "full":
-            return # Модуль вимкнено для цього юзера
+            return "", [], None
+
+        prefix = "💸 <b>КУПІВЛЯ (BUY):</b> " if direction == "buy" else "📥 <b>ПРИЙМАЄМО (SELL):</b> "
 
         engine = CardMatchingEngine(self._db)
-        
-        excluded = []
-        if cache_key and cache_key in _card_matching_cache:
-            excluded = _card_matching_cache[cache_key].get("excluded_cards", [])
-        else:
+        excluded = _card_matching_cache[cache_key].get("excluded_cards", []) if (cache_key and cache_key in _card_matching_cache) else []
+
+        if not cache_key:
             cache_key = f"cm_{order_id[:10]}_{int(time.time())}"
-            _card_matching_cache[cache_key] = {
-                "order_id": order_id,
-                "target_amount": target_amount,
-                "direction": direction,
-                "bank": bank,
-                "excluded_cards": [],
-                "found_cards": []
-            }
-            
-        result = await engine.run(chat_id, bank, target_amount, direction, crypto_available=True)
-        
-        # Виключаємо картки, які вже пропонували (якщо юзер натиснув "Інша картка")
-        # Якщо result.status успішний, але картка в excluded - це обробляється всередині engine. 
-        # В нашому engine зараз excluded_cards немає в аргументах. Ой. Треба буде додати у CardMatchingEngine, або фільтрувати тут. 
-        # Оскільки в Engine цього ще нема (додамо згодом), поки що ми просто передамо як є.
-        # Точніше, Engine зараз не має `excluded_cards`.
-        
-        if result.status in ("no_cards", "no_crypto"):
-            reason = "Недостатньо крипти для Sell-ноги" if result.status == "no_crypto" else "Не знайдено підходящих карток (всі зайняті або ліміти вичерпано)"
-            text = f"💳 <b>Картовий модуль:</b>\n⚠️ {reason}"
-            kb = None
-        elif result.status == "needs_split":
-            cards = result.split_options[0] if result.split_options else []
-            _card_matching_cache[cache_key]["found_cards"] = cards
-            
-            text = f"💳 <b>Рекомендовано СПЛІТ на {len(cards)} картки ({target_amount:.0f} ₴):</b>\n\n"
-            for c in cards:
-                drop_text = "Власна" if c.get("is_own") else "Дроп"
-                text += f"🟢 {c['bank_name'].capitalize()} {c['last_four']} ({drop_text})\n"
-                
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Взяти в роботу (Резерв)", callback_data=f"card_match:confirm:{cache_key}")],
-                [InlineKeyboardButton(text="🔄 Інший варіант", callback_data=f"card_match:other:{cache_key}")],
-                [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"card_match:cancel:{cache_key}")]
-            ])
-        else:
-            cards = []
-            if result.best_card:
-                if "buy" in result.best_card and "sell" in result.best_card: # spread case
-                    cards = [result.best_card["buy"], result.best_card["sell"]]
-                else:
-                    cards = [result.best_card]
-                    
-            _card_matching_cache[cache_key]["found_cards"] = cards
-            
-            text = f"💳 <b>Рекомендована картка для ордеру ({target_amount:.0f} ₴):</b>\n\n"
-            for c in cards:
-                drop_text = "Власна" if c.get("is_own") else "Дроп"
-                text += f"🟢 {c['bank_name'].capitalize()} {c['last_four']} ({drop_text})\n"
-                
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Взяти в роботу (Резерв)", callback_data=f"card_match:confirm:{cache_key}")],
-                [InlineKeyboardButton(text="🔄 Інша картка", callback_data=f"card_match:other:{cache_key}")],
-                [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"card_match:cancel:{cache_key}")]
-            ])
+            _card_matching_cache[cache_key] = {"order_id": order_id, "target_amount": target_amount, "direction": direction, "bank": bank, "excluded_cards": [], "found_cards": []}
+
+        result = await engine.run(chat_id, bank, target_amount, direction, crypto_available=True, excluded_cards=excluded if excluded else None)
+
+        if result.status in ("no_cards", "disabled"):
+            if result.status == "disabled":
+                return "", [], None
+            text = f"{prefix}⚠️ Немає доступних карток\n"
+            if result.rejection_report:
+                text += "\n".join([f"  └ *{rep['last_four']} — {rep['reason']}" if "last_four" in rep else f"  └ {rep['reason']}" for rep in result.rejection_report])
+            return text, [], None
+
+        if result.status == "no_crypto":
+            return f"{prefix}⚠️ Недостатньо крипти для Sell", [], None
+
+        cards = [result.best_card] if result.best_card else (result.split_options[0] if result.status == "needs_split" else [])
+        _card_matching_cache[cache_key]["found_cards"] = cards
+
+        if not cards:
+            return f"{prefix}⚠️ Немає доступних", [], None
+
+        c = cards[0]
+        card_id = c.get("id") or c.get("card_id")
+        drop_text = "Власна" if c.get("is_own", 1) else "Дроп"
+
+        # Стягуємо актуальні ліміти банку для побудови проєкції
+        limits = await self._db.get_user_bank_limits(chat_id, bank) or {"max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0, "daily_in_max": 150000.0, "daily_out_max": 150000.0, "max_tx_per_day": 15}
+        max_single = limits["max_single_tx_in"] if direction == "sell" else limits["max_single_tx_out"]
+        daily_max = limits["daily_in_max"] if direction == "sell" else limits["daily_out_max"]
+        used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
+        tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
+
+        # 🚀 ПОСЛІДОВНИЙ РОЗРАХУНОК БАЛАНСУ: якщо це та сама карта на Sell-нозі, зменшуємо стартовий баланс
+        base_bal = float(c.get("balance", 0.0))
+        if direction == "sell" and card_id == buy_card_id:
+            base_bal -= buy_card_spent_fiat
+
+        bal_after = base_bal - target_amount if direction == "buy" else base_bal + target_amount
+        avail_before = max(0.0, daily_max - used_daily)
+        avail_after = max(0.0, avail_before - target_amount)
+
+        text = (
+            f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text})\n"
+            f"  ├ 💰 Баланс у боті: <code>{base_bal:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
+            f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code>\n"
+            f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>\n"
+            f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{limits['max_tx_per_day']}</code> ➔ <b>{tx_count + 1}</b>"
+        )
+
+        rows = [[InlineKeyboardButton(text="✅ Взяти в роботу", callback_data=f"card_match:confirm:{cache_key}"), InlineKeyboardButton(text="🔄 Інша картка", callback_data=f"card_match:other:{cache_key}")]]
+        return text, rows, c
+
+    async def send_card_recommendation(
+            self, chat_id: int, target_amount: float, direction: str, bank: str, order_id: str,
+            cache_key: str = None, message_id: int = None
+    ) -> None:
+        """Редагує або надсилає картковий блок окремим повідомленням."""
+        text, rows = await self.get_card_block(
+            chat_id, target_amount, direction, bank, order_id, cache_key
+        )
+        if not text:
+            return
+
+        kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
         try:
             if message_id:
@@ -108,7 +185,7 @@ class CardNotifier:
                     chat_id=chat_id,
                     text=text,
                     reply_markup=kb,
-                    disable_notification=True
+                    disable_notification=True,
                 )
         except Exception as e:
             logger.error("Error sending card recommendation: %s", e)

@@ -39,11 +39,12 @@ class CrossMatchingEngine:
         self.min_spread = float(value)
 
     def match(
-        self,
-        buy_grouped: dict[str, list[Order]],
-        sell_grouped: dict[str, list[Order]],
+            self,
+            buy_grouped: dict[str, list[Order]],
+            sell_grouped: dict[str, list[Order]],
+            experimental_mode: bool = False,
     ) -> list[dict]:
-        best_opportunities =[]
+        best_opportunities = []
 
         for buy_bank, buy_orders in buy_grouped.items():
             for sell_bank, sell_orders in sell_grouped.items():
@@ -55,12 +56,7 @@ class CrossMatchingEngine:
                         if sell.price <= buy.price:
                             continue
 
-                        calculator = get_calculator(
-                            buy_bank,
-                            sell_bank,
-                            buy.exchange,
-                            sell.exchange,
-                        )
+                        calculator = get_calculator(buy_bank, sell_bank, buy.exchange, sell.exchange)
 
                         max_buy_fiat = min(
                             self.max_capital,
@@ -68,10 +64,24 @@ class CrossMatchingEngine:
                             float(buy.available_amount) * float(buy.price),
                         )
 
-                        if max_buy_fiat < self.min_trade or max_buy_fiat < float(buy.min_limit):
+                        if max_buy_fiat < self.min_trade:
                             continue
 
-                        usdt_bought = max_buy_fiat / float(buy.price)
+                        is_asymmetric_deal = False
+                        actual_buy_fiat = max_buy_fiat
+
+                        # 🧠 АСИМЕТРІЯ ТИП 1: Якщо сума закупівлі менша за мінімалку BUY-мерчанта
+                        if max_buy_fiat < float(buy.min_limit):
+                            if experimental_mode and float(buy.min_limit) <= self.max_capital:
+                                # Підтягуємо фіат до мінімалки BUY-мерчанта
+                                actual_buy_fiat = float(buy.min_limit)
+                                is_asymmetric_deal = True
+                            else:
+                                continue
+
+                        usdt_bought = actual_buy_fiat / float(buy.price)
+
+                        # На продаж пускаємо тільки те, що дозволяє SELL-ордер
                         usdt_to_sell = min(
                             usdt_bought,
                             float(sell.max_limit) / float(sell.price),
@@ -81,27 +91,35 @@ class CrossMatchingEngine:
                         if usdt_to_sell <= 0.0:
                             continue
 
-                        actual_buy_fiat = usdt_to_sell * float(buy.price)
+                        buy_fiat_for_sell_leg = usdt_to_sell * float(buy.price)
                         actual_sell_fiat = usdt_to_sell * float(sell.price)
 
+                        # Перевіряємо мінімалку SELL-мерчанта
                         if actual_sell_fiat < float(sell.min_limit):
                             continue
 
-                        gross_profit = actual_sell_fiat - actual_buy_fiat
-                        gross_spread_pct = (gross_profit / actual_buy_fiat) * 100.0
+                        # 🚀 ФІКС АСИМЕТРІЇ ТИП 2: Якщо ми купили більше крипти, ніж селлер здатний прийняти
+                        # (Наприклад: купили фіксом на 10к, а злити можемо тільки 2к через його ліміт)
+                        if experimental_mode and usdt_bought > (usdt_to_sell + 0.01):
+                            is_asymmetric_deal = True
+
+                        # Профіт рахуємо від фактично прокрученого об'єму фіату на зливі
+                        gross_profit = actual_sell_fiat - buy_fiat_for_sell_leg
+                        gross_spread_pct = (gross_profit / buy_fiat_for_sell_leg) * 100.0
 
                         _, total_fee, fee_details = calculator.calculate_net(
-                            actual_buy_fiat,
+                            buy_fiat_for_sell_leg,
                             usdt_price=float(buy.price),
                         )
 
                         net_profit = gross_profit - total_fee
-                        net_spread_pct = (net_profit / actual_buy_fiat) * 100.0
+                        net_spread_pct = (net_profit / buy_fiat_for_sell_leg) * 100.0
 
                         if net_spread_pct >= (self.min_spread + self.safety_buffer):
-                            route_type = (
-                                "INTRA" if buy.exchange == sell.exchange else "CROSS"
-                            )
+                            route_type = "INTRA" if buy.exchange == sell.exchange else "CROSS"
+
+                            # Рахуємо залишок крипти, який осяде в інвентарі
+                            inventory_left = usdt_bought - usdt_to_sell if is_asymmetric_deal else 0.0
 
                             best_opportunities.append(
                                 {
@@ -116,6 +134,12 @@ class CrossMatchingEngine:
                                     "net_spread_pct": float(net_spread_pct),
                                     "total_fee": float(total_fee),
                                     "fee_details": fee_details,
+                                    "is_asymmetric": is_asymmetric_deal,
+                                    "asymmetric_details": {
+                                        "buy_required": float(actual_buy_fiat),
+                                        "sell_executed": float(actual_sell_fiat),
+                                        "inventory_usdt": float(inventory_left)
+                                    } if is_asymmetric_deal else None
                                 }
                             )
 
@@ -132,9 +156,6 @@ class CrossMatchingEngine:
         """
         Групує сирі можливості за унікальним маршрутом (мерчант+ціна).
         Збирає всі варіанти банківських пар в один алерт.
-        bank_names: {internal_code: human_name}
-
-        Перенесено з scanner.py._group_opportunities()
         """
         grouped: dict[str, dict] = {}
 

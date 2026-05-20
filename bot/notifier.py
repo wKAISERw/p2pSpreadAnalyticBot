@@ -39,14 +39,24 @@ BANKS_MAP = {
     "64": "ПУМБ",
     "48": "А-Банк",
 }
-
+BANK_CODE_TO_DB_NAME = {
+    "43": "monobank",
+    "14": "privatbank",
+    "64": "pumb",
+    "48": "abank",
+    "61": "abank",
+    "80": "pumb",
+    "1":  "monobank",
+}
 BANKS_SHORT = {
     "43": "Mono",
     "14": "Privat",
     "64": "ПУМБ",
     "48": "А-Банк",
 }
-
+def _bank_code_to_db(code: str) -> str:
+    """Конвертує числовий код банку біржі в назву в БД."""
+    return BANK_CODE_TO_DB_NAME.get(str(code), str(code).lower())
 
 @dataclass
 class SpreadAlert:
@@ -488,7 +498,6 @@ class TelegramNotifier:
         self._taker_cache = bot_commands._taker_order_cache
 
     async def _get_display_settings(self, chat_id: int) -> dict:
-        """Повертає per-user налаштування виводу повідомлень."""
         if not self._db:
             return {
                 "show_ai_terms_summary": True,
@@ -496,6 +505,7 @@ class TelegramNotifier:
                 "show_ai_logic": True,
                 "show_bank_details": True,
                 "show_llm_summary": True,
+                "show_card_recommendation": True,   # ← ДОДАТИ
             }
         try:
             return await self._db.get_user_display_settings(chat_id)
@@ -506,6 +516,7 @@ class TelegramNotifier:
                 "show_ai_logic": True,
                 "show_bank_details": True,
                 "show_llm_summary": True,
+                "show_card_recommendation": True,   # ← ДОДАТИ
             }
 
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert", is_sniper_match: bool = False) -> None:
@@ -787,9 +798,24 @@ class TelegramNotifier:
                 InlineKeyboardButton(text="ТГ", callback_data=f"fb:{order.exchange}:{mid}:chat"),
             ])
 
+        # ── Картковий блок (вбудований) ──
+        if ds.get("show_card_recommendation", True) and getattr(self, "card_notifier", None):
+            bank_code = order.bank_codes[0] if order.bank_codes else ""
+            card_bank = _bank_code_to_db(bank_code)
+            card_direction = "buy" if is_buy else "sell"
+            card_order_id = str(ad_id) if ad_id else ""
+            card_text, card_rows = await self.card_notifier.get_card_block(
+                chat_id=chat_id or self._chat_id,
+                target_amount=float(order.min_limit),
+                direction=card_direction,
+                bank=card_bank,
+                order_id=card_order_id,
+            )
+            if card_text:
+                text += f"\n{card_text}"
+                kb.extend(card_rows)
+ 
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
-
-        # Розбиваємо якщо > 4096
         chunks = self._split_message(text)
         for i, chunk in enumerate(chunks):
             await self._send_with_retry(
@@ -799,17 +825,6 @@ class TelegramNotifier:
                 chat_id=chat_id,
             )
 
-        if getattr(self, "card_notifier", None):
-            bank = order.bank_codes[0] if order.bank_codes else ""
-            direction = "buy" if is_buy else "sell"
-            import asyncio
-            asyncio.create_task(self.card_notifier.send_card_recommendation(
-                chat_id=chat_id or self._chat_id,
-                target_amount=float(order.min_limit),
-                direction=direction,
-                bank=bank,
-                order_id=str(ad_id)
-            ))
 
     async def send_maker_order_alert(
         self,
@@ -1094,7 +1109,8 @@ class TelegramNotifier:
                 break
         return batch
 
-    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None, is_sniper_match: bool = False) -> None:
+    async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None,
+                           is_sniper_match: bool = False) -> None:
         # Display settings (per-user)
         ds = display_settings or {
             "show_ai_terms_summary": True, "show_full_terms": True,
@@ -1158,7 +1174,7 @@ class TelegramNotifier:
         sell_fit = _format_bank_list(getattr(alert, "sell_banks_fit", None))
         buy_warn = _regex_warn_block(alert.buy_order)
         sell_warn = _regex_warn_block(alert.sell_order)
-        # buy_name / sell_name вже є <a href> лінками від _profile_link() (рядки 675-684)
+
         buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}"
         sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
 
@@ -1179,7 +1195,6 @@ class TelegramNotifier:
                 reviews_analysis=getattr(alert, "sell_reviews_analysis", "")
             )
         else:
-            # Тільки бейдж без деталей
             buy_llm = _llm_verdict_block("Buy", alert.buy_rec, "", show_ai_logic=False, show_ai_terms_summary=False)
             sell_llm = _llm_verdict_block("Sell", alert.sell_rec, "", show_ai_logic=False, show_ai_terms_summary=False)
 
@@ -1192,10 +1207,20 @@ class TelegramNotifier:
         else:
             net_block_html = ""
 
+        # 🚀 ЕКСПЕРИМЕНТ: Генеруємо підстроку з дужками-деталями інвентарю для ТГ
+        asym_str = ""
+        if getattr(alert, "is_asymmetric", False) and getattr(alert, "asymmetric_details", None):
+            asym = alert.asymmetric_details
+            asym_str = (
+                f"\n  └ <i>(Деталі: Купівля: {asym['buy_required']:.0f}₴ | "
+                f"Продаж: {asym['sell_executed']:.0f}₴ | "
+                f"Інвентар: +{asym['inventory_usdt']:.2f} USDT)</i>"
+            )
+
         text = (
             f"{title}\n\n"
             f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
-            f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b>\n"
+            f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b>{asym_str}\n"  # ← Інжектовано деталі фічі
             f"🔄 Маршрут: {route_marker} | "
             f"{b_icon}{escape(alert.buy_order.exchange)} → "
             f"{s_icon}{escape(alert.sell_order.exchange)}\n"
@@ -1228,7 +1253,6 @@ class TelegramNotifier:
             f"{buy_risk if buy_risk else ''}"
             f"{buy_warn if buy_warn else ''}"
         )
-        # 🔘 Окремий розділ умов (AI-вижимка + повний текст під спойлером)
         buy_terms_blk = _terms_block(
             buy_terms_raw,
             terms_summary=alert.buy_terms_summary,
@@ -1251,7 +1275,6 @@ class TelegramNotifier:
             f"{sell_risk if sell_risk else ''}"
             f"{sell_warn if sell_warn else ''}"
         )
-        # 🔘 Окремий розділ умов (AI-вижимка + повний текст під спойлером)
         sell_terms_blk = _terms_block(
             sell_terms_raw,
             terms_summary=alert.sell_terms_summary,
@@ -1265,7 +1288,6 @@ class TelegramNotifier:
         # 🚀 НОВІ ІНТЕРАКТИВНІ КНОПКИ
         kb = []
 
-        # 🚀 Блок A: Single-Leg кнопки "Купити" / "Продати"
         b_ad = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
         s_ad = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
 
@@ -1273,7 +1295,6 @@ class TelegramNotifier:
             cache_key = f"{b_ad[:12]}_{s_ad[:12]}"
 
             import time
-            # 🚀 ФІКС: Зберігаємо алерт разом із міткою часу для TTL
             bot_commands._spread_cache[cache_key] = (alert, time.time())
 
             kb.append([
@@ -1289,11 +1310,10 @@ class TelegramNotifier:
                     InlineKeyboardButton(text=f"🚨 M→T (Стати мейкером і злити)", callback_data=f"trade:mt:{cache_key}")
                 ])
 
-        # Кнопки Single-Leg (незалежні від пари)
+        # Кнопки Single-Leg
         single_leg_row = []
         if b_ad and alert.buy_rec != "REJECT":
             buy_bank = alert.buy_bank or ""
-            # Telegram callback_data max 64 bytes — скорочуємо
             sl_buy_key = f"{b_ad[:10]}|{alert.buy_order.exchange[:3]}|{buy_bank[:4]}"
             bot_commands._single_leg_cache[f"b:{sl_buy_key}"] = {
                 "ad_id": str(b_ad), "exchange": alert.buy_order.exchange,
@@ -1329,7 +1349,6 @@ class TelegramNotifier:
         if single_leg_row:
             kb.append(single_leg_row)
 
-        # URL-кнопки (відкрити оголошення на біржі)
         url_row = []
         buy_url = getattr(alert.buy_order, "link", "") or build_profile_url(
             alert.buy_order.exchange, alert.buy_order.merchant_id
@@ -1343,7 +1362,6 @@ class TelegramNotifier:
             url_row.append(InlineKeyboardButton(text="🔗 Sell на біржі", url=sell_url))
         if url_row:
             kb.append(url_row)
-
 
         b_mid = alert.buy_order.merchant_id
         if b_mid:
@@ -1363,10 +1381,50 @@ class TelegramNotifier:
                 InlineKeyboardButton(text="🔵 ТГ", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:chat"),
             ])
 
+        # ── КАРТКОВИЙ БЛОК З ДИНАМІЧНИМ ПРОРАХУНКОМ АСИМЕТРІЇ ──
+        if ds.get("show_card_recommendation", True) and getattr(self, "card_notifier", None):
+            b_ad_id = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
+            s_ad_id = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
+
+            # 🧠 РОЗУМНИЙ РОЗПОДІЛ СУМ:
+            # Для BUY ноги сума завжди дорівнює повній сумі ордера входу
+            buy_target = alert.deal_amount_uah
+
+            # Для SELL ноги сума міняється залежно від активності асиметричного режиму
+            if getattr(alert, "is_asymmetric", False) and getattr(alert, "asymmetric_details", None):
+                sell_target = alert.asymmetric_details["sell_executed"]
+            else:
+                sell_target = alert.deal_amount_uah + alert.profit_uah
+
+            buy_card_text, buy_card_rows, buy_card_obj = await self.card_notifier.get_card_block(
+                chat_id=chat_id or self._chat_id,
+                target_amount=buy_target,
+                direction="buy",
+                bank=_bank_code_to_db(alert.buy_bank or ""),
+                order_id=str(b_ad_id) if b_ad_id else "",
+            )
+
+            # Нога SELL — приймає ID та об'єм закупівлі для корекції
+            buy_card_id = buy_card_obj.get("id") if buy_card_obj else None
+            sell_card_text, sell_card_rows, _ = await self.card_notifier.get_card_block(
+                chat_id=chat_id or self._chat_id,
+                target_amount=sell_target,
+                direction="sell",
+                bank=_bank_code_to_db(alert.sell_bank or ""),
+                order_id=str(s_ad_id) if s_ad_id else "",
+                buy_card_spent_fiat=buy_target,
+                buy_card_id=buy_card_id
+            )
+
+            card_text_combined = "\n".join(filter(None, [buy_card_text, sell_card_text]))
+            if card_text_combined:
+                text += f"\n{card_text_combined}"
+                kb.extend(buy_card_rows)
+                if sell_card_rows != buy_card_rows:
+                    kb.extend(sell_card_rows)
+
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
 
-        # Розбиваємо якщо повідомлення > 4096 (Telegram ліміт)
-        # Keyboard тільки на першому чанку
         chunks = self._split_message(text)
         for i, chunk in enumerate(chunks):
             await self._send_with_retry(
@@ -1376,27 +1434,6 @@ class TelegramNotifier:
                 chat_id=chat_id,
             )
 
-        if getattr(self, "card_notifier", None):
-            target_chat = chat_id or self._chat_id
-            import asyncio
-            b_ad = getattr(alert.buy_order, "ad_id", getattr(alert.buy_order, "order_id", ""))
-            if b_ad:
-                asyncio.create_task(self.card_notifier.send_card_recommendation(
-                    chat_id=target_chat,
-                    target_amount=alert.deal_amount_uah,
-                    direction="buy",
-                    bank=alert.buy_bank,
-                    order_id=str(b_ad)
-                ))
-            s_ad = getattr(alert.sell_order, "ad_id", getattr(alert.sell_order, "order_id", ""))
-            if s_ad:
-                asyncio.create_task(self.card_notifier.send_card_recommendation(
-                    chat_id=target_chat,
-                    target_amount=alert.deal_amount_uah,
-                    direction="sell",
-                    bank=alert.sell_bank,
-                    order_id=str(s_ad)
-                ))
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         """Підсумок усіх знайдених маршрутів за цикл."""
