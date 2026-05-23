@@ -32,6 +32,117 @@ from config import settings
 router = Router()
 logger = logging.getLogger(__name__)
 
+@router.callback_query(F.data == "menu:monitoring")
+async def cb_monitoring_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    text = (
+        "📊 <b>ARBIX QUANTUM | Моніторинг та аналітика</b>\n\n"
+        "Тут ви можете переглянути стан системи сканера, статистику спредів "
+        "і торгових угод, активні сесії та баланси.\n\n"
+        "<i>Оберіть розділ моніторингу:</i>"
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            text,
+            reply_markup=keyboards.monitoring_menu_kb(is_admin=_is_admin(call.from_user.id))
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:health")
+@router.callback_query(F.data == "health:check_all")
+async def cb_health_check_all(call: CallbackQuery):
+    await call.message.edit_text("🏥 <b>Health Check API</b>\n\n⏳ Опитую всі підключені біржі...", reply_markup=None)
+    
+    from core.engine.exchange_manager import exchange_manager
+    exchanges = ["Bybit", "OKX", "MEXC", "Binance", "Wallet"]
+    lines = ["🏥 <b>Health Check API</b>\n"]
+    
+    tasks = [exchange_manager.health_check(name) for name in exchanges]
+    results = await asyncio.gather(*tasks)
+    
+    for name, (ok, msg) in zip(exchanges, results):
+        icon = "🟢" if ok else "🔴"
+        lines.append(f"{icon} <b>{name}</b>: {msg}")
+        
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Оновити", callback_data="health:check_all")],
+        [InlineKeyboardButton(text="🔙 До моніторингу", callback_data="menu:monitoring")]
+    ])
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("\n".join(lines), reply_markup=kb)
+    await call.answer()
+
+
+@router.callback_query(F.data == "menu:logs")
+@router.callback_query(F.data.startswith("logs:view:"))
+async def cb_logs_view(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        return await call.answer("⛔ Доступ тільки для адміністраторів", show_alert=True)
+        
+    parts = call.data.split(":")
+    log_name = parts[2] if len(parts) > 2 else "error"
+    
+    allowed_logs = {
+        "error": "logs/error.log",
+        "debug": "logs/debug.log",
+        "verdict": "logs/verdict_audit.log",
+        "llm": "logs/llm_decisions.log"
+    }
+    
+    file_path = allowed_logs.get(log_name, "logs/error.log")
+    
+    try:
+        import os
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                seek_pos = max(0, size - 2500)
+                f.seek(seek_pos)
+                content = f.read()
+                
+                lines = content.splitlines()
+                if len(lines) > 20:
+                    lines = lines[-20:]
+                log_text = "\n".join(lines)
+        else:
+            log_text = f"❌ Файл {file_path} не знайдено."
+    except Exception as e:
+        log_text = f"❌ Помилка читання логу: {e}"
+        
+    if not log_text.strip():
+        log_text = "📭 Лог-файл порожній."
+        
+    import html
+    escaped_log = html.escape(log_text)
+    
+    text = (
+        f"📝 <b>Лог-файл:</b> <code>{file_path}</code>\n\n"
+        f"<pre>{escaped_log}</pre>\n"
+        f"<i>Показано останні 20 рядків логу.</i>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="❌ Error", callback_data="logs:view:error"),
+        InlineKeyboardButton(text="🐞 Debug", callback_data="logs:view:debug"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🛡️ Verdict", callback_data="logs:view:verdict"),
+        InlineKeyboardButton(text="🧠 LLM Decisions", callback_data="logs:view:llm"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔄 Оновити", callback_data=f"logs:view:{log_name}"),
+        InlineKeyboardButton(text="🔙 До моніторингу", callback_data="menu:monitoring")
+    )
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()

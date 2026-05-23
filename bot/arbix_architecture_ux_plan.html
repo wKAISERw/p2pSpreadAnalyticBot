@@ -1,0 +1,296 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); }
+.wrap { padding: 8px 0; }
+h2 { font-size: 15px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--color-border-tertiary); }
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+.tab { padding: 5px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; border: 1px solid var(--color-border-tertiary); background: var(--color-background-secondary); color: var(--color-text-secondary); transition: all .15s; }
+.tab.active { background: var(--color-background-primary); border-color: var(--color-border-primary); color: var(--color-text-primary); font-weight: 500; }
+.section { display: none; }
+.section.active { display: block; }
+
+/* UX Section */
+.menu-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.menu-card { border: 1px solid var(--color-border-tertiary); border-radius: 10px; padding: 12px; background: var(--color-background-secondary); }
+.menu-card .title { font-size: 13px; font-weight: 500; color: var(--color-text-primary); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.menu-card .items { display: flex; flex-direction: column; gap: 3px; }
+.menu-card .item { font-size: 11px; color: var(--color-text-secondary); padding: 3px 6px; border-radius: 4px; background: var(--color-background-primary); }
+.menu-card .item.new { color: var(--color-text-success); background: var(--color-background-success); }
+.menu-card .item.moved { color: var(--color-text-info); background: var(--color-background-info); }
+.menu-card .item.removed { color: var(--color-text-danger); text-decoration: line-through; background: var(--color-background-danger); }
+.legend { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--color-text-secondary); }
+.dot { width: 8px; height: 8px; border-radius: 2px; }
+.dot-new { background: var(--color-background-success); border: 1px solid var(--color-border-success); }
+.dot-moved { background: var(--color-background-info); border: 1px solid var(--color-border-info); }
+.dot-kept { background: var(--color-background-secondary); border: 1px solid var(--color-border-tertiary); }
+.dot-removed { background: var(--color-background-danger); border: 1px solid var(--color-border-danger); }
+
+/* Architecture section */
+.arch-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px; }
+.arch-table th { text-align: left; padding: 6px 8px; font-weight: 500; font-size: 11px; color: var(--color-text-secondary); border-bottom: 1px solid var(--color-border-tertiary); }
+.arch-table td { padding: 6px 8px; border-bottom: 1px solid var(--color-border-tertiary); color: var(--color-text-primary); vertical-align: top; }
+.arch-table tr:last-child td { border-bottom: none; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 500; }
+.badge-split { background: var(--color-background-warning); color: var(--color-text-warning); }
+.badge-new { background: var(--color-background-success); color: var(--color-text-success); }
+.badge-refactor { background: var(--color-background-info); color: var(--color-text-info); }
+.badge-keep { background: var(--color-background-secondary); color: var(--color-text-secondary); }
+.file-path { font-family: var(--font-mono); font-size: 10px; color: var(--color-text-secondary); }
+.arrow-right { color: var(--color-text-tertiary); }
+
+/* Phases */
+.phase { border: 1px solid var(--color-border-tertiary); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+.phase-header { padding: 8px 12px; background: var(--color-background-secondary); display: flex; align-items: center; gap: 8px; }
+.phase-num { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 500; flex-shrink: 0; }
+.phase-num.p1 { background: var(--color-background-info); color: var(--color-text-info); }
+.phase-num.p2 { background: var(--color-background-warning); color: var(--color-text-warning); }
+.phase-num.p3 { background: var(--color-background-success); color: var(--color-text-success); }
+.phase-title { font-size: 13px; font-weight: 500; color: var(--color-text-primary); }
+.phase-body { padding: 8px 12px; display: flex; flex-direction: column; gap: 4px; }
+.phase-item { font-size: 12px; color: var(--color-text-secondary); display: flex; gap: 6px; }
+.phase-item::before { content: "→"; color: var(--color-text-tertiary); flex-shrink: 0; }
+</style>
+
+<div class="wrap">
+  <div class="tabs">
+    <div class="tab active" onclick="show('ux')">UX / Меню</div>
+    <div class="tab" onclick="show('arch')">Архітектура</div>
+    <div class="tab" onclick="show('plan')">Фази виконання</div>
+  </div>
+
+  <!-- UX TAB -->
+  <div class="section active" id="ux">
+    <div class="legend">
+      <div class="legend-item"><div class="dot dot-new"></div> Нове</div>
+      <div class="legend-item"><div class="dot dot-moved"></div> Переїхало</div>
+      <div class="legend-item"><div class="dot dot-kept"></div> Залишається</div>
+      <div class="legend-item"><div class="dot dot-removed"></div> Прибирається</div>
+    </div>
+    <div class="menu-grid">
+
+      <div class="menu-card">
+        <div class="title">🏠 Головне меню</div>
+        <div class="items">
+          <div class="item">⚡ Статус ядра (вгорі)</div>
+          <div class="item">📡 Біржі</div>
+          <div class="item">🎛 Фільтри</div>
+          <div class="item">💳 Картки</div>
+          <div class="item">📊 Моніторинг</div>
+          <div class="item">⚙️ Система</div>
+          <div class="item removed">Статус (окремо)</div>
+          <div class="item removed">Баланси (окремо)</div>
+          <div class="item removed">Сесії (окремо)</div>
+          <div class="item removed">Пауза 1г/4г/∞</div>
+        </div>
+      </div>
+
+      <div class="menu-card">
+        <div class="title">📡 Біржі</div>
+        <div class="items">
+          <div class="item">🟢 Bybit / OKX / MEXC</div>
+          <div class="item">🟢 Binance / Wallet</div>
+          <div class="item moved">💰 Баланси</div>
+          <div class="item moved">🔑 API Ключі</div>
+          <div class="item moved">🔐 Сесії</div>
+          <div class="item new">📣 Створити оголошення</div>
+        </div>
+      </div>
+
+      <div class="menu-card">
+        <div class="title">🎛 Фільтри</div>
+        <div class="items">
+          <div class="item">💰 Капітал</div>
+          <div class="item">📦 Мін. сума угоди</div>
+          <div class="item">📉 Мін. спред</div>
+          <div class="item">🏦 Банки (buy/sell)</div>
+          <div class="item">🏪 Фільтри мерчантів</div>
+          <div class="item">🔍 Режим сканування</div>
+          <div class="item">💲 Фільтр ціни</div>
+          <div class="item moved">🖨 Налашт. виводу</div>
+          <div class="item moved">🔔 Алерти вкл/викл</div>
+        </div>
+      </div>
+
+      <div class="menu-card">
+        <div class="title">💳 Картки</div>
+        <div class="items">
+          <div class="item">📋 Список карток</div>
+          <div class="item">➕ Додати картку</div>
+          <div class="item">🏦 Ліміти банків</div>
+          <div class="item">⚙️ Модуль вкл/викл</div>
+          <div class="item moved">🖨 Налашт. виводу</div>
+          <div class="item">📊 Звіт 24г / 7д / 30д</div>
+          <div class="item new">🔍 Діагностика карток</div>
+        </div>
+      </div>
+
+      <div class="menu-card">
+        <div class="title">📊 Моніторинг</div>
+        <div class="items">
+          <div class="item moved">📈 Стан системи</div>
+          <div class="item moved">📉 Статистика</div>
+          <div class="item moved">💰 Баланси бірж</div>
+          <div class="item moved">🔐 Auth-сесії</div>
+          <div class="item new">📝 Логи / аудит</div>
+          <div class="item new">🏥 Health check</div>
+        </div>
+      </div>
+
+      <div class="menu-card">
+        <div class="title">⚙️ Система (адмін)</div>
+        <div class="items">
+          <div class="item moved">🛡 Антифрод налашт.</div>
+          <div class="item moved">🔧 Глобальні налашт.</div>
+          <div class="item">🧪 Експерим. функції</div>
+          <div class="item">⏸ Пауза 1г / 4г / ∞</div>
+          <div class="item new">👥 Управління юзерами</div>
+          <div class="item new">🔄 Debug / перезапуск</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ARCH TAB -->
+  <div class="section" id="arch">
+    <table class="arch-table">
+      <thead>
+        <tr>
+          <th>Файл зараз</th>
+          <th>Рядків</th>
+          <th>Дія</th>
+          <th>Стане</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="file-path">bot/commands.py</span></td>
+          <td>~6000</td>
+          <td><span class="badge badge-split">Розбити</span></td>
+          <td>
+            <div class="file-path">bot/handlers/exchanges.py</div>
+            <div class="file-path">bot/handlers/filters.py</div>
+            <div class="file-path">bot/handlers/cards.py</div>
+            <div class="file-path">bot/handlers/monitoring.py</div>
+            <div class="file-path">bot/handlers/system.py</div>
+            <div class="file-path">bot/handlers/menu.py (роутер)</div>
+          </td>
+        </tr>
+        <tr>
+          <td><span class="file-path">core/storage/merchant_db.py</span></td>
+          <td>~2700</td>
+          <td><span class="badge badge-split">Розбити</span></td>
+          <td>
+            <div class="file-path">core/storage/user_repo.py</div>
+            <div class="file-path">core/storage/card_repo.py</div>
+            <div class="file-path">core/storage/stats_repo.py</div>
+            <div class="file-path">core/storage/base_db.py</div>
+          </td>
+        </tr>
+        <tr>
+          <td><span class="file-path">bot/keyboards.py</span></td>
+          <td>~?</td>
+          <td><span class="badge badge-split">Розбити</span></td>
+          <td>
+            <div class="file-path">bot/keyboards/ (папка)</div>
+            <div class="file-path">  exchanges.py / filters.py</div>
+            <div class="file-path">  cards.py / monitoring.py</div>
+          </td>
+        </tr>
+        <tr>
+          <td><span class="file-path">bot/notifier.py</span></td>
+          <td>~1600</td>
+          <td><span class="badge badge-refactor">Рефактор</span></td>
+          <td>
+            <div class="file-path">bot/notifier.py (транспорт)</div>
+            <div class="file-path">bot/formatters.py (UI-рядки)</div>
+          </td>
+        </tr>
+        <tr>
+          <td><span class="file-path">bot/card_notifier.py</span></td>
+          <td>~400</td>
+          <td><span class="badge badge-keep">Залишити</span></td>
+          <td><span class="file-path">bot/card_notifier.py</span></td>
+        </tr>
+        <tr>
+          <td><span class="file-path">scanner.py</span></td>
+          <td>~1100</td>
+          <td><span class="badge badge-refactor">Рефактор</span></td>
+          <td>
+            <div class="file-path">scanner.py (AlertDispatcher)</div>
+            <div class="file-path">— UI-рядки → formatters.py</div>
+          </td>
+        </tr>
+        <tr>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="badge badge-new">Нові</span></td>
+          <td>
+            <div class="file-path">bot/middleware/auth.py</div>
+            <div class="file-path">bot/middleware/rate_limit.py</div>
+            <div class="file-path">core/storage/migrations/</div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- PLAN TAB -->
+  <div class="section" id="plan">
+
+    <div class="phase">
+      <div class="phase-header">
+        <div class="phase-num p1">1</div>
+        <div class="phase-title">Фаза 1 — Стабілізація (зараз)</div>
+      </div>
+      <div class="phase-body">
+        <div class="phase-item">Фікси багів: settings.get, reply-режим, bank codes parser</div>
+        <div class="phase-item">Повна діагностика карток (card_notifier)</div>
+        <div class="phase-item">html.escape у debugfilters</div>
+        <div class="phase-item">Тести: card_matching_engine, bank_filter</div>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-header">
+        <div class="phase-num p2">2</div>
+        <div class="phase-title">Фаза 2 — Рефактор архітектури</div>
+      </div>
+      <div class="phase-body">
+        <div class="phase-item">merchant_db.py → 4 репозиторії (не ламаючи інтерфейс)</div>
+        <div class="phase-item">keyboards.py → папка bot/keyboards/</div>
+        <div class="phase-item">commands.py → 5 handlers + роутер</div>
+        <div class="phase-item">notifier.py → відокремити formatters.py</div>
+      </div>
+    </div>
+
+    <div class="phase">
+      <div class="phase-header">
+        <div class="phase-num p3">3</div>
+        <div class="phase-title">Фаза 3 — UX редизайн меню</div>
+      </div>
+      <div class="phase-body">
+        <div class="phase-item">Нова структура головного меню: 5 розділів</div>
+        <div class="phase-item">Переїзд кнопок у правильні розділи</div>
+        <div class="phase-item">Пауза/мут переїжджає в Систему</div>
+        <div class="phase-item">Моніторинг збирає Статус + Баланси + Сесії</div>
+        <div class="phase-item">Картки: додати вкладку Діагностика</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.tab').forEach((t,i)=>{
+    const ids=['ux','arch','plan'];
+    t.classList.toggle('active', ids[i]===id);
+  });
+  document.querySelectorAll('.section').forEach(s=>{
+    s.classList.toggle('active', s.id===id);
+  });
+}
+</script>

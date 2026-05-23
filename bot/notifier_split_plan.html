@@ -1,0 +1,118 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans); font-size: 13px; }
+.wrap { padding: 8px 0 16px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+.card { border: 1px solid var(--color-border-tertiary); border-radius: 10px; overflow: hidden; }
+.card-head { padding: 8px 12px; background: var(--color-background-secondary); border-bottom: 1px solid var(--color-border-tertiary); display: flex; justify-content: space-between; align-items: center; }
+.card-title { font-size: 12px; font-weight: 500; color: var(--color-text-primary); font-family: var(--font-mono); }
+.lines { font-size: 11px; color: var(--color-text-tertiary); }
+.card-body { padding: 8px 12px; display: flex; flex-direction: column; gap: 3px; }
+.method { font-size: 11px; color: var(--color-text-secondary); padding: 2px 6px; border-radius: 4px; display: flex; align-items: center; gap: 5px; }
+.method::before { content: ""; width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.m-format::before { background: var(--color-text-info); }
+.m-transport::before { background: var(--color-text-success); }
+.m-handler::before { background: var(--color-text-warning); }
+.m-queue::before { background: var(--color-text-secondary); }
+.desc { font-size: 11px; color: var(--color-text-tertiary); padding: 0 0 4px; font-style: italic; }
+.legend { display: flex; gap: 14px; margin-bottom: 12px; flex-wrap: wrap; }
+.leg { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--color-text-secondary); }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.note { font-size: 11px; color: var(--color-text-secondary); background: var(--color-background-secondary); border-radius: 6px; padding: 8px 10px; border-left: 3px solid var(--color-border-secondary); }
+.arrow-row { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: 11px; color: var(--color-text-tertiary); padding: 4px 0; }
+</style>
+
+<div class="wrap">
+  <div class="legend">
+    <div class="leg"><div class="dot" style="background:var(--color-text-info)"></div> UI-форматери</div>
+    <div class="leg"><div class="dot" style="background:var(--color-text-success)"></div> Транспорт/відправка</div>
+    <div class="leg"><div class="dot" style="background:var(--color-text-warning)"></div> Callback-хендлери</div>
+    <div class="leg"><div class="dot" style="background:var(--color-text-secondary)"></div> Черга/воркер</div>
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">bot/formatters.py</span>
+        <span class="lines">~150 рядків</span>
+      </div>
+      <div class="card-body">
+        <div class="desc">Вже існує. Доповнюємо.</div>
+        <div class="method m-format">RISK_BADGES, RISK_COLORS (вже є)</div>
+        <div class="method m-format">risk_badge(), format_risk_line() (вже є)</div>
+        <div class="method m-format">rec_badge() ← з notifier.py L92</div>
+        <div class="method m-format">_llm_verdict_block() ← L111</div>
+        <div class="method m-format">_terms_block() ← L137</div>
+        <div class="method m-format">_format_bank_list() ← L172</div>
+        <div class="method m-format">_format_route_variants() ← L179</div>
+        <div class="method m-format">_profile_link() ← L187</div>
+        <div class="method m-format">_verified_badge() ← L199</div>
+        <div class="method m-format">_alert_grade() ← L203</div>
+        <div class="method m-format">_regex_warn_block() ← L213</div>
+        <div class="method m-format">_risk_badge() ← L242</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">bot/alert_builder.py</span>
+        <span class="lines">~400 рядків</span>
+      </div>
+      <div class="card-body">
+        <div class="desc">Новий. Збирає текст повідомлень.</div>
+        <div class="method m-format">SpreadAlert (dataclass) ← L62</div>
+        <div class="method m-format">_bank_code_to_db() ← L57</div>
+        <div class="method m-format">_send_single() ← L1154 (логіка тексту)</div>
+        <div class="method m-format">_send_batch() ← L1524 (логіка групування)</div>
+        <div class="method m-format">_send_taker_single() ← L633 (текст)</div>
+        <div class="method m-format">send_maker_buy_suggestion() ← L529 (текст)</div>
+        <div class="method m-format">send_maker_sell_update() ← L571 (текст)</div>
+        <div class="method m-format">send_maker_order_alert() ← L871 (текст)</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">bot/notifier.py</span>
+        <span class="lines">~450 рядків</span>
+      </div>
+      <div class="card-body">
+        <div class="desc">Залишається. Тільки транспорт.</div>
+        <div class="method m-transport">TelegramNotifier.__init__() ← L456</div>
+        <div class="method m-transport">bind_db(), bind_commands()</div>
+        <div class="method m-transport">send_to_user() ← L517</div>
+        <div class="method m-transport">send_taker_to_user() ← L614</div>
+        <div class="method m-transport">_get_display_settings()</div>
+        <div class="method m-transport">start(), stop()</div>
+        <div class="method m-transport">_send_with_retry() ← L1563</div>
+        <div class="method m-transport">_split_message() ← L1594</div>
+        <div class="method m-queue">push() ← L1098</div>
+        <div class="method m-queue">_worker_loop() ← L1110</div>
+        <div class="method m-queue">_collect_batch() ← L1134</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span class="card-title">bot/callback_handlers.py</span>
+        <span class="lines">~120 рядків</span>
+      </div>
+      <div class="card-body">
+        <div class="desc">Новий. Кнопки прямо в повідомленнях.</div>
+        <div class="method m-handler">_setup_handlers() ← L969</div>
+        <div class="method m-handler">on_feedback() ← L973 (fb:..)</div>
+        <div class="method m-handler">on_maker_order_action() ← L1012</div>
+        <div class="method m-handler">card_match callbacks</div>
+        <div class="desc" style="padding-top:4px">Окремий router що підключається в TelegramNotifier</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note">
+    <b>card_notifier.py</b> — не чіпаємо, вже чистий після рефакторингу.<br>
+    Всі імпорти з <code>bot.notifier</code> (SpreadAlert, TelegramNotifier) залишаються, бо <code>notifier.py</code> ре-експортує з нових модулів.
+  </div>
+</div>

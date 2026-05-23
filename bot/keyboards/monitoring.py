@@ -24,7 +24,7 @@ def stats_overview_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📅 Будні/Вихідні", callback_data="stats:weekly"),
         InlineKeyboardButton(text="📋 Історія угод", callback_data="stats:history"),
     )
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:monitoring"))
     return builder.as_markup()
 
 
@@ -33,7 +33,7 @@ def stats_source_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="💼 Моя статистика (Реальні угоди)", callback_data="stats:menu:my"))
     builder.row(InlineKeyboardButton(text="📡 Аналітика ринку (Знайдено сканером)", callback_data="stats:menu:scanner"))
-    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:monitoring"))
     return builder.as_markup()
 
 
@@ -50,5 +50,25 @@ def stats_metrics_kb(source: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🗺 Маршрути", callback_data=f"stats:routes:{source}")
     )
     builder.row(InlineKeyboardButton(text="🔙 Назад до вибору", callback_data="stats:main:none")) # Повернення на 1-й рівень
+    return builder.as_markup()
+
+
+def monitoring_menu_kb(is_admin: bool = False) -> InlineKeyboardMarkup:
+    """Підменю Моніторинг зі статусом, статистикою, балансами та сесіями."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📈 Стан системи", callback_data="menu:status"),
+        InlineKeyboardButton(text="📊 Статистика", callback_data="menu:stats"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="💰 Баланси бірж", callback_data="menu:balance"),
+        InlineKeyboardButton(text="🔐 Auth-сесії", callback_data="menu:sessions"),
+    )
+    if is_admin:
+        builder.row(
+            InlineKeyboardButton(text="📝 Логи / аудит", callback_data="menu:logs"),
+            InlineKeyboardButton(text="🏥 Health check", callback_data="menu:health"),
+        )
+    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
     return builder.as_markup()
 

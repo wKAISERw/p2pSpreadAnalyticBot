@@ -77,6 +77,90 @@ async def cb_menu_report(call: CallbackQuery) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data == "card:diagnostics")
+async def cb_card_diagnostics(call: CallbackQuery):
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+        
+    user_id = call.from_user.id
+    cards = await _db.get_cards(user_id)
+    
+    total = len(cards)
+    own = sum(1 for c in cards if c.get("is_own", 1))
+    drops = total - own
+    active = sum(1 for c in cards if c.get("status") == "active")
+    frozen = sum(1 for c in cards if c.get("status") == "frozen_funds")
+    
+    import time
+    cooldown = sum(1 for c in cards if c.get("cooldown_until", 0) > time.time())
+    
+    warnings = []
+    
+    for c in cards:
+        card_id = c["id"]
+        last_four = c["last_four"]
+        bank = c["bank_name"].capitalize()
+        label = c["label"]
+        bal = c["balance"]
+        
+        if bal <= 0:
+            warnings.append(f"⚠️ <b>{bank} *{last_four}</b> ({label}): Баланс рівний 0 ₴. Буде пропущено в BUY.")
+            
+        if c["status"] == "frozen_funds":
+            warnings.append(f"❄️ <b>{bank} *{last_four}</b> ({label}): Заморожена. Кошти не використовуються.")
+            
+        if c.get("cooldown_until", 0) > time.time():
+            remaining_mins = int((c["cooldown_until"] - time.time()) / 60)
+            warnings.append(f"⏳ <b>{bank} *{last_four}</b> ({label}): Кулдаун ще {remaining_mins} хв.")
+            
+        if c["bank_name"].lower() == "monobank":
+            mono_settings = await _db.get_card_mono_settings(card_id)
+            if not mono_settings or not mono_settings.get("webhook_secret"):
+                warnings.append(f"🐈 <b>{bank} *{last_four}</b> ({label}): Не налаштовано Webhook. Авто-підтвердження вимкнено.")
+            elif not mono_settings.get("mono_account_id"):
+                warnings.append(f"⚠️ <b>{bank} *{last_four}</b> ({label}): Webhook підключено, але не прив'язано до рахунку в API.")
+                
+        limits = await _db.get_card_effective_limits(card_id, user_id, c["bank_name"])
+        daily_in_max = limits.get("daily_in_max", 150000.0)
+        daily_out_max = limits.get("daily_out_max", 150000.0)
+        
+        used_in = await _db.get_rolling_used(card_id, "in", 24)
+        used_out = await _db.get_rolling_used(card_id, "out", 24)
+        
+        if used_in >= daily_in_max * 0.8:
+            pct = (used_in / daily_in_max) * 100
+            warnings.append(f"🚨 <b>{bank} *{last_four}</b> ({label}): Використано {pct:.0f}% добового ліміту IN ({used_in:.0f}/{daily_in_max:.0f} ₴).")
+        if used_out >= daily_out_max * 0.8:
+            pct = (used_out / daily_out_max) * 100
+            warnings.append(f"🚨 <b>{bank} *{last_four}</b> ({label}): Використано {pct:.0f}% добового ліміту OUT ({used_out:.0f}/{daily_out_max:.0f} ₴).")
+
+    from bot.card_notifier import _card_matching_cache
+    cache_sessions = len(_card_matching_cache)
+    
+    warnings_text = "\n".join(warnings) if warnings else "🟢 <b>Проблем або зауважень не виявлено.</b>"
+    
+    text = (
+        "🔍 <b>ARBIX QUANTUM | Діагностика карток</b>\n\n"
+        f"📊 <b>Загальна статистика:</b>\n"
+        f"├ Всього карток: <b>{total}</b> (Власних: <b>{own}</b>, Дропів: <b>{drops}</b>)\n"
+        f"├ Активних: <b>{active}</b> 🟢\n"
+        f"├ Заморожених: <b>{frozen}</b> ❄️\n"
+        f"└ В кулдауні: <b>{cooldown}</b> ⏳\n\n"
+        f"🧠 <b>Кеш автопідбору карт:</b>\n"
+        f"└ Активних сесій підбору: <b>{cache_sessions}</b>\n\n"
+        f"⚠️ <b>Проблеми та попередження:</b>\n"
+        f"{warnings_text}"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="🔄 Оновити", callback_data="card:diagnostics"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до карток", callback_data="card:dashboard"))
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
+    await call.answer()
+
+
 @router.callback_query(F.data == "card:toggle_module")
 async def cb_card_toggle_module(call: CallbackQuery) -> None:
     if not _db:

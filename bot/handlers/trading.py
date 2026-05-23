@@ -1268,3 +1268,41 @@ async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
 # 🎯 СНАЙПЕР-ОРДЕРИ (VOLUME SWEEPER)
 # =========================================================================
 
+@router.callback_query(F.data.startswith("mkord:"))
+async def on_maker_order_action(call: CallbackQuery):
+    """Обробка кнопок Прийняти/Відхилити для вхідних maker-ордерів."""
+    try:
+        parts = call.data.split(":")
+        if len(parts) < 3:
+            return await call.answer("Помилка формату")
+
+        action = parts[1]   # "accept" або "reject"
+        order_id = parts[2]
+
+        if action == "accept":
+            # Просто підтверджуємо — фактичний release робиться на біржі вручну
+            await call.answer("✅ Прийнято! Завершіть угоду на біржі.", show_alert=True)
+            old_text = call.message.html_text or ""
+            new_text = f"✅ <b>ПРИЙНЯТО</b>\n\n{old_text[:3500]}"
+            from contextlib import suppress
+            from aiogram.exceptions import TelegramBadRequest
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(new_text, reply_markup=None)
+
+        elif action == "reject":
+            await call.answer("❌ Відхилено. Спробуйте скасувати на біржі.", show_alert=True)
+            old_text = call.message.html_text or ""
+            new_text = f"❌ <b>ВІДХИЛЕНО</b>\n\n<del>{old_text[:3500]}</del>"
+            from contextlib import suppress
+            from aiogram.exceptions import TelegramBadRequest
+            with suppress(TelegramBadRequest):
+                await call.message.edit_text(new_text, reply_markup=None)
+
+        else:
+            await call.answer("Невідома дія")
+
+    except Exception as e:
+        logger.error("mkord callback error: %s", e)
+        await call.answer("Помилка обробки", show_alert=True)
+
+

@@ -18,6 +18,7 @@ from bot.handlers.core import (
     _trade_worker, _single_leg_executor, is_muted, update_stats,
     _generate_dashboard_text, SniperStates, EXPERIMENTAL_FEATURES, _active_repricers, HybridTradeStates, _spread_cache,
 )
+from bot import keyboards
 from bot.keyboards import back_to_main_kb
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
@@ -245,6 +246,7 @@ async def cb_features_main_menu(call: CallbackQuery):
     kb = []
     for cat_id, cat_data in EXPERIMENTAL_FEATURES.items():
         kb.append([InlineKeyboardButton(text=cat_data["title"], callback_data=f"feat:cat:{cat_id}")])
+    kb.append([InlineKeyboardButton(text="🔙 Назад до системи", callback_data="menu:system")])
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
 
 
@@ -491,6 +493,158 @@ async def process_mt_amount(message: Message, state: FSMContext) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CARD MANAGEMENT SYSTEM UI
+# SYSTEM ADMINISTRATION AND DIAGNOSTICS HANDLERS (Phase 3 UX Redesign)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data == "menu:system")
+async def cb_system_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if not _is_admin(call.from_user.id):
+        return await call.answer("⛔ Доступ дозволено тільки адміну", show_alert=True)
+
+    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+    
+    # We check if the bot is currently muted
+    from bot.handlers.core import is_muted
+    muted = is_muted()
+    
+    text = (
+        "⚙️ <b>ARBIX QUANTUM | Адміністрування системи</b>\n\n"
+        "Панель управління ядром сканера, лімітами, експериментальними "
+        "функціями, користувачами та системним перезапуском.\n\n"
+        f"├ Стан ядра: <b>{'АКТИВНИЙ 🟢' if is_active else 'ЗУПИНЕНИЙ 🔴'}</b>\n"
+        f"└ Пауза сповіщень: <b>{'АКТИВНА 🔕' if muted else 'НЕАКТИВНА 🔔'}</b>\n\n"
+        "<i>Оберіть потрібну дію:</i>"
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            text,
+            reply_markup=keyboards.system_menu_kb(is_scanner_active=is_active, is_muted=muted)
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "sys:users")
+@router.callback_query(F.data.startswith("sys:users:toggle:"))
+async def cb_sys_users(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        return await call.answer("⛔ Доступ дозволено тільки адміну", show_alert=True)
+        
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    
+    # Check if this is a toggle action
+    parts = call.data.split(":")
+    if len(parts) > 3 and parts[2] == "toggle":
+        target_user_id = int(parts[3])
+        # Get current status
+        async with conn.execute("SELECT is_active FROM scanner_users WHERE user_id = ?", (target_user_id,)) as cur:
+            row = await cur.fetchone()
+        if row:
+            new_active = 0 if row[0] else 1
+            await conn.execute("UPDATE scanner_users SET is_active = ? WHERE user_id = ?", (new_active, target_user_id))
+            await conn.commit()
+            await call.answer(f"Статус користувача {target_user_id} змінено на {'активний' if new_active else 'неактивний'}!")
+            
+    # Load all users
+    async with conn.execute("SELECT user_id, telegram_chat_id, is_active, scanner_mode FROM scanner_users") as cur:
+        rows = await cur.fetchall()
+        
+    text_lines = ["👥 <b>Управління користувачами</b>\n", f"Всього в базі: <b>{len(rows)}</b>\n"]
+    builder = InlineKeyboardBuilder()
+    
+    for row in rows:
+        uid = row["user_id"]
+        chat_id = row["telegram_chat_id"]
+        is_act = row["is_active"]
+        mode = row["scanner_mode"]
+        
+        status_icon = "🟢" if is_act else "🔴"
+        text_lines.append(f"• 👤 <b>{uid}</b> (Chat: {chat_id})\n  └ Режим: <code>{mode}</code> | Статус: {status_icon}")
+        
+        # Add toggle button for each user
+        btn_label = f"Toggle {uid} ({'🔴' if is_act else '🟢'})"
+        builder.row(InlineKeyboardButton(text=btn_label, callback_data=f"sys:users:toggle:{uid}"))
+        
+    builder.row(InlineKeyboardButton(text="🔙 Назад до системи", callback_data="menu:system"))
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("\n".join(text_lines), reply_markup=builder.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data == "sys:debug")
+@router.callback_query(F.data == "sys:clear_caches")
+async def cb_sys_debug(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        return await call.answer("⛔ Доступ дозволено тільки адміну", show_alert=True)
+        
+    # Check cache clear action
+    if call.data == "sys:clear_caches":
+        # Clear caches in notifier / card_notifier
+        from bot.notifier import _single_leg_cache, _spread_cache, _taker_order_cache
+        from bot.card_notifier import _card_matching_cache
+        _single_leg_cache.clear()
+        _spread_cache.clear()
+        _taker_order_cache.clear()
+        _card_matching_cache.clear()
+        await call.answer("🧹 Всі системні кеші успішно очищено!", show_alert=True)
+        
+    import sys
+    import os
+    import time
+    
+    mem_mb = 0.0
+    cpu_pct = 0.0
+    uptime_str = "Невідомо"
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+        cpu_pct = process.cpu_percent(interval=None)
+        create_time = process.create_time()
+        uptime_sec = time.time() - create_time
+        days = int(uptime_sec // 86400)
+        hours = int((uptime_sec % 86400) // 3600)
+        minutes = int((uptime_sec % 3600) // 60)
+        uptime_str = f"{days}д {hours}г {minutes}хв"
+    except Exception:
+        pass
+        
+    active_tasks = len(asyncio.all_tasks())
+    is_active = runtime_config.get("is_scanner_active", "false") == "true"
+    status_text = "🟢 АКТИВНИЙ" if is_active else "🔴 ЗУПИНЕНИЙ"
+    
+    text = (
+        f"🔄 <b>Системна діагностика & Debug</b>\n\n"
+        f"├ Стан ядра: <b>{status_text}</b>\n"
+        f"├ Uptime процесу: <b>{uptime_str}</b>\n"
+        f"├ Споживання пам'яті: <b>{mem_mb:.1f} MB</b>\n"
+        f"├ CPU: <b>{cpu_pct:.1f}%</b>\n"
+        f"├ Активних тасків: <b>{active_tasks}</b>\n"
+        f"└ Python version: <code>{sys.version.split()[0]}</code>\n\n"
+        f"⚠️ <i>Натискання «Перезапуск» завершить роботу поточного процесу. Бот перезапуститься автоматично, якщо налаштовано PM2/Docker/systemd.</i>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="💀 Перезапустити процес", callback_data="sys:restart_process"))
+    builder.row(InlineKeyboardButton(text="🧹 Очистити кеші", callback_data="sys:clear_caches"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до системи", callback_data="menu:system"))
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=builder.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data == "sys:restart_process")
+async def cb_sys_restart_process(call: CallbackQuery):
+    if not _is_admin(call.from_user.id):
+        return await call.answer("⛔ Доступ дозволено тільки адміну", show_alert=True)
+        
+    await call.message.edit_text("💀 <b>Процес завершує роботу...</b>\n\nБот вимикається для перезавантаження.")
+    await call.answer("Перезапуск процесу...", show_alert=True)
+    
+    # Wait for message to be sent
+    await asyncio.sleep(1.0)
+    import sys
+    sys.exit(0)
 

@@ -19,7 +19,7 @@ def keys_menu_kb(has_keys: bool = False) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="❌ Відключити біржу", callback_data="keys:disconnect")
         )
     builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main")
+        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:exchanges")
     )
     return builder.as_markup()
 
@@ -107,7 +107,7 @@ def exchanges_status_kb(statuses: list[dict]) -> InlineKeyboardMarkup:
                 label = f"🔴 {icon} {name}"
             builder.button(text=label, callback_data=f"exch:toggle_menu:{name}")
     builder.adjust(2)
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:status"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:exchanges"))
     return builder.as_markup()
 
 
@@ -208,5 +208,37 @@ def create_ad_banks_kb(all_banks: dict[str, str], selected: list[str]) -> Inline
 # ═══════════════════════════════════════════════════════════════════════════════
 # Card Management UI
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def exchanges_menu_kb(statuses: list[dict]) -> InlineKeyboardMarkup:
+    """Підменю Біржі з кнопками балансів, ключів, сесій та створення оголошення."""
+    builder = InlineKeyboardBuilder()
+
+    # 1. Кнопки швидкого перегляду стану / переходу до керування кожною біржею
+    for st in statuses:
+        name = st["name"]
+        icon = EXCHANGE_ICONS.get(name, "🔌")
+        if st["enabled"]:
+            label = f"🟢 {icon} {name}"
+        else:
+            remaining = st.get("cooldown_remaining_h", 0)
+            if remaining > 0:
+                label = f"⏱ {icon} {name} ({remaining:.1f}г)"
+            else:
+                label = f"🔴 {icon} {name}"
+        builder.button(text=label, callback_data=f"exch:toggle_menu:{name}")
+    builder.adjust(2)
+
+    # 2. Додаткові кнопки
+    builder.row(
+        InlineKeyboardButton(text="💰 Баланси", callback_data="menu:balance"),
+        InlineKeyboardButton(text="🔑 API Ключі", callback_data="menu:keys"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔐 Сесії", callback_data="menu:sessions"),
+        InlineKeyboardButton(text="📣 Створити оголошення", callback_data="ad:create"),
+    )
+    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
+    return builder.as_markup()
 
 

@@ -189,3 +189,46 @@ def price_range_kb() -> InlineKeyboardMarkup:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+def filters_menu_kb(scanner_mode: str = "SPREAD", is_alerts_active: bool = True) -> InlineKeyboardMarkup:
+    """Підменю Фільтри з кнопками налаштування капіталу, спреду, режимів та відображення."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="💰 Капітал", callback_data="set:capital"),
+        InlineKeyboardButton(text="📦 Мін. сума", callback_data="set:min_amount"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📉 Мін. спред", callback_data="set:spread"),
+        InlineKeyboardButton(text="🏦 Банки", callback_data="set:banks_menu"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🏪 Фільтри мерчантів", callback_data="set:merchant_filters"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔍 Режим сканування", callback_data="set:scanner_mode"),
+        InlineKeyboardButton(text="💲 Фільтр ціни", callback_data="set:price_range"),
+    )
+
+    # Контекстні кнопки для мейкер-режимів
+    if scanner_mode == "MAKER_SELL":
+        builder.row(
+            InlineKeyboardButton(text="💲 Ціна купівлі (maker)", callback_data="set:maker_buy_price"),
+        )
+    elif scanner_mode == "MAKER_BUY":
+        builder.row(
+            InlineKeyboardButton(text="📊 Цільова маржа (maker)", callback_data="set:target_margin"),
+        )
+
+    builder.row(
+        InlineKeyboardButton(text="🖥 Налаштування виводу", callback_data="set:display_menu"),
+    )
+
+    # Динамічний перемикач алертів
+    if is_alerts_active:
+        builder.row(InlineKeyboardButton(text="🔕 Вимкнути алерти", callback_data="user:alerts:off"))
+    else:
+        builder.row(InlineKeyboardButton(text="🔔 Увімкнути алерти", callback_data="user:alerts:on"))
+
+    builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+

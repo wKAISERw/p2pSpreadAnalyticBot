@@ -33,9 +33,72 @@ from aiogram.fsm.state import State, StatesGroup
 from bot import keyboards
 from config import settings
 
-_trade_worker = None
-_single_leg_executor = None
-_maker_monitor = None
+class GlobalProxy:
+    __slots__ = ("_var_name",)
+    def __init__(self, var_name: str):
+        object.__setattr__(self, "_var_name", var_name)
+        
+    def _get_target(self):
+        return globals()[object.__getattribute__(self, "_var_name")]
+        
+    def __getattr__(self, name):
+        target = self._get_target()
+        if target is None:
+            raise AttributeError(f"Global object '{object.__getattribute__(self, '_var_name')}' is not initialized")
+        return getattr(target, name)
+
+    def __setattr__(self, name, value):
+        target = self._get_target()
+        if target is None:
+            raise AttributeError(f"Global object '{object.__getattribute__(self, '_var_name')}' is not initialized")
+        setattr(target, name, value)
+
+    def __bool__(self) -> bool:
+        return self._get_target() is not None
+
+    def __str__(self) -> str:
+        target = self._get_target()
+        return str(target) if target is not None else "None"
+
+    def __repr__(self) -> str:
+        target = self._get_target()
+        return repr(target) if target is not None else "None"
+
+    def __getitem__(self, item):
+        target = self._get_target()
+        if target is None:
+            raise KeyError(f"Global object '{object.__getattribute__(self, '_var_name')}' is not initialized")
+        return target[item]
+
+    def __setitem__(self, key, value):
+        target = self._get_target()
+        if target is None:
+            raise KeyError(f"Global object '{object.__getattribute__(self, '_var_name')}' is not initialized")
+        target[key] = value
+
+    def __len__(self) -> int:
+        target = self._get_target()
+        if target is None:
+            return 0
+        return len(target)
+
+    def __contains__(self, item) -> bool:
+        target = self._get_target()
+        return item in target if target is not None else False
+
+    def __iter__(self):
+        target = self._get_target()
+        if target is None:
+            return iter([])
+        return iter(target)
+
+_trade_worker_impl = None
+_single_leg_executor_impl = None
+_maker_monitor_impl = None
+
+_trade_worker = GlobalProxy("_trade_worker_impl")
+_single_leg_executor = GlobalProxy("_single_leg_executor_impl")
+_maker_monitor = GlobalProxy("_maker_monitor_impl")
 _active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 
 # ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
@@ -239,10 +302,16 @@ _KEY_LABELS = {
 }
 
 # ── Посилання на глобальні об'єкти (заповнюються з scanner.py) ─────────────
-_db: Optional["MerchantDB"] = None
-_bot = None
-_notifier = None
-_account_clients: dict = {}
+_db_impl = None
+_bot_impl = None
+_notifier_impl = None
+_account_clients_impl: dict = {}
+
+_db = GlobalProxy("_db_impl")
+_bot = GlobalProxy("_bot_impl")
+_notifier = GlobalProxy("_notifier_impl")
+_account_clients = GlobalProxy("_account_clients_impl")
+
 _scanner_stats: dict = {
     "cycles": 0,
     "last_cycle_ms": 0,
@@ -263,26 +332,26 @@ def is_muted() -> bool:
 
 def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None,
           maker_monitor=None, bot=None) -> None:
-    global _db, _account_clients, _trade_worker, _notifier, _single_leg_executor, _maker_monitor, _bot
-    if _trade_worker and trade_worker and _trade_worker is not trade_worker:
+    global _db_impl, _account_clients_impl, _trade_worker_impl, _notifier_impl, _single_leg_executor_impl, _maker_monitor_impl, _bot_impl
+    if _trade_worker_impl and trade_worker and _trade_worker_impl is not trade_worker:
         logger.warning("setup(): TradeWorker перезаписується!")
-    _db = db
-    _account_clients = account_clients
-    _trade_worker = trade_worker
+    _db_impl = db
+    _account_clients_impl = account_clients
+    _trade_worker_impl = trade_worker
 
     if notifier is not None:
-        _notifier = notifier
+        _notifier_impl = notifier
         # Автоматичний fallback: якщо bot не передали явно, беремо його з нотифікатора
         if hasattr(notifier, "_bot") and notifier._bot is not None:
-            _bot = notifier._bot
+            _bot_impl = notifier._bot
 
     if bot is not None:
-        _bot = bot
+        _bot_impl = bot
 
     if single_leg_executor is not None:
-        _single_leg_executor = single_leg_executor
+        _single_leg_executor_impl = single_leg_executor
     if maker_monitor is not None:
-        _maker_monitor = maker_monitor
+        _maker_monitor_impl = maker_monitor
 
 
 def update_stats(**kwargs) -> None:

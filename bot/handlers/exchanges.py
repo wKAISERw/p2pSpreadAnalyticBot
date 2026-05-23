@@ -418,6 +418,25 @@ async def on_main_menu(call: CallbackQuery, state: FSMContext) -> None:
     await call.answer()
 
 
+@router.callback_query(F.data == "menu:exchanges")
+async def on_exchanges_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    from core.engine.exchange_manager import exchange_manager
+    statuses = exchange_manager.get_status_all()
+    text = (
+        "📡 <b>ARBIX QUANTUM | Біржі та API</b>\n\n"
+        "Тут ви можете налаштувати роботу з біржами, переглянути баланси, "
+        "керувати API ключами або сесіями, а також створити P2P оголошення.\n\n"
+        "<i>Оберіть потрібну дію або біржу для керування:</i>"
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            text,
+            reply_markup=keyboards.exchanges_menu_kb(statuses)
+        )
+    await call.answer()
+
+
 @router.callback_query(F.data.in_(["scanner:start", "scanner:stop"]))
 async def on_scanner_toggle(call: CallbackQuery) -> None:
     if not _is_admin(call.from_user.id):
@@ -513,7 +532,7 @@ def _status_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔌 Управління біржами", callback_data="exch:list"),
     )
     builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:main"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="menu:monitoring"),
     )
     return builder.as_markup()
 
@@ -773,20 +792,7 @@ async def on_user_alerts_on(call: CallbackQuery) -> None:
     await call.answer("🔔 Мої алерти увімкнено!", show_alert=True)
 
 
-@router.callback_query(F.data == "menu:settings")
-async def on_settings_menu(call: CallbackQuery) -> None:
-    scanner_mode = "SPREAD"
-    if _db:
-        users = await _db.get_active_users()
-        for u in users:
-            if u["user_id"] == call.from_user.id:
-                scanner_mode = u.get("scanner_mode", "SPREAD")
-                break
-    text = "⚙️ <b>Налаштування персональних фільтрів</b>\n\nТут ти можеш змінити свої особисті обмеження. Бот надішле тобі угоду ТІЛЬКИ якщо вона проходить під ці фільтри."
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(text,
-                                     reply_markup=settings_menu_kb(scanner_mode, is_admin=_is_admin(call.from_user.id)))
-    await call.answer()
+# menu:settings migrated to filters.py
 
 
 @router.callback_query(F.data == "menu:keys")
@@ -814,7 +820,7 @@ async def on_balance_button(call: CallbackQuery) -> None:
     await call.message.edit_text("⏳ Завантажую баланси...", reply_markup=None)
     text = await _generate_balance_text(call.from_user.id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+        await call.message.edit_text(text, reply_markup=keyboards.back_to_balance_kb())
     await call.answer()
 
 
@@ -934,7 +940,7 @@ async def on_stats_callback(call: CallbackQuery):
 async def on_sessions_button(call: CallbackQuery) -> None:
     if not _db:
         with suppress(TelegramBadRequest):
-            await call.message.edit_text("❌ БД не підключена.", reply_markup=back_to_main_kb())
+            await call.message.edit_text("❌ БД не підключена.", reply_markup=keyboards.back_to_sessions_kb())
         return await call.answer()
 
     from core.workers.session_manager import SESSION_TTL
@@ -943,7 +949,7 @@ async def on_sessions_button(call: CallbackQuery) -> None:
 
     if not sessions:
         with suppress(TelegramBadRequest):
-            await call.message.edit_text("📭 Жодних auth-сесій не знайдено.", reply_markup=back_to_main_kb())
+            await call.message.edit_text("📭 Жодних auth-сесій не знайдено.", reply_markup=keyboards.back_to_sessions_kb())
         return await call.answer()
 
     lines = ["🩺 <b>Auth-сесії:</b>\n"]
@@ -968,7 +974,7 @@ async def on_sessions_button(call: CallbackQuery) -> None:
         )
 
     with suppress(TelegramBadRequest):
-        await call.message.edit_text("\n".join(lines), reply_markup=back_to_main_kb())
+        await call.message.edit_text("\n".join(lines), reply_markup=keyboards.back_to_sessions_kb())
     await call.answer()
 
 

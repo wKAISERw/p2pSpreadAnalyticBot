@@ -22,8 +22,12 @@ def get_router() -> Router:
     root.include_router(system.router)
     root.include_router(cards.router)
 
+    # Створюємо окремий роутер для фолбеків, щоб вони не перехоплювали запити до модульних роутерів.
+    # Aiogram перевіряє хендлери самого роутера перед тим, як спускатися в його sub-routers.
+    fallback_router = Router()
+
     # 🕵️‍♂️ РОЗУМНА ПАСТКА ДЛЯ БОЙОВИХ КНОПОК ТА СЕЙФ-БУТУ
-    @root.callback_query()
+    @fallback_router.callback_query()
     async def global_ux_fallback(call: CallbackQuery):
         """
         Ловить будь-який нерозпізнаний клік.
@@ -56,9 +60,11 @@ def get_router() -> Router:
         # Дефолтна відповідь для інших непідключених кнопок
         await call.answer(f"⚠️ Кнопка '{data}' ще в процесі редизайну Фази 3", show_alert=True)
 
-    @root.message()
+    @fallback_router.message()
     async def global_message_fallback(message: Message):
         """Ловить неочікуваний текст або команди."""
         logger.warning(f"🕵️‍♂️ НЕОБРОБЛЕНА КОМАНДА/ТЕКСТ: '{message.text}'")
+
+    root.include_router(fallback_router)
 
     return root

@@ -45,16 +45,24 @@ def cards_dashboard_kb(cards: list[dict], module_mode: str) -> InlineKeyboardMar
     for card in cards:
         icon = "🟢" if card["status"] == "active" else ("❄️" if card["status"] == "frozen_funds" else "🔴")
         drop = " (Дроп)" if not card.get("is_own", 1) else ""
-        label = f"{icon} {card['bank_name']} {card['last_four']}{drop} — {card['balance']:.0f} ₴"
+        label = f"{icon} {card['bank_name'].capitalize()} {card['last_four']}{drop} — {card['balance']:.0f} ₴"
         builder.row(InlineKeyboardButton(text=label, callback_data=f"card:view:{card['id']}"))
         
     builder.row(
         InlineKeyboardButton(text="➕ Додати картку", callback_data="card:add_start"),
-        InlineKeyboardButton(text="⚙️ Ліміти банків", callback_data="menu:bank_limits")
+        InlineKeyboardButton(text="🏦 Ліміти банків", callback_data="menu:bank_limits")
     )
     
     mode_label = "УВІМКНЕНО" if module_mode == "full" else "ВИМКНЕНО"
-    builder.row(InlineKeyboardButton(text=f"⚙️ Модуль: {mode_label}", callback_data="card:toggle_module"))
+    builder.row(
+        InlineKeyboardButton(text=f"⚙️ Модуль: {mode_label}", callback_data="card:toggle_module"),
+        InlineKeyboardButton(text="🖨 Налашт. виводу", callback_data="set:card_display_menu")
+    )
+    
+    builder.row(
+        InlineKeyboardButton(text="📊 Звіт по картках", callback_data="menu:report"),
+        InlineKeyboardButton(text="🔍 Діагностика", callback_data="card:diagnostics")
+    )
     
     builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
     return builder.as_markup()

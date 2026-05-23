@@ -33,6 +33,49 @@ from config import settings
 router = Router()
 logger = logging.getLogger(__name__)
 
+@router.callback_query(F.data.in_(["menu:filters", "menu:settings"]))
+async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    
+    scanner_mode = "SPREAD"
+    is_alerts_active = True
+    user_capital = str(settings.working_capital_uah)
+    user_min_amount = "без обмежень"
+    user_spread = "0.50"
+    
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        async with conn.execute(
+            "SELECT working_capital, COALESCE(min_amount_uah, 0.0) as min_amount_uah, min_spread_pct, COALESCE(is_alerts_active, 1) as is_alerts_active, COALESCE(scanner_mode, 'SPREAD') FROM scanner_users WHERE user_id = ?",
+            (call.from_user.id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            user_capital = f"{row[0]:.1f}"
+            _min_amt = float(row[1] or 0.0)
+            user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
+            user_spread = f"{row[2]:.2f}"
+            is_alerts_active = bool(row[3])
+            scanner_mode = row[4] or "SPREAD"
+            
+    text = (
+        "🎛 <b>ARBIX QUANTUM | Налаштування фільтрів</b>\n\n"
+        "Тут ви можете змінити свої особисті обмеження для спредів та алертів:\n"
+        f"├ Капітал: <b>{user_capital} ₴</b>\n"
+        f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
+        f"├ Мін. спред: <b>{user_spread}%</b>\n"
+        f"├ Режим сканування: <b>{scanner_mode}</b>\n"
+        f"└ Алерти: <b>{'ВКЛЮЧЕНІ 🔔' if is_alerts_active else 'ВИМКНЕНІ 🔕'}</b>\n\n"
+        "<i>Оберіть параметр для зміни:</i>"
+    )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            text,
+            reply_markup=keyboards.filters_menu_kb(scanner_mode, is_alerts_active)
+        )
+    await call.answer()
+
+
 @router.message(Command("ban"))
 async def cmd_ban(message: Message) -> None:
     parts = message.text.split(maxsplit=3)
@@ -61,25 +104,40 @@ async def cmd_ban(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("mute:"))
 async def on_mute(call: CallbackQuery) -> None:
-    global _mute_until
+    from bot.handlers import core
     import time
     action = call.data.split(":")[1]
     if action == "off":
-        _mute_until = 0.0
+        core._mute_until = 0.0
         text, is_active = await _generate_dashboard_text(call.from_user.id)
         with suppress(TelegramBadRequest):
-            await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, False))
+            await call.message.edit_text(text, reply_markup=main_menu_kb(is_active, False, _is_admin(call.from_user.id)))
         await call.answer("🔔 Алерти увімкнено!")
         return
-    hours = float(action)
-    _mute_until = time.monotonic() + hours * 3600
+
+    if action in ("forever", "inf"):
+        core._mute_until = time.monotonic() + 365 * 24 * 3600
+        text_msg = "🔕 <b>Алерти вимкнено назавжди (глобально)</b>"
+        alert_msg = "🔕 Пауза назавжди"
+    else:
+        try:
+            hours = float(action)
+            core._mute_until = time.monotonic() + hours * 3600
+            text_msg = f"🔕 <b>Алерти вимкнено на {hours:.0f} год</b>"
+            alert_msg = f"🔕 Пауза на {hours:.0f} год"
+        except ValueError:
+            await call.answer("❌ Невірне значення часу", show_alert=True)
+            return
+
+    # Якщо адмін — повертаємо його в системне меню, інакше на головну
+    kb = keyboards.back_to_system_kb() if _is_admin(call.from_user.id) else back_to_main_kb()
+
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            f"🔕 <b>Алерти вимкнено на {hours:.0f} год</b>\n\n"
-            "Щоб увімкнути — натисни /start або кнопку нижче.",
-            reply_markup=back_to_main_kb(),
+            f"{text_msg}\n\nЩоб увімкнути — натисніть кнопку нижче або перезапустіть алерти.",
+            reply_markup=kb,
         )
-    await call.answer(f"🔕 Пауза на {hours:.0f} год")
+    await call.answer(alert_msg)
 
 
 # ── Налаштування виводу (display settings menu + toggles) ──────────────────
@@ -1112,4 +1170,44 @@ async def on_price_range_value_input(message: Message, state: FSMContext) -> Non
 # =========================================================================
 # 📝 СТВОРЕННЯ P2P ОГОЛОШЕННЯ (Create Ad Wizard)
 # =========================================================================
+
+@router.callback_query(F.data.startswith("fb:"))
+async def on_feedback(call: CallbackQuery):
+    if not _db:
+        return await call.answer("База даних не підключена", show_alert=True)
+
+    try:
+        parts = call.data.split(":")
+        if len(parts) != 4:
+            return await call.answer("Помилка формату кнопок")
+
+        _, exchange, mid, action = parts
+
+        reason_map = {
+            "triangle": "🚫 ТРЕТІ ОСОБИ (Ручний Blacklist)",
+            "receipt": "🧾 СКАМ З ЧЕКОМ (Ручний Blacklist)",
+            "chat": "📲 ТЯГНЕ В ТГ (Ручний Blacklist)",
+            "fincrime": "🏴‍☠️ ФІНМОН/СХЕМА (Ручний Blacklist)"
+        }
+
+        if action not in reason_map:
+            return await call.answer("Невідома дія")
+
+        reason = reason_map[action]
+
+        # Записуємо в глобальний Blacklist
+        await _db.add_to_blacklist(exchange, mid, "Unknown", reason, "manual_tg")
+        await call.answer(f"✅ Успіх! Заблоковано: {reason}", show_alert=True)
+
+        # Перекреслюємо повідомлення, щоб візуально закрити тікет
+        old_text = call.message.html_text or "Ордер"
+        new_text = f"🚨 <b>МЕРЧАНТ ЗАБЛОКОВАНИЙ (Blacklist)!</b>\nПричина: {reason}\nБіржа: {exchange}\n\n<del>{old_text[:3000]}</del>"
+
+        # Прибираємо кнопки
+        await call.message.edit_text(new_text, reply_markup=None)
+
+    except Exception as e:
+        logger.error("Помилка обробки кнопки: %s", e)
+        await call.answer("Помилка БД при блокуванні", show_alert=True)
+
 
