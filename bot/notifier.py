@@ -12,7 +12,7 @@ from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from config import settings
-from bot import commands as bot_commands
+from bot.handlers import core as bot_commands
 from bot.card_notifier import CardNotifier
 from exchanges.base import Order
 from core.storage.merchant_db import MerchantDB

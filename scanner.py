@@ -3,6 +3,8 @@
 # БОЙОВА ВЕРСІЯ v2.0 (Рефакторинг: AlertDispatcher + ProviderFactory)
 # =============================================================================
 from __future__ import annotations
+
+from bot.handlers.core import update_stats, is_muted
 from state import state
 import asyncio
 import logging
@@ -13,7 +15,7 @@ from typing import Optional
 from config import settings
 from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
 from config.runtime import runtime_config
-from bot.commands import update_stats, is_muted
+
 from bot.notifier import TelegramNotifier, SpreadAlert
 from core.engine.cross_matcher import CrossMatchingEngine
 from core.engine.risk_engine import RiskEngine
