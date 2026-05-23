@@ -78,6 +78,222 @@ class CardNotifier:
         )
         return text
 
+    async def _build_rejection_diagnosis(
+            self,
+            chat_id: int,
+            bank: str,
+            target_amount: float,
+            direction: str,
+            excluded_cards: list[str] | None = None,
+    ) -> str:
+        """
+        Повний root-cause звіт: чому жодна картка не підійшла.
+        Покриває всі причини відхилення рушія CardMatchingEngine.
+        """
+        import time as _t
+
+        if not self._db:
+            return "  └ ⚠️ БД недоступна для діагностики\n"
+
+        # ── Рівень 0: модуль вимкнений ─────────────────────────────────────
+        card_settings = await self._db.get_user_card_settings(chat_id) or {}
+        if card_settings.get("card_module_mode") == "off":
+            return "  └ ❌ <b>Причина:</b> картковий модуль вимкнений у налаштуваннях\n"
+
+        # ── Отримуємо всі картки по банку та загалом ───────────────────────
+        all_cards_bank = await self._db.get_cards(owner_id=chat_id, bank_name=bank)
+        all_cards_any  = await self._db.get_cards(owner_id=chat_id)
+
+        # ── Рівень 1: картки цього банку відсутні взагалі ──────────────────
+        if not all_cards_bank:
+            other_banks = sorted({c.get("bank_name", "").capitalize() for c in all_cards_any if c.get("bank_name")})
+            hint = f" (є картки: {', '.join(other_banks)})" if other_banks else " (картковий модуль порожній)"
+            return (
+                f"  └ ❌ <b>Причина:</b> немає жодної картки банку <b>{bank.capitalize()}</b>{hint}\n"
+                f"  └ 💡 Додайте картку через /cards → Додати картку\n"
+            )
+
+        # ── Рівень 2: всі картки неактивні ─────────────────────────────────
+        active_cards = [c for c in all_cards_bank if c.get("status") == "active"]
+        if not active_cards:
+            lines = ["  └ ❌ <b>Причина:</b> всі картки банку неактивні"]
+            for c in all_cards_bank:
+                st = c.get("status", "unknown")
+                icon = {"inactive": "😴", "blocked": "🚫", "frozen": "🧊"}.get(st, "❓")
+                lines.append(f"  │   └ 💳 *{c.get('last_four','????')} — {icon} <code>{st}</code>")
+            lines.append("  └ 💡 Активуйте картку через /cards")
+            return "\n".join(lines) + "\n"
+
+        # ── Рівень 3: всі excluded (юзер натиснув "Інша" до кінця) ────────
+        if excluded_cards:
+            active_ids = {c.get("id") or c.get("card_id") for c in active_cards}
+            if active_ids and active_ids.issubset(set(excluded_cards)):
+                return (
+                    "  └ ❌ <b>Причина:</b> всі картки банку були виключені кнопкою «Інша»\n"
+                    "  └ 💡 Новий алерт скине список виключень автоматично\n"
+                )
+
+        # ── Рівень 4: детальна перевірка кожної активної картки ────────────
+        limits = await self._db.get_user_bank_limits(chat_id, bank) or {
+            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
+            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
+            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
+            "max_tx_per_day": 15,
+        }
+        max_single  = limits["max_single_tx_in"]  if direction == "sell" else limits["max_single_tx_out"]
+        daily_max   = limits["daily_in_max"]       if direction == "sell" else limits["daily_out_max"]
+        monthly_max = limits["monthly_in_max"]     if direction == "sell" else limits["monthly_out_max"]
+        max_tx      = limits["max_tx_per_day"]
+
+        lines: list[str] = []
+        reasons_summary: dict[str, int] = {}
+
+        # Накопичуємо доступний баланс/ліміт для аналізу спліту
+        split_candidates: list[dict] = []  # картки що могли б піти в спліт
+
+        for c in active_cards:
+            card_id   = c.get("id") or c.get("card_id")
+            last_four = c.get("last_four", "????")
+            balance   = float(c.get("balance", 0.0))
+            label     = f" [{c['label']}]" if c.get("label") else ""
+            drop_text = "Власна" if c.get("is_own") else "Дроп"
+            card_label = f"*{last_four}{label} ({drop_text})"
+
+            # Пропускаємо excluded
+            if excluded_cards and card_id in excluded_cards:
+                lines.append(f"  ├ 💳 {card_label}: ⏭️ виключена кнопкою «Інша»")
+                continue
+
+            card_issues: list[str] = []
+            try:
+                # 1. Cooldown
+                cooldown_until = float(c.get("cooldown_until", 0))
+                if cooldown_until > _t.time():
+                    mins_left = max(1, int((cooldown_until - _t.time()) / 60) + 1)
+                    card_issues.append(f"⏳ Кулдаун ще <code>{mins_left} хв</code>")
+                    reasons_summary["cooldown"] = reasons_summary.get("cooldown", 0) + 1
+
+                # 2. Баланс (BUY) — нуль = тверде відхилення; > 0 але < суми = кандидат на спліт
+                if direction == "buy":
+                    if balance == 0:
+                        card_issues.append("💰 Баланс: <code>0 ₴</code> — картка порожня")
+                        reasons_summary["balance_zero"] = reasons_summary.get("balance_zero", 0) + 1
+                    elif balance < target_amount:
+                        shortage = target_amount - balance
+                        card_issues.append(
+                            f"💰 Баланс: <code>{balance:,.0f} ₴</code> — не вистачає <b>{shortage:,.0f} ₴</b> (кандидат у спліт)"
+                        )
+                        reasons_summary["balance_low"] = reasons_summary.get("balance_low", 0) + 1
+
+                # 3. Ліміт TX за добу
+                tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
+                if tx_count >= max_tx:
+                    card_issues.append(f"🔢 Ліміт TX за добу: <code>{tx_count}/{max_tx}</code> — вичерпано")
+                    reasons_summary["tx_count"] = reasons_summary.get("tx_count", 0) + 1
+
+                # 4. Добовий ліміт
+                used_daily   = await self._db.get_rolling_used(card_id, direction, hours=24)
+                avail_daily  = daily_max - used_daily
+                if avail_daily <= 0:
+                    card_issues.append(
+                        f"📅 Добовий ліміт: <code>0/{daily_max:,.0f} ₴</code> — повністю вичерпано"
+                    )
+                    reasons_summary["daily_full"] = reasons_summary.get("daily_full", 0) + 1
+                elif target_amount > avail_daily:
+                    card_issues.append(
+                        f"📅 Добовий залишок: <code>{avail_daily:,.0f}/{daily_max:,.0f} ₴</code>"
+                        f" — не вистачає <b>{target_amount - avail_daily:,.0f} ₴</b>"
+                    )
+                    reasons_summary["daily_low"] = reasons_summary.get("daily_low", 0) + 1
+
+                # 5. Місячний ліміт
+                used_monthly  = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
+                avail_monthly = monthly_max - used_monthly
+                if avail_monthly <= 0:
+                    card_issues.append(
+                        f"📆 Місячний ліміт: <code>0/{monthly_max:,.0f} ₴</code> — вичерпано"
+                    )
+                    reasons_summary["monthly_full"] = reasons_summary.get("monthly_full", 0) + 1
+                elif target_amount > avail_monthly:
+                    card_issues.append(
+                        f"📆 Місячний залишок: <code>{avail_monthly:,.0f}/{monthly_max:,.0f} ₴</code>"
+                        f" — не вистачає <b>{target_amount - avail_monthly:,.0f} ₴</b>"
+                    )
+                    reasons_summary["monthly_low"] = reasons_summary.get("monthly_low", 0) + 1
+
+                # 6. Ліміт одного TX
+                if target_amount > max_single:
+                    card_issues.append(
+                        f"🛡️ Ліміт TX: <code>{max_single:,.0f} ₴</code>"
+                        f" — перевищено на <b>{target_amount - max_single:,.0f} ₴</b>"
+                    )
+                    reasons_summary["max_single"] = reasons_summary.get("max_single", 0) + 1
+
+                # Збираємо кандидатів на спліт (є хоч якийсь доступний ліміт)
+                avail_for_split = min(avail_daily, avail_monthly, max_single)
+                if direction == "buy":
+                    avail_for_split = min(avail_for_split, balance)
+                if avail_for_split > 0 and tx_count < max_tx and cooldown_until <= _t.time():
+                    split_candidates.append({"last_four": last_four, "avail": avail_for_split})
+
+            except Exception as ex:
+                card_issues.append(f"⚠️ Помилка діагностики: {ex}")
+
+            if card_issues:
+                lines.append(f"  ├ 💳 {card_label}:")
+                for issue in card_issues:
+                    lines.append(f"  │   └ {issue}")
+            else:
+                lines.append(f"  ├ 💳 {card_label}: ✅ ліміти ОК — відхилено рушієм (невідома причина)")
+
+        # ── Аналіз спліту: чи могли б картки вкрити суму разом ────────────
+        split_note = ""
+        if split_candidates:
+            total_split_avail = sum(s["avail"] for s in split_candidates)
+            if total_split_avail >= target_amount:
+                names = ", ".join(f"*{s['last_four']}" for s in split_candidates)
+                split_note = (
+                    f"  └ 🔀 <b>Спліт теоретично можливий</b> ({names})"
+                    f" — разом <code>{total_split_avail:,.0f} ₴</code>, але рушій не зміг зібрати комбінацію"
+                    f" (перевірте max_cards_per_order у налаштуваннях)\n"
+                )
+            else:
+                split_note = (
+                    f"  └ ❌ <b>Спліт неможливий</b> — сумарно доступно лише"
+                    f" <code>{total_split_avail:,.0f} ₴</code>"
+                    f" з потрібних <code>{target_amount:,.0f} ₴</code>\n"
+                )
+
+        # ── Root-cause заголовок ────────────────────────────────────────────
+        total = len(active_cards)
+        root_parts = []
+        if reasons_summary.get("balance_zero"):
+            root_parts.append(f"порожній баланс ({reasons_summary['balance_zero']}/{total})")
+        if reasons_summary.get("balance_low"):
+            root_parts.append(f"недостатній баланс ({reasons_summary['balance_low']}/{total})")
+        if reasons_summary.get("tx_count"):
+            root_parts.append(f"ліміт TX за добу ({reasons_summary['tx_count']}/{total})")
+        if reasons_summary.get("daily_full"):
+            root_parts.append(f"добовий ліміт вичерпано ({reasons_summary['daily_full']}/{total})")
+        if reasons_summary.get("daily_low"):
+            root_parts.append(f"добовий ліміт замалий ({reasons_summary['daily_low']}/{total})")
+        if reasons_summary.get("monthly_full"):
+            root_parts.append(f"місячний ліміт вичерпано ({reasons_summary['monthly_full']}/{total})")
+        if reasons_summary.get("monthly_low"):
+            root_parts.append(f"місячний ліміт замалий ({reasons_summary['monthly_low']}/{total})")
+        if reasons_summary.get("max_single"):
+            root_parts.append(f"ліміт одного TX ({reasons_summary['max_single']}/{total})")
+        if reasons_summary.get("cooldown"):
+            root_parts.append(f"кулдаун ({reasons_summary['cooldown']}/{total})")
+
+        if root_parts:
+            header = "  └ ❌ <b>Причина:</b> " + ", ".join(root_parts) + "\n"
+        else:
+            header = "  └ ❓ <b>Причина невідома</b> — всі ліміти ОК, але рушій відхилив\n"
+
+        card_lines = "\n".join(lines) + "\n" if lines else ""
+        return header + card_lines + split_note
+
     async def get_card_block(
             self,
             chat_id: int,
@@ -117,8 +333,8 @@ class CardNotifier:
             if result.status == "disabled":
                 return "", [], None
             text = f"{prefix}⚠️ Немає доступних карток\n"
-            if result.rejection_report:
-                text += "\n".join([f"  └ *{rep['last_four']} — {rep['reason']}" if "last_four" in rep else f"  └ {rep['reason']}" for rep in result.rejection_report])
+            diagnosis = await self._build_rejection_diagnosis(chat_id, bank, target_amount, direction, excluded_cards=excluded)
+            text += diagnosis
             return text, [], None
 
         if result.status == "no_crypto":
@@ -128,7 +344,10 @@ class CardNotifier:
         _card_matching_cache[cache_key]["found_cards"] = cards
 
         if not cards:
-            return f"{prefix}⚠️ Немає доступних", [], None
+            text = f"{prefix}⚠️ Немає доступних (split failed)\n"
+            diagnosis = await self._build_rejection_diagnosis(chat_id, bank, target_amount, direction, excluded_cards=excluded)
+            text += diagnosis
+            return text, [], None
 
         c = cards[0]
         card_id = c.get("id") or c.get("card_id")

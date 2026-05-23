@@ -700,7 +700,8 @@ class TelegramNotifier:
             f"Курс: <code>{escape(str(order.price))}</code>\n"
             f"Мерчант: {name_str} "
             f"({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
-            f"Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code>\n"
+            f"Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code>"
+            f"  💎 <code>{float(order.available_amount):.0f} USDT</code> в ордері\n"
             f"{risk_block if risk_block else ''}"
             f"{warn_block if warn_block else ''}"
         )
