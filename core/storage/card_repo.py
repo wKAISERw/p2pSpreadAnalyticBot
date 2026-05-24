@@ -599,3 +599,57 @@ class CardRepo:
                 (user_id, feature_key, new_state, new_state)
             )
             await self._db.commit()
+
+    async def get_user_auto_capital(self, user_id: int) -> float:
+        """
+        Calculates the user's maximum available capital based on the sum of
+        available balances/limits on all active and healthy connected cards.
+        """
+        if not self._db:
+            return 0.0
+            
+        # Get all active cards
+        cards = await self.get_cards(user_id, status="active")
+        if not cards:
+            return 0.0
+            
+        total_capital = 0.0
+        now = time.time()
+        
+        for card in cards:
+            # 1. Cooldown check
+            if card.get("cooldown_until", 0) > now:
+                continue
+                
+            card_id = card["id"]
+            
+            # 2. Get limits (default to buy/out limits since capital is buy budget)
+            limits = await self.get_card_effective_limits(card_id)
+            max_tx = limits.get("max_tx_per_day", 15)
+            daily_out = limits.get("daily_out_max", 150000.0)
+            monthly_out = limits.get("monthly_out_max", 400000.0)
+            max_single = limits.get("max_single_tx_out", 29999.0)
+            
+            # 3. Daily tx count check
+            tx_count = await self.get_card_transactions_count(card_id, hours=24)
+            if tx_count >= max_tx:
+                continue
+                
+            # 4. Rolling used limits
+            used_daily = await self.get_rolling_used(card_id, "out", hours=24)
+            used_monthly = await self.get_rolling_used(card_id, "out", hours=24*30)
+            
+            avail_daily = max(0.0, daily_out - used_daily)
+            avail_monthly = max(0.0, monthly_out - used_monthly)
+            
+            # Money we can actually spend from this card: bounded by balance, limits, and max single tx
+            card_avail = min(
+                float(card.get("balance", 0.0)),
+                avail_daily,
+                avail_monthly
+            )
+            
+            if card_avail > 0:
+                total_capital += card_avail
+                
+        return total_capital

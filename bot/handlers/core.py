@@ -369,7 +369,11 @@ async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
         active_users = await _db.get_active_users()
         for u in active_users:
             if u["user_id"] == user_id:
-                user_capital = f"{u['capital']:.1f}"
+                if u.get("capital_mode") == "auto":
+                    auto_cap = await _db.get_user_auto_capital(user_id)
+                    user_capital = f"{auto_cap:.1f} (Авто)"
+                else:
+                    user_capital = f"{u['capital']:.1f}"
                 user_spread = f"{u['min_spread']:.2f}"
                 _min_amt = float(u.get("min_amount") or 0.0)
                 user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"

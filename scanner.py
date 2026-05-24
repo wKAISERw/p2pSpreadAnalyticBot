@@ -9,7 +9,6 @@ from state import state
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 from config import settings
@@ -49,6 +48,11 @@ from infrastructure.http.okx_client import OkxClient
 from infrastructure.http.wallet_client import WalletClient
 from core.workers.session_manager import SessionManager
 
+# Extracted modules
+from core.engine.alert_dispatcher import AlertDispatcher
+from core.engine.credentials import AccountClients, load_credentials as _load_credentials, bind_http_credentials as _bind_http_credentials
+from core.engine.scanner_helpers import calculate_search_amounts, process_taker_path, process_maker_path
+
 
 logger = logging.getLogger("Scanner")
 
@@ -61,282 +65,10 @@ def safe_float(val) -> float:
         return 0.0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# AlertDispatcher — персоналізована розсилка алертів
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AlertDispatcher — персоналізована розсилка алертів з урахуванням наявних карт
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class AlertDispatcher:
-    """
-    Відповідає за персоналізовану розсилку алертів.
-    Автоматично коригує банк угоди під наявні АКТИВНІ картки користувача
-    на основі повного перетину підтримуваних мерчантом банків.
-    """
-
-    def __init__(self, db: MerchantDB, notifier: TelegramNotifier, cache_ttl: float = 5.0):
-        self._db = db
-        self._notifier = notifier
-        self._cache_ttl = cache_ttl
-        self._users_cache: list[dict] = []
-        self._cache_loaded_at: float = 0.0
-
-    async def _get_users(self) -> list[dict]:
-        """Повертає active_users з кешем TTL=5s."""
-        if time.monotonic() - self._cache_loaded_at >= self._cache_ttl:
-            self._users_cache = await self._db.get_active_users()
-            self._cache_loaded_at = time.monotonic()
-        return self._users_cache
-
-    @staticmethod
-    def _clean_and_normalize_banks(banks_input) -> set[str]:
-        """Універсальний куленепробивний нормалізатор брудних даних банку з баз SQLite."""
-        if not banks_input:
-            return set()
-        import re
-        raw_strings = []
-        input_str = str(banks_input)
-        raw_strings = re.findall(r'[a-zA-Z0-9а-яА-ЯіІёЁєЄїЇґҐ]+', input_str)
-
-        normalized = set()
-        name_map = {
-            "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
-            "14": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
-            "64": "pumb", "pumb": "pumb", "пумб": "pumb",
-            "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
-            "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
-            "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
-        }
-        for s in raw_strings:
-            s_low = s.lower()
-            if s_low in name_map:
-                normalized.add(name_map[s_low])
-            else:
-                normalized.add(s_low)
-        return normalized
-
-    def _user_wants(self, user: dict, opp: dict) -> tuple[bool, str]:
-        """Персональний фільтр юзера. Повертає (True, "") або (False, причина)."""
-        mode = user.get("scanner_mode", "SPREAD")
-        if mode != "SPREAD":
-            return False, f"mode={mode}"
-
-        entry = float(opp["actual_entry_uah"])
-
-        # 1. Капітальний коридор
-        if entry > float(user["capital"]):
-            return False, f"entry {entry:.0f} > capital {user['capital']}"
-        min_amount = float(user.get("min_amount", 0.0))
-        if min_amount > 0 and entry < min_amount:
-            return False, f"entry {entry:.0f} < min_amount {min_amount:.0f}"
-
-        # 2. Мінімальний спред
-        if float(opp["net_spread_pct"]) < float(user["min_spread"]):
-            return False, f"spread {opp['net_spread_pct']:.2f}% < min {user['min_spread']}"
-
-        # 3. Нормалізація та звірка перетину банків
-        user_buy_normalized = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
-        user_sell_normalized = self._clean_and_normalize_banks(user.get("sell_bank_codes") or user.get("bank_codes"))
-        opp_buy_normalized = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
-        opp_sell_normalized = self._clean_and_normalize_banks(opp.get("sell_banks_fit"))
-
-        if not (opp_buy_normalized & user_buy_normalized):
-            return False, f"buy banks no match: user={user_buy_normalized} opp={opp_buy_normalized}"
-        if not (opp_sell_normalized & user_sell_normalized):
-            return False, f"sell banks no match: user={user_sell_normalized} opp={opp_sell_normalized}"
-
-        # 4. Фільтри статистики мерчантів
-        from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
-        mf = user.get("merchant_filters") or {}
-        emf = user.get("exchange_merchant_filters") or {}
-        buy_o = opp["buy_order"]
-        sell_o = opp["sell_order"]
-
-        for order_obj in (buy_o, sell_o):
-            ex_name = getattr(order_obj, "exchange", "")
-            side_label = "buy" if order_obj is buy_o else "sell"
-            ex_filters = emf.get(ex_name, {})
-            min_orders = float(ex_filters.get("min_orders", 0) or mf.get("min_orders", 0) or _DEF_ORDERS.get(ex_name, 0))
-            min_rate = float(ex_filters.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or _DEF_RATE.get(ex_name, 0.0))
-
-            if min_orders > 0 and order_obj.month_order_count < min_orders:
-                return False, f"{side_label} merchant orders {order_obj.month_order_count} < {min_orders}"
-            if min_rate > 0 and order_obj.finish_rate_pct < min_rate:
-                return False, f"{side_label} merchant rate {order_obj.finish_rate_pct:.1f}% < {min_rate}"
-
-        return True, ""
-
-    async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
-        """Відправляє алерт з розумним підбором банку на основі ВСІХ спільних фільтрів."""
-        users = await self._get_users()
-        if not users:
-            logger.info("📬 Dispatch fallback → queue (немає зареєстрованих юзерів)")
-            await self._notifier.push(alert)
-            return
-
-        logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
-        matched_count = 0
-        import copy
-
-        for user in users:
-            uid = user.get("user_id")
-            chat_id = user.get("chat_id")
-
-            if opp.get("is_asymmetric"):
-                is_asym_active = await self._db.get_feature_status(uid, "asymmetric_spread")
-                if not is_asym_active:
-                    continue
-
-            is_sniper = False
-            for r in user.get("sniper_rules", []):
-                req_ex = r.get("exchange", "")
-                req_dir = r.get("direction", "")
-                min_spd = float(r.get("min_spread", 0))
-                min_vol = float(r.get("min_volume", 0))
-
-                if float(opp["net_spread_pct"]) >= min_spd and float(opp["actual_entry_uah"]) >= min_vol:
-                    if req_dir == "BUY" and opp["sell_order"].exchange.upper() == req_ex.upper():
-                        is_sniper = True
-                        break
-                    elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
-                        is_sniper = True
-                        break
-
-            wants, skip_reason = self._user_wants(user, opp)
-
-            if wants or is_sniper:
-                matched_count += 1
-                match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
-
-                # 💳 Витягуємо назви брендів твоїх АКТИВНИХ пластикових карт
-                try:
-                    user_cards = await self._db.get_cards(owner_id=uid, status="active")
-                    user_card_names = {str(c["bank_name"]).lower() for c in user_cards}
-                except Exception as e:
-                    logger.warning("Помилка отримання карток користувача %s: %s", uid, e)
-                    user_card_names = set()
-
-                # Очищуємо та розгортаємо глобальні списки доступних карт
-                user_buy_names = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
-                user_sell_names = self._clean_and_normalize_banks(user.get("sell_bank_codes") or user.get("bank_codes"))
-                opp_buy_names = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
-                opp_sell_names = self._clean_and_normalize_banks(opp.get("sell_banks_fit"))
-
-                allowed_buy_names = opp_buy_names & user_buy_names
-                allowed_sell_names = opp_sell_names & user_sell_names
-
-                # Шукаємо перетин: які з дозволених фільтрами банків мерчанта у нас РЕАЛЬНО є в гаманці
-                cards_buy_match = allowed_buy_names & user_card_names
-                cards_sell_match = allowed_sell_names & user_card_names
-
-                # 🧠 АДАПТИВНИЙ ПРІОРИТЕТ:
-                # Якщо є збіг по живих картах (напр. Monobank) — ставимо його.
-                # Якщо немає — беремо канонічний код, який виплюнув матчер (opp["buy_bank"])
-                engine_buy_name = str(BankRegistry.get_name(opp.get("buy_bank", "43"))).lower()
-                engine_sell_name = str(BankRegistry.get_name(opp.get("sell_bank", "43"))).lower()
-
-                final_buy_name = list(cards_buy_match)[0] if cards_buy_match else (
-                    engine_buy_name if engine_buy_name in allowed_buy_names else (list(allowed_buy_names)[0] if allowed_buy_names else "monobank")
-                )
-                final_sell_name = list(cards_sell_match)[0] if cards_sell_match else (
-                    engine_sell_name if engine_sell_name in allowed_sell_names else (list(allowed_sell_names)[0] if allowed_sell_names else "monobank")
-                )
-
-                NAME_TO_CODE = {"monobank": "43", "privatbank": "14", "pumb": "64", "a-bank": "48", "izibank": "553", "sense": "328"}
-                chosen_buy = NAME_TO_CODE.get(final_buy_name, "43")
-                chosen_sell = NAME_TO_CODE.get(final_sell_name, "43")
-
-                # Створюємо ізольовану копію алерта під користувача
-                local_alert = copy.copy(alert)
-                local_alert.buy_bank = chosen_buy
-                local_alert.sell_bank = chosen_sell
-                local_alert.is_asymmetric = opp.get("is_asymmetric", False)
-                local_alert.asymmetric_details = opp.get("asymmetric_details")
-
-                try:
-                    await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
-                    logger.info(
-                        "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
-                        match_type, uid, chosen_buy.upper(), chosen_sell.upper()
-                    )
-                except Exception as e:
-                    logger.warning("  └─ ❌ Помилка відправки юзеру %s: %s", uid, e)
-            else:
-                logger.debug("  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Причина: %s", uid, skip_reason)
-
-        logger.info("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ProviderFactory — ініціалізація клієнтів і credentials
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@dataclass
-class AccountClients:
-    bybit: BybitAccountClient
-    binance: BinanceAccountClient
-    okx: OKXAccountClient
-    mexc: MEXCAccountClient
-
-    def as_dict(self) -> dict:
-        return {
-            "Bybit": self.bybit, "Binance": self.binance,
-            "OKX": self.okx, "MEXC": self.mexc,
-        }
-
-
-async def _load_credentials(db: MerchantDB) -> AccountClients:
-    """
-    Завантажує зашифровані credentials з БД і ініціалізує account клієнтів.
-    Повертає AccountClients — навіть якщо credentials немає (порожні клієнти).
-    """
-    creds = await db.get_all_credentials()
-
-    bybit_acc = BybitAccountClient()
-    binance_acc = BinanceAccountClient()
-    okx_acc = OKXAccountClient()
-    mexc_acc = MEXCAccountClient()
-
-    if "Bybit" in creds:
-        bybit_acc.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
-        logger.info("✅ Bybit API credentials завантажено")
-    if "Binance" in creds:
-        binance_acc.set_credentials(creds["Binance"]["api_key"], creds["Binance"]["api_secret"])
-        logger.info("✅ Binance API credentials завантажено")
-    if "OKX" in creds:
-        okx_acc.set_credentials(
-            creds["OKX"]["api_key"], creds["OKX"]["api_secret"],
-            creds["OKX"].get("passphrase", ""),
-        )
-        logger.info("✅ OKX API credentials завантажено")
-    if "MEXC" in creds:
-        mexc_acc.set_credentials(creds["MEXC"]["api_key"], creds["MEXC"]["api_secret"])
-        logger.info("✅ MEXC API credentials завантажено")
-
-    return AccountClients(bybit_acc, binance_acc, okx_acc, mexc_acc)
-
-
-def _bind_http_credentials(
-        creds: dict,
-        b_client: BybitP2PClient,
-        bn_client: BinanceClient,
-        o_client: OkxClient,
-        w_client: WalletClient = None,
-) -> None:
-    """Прив'язує ті самі credentials до HTTP клієнтів (для ReviewFetcher)."""
-    if "Bybit" in creds:
-        b_client.set_credentials(creds["Bybit"]["api_key"], creds["Bybit"]["api_secret"])
-    if "Binance" in creds:
-        bn_client.set_credentials(creds["Binance"]["api_key"], creds["Binance"]["api_secret"])
-    if "OKX" in creds:
-        o_client.set_credentials(
-            creds["OKX"]["api_key"], creds["OKX"]["api_secret"],
-            creds["OKX"].get("passphrase", ""),
-        )
-    if "Wallet" in creds and w_client:
-        w_client.set_credentials(creds["Wallet"]["api_key"])
+# Extracted classes and helpers have been moved to:
+# - core/engine/alert_dispatcher.py (AlertDispatcher)
+# - core/engine/credentials.py (AccountClients, load_credentials, bind_http_credentials)
+# - core/engine/scanner_helpers.py (calculate_search_amounts, process_taker_path, process_maker_path)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -671,7 +403,19 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                     active_users = await merchant_db.get_active_users()
                     if active_users:
-                        current_capital = max(float(u["capital"]) for u in active_users)
+                        # 🚀 Оновлюємо капітал для користувачів
+                        for u in active_users:
+                            auto_cap = await merchant_db.get_user_auto_capital(u["user_id"])
+                            card_settings = await merchant_db.get_user_card_settings(u["user_id"])
+                            card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
+
+                            if u.get("capital_mode") == "auto":
+                                u["capital"] = auto_cap
+                            else:
+                                if card_module_enabled and auto_cap > 0:
+                                    u["capital"] = min(float(u["capital"]), auto_cap)
+                        
+                        current_capital = max(float(u["capital"]) for u in active_users) if active_users else settings.working_capital_uah
                         current_spread  = min(float(u["min_spread"]) for u in active_users)
                         # Динамічні банки — union всіх активних юзерів (загальні + buy + sell)
                         _all_banks: set[str] = set()
@@ -690,16 +434,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     matcher.min_spread_pct = current_spread
                     set_max_capital(current_capital)
 
-                    _grid: set[float] = {1000.0, 2500.0}
-                    for u in active_users:
-                        cap = float(u["capital"])
-                        mn = float(u.get("min_amount", 0.0)) or 1000.0
-                        _grid.add(mn)
-                        _grid.add(cap)
-                        _grid.add(round((mn + cap) / 2, -2))
-                    if not active_users:
-                        _grid.update(getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0]))
-                    search_amounts = sorted(_grid)
+                    search_amounts = calculate_search_amounts(
+                        active_users,
+                        getattr(settings, "search_amounts_uah", [1000.0, 2500.0, 5100.0])
+                    )
 
                     results = await asyncio.gather(
                         *(safe_fetch(cfg, search_amounts, list(target_banks.keys())) for cfg in ex_configs),
@@ -975,146 +713,23 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     state.current_alerts = current_cycle_alerts[:50]
 
                     # ── Тейкер-шлях: алерти для TAKER_BUY / TAKER_SELL юзерів ──
-                    if active_users and not is_muted():
-                        taker_users = [
-                            u for u in active_users
-                            if u.get("scanner_mode") in ("TAKER_BUY", "TAKER_SELL")
-                        ]
-                        for t_user in taker_users:
-                            try:
-                                t_orders = taker_scanner.find_orders_for_user(
-                                    t_user, buy_grouped, sell_grouped,
-                                )
-                                if not t_orders:
-                                    continue
-                                # Dedup: не спамимо тим самим ордером щоцикл
-                                t_mode = t_user["scanner_mode"]
-                                fresh = []
-                                for o in t_orders:
-                                    dk = f"taker:{t_user['user_id']}:{o.id}"
-                                    if not taker_dedup.seen(dk):
-                                        taker_dedup.mark(dk)
-                                        fresh.append(o)
-                                if fresh:
-                                    logger.info(
-                                        "📤 Taker dispatch → user %s | %s | %d ордерів",
-                                        t_user["user_id"], t_mode, len(fresh),
-                                    )
-                                    asyncio.create_task(
-                                        notifier.send_taker_to_user(
-                                            t_user["chat_id"], fresh, t_mode,
-                                        )
-                                    )
-                            except Exception as e:
-                                logger.warning(
-                                    "Taker dispatch error user %s: %s",
-                                    t_user.get("user_id"), e,
-                                )
+                    await process_taker_path(
+                        active_users,
+                        buy_grouped,
+                        sell_grouped,
+                        taker_scanner,
+                        taker_dedup,
+                        notifier,
+                    )
 
                     # ── Мейкер-шлях: підказки для MAKER_BUY / MAKER_SELL юзерів ──
-                    if active_users and not is_muted():
-                        # Збираємо sell_book_top — найкраща (найнижча) ціна продажу зі стакану
-                        # Це потрібно для PriceAdvisor
-                        _sell_prices: list[float] = []
-                        for bank_code, orders in sell_grouped.items():
-                            for o in orders:
-                                try:
-                                    _sell_prices.append(float(o.price))
-                                except (TypeError, ValueError):
-                                    pass
-                        sell_book_top = min(_sell_prices) if _sell_prices else 0.0
-
-                        # Збираємо buy_book_top — найкраща (найвища) ціна купівлі зі стакану
-                        _buy_prices: list[float] = []
-                        for bank_code, orders in buy_grouped.items():
-                            for o in orders:
-                                try:
-                                    _buy_prices.append(float(o.price))
-                                except (TypeError, ValueError):
-                                    pass
-                        buy_book_top = max(_buy_prices) if _buy_prices else 0.0
-
-                        # ── MAKER_SELL: розрахунок рекомендованої ціни продажу ──
-                        maker_sell_users = [
-                            u for u in active_users
-                            if u.get("scanner_mode") == "MAKER_SELL"
-                               and float(u.get("maker_buy_price", 0)) > 0
-                        ]
-                        for ms_user in maker_sell_users:
-                            try:
-                                uid = ms_user["user_id"]
-                                dk = f"maker_sell:{uid}"
-                                if maker_dedup.seen(dk):
-                                    continue
-
-                                buy_price = float(ms_user["maker_buy_price"])
-                                capital = float(ms_user["capital"])
-                                amount_usdt = capital / buy_price if buy_price > 0 else 100.0
-
-                                advice = PriceAdvisor.suggest_sell_price(
-                                    buy_price=buy_price,
-                                    amount_usdt=amount_usdt,
-                                    min_margin=float(ms_user.get("target_margin", 0.003)),
-                                )
-
-                                # Перевіряємо: чи sell_book_top вигідний для мейкера
-                                if sell_book_top > 0:
-                                    advice["sell_book_top"] = sell_book_top
-                                    advice["book_vs_min"] = round(sell_book_top - advice["min_sell_price"], 4)
-
-                                maker_dedup.mark(dk)
-                                logger.info(
-                                    "📤 Maker SELL advice → user %s | buy=%.2f min_sell=%.4f book_top=%.2f",
-                                    uid, buy_price, advice["min_sell_price"], sell_book_top,
-                                )
-                                asyncio.create_task(
-                                    notifier.send_maker_sell_update(
-                                        ms_user["chat_id"], advice,
-                                    )
-                                )
-                            except Exception as e:
-                                logger.warning("Maker SELL error user %s: %s", ms_user.get("user_id"), e)
-
-                        # ── MAKER_BUY: аналіз ринку + рекомендація ціни купівлі ──
-                        maker_buy_users = [
-                            u for u in active_users
-                            if u.get("scanner_mode") == "MAKER_BUY"
-                        ]
-                        for mb_user in maker_buy_users:
-                            try:
-                                uid = mb_user["user_id"]
-                                dk = f"maker_buy:{uid}"
-                                if maker_dedup.seen(dk):
-                                    continue
-
-                                if sell_book_top <= 0:
-                                    continue  # Немає даних по стакану
-
-                                target_margin = float(mb_user.get("target_margin", 0.005))
-                                capital = float(mb_user["capital"])
-
-                                advice = PriceAdvisor.suggest_buy_price(
-                                    sell_book_top=sell_book_top,
-                                    amount_usdt=capital / sell_book_top if sell_book_top > 0 else 100.0,
-                                    target_margin=target_margin,
-                                )
-
-                                # Додаємо контекст стакану
-                                if buy_book_top > 0:
-                                    advice["buy_book_top"] = buy_book_top
-
-                                maker_dedup.mark(dk)
-                                logger.info(
-                                    "📤 Maker BUY advice → user %s | sell_top=%.2f max_buy=%.4f margin=%.1f%%",
-                                    uid, sell_book_top, advice["max_buy_price"], target_margin * 100,
-                                )
-                                asyncio.create_task(
-                                    notifier.send_maker_buy_suggestion(
-                                        mb_user["chat_id"], advice,
-                                    )
-                                )
-                            except Exception as e:
-                                logger.warning("Maker BUY error user %s: %s", mb_user.get("user_id"), e)
+                    await process_maker_path(
+                        active_users,
+                        buy_grouped,
+                        sell_grouped,
+                        maker_dedup,
+                        notifier,
+                    )
 
                     cycle_elapsed = time.monotonic() - start_time
                     adaptive_sleep = max(cycle_min_sleep, min(cycle_max_sleep, cycle_max_sleep - cycle_elapsed))

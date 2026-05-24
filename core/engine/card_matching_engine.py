@@ -77,13 +77,24 @@ class CardMatchingEngine:
         requires_split_cards = []
         rejections = []
 
-        max_single = limits["max_single_tx_in"] if direction == "sell" else limits["max_single_tx_out"]
-        daily_max = limits["daily_in_max"] if direction == "sell" else limits["daily_out_max"]
-        monthly_max = limits["monthly_in_max"] if direction == "sell" else limits["monthly_out_max"]
-
         for card in all_cards:
             reason = None
             
+            # Fetch card-specific effective limits (incorporating local overrides if custom limits are active)
+            card_limits = await self.db.get_card_effective_limits(card["id"], user_id, bank)
+            
+            max_single = card_limits.get("max_single_tx_in" if direction == "sell" else "max_single_tx_out", 29999.0)
+            if max_single == -1 or max_single == -1.0:
+                max_single = float('inf')
+
+            daily_max = card_limits.get("daily_in_max" if direction == "sell" else "daily_out_max", 150000.0)
+            if daily_max == -1 or daily_max == -1.0:
+                daily_max = float('inf')
+
+            monthly_max = card_limits.get("monthly_in_max" if direction == "sell" else "monthly_out_max", 400000.0)
+            if monthly_max == -1 or monthly_max == -1.0:
+                monthly_max = float('inf')
+
             if card["cooldown_until"] > time.time():
                 reason = "Card is on cooldown"
                 
@@ -95,7 +106,8 @@ class CardMatchingEngine:
                     
             if not reason:
                 tx_count = await self.db.get_card_transactions_count(card["id"], hours=24)
-                if tx_count >= limits["max_tx_per_day"]:
+                max_tx = card_limits.get("max_tx_per_day", 15)
+                if max_tx != -1 and max_tx != -1.0 and tx_count >= max_tx:
                     reason = f"Max transactions reached ({tx_count})"
                 else:
                     card["_tx_count"] = tx_count
@@ -104,8 +116,8 @@ class CardMatchingEngine:
                 used_daily = await self.db.get_rolling_used(card["id"], direction, hours=24)
                 used_monthly = await self.db.get_rolling_used(card["id"], direction, hours=24*30) 
                 
-                avail_daily = daily_max - used_daily
-                avail_monthly = monthly_max - used_monthly
+                avail_daily = daily_max - used_daily if daily_max != float('inf') else float('inf')
+                avail_monthly = monthly_max - used_monthly if monthly_max != float('inf') else float('inf')
                 
                 # Uncapped — без обмеження max_single_tx (для внутрішнього спліту B6)
                 max_avail_uncapped = min(avail_daily, avail_monthly)

@@ -823,11 +823,33 @@ async def cb_limits_field(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         f"⚙️ <b>{label}</b> ({bank.capitalize()})\n\nВведіть нове значення ({hint}):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📴 Вимкнути ліміт", callback_data="limits:disable")],
             [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"limits:bank:{bank}")]
         ])
     )
     await state.set_state(BankLimitStates.waiting_value)
     await call.answer()
+
+
+@router.callback_query(F.data == "limits:disable")
+async def cb_limits_disable(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    bank = data.get("limit_bank")
+    field = data.get("limit_field")
+    if not bank or not field:
+        return await call.answer("❌ Сталася помилка: недостатньо даних у стані FSM.", show_alert=True)
+    
+    await _db.set_user_bank_limit(call.from_user.id, bank, field, -1)
+    await state.clear()
+    await call.answer(f"✅ Ліміт для {bank.capitalize()} вимкнено.")
+    
+    # Рефреш меню лімітів банку
+    limits = await _db.get_user_bank_limits(call.from_user.id, bank)
+    await call.message.edit_text(
+        f"⚙️ <b>Ліміти: {bank.capitalize()}</b>\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
+    )
 
 
 @router.message(BankLimitStates.waiting_value)
@@ -925,11 +947,42 @@ async def cb_card_limits_field(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.edit_text(
         f"⚙️ <b>{label}</b> (індивідуальний)\n\nВведіть нове значення ({hint}):",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📴 Вимкнути ліміт", callback_data="card:limits:disable")],
             [InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:limits:{card_id}")]
         ])
     )
     await state.set_state(CardLimitStates.waiting_value)
     await call.answer()
+
+
+@router.callback_query(F.data == "card:limits:disable")
+async def cb_card_limits_disable(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    card_id = data.get("card_limit_card_id")
+    field = data.get("card_limit_field")
+    if not card_id or not field:
+        return await call.answer("❌ Сталася помилка: недостатньо даних у стані FSM.", show_alert=True)
+    
+    await _db.update_card_limit_override(card_id, field, -1)
+    await state.clear()
+    await call.answer("✅ Ліміт для картки вимкнено.")
+    
+    # Рефреш меню індивідуальних лімітів
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.message.edit_text("❌ Картку не знайдено.")
+        
+    is_custom = bool(card.get("is_custom_limits", 0))
+    effective = await _db.get_card_effective_limits(card_id, call.from_user.id, card["bank_name"])
+    mode_text = "🟢 <b>Локальні ліміти</b> (перезаписують глобальні)" if is_custom else "⚪ <b>Глобальні ліміти</b> (з налаштувань банку)"
+    
+    await call.message.edit_text(
+        f"⚙️ <b>Ліміти для {card['bank_name'].capitalize()} {card['last_four']}</b>\n"
+        f"{mode_text}\n\n"
+        f"<i>Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.card_limits_fields_kb(card_id, effective, is_custom)
+    )
 
 
 @router.message(CardLimitStates.waiting_value)

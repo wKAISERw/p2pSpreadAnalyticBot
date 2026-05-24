@@ -98,10 +98,19 @@ class CrossMatchingEngine:
                         if actual_sell_fiat < float(sell.min_limit):
                             continue
 
-                        # 🚀 ФІКС АСИМЕТРІЇ ТИП 2: Якщо ми купили більше крипти, ніж селлер здатний прийняти
-                        # (Наприклад: купили фіксом на 10к, а злити можемо тільки 2к через його ліміт)
-                        if experimental_mode and usdt_bought > (usdt_to_sell + 0.01):
-                            is_asymmetric_deal = True
+                        # 🚀 ФІКС АСИМЕТРІЇ / СИМЕТРИЧНОГО ВУЗЬКОГО ГОРЛА
+                        if usdt_bought > (usdt_to_sell + 0.01):
+                            if buy_fiat_for_sell_leg >= float(buy.min_limit):
+                                # Можемо симетрично масштабувати угоду вниз без порушення лімітів
+                                actual_buy_fiat = buy_fiat_for_sell_leg
+                                usdt_bought = usdt_to_sell
+                            elif experimental_mode:
+                                # Не можемо масштабувати вниз, бо вийдемо за min_limit покупця.
+                                # Але дозволено асиметричний режим -> лишаємо велику закупку, частина осяде в інвентарі.
+                                is_asymmetric_deal = True
+                            else:
+                                # Не можна масштабувати вниз, а асиметричний режим вимкнено -> пропускаємо
+                                continue
 
                         # Профіт рахуємо від фактично прокрученого об'єму фіату на зливі
                         gross_profit = actual_sell_fiat - buy_fiat_for_sell_leg

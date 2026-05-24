@@ -44,11 +44,13 @@ class CardNotifier:
         # Зчитуємо ліміти й поточні накопичені лічильники з SQLite
         limits = await self._db.get_card_effective_limits(card_id)
         used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
+        used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
         tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
 
         # Визначаємо константи залежно від напрямку
         max_single = limits.get("max_single_tx_out" if direction == "buy" else "max_single_tx_in", 29999.0)
         daily_max = limits.get("daily_out_max" if direction == "buy" else "daily_in_max", 150000.0)
+        monthly_max = limits.get("monthly_out_max" if direction == "buy" else "monthly_in_max", 400000.0)
         max_tx = limits.get("max_tx_per_day", 15)
 
         # Прорахунок проєкції Балансу
@@ -56,11 +58,37 @@ class CardNotifier:
         bal_after = bal_before - tx_amount if direction == "buy" else bal_before + tx_amount
 
         # Прорахунок проєкції Лімітів обороту
-        avail_before = max(0.0, daily_max - used_daily)
-        avail_after = max(0.0, avail_before - tx_amount)
+        dir_word = "OUT" if direction == "buy" else "IN"
 
-        # Прорахунок лічильника транзакцій
-        tx_after = tx_count + 1
+        if daily_max == -1 or daily_max == -1.0:
+            limit_lbl = "♾️ вільно"
+            avail_after_str = "♾️"
+        else:
+            avail_before = max(0.0, daily_max - used_daily)
+            avail_after = max(0.0, avail_before - tx_amount)
+            limit_lbl = f"{avail_before:,.0f}/{daily_max:,.0f} ₴ вільно"
+            avail_after_str = f"{avail_after:,.0f} ₴"
+
+        if monthly_max == -1 or monthly_max == -1.0:
+            monthly_limit_lbl = "♾️ вільно"
+            avail_monthly_after_str = "♾️"
+        else:
+            avail_monthly_before = max(0.0, monthly_max - used_monthly)
+            avail_monthly_after = max(0.0, avail_monthly_before - tx_amount)
+            monthly_limit_lbl = f"{avail_monthly_before:,.0f}/{monthly_max:,.0f} ₴ вільно"
+            avail_monthly_after_str = f"{avail_monthly_after:,.0f} ₴"
+
+        if max_single == -1 or max_single == -1.0:
+            max_single_str = "♾️"
+        else:
+            max_single_str = f"{max_single:,.0f} ₴"
+
+        if max_tx == -1 or max_tx == -1.0:
+            max_tx_str = "♾️"
+            tx_after_str = "—"
+        else:
+            max_tx_str = str(max_tx)
+            tx_after_str = str(tx_count + 1)
 
         drop_text = "Власна" if c.get("is_own") else "Дроп"
         bank_name = c.get("bank_name", "unknown").capitalize()
@@ -72,9 +100,10 @@ class CardNotifier:
         text = (
             f"💳 <b>{dir_label}: {bank_name} *{last_four}</b> ({drop_text}{label_str})\n"
             f"  ├ 💰 Баланс у боті: <code>{bal_before:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
-            f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code> (макс. за один переказ)\n"
-            f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> вільних ➔ <b>{avail_after:,.0f} ₴</b>\n"
-            f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{max_tx}</code> операцій ➔ <b>{tx_after}</b>\n"
+            f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single_str}</code> (макс. за один переказ)\n"
+            f"  ├ 📅 Денний {dir_word} (твій ліміт): <code>{limit_lbl}</code> ➔ <b>{avail_after_str}</b>\n"
+            f"  ├ 📆 Місячний {dir_word} (твій ліміт): <code>{monthly_limit_lbl}</code> ➔ <b>{avail_monthly_after_str}</b>\n"
+            f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{max_tx_str}</code> операцій ➔ <b>{tx_after_str}</b>\n"
         )
         return text
 
@@ -134,17 +163,6 @@ class CardNotifier:
                 )
 
         # ── Рівень 4: детальна перевірка кожної активної картки ────────────
-        limits = await self._db.get_user_bank_limits(chat_id, bank) or {
-            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
-            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
-            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
-            "max_tx_per_day": 15,
-        }
-        max_single  = limits["max_single_tx_in"]  if direction == "sell" else limits["max_single_tx_out"]
-        daily_max   = limits["daily_in_max"]       if direction == "sell" else limits["daily_out_max"]
-        monthly_max = limits["monthly_in_max"]     if direction == "sell" else limits["monthly_out_max"]
-        max_tx      = limits["max_tx_per_day"]
-
         lines: list[str] = []
         reasons_summary: dict[str, int] = {}
 
@@ -166,6 +184,13 @@ class CardNotifier:
 
             card_issues: list[str] = []
             try:
+                # Отримуємо ефективні ліміти для конкретної картки
+                limits = await self._db.get_card_effective_limits(card_id)
+                max_single  = limits.get("max_single_tx_in" if direction == "sell" else "max_single_tx_out", 29999.0)
+                daily_max   = limits.get("daily_in_max" if direction == "sell" else "daily_out_max", 150000.0)
+                monthly_max = limits.get("monthly_in_max" if direction == "sell" else "monthly_out_max", 400000.0)
+                max_tx      = limits.get("max_tx_per_day", 15)
+
                 # 1. Cooldown
                 cooldown_until = float(c.get("cooldown_until", 0))
                 if cooldown_until > _t.time():
@@ -187,42 +212,48 @@ class CardNotifier:
 
                 # 3. Ліміт TX за добу
                 tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
-                if tx_count >= max_tx:
+                if max_tx != -1 and max_tx != -1.0 and tx_count >= max_tx:
                     card_issues.append(f"🔢 Ліміт TX за добу: <code>{tx_count}/{max_tx}</code> — вичерпано")
                     reasons_summary["tx_count"] = reasons_summary.get("tx_count", 0) + 1
 
                 # 4. Добовий ліміт
-                used_daily   = await self._db.get_rolling_used(card_id, direction, hours=24)
-                avail_daily  = daily_max - used_daily
-                if avail_daily <= 0:
-                    card_issues.append(
-                        f"📅 Добовий ліміт: <code>0/{daily_max:,.0f} ₴</code> — повністю вичерпано"
-                    )
-                    reasons_summary["daily_full"] = reasons_summary.get("daily_full", 0) + 1
-                elif target_amount > avail_daily:
-                    card_issues.append(
-                        f"📅 Добовий залишок: <code>{avail_daily:,.0f}/{daily_max:,.0f} ₴</code>"
-                        f" — не вистачає <b>{target_amount - avail_daily:,.0f} ₴</b>"
-                    )
-                    reasons_summary["daily_low"] = reasons_summary.get("daily_low", 0) + 1
+                used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
+                if daily_max != -1 and daily_max != -1.0:
+                    avail_daily = daily_max - used_daily
+                    if avail_daily <= 0:
+                        card_issues.append(
+                            f"📅 Добовий ліміт: <code>0/{daily_max:,.0f} ₴</code> — повністю вичерпано"
+                        )
+                        reasons_summary["daily_full"] = reasons_summary.get("daily_full", 0) + 1
+                    elif target_amount > avail_daily:
+                        card_issues.append(
+                            f"📅 Добовий залишок: <code>{avail_daily:,.0f}/{daily_max:,.0f} ₴</code>"
+                            f" — не вистачає <b>{target_amount - avail_daily:,.0f} ₴</b>"
+                        )
+                        reasons_summary["daily_low"] = reasons_summary.get("daily_low", 0) + 1
+                else:
+                    avail_daily = float('inf')
 
                 # 5. Місячний ліміт
-                used_monthly  = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
-                avail_monthly = monthly_max - used_monthly
-                if avail_monthly <= 0:
-                    card_issues.append(
-                        f"📆 Місячний ліміт: <code>0/{monthly_max:,.0f} ₴</code> — вичерпано"
-                    )
-                    reasons_summary["monthly_full"] = reasons_summary.get("monthly_full", 0) + 1
-                elif target_amount > avail_monthly:
-                    card_issues.append(
-                        f"📆 Місячний залишок: <code>{avail_monthly:,.0f}/{monthly_max:,.0f} ₴</code>"
-                        f" — не вистачає <b>{target_amount - avail_monthly:,.0f} ₴</b>"
-                    )
-                    reasons_summary["monthly_low"] = reasons_summary.get("monthly_low", 0) + 1
+                used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
+                if monthly_max != -1 and monthly_max != -1.0:
+                    avail_monthly = monthly_max - used_monthly
+                    if avail_monthly <= 0:
+                        card_issues.append(
+                            f"📆 Місячний ліміт: <code>0/{monthly_max:,.0f} ₴</code> — вичерпано"
+                        )
+                        reasons_summary["monthly_full"] = reasons_summary.get("monthly_full", 0) + 1
+                    elif target_amount > avail_monthly:
+                        card_issues.append(
+                            f"📆 Місячний залишок: <code>{avail_monthly:,.0f}/{monthly_max:,.0f} ₴</code>"
+                            f" — не вистачає <b>{target_amount - avail_monthly:,.0f} ₴</b>"
+                        )
+                        reasons_summary["monthly_low"] = reasons_summary.get("monthly_low", 0) + 1
+                else:
+                    avail_monthly = float('inf')
 
                 # 6. Ліміт одного TX
-                if target_amount > max_single:
+                if max_single != -1 and max_single != -1.0 and target_amount > max_single:
                     card_issues.append(
                         f"🛡️ Ліміт TX: <code>{max_single:,.0f} ₴</code>"
                         f" — перевищено на <b>{target_amount - max_single:,.0f} ₴</b>"
@@ -233,7 +264,7 @@ class CardNotifier:
                 avail_for_split = min(avail_daily, avail_monthly, max_single)
                 if direction == "buy":
                     avail_for_split = min(avail_for_split, balance)
-                if avail_for_split > 0 and tx_count < max_tx and cooldown_until <= _t.time():
+                if avail_for_split > 0 and (max_tx == -1 or tx_count < max_tx) and cooldown_until <= _t.time():
                     split_candidates.append({"last_four": last_four, "avail": avail_for_split})
 
             except Exception as ex:
@@ -353,11 +384,15 @@ class CardNotifier:
         card_id = c.get("id") or c.get("card_id")
         drop_text = "Власна" if c.get("is_own", 1) else "Дроп"
 
-        # Стягуємо актуальні ліміти банку для побудови проєкції
-        limits = await self._db.get_user_bank_limits(chat_id, bank) or {"max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0, "daily_in_max": 150000.0, "daily_out_max": 150000.0, "max_tx_per_day": 15}
-        max_single = limits["max_single_tx_in"] if direction == "sell" else limits["max_single_tx_out"]
-        daily_max = limits["daily_in_max"] if direction == "sell" else limits["daily_out_max"]
+        # Стягуємо актуальні ліміти для побудови проєкції (ефективні з урахуванням локальних)
+        limits = await self._db.get_card_effective_limits(card_id)
+        max_single = limits.get("max_single_tx_in" if direction == "sell" else "max_single_tx_out", 29999.0)
+        daily_max = limits.get("daily_in_max" if direction == "sell" else "daily_out_max", 150000.0)
+        monthly_max = limits.get("monthly_in_max" if direction == "sell" else "monthly_out_max", 400000.0)
+        max_tx = limits.get("max_tx_per_day", 15)
+
         used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
+        used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
         tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
 
         # 🚀 ПОСЛІДОВНИЙ РОЗРАХУНОК БАЛАНСУ: якщо це та сама карта на Sell-нозі, зменшуємо стартовий баланс
@@ -366,17 +401,49 @@ class CardNotifier:
             base_bal -= buy_card_spent_fiat
 
         bal_after = base_bal - target_amount if direction == "buy" else base_bal + target_amount
-        avail_before = max(0.0, daily_max - used_daily)
-        avail_after = max(0.0, avail_before - target_amount)
+
+        # Прорахунок проєкції Лімітів обороту
+        dir_word = "OUT" if direction == "buy" else "IN"
+
+        if daily_max == -1 or daily_max == -1.0:
+            limit_lbl = "♾️ вільно"
+            avail_after_str = "♾️"
+            avail_after = float('inf')
+        else:
+            avail_before = max(0.0, daily_max - used_daily)
+            avail_after = max(0.0, avail_before - target_amount)
+            limit_lbl = f"{avail_before:,.0f}/{daily_max:,.0f} ₴ вільно"
+            avail_after_str = f"{avail_after:,.0f} ₴"
+
+        if monthly_max == -1 or monthly_max == -1.0:
+            monthly_limit_lbl = "♾️ вільно"
+            avail_monthly_after_str = "♾️"
+        else:
+            avail_monthly_before = max(0.0, monthly_max - used_monthly)
+            avail_monthly_after = max(0.0, avail_monthly_before - target_amount)
+            monthly_limit_lbl = f"{avail_monthly_before:,.0f}/{monthly_max:,.0f} ₴ вільно"
+            avail_monthly_after_str = f"{avail_monthly_after:,.0f} ₴"
+
+        if max_single == -1 or max_single == -1.0:
+            max_single_str = "♾️"
+        else:
+            max_single_str = f"{max_single:,.0f} ₴"
+
+        if max_tx == -1 or max_tx == -1.0:
+            max_tx_str = "♾️"
+            tx_after_str = "—"
+        else:
+            max_tx_str = str(max_tx)
+            tx_after_str = str(tx_count + 1)
 
         is_red_zone = False
         warning_reasons = []
 
-        if tx_count >= limits['max_tx_per_day'] - 2:
+        if max_tx != -1 and max_tx != -1.0 and tx_count >= max_tx - 2:
             is_red_zone = True
-            warning_reasons.append(f"Критично мало транзакцій (залишилось {limits['max_tx_per_day'] - tx_count})")
+            warning_reasons.append(f"Критично мало транзакцій (залишилось {max_tx - tx_count})")
 
-        if avail_after < daily_max * 0.15:
+        if daily_max != -1 and daily_max != -1.0 and avail_after < daily_max * 0.15:
             is_red_zone = True
             warning_reasons.append("Добовий ліміт банку залишок < 15%")
 
@@ -387,15 +454,16 @@ class CardNotifier:
             # Ультра-короткий вивід для швидкої роботи
             card_info_body = (
                 f"  ├ 💰 Баланс: <code>{base_bal:,.0f} ₴</code> ➔ <b>{bal_after:,.0f} ₴</b>\n"
-                f"  └ 📅 Ліміт: <code>{avail_before:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>"
+                f"  └ 📅 Ліміт {dir_word}: <code>{limit_lbl}</code> ➔ <b>{avail_after_str}</b>"
             )
         else:
             # Твій повний детальний варіант
             card_info_body = (
                 f"  ├ 💰 Баланс у боті: <code>{base_bal:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
-                f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single:,.0f} ₴</code>\n"
-                f"  ├ 📅 Добовий ліміт банку: <code>{avail_before:,.0f}/{daily_max:,.0f} ₴</code> ➔ <b>{avail_after:,.0f} ₴</b>\n"
-                f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{limits['max_tx_per_day']}</code> ➔ <b>{tx_count + 1}</b>"
+                f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single_str}</code>\n"
+                f"  ├ 📅 Денний {dir_word} (твій ліміт): <code>{limit_lbl}</code> ➔ <b>{avail_after_str}</b>\n"
+                f"  ├ 📆 Місячний {dir_word} (твій ліміт): <code>{monthly_limit_lbl}</code> ➔ <b>{avail_monthly_after_str}</b>\n"
+                f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{max_tx_str}</code> ➔ <b>{tx_after_str}</b>"
             )
 
         # Логіка Смарт-спойлера: якщо картка в небезпеці — лишаємо текст повністю ВІДКРИТИМ

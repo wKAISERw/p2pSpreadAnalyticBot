@@ -23,7 +23,7 @@ from bot.handlers.core import (
 )
 from bot.keyboards import exchanges_status_kb, global_settings_kb, back_to_settings_kb, back_to_main_kb, \
     exchange_cooldown_kb, main_menu_kb, exchange_toggle_kb, exchange_connect_kb, banks_selection_kb, exchange_down_kb, \
-    back_to_status_kb, settings_menu_kb, keys_menu_kb
+    back_to_status_kb, settings_menu_kb, keys_menu_kb, back_to_filters_kb
 from config.runtime import runtime_config
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
@@ -303,29 +303,66 @@ async def on_gset_value_input(message: Message, state: FSMContext) -> None:
 
 
 # ── ЗМІНА ПЕРСОНАЛЬНОГО КАПІТАЛУ ТА СПРЕДУ ────────────────────────────────
+# ── ЗМІНА ПЕРСОНАЛЬНОГО КАПІТАЛУ ТА СПРЕДУ ────────────────────────────────
 @router.callback_query(F.data == "set:capital")
-async def on_set_capital(call: CallbackQuery, state: FSMContext) -> None:
+async def on_set_capital(call: CallbackQuery) -> None:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔘 Вказати вручну", callback_data="capital:mode:manual_prompt")],
+        [InlineKeyboardButton(text="🤖 Розраховувати автоматично з карт", callback_data="capital:mode:auto")],
+        [InlineKeyboardButton(text="🔙 Назад до фільтрів", callback_data="menu:filters")]
+    ])
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "💵 <b>Персональний робочий капітал</b>\n\n"
+            "Оберіть спосіб визначення ліміту:\n"
+            "• <b>Вказати вручну</b> — фіксована сума для всіх кругів.\n"
+            "• <b>Розраховувати автоматично з карт</b> — динамічно сумуватиме ліміти/баланси наявних активних карток.",
+            reply_markup=kb
+        )
+    await call.answer()
+
+
+@router.callback_query(F.data == "capital:mode:manual_prompt")
+async def on_capital_manual_prompt(call: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(SettingStates.waiting_capital)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "💵 <b>Введи твій персональний робочий капітал</b>\n\n"
+            "💵 <b>Введи твій персональний робочий капітал вручну</b>\n\n"
             "<i>Автоматично конвертується у формат з крапкою (напр. 15000 -> 15000.0)</i>",
-            reply_markup=back_to_main_kb()
+            reply_markup=back_to_filters_kb()
         )
+    await call.answer()
+
+
+@router.callback_query(F.data == "capital:mode:auto")
+async def on_capital_auto(call: CallbackQuery) -> None:
+    if _db:
+        conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+        await conn.execute("UPDATE scanner_users SET capital_mode = 'auto' WHERE user_id = ?", (call.from_user.id,))
+        await conn.commit()
+        auto_cap = await _db.get_user_auto_capital(call.from_user.id)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                f"✅ <b>Встановлено авто-капітал!</b>\n\n"
+                f"Поточна сума на активних картках: <b>{auto_cap:.1f} ₴</b>\n"
+                f"Сканер буде автоматично підлаштовуватись під баланси ваших живих карт.",
+                reply_markup=back_to_filters_kb()
+            )
+    else:
+        await call.answer("❌ Помилка БД", show_alert=True)
     await call.answer()
 
 
 @router.message(SettingStates.waiting_capital)
 async def on_capital_input(message: Message, state: FSMContext) -> None:
     try:
-        # Автоматично прибираємо коми і конвертуємо
         val = float(message.text.strip().replace(",", "."))
         if _db:
             conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-            await conn.execute("UPDATE scanner_users SET working_capital = ? WHERE user_id = ?",
+            await conn.execute("UPDATE scanner_users SET working_capital = ?, capital_mode = 'manual' WHERE user_id = ?",
                                (val, message.from_user.id))
             await conn.commit()
-        await message.answer(f"✅ Персональний капітал оновлено: <b>{val:.1f} ₴</b>", reply_markup=back_to_main_kb())
+        await message.answer(f"✅ Персональний капітал оновлено: <b>{val:.1f} ₴</b> (Ручний режим)", reply_markup=back_to_filters_kb())
     except ValueError:
         await message.answer("❌ Формат невірний. Введи число (наприклад: 6000.0 або просто 6000)")
     finally:

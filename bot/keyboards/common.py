@@ -119,4 +119,11 @@ def back_to_sessions_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def back_to_filters_kb() -> InlineKeyboardMarkup:
+    """Кнопка повернення до меню фільтрів."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 До фільтрів", callback_data="menu:filters")
+    return builder.as_markup()
+
+
 

@@ -341,8 +341,9 @@ def test_crypto_bad_ciphertext():
 
 @pytest.mark.asyncio
 async def test_mono_settings_save_and_get(db):
-    await db.save_user_mono_settings(TEST_USER_ID, "encrypted_token_xxx", "secret_abc")
-    settings = await db.get_user_mono_settings(TEST_USER_ID)
+    card_id = await _setup_user_and_card(db)
+    await db.save_card_mono_settings(card_id, "encrypted_token_xxx", "secret_abc")
+    settings = await db.get_card_mono_settings(card_id)
     assert settings["x_token_encrypted"] == "encrypted_token_xxx"
     assert settings["webhook_secret"] == "secret_abc"
 
@@ -484,3 +485,63 @@ async def test_release_expired_reservations(db):
     
     count = await db.release_expired_reservations()
     assert count >= 1
+
+
+@pytest.mark.asyncio
+async def test_get_user_auto_capital(db):
+    # Setup card 1: Monobank balance=15000 (healthy)
+    c1 = await _setup_user_and_card(db, balance=15000.0, bank="monobank", last_four="1111")
+    
+    # Setup card 2: Privatbank balance=200000 (healthy)
+    c2 = await _setup_user_and_card(db, balance=200000.0, bank="privatbank", last_four="2222")
+    
+    # Setup card 3: Cooldown card balance=30000 (ignored because of cooldown)
+    c3 = await _setup_user_and_card(db, balance=30000.0, bank="monobank", last_four="3333")
+    await db.update_card(c3, {"cooldown_until": time.time() + 3600})
+    
+    # Initial auto-capital should sum healthy card balances (15000 + 200000 [bounded by daily_out_max=150000] = 165000)
+    cap = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap == pytest.approx(165000.0)
+    
+    # Exhaust privatbank limits by recording transactions (limits: daily_out_max=150000)
+    # If we spend 140000 from c2 (available daily becomes 10000)
+    # Available amount on c2 will be min(balance=60000, daily_avail=10000) = 10000.
+    # Total auto-capital should become 15000 (c1) + 10000 (c2) = 25000.
+    await db.confirm_transaction(c2, 140000.0, "out", "work", source="test")
+    
+    cap2 = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap2 == pytest.approx(25000.0)
+
+
+@pytest.mark.asyncio
+async def test_disabled_limits_ignored_by_engine(db):
+    # Setup a card with balance of 250,000.0
+    card_id = await _setup_user_and_card(db, balance=250000.0, bank="monobank")
+    
+    # 1. Test global limits set to -1
+    # By default, max_single_tx_out is 29999.0, and daily_out_max is 150000.0.
+    # Set them to -1.0
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "max_single_tx_out", -1.0)
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "daily_out_max", -1.0)
+    
+    # Run engine with 200,000.0. This exceeds default daily out max (150000) and max single (29999).
+    engine = CardMatchingEngine(db)
+    result = await engine.run(TEST_USER_ID, "monobank", 200000.0, "buy")
+    assert result.status == "success"
+    assert result.best_card["id"] == card_id
+    
+    # 2. Test local override set to -1
+    # Set global max_single_tx_out back to a small value, e.g. 5000.0
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "max_single_tx_out", 5000.0)
+    
+    # Verify that run with 10000.0 fails to match directly because of max_single (triggers split)
+    result_fail = await engine.run(TEST_USER_ID, "monobank", 10000.0, "buy")
+    assert result_fail.status == "needs_split"
+    
+    # Now set local override for this card's max_single_tx_out to -1.0
+    await db.update_card_limit_override(card_id, "max_single_tx_out", -1.0)
+    
+    # Verify that run with 10000.0 now succeeds
+    result_success = await engine.run(TEST_USER_ID, "monobank", 10000.0, "buy")
+    assert result_success.status == "success"
+    assert result_success.best_card["id"] == card_id

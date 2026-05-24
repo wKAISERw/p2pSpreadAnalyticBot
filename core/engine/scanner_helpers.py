@@ -1,0 +1,185 @@
+# core/engine/scanner_helpers.py
+import asyncio
+import logging
+
+from bot.handlers.core import is_muted
+from core.engine.price_advisor import PriceAdvisor
+
+logger = logging.getLogger("Scanner.Helpers")
+
+
+def calculate_search_amounts(active_users: list[dict], default_amounts: list[float]) -> list[float]:
+    """Будує динамічну сітку сум для пошуку на основі капіталів активних юзерів."""
+    _grid: set[float] = {1000.0, 2500.0}
+    for u in active_users:
+        cap = float(u["capital"])
+        mn = float(u.get("min_amount", 0.0)) or 1000.0
+        _grid.add(mn)
+        _grid.add(cap)
+        _grid.add(round((mn + cap) / 2, -2))
+    if not active_users:
+        _grid.update(default_amounts)
+    return sorted(_grid)
+
+
+async def process_taker_path(
+    active_users: list[dict],
+    buy_grouped: dict,
+    sell_grouped: dict,
+    taker_scanner,
+    taker_dedup,
+    notifier,
+) -> None:
+    """Тейкер-шлях: алерти для TAKER_BUY / TAKER_SELL юзерів."""
+    if not active_users or is_muted():
+        return
+
+    taker_users = [
+        u for u in active_users
+        if u.get("scanner_mode") in ("TAKER_BUY", "TAKER_SELL")
+    ]
+    for t_user in taker_users:
+        try:
+            t_orders = taker_scanner.find_orders_for_user(
+                t_user, buy_grouped, sell_grouped,
+            )
+            if not t_orders:
+                continue
+            # Dedup: не спамимо тим самим ордером щоцикл
+            t_mode = t_user["scanner_mode"]
+            fresh = []
+            for o in t_orders:
+                dk = f"taker:{t_user['user_id']}:{o.id}"
+                if not taker_dedup.seen(dk):
+                    taker_dedup.mark(dk)
+                    fresh.append(o)
+            if fresh:
+                logger.info(
+                    "📤 Taker dispatch → user %s | %s | %d ордерів",
+                    t_user["user_id"], t_mode, len(fresh),
+                )
+                asyncio.create_task(
+                    notifier.send_taker_to_user(
+                        t_user["chat_id"], fresh, t_mode,
+                    )
+                )
+        except Exception as e:
+            logger.warning(
+                "Taker dispatch error user %s: %s",
+                t_user.get("user_id"), e,
+            )
+
+
+async def process_maker_path(
+    active_users: list[dict],
+    buy_grouped: dict,
+    sell_grouped: dict,
+    maker_dedup,
+    notifier,
+) -> None:
+    """Мейкер-шлях: підказки для MAKER_BUY / MAKER_SELL юзерів."""
+    if not active_users or is_muted():
+        return
+
+    # Збираємо sell_book_top — найкраща (найнижча) ціна продажу зі стакану
+    # Це потрібно для PriceAdvisor
+    _sell_prices: list[float] = []
+    for bank_code, orders in sell_grouped.items():
+        for o in orders:
+            try:
+                _sell_prices.append(float(o.price))
+            except (TypeError, ValueError):
+                pass
+    sell_book_top = min(_sell_prices) if _sell_prices else 0.0
+
+    # Збираємо buy_book_top — найкраща (найвища) ціна купівлі зі стакану
+    _buy_prices: list[float] = []
+    for bank_code, orders in buy_grouped.items():
+        for o in orders:
+            try:
+                _buy_prices.append(float(o.price))
+            except (TypeError, ValueError):
+                pass
+    buy_book_top = max(_buy_prices) if _buy_prices else 0.0
+
+    # ── MAKER_SELL: розрахунок рекомендованої ціни продажу ──
+    maker_sell_users = [
+        u for u in active_users
+        if u.get("scanner_mode") == "MAKER_SELL"
+           and float(u.get("maker_buy_price", 0)) > 0
+    ]
+    for ms_user in maker_sell_users:
+        try:
+            uid = ms_user["user_id"]
+            dk = f"maker_sell:{uid}"
+            if maker_dedup.seen(dk):
+                continue
+
+            buy_price = float(ms_user["maker_buy_price"])
+            capital = float(ms_user["capital"])
+            amount_usdt = capital / buy_price if buy_price > 0 else 100.0
+
+            advice = PriceAdvisor.suggest_sell_price(
+                buy_price=buy_price,
+                amount_usdt=amount_usdt,
+                min_margin=float(ms_user.get("target_margin", 0.003)),
+            )
+
+            # Перевіряємо: чи sell_book_top вигідний для мейкера
+            if sell_book_top > 0:
+                advice["sell_book_top"] = sell_book_top
+                advice["book_vs_min"] = round(sell_book_top - advice["min_sell_price"], 4)
+
+            maker_dedup.mark(dk)
+            logger.info(
+                "📤 Maker SELL advice → user %s | buy=%.2f min_sell=%.4f book_top=%.2f",
+                uid, buy_price, advice["min_sell_price"], sell_book_top,
+            )
+            asyncio.create_task(
+                notifier.send_maker_sell_update(
+                    ms_user["chat_id"], advice,
+                )
+            )
+        except Exception as e:
+            logger.warning("Maker SELL error user %s: %s", ms_user.get("user_id"), e)
+
+    # ── MAKER_BUY: аналіз ринку + рекомендація ціни купівлі ──
+    maker_buy_users = [
+        u for u in active_users
+        if u.get("scanner_mode") == "MAKER_BUY"
+    ]
+    for mb_user in maker_buy_users:
+        try:
+            uid = mb_user["user_id"]
+            dk = f"maker_buy:{uid}"
+            if maker_dedup.seen(dk):
+                continue
+
+            if sell_book_top <= 0:
+                continue  # Немає даних по стакану
+
+            target_margin = float(mb_user.get("target_margin", 0.005))
+            capital = float(mb_user["capital"])
+
+            advice = PriceAdvisor.suggest_buy_price(
+                sell_book_top=sell_book_top,
+                amount_usdt=capital / sell_book_top if sell_book_top > 0 else 100.0,
+                target_margin=target_margin,
+            )
+
+            # Додаємо контекст стакану
+            if buy_book_top > 0:
+                advice["buy_book_top"] = buy_book_top
+
+            maker_dedup.mark(dk)
+            logger.info(
+                "📤 Maker BUY advice → user %s | sell_top=%.2f max_buy=%.4f margin=%.1f%%",
+                uid, sell_book_top, advice["max_buy_price"], target_margin * 100,
+            )
+            asyncio.create_task(
+                notifier.send_maker_buy_suggestion(
+                    mb_user["chat_id"], advice,
+                )
+            )
+        except Exception as e:
+            logger.warning("Maker BUY error user %s: %s", mb_user.get("user_id"), e)

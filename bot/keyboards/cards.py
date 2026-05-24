@@ -179,10 +179,14 @@ def bank_limits_fields_kb(bank: str, current: dict) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for field, label in LIMIT_FIELD_LABELS.items():
         val = current.get(field, "—")
-        if isinstance(val, float):
-            val = f"{val:.0f}"
+        if val == -1 or val == -1.0:
+            val_str = "♾️ Ігнорувати"
+        elif isinstance(val, float):
+            val_str = f"{val:.0f}"
+        else:
+            val_str = str(val)
         builder.row(InlineKeyboardButton(
-            text=f"{label}: {val}",
+            text=f"{label}: {val_str}",
             callback_data=f"limits:field:{bank}:{field}"
         ))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="limits:back"))
@@ -203,10 +207,14 @@ def card_limits_fields_kb(card_id: str, effective_limits: dict, is_custom: bool)
     
     for field, label in LIMIT_FIELD_LABELS.items():
         val = effective_limits.get(field, "—")
-        if isinstance(val, float):
-            val = f"{val:.0f}"
+        if val == -1 or val == -1.0:
+            val_str = "♾️ Ігнорувати"
+        elif isinstance(val, float):
+            val_str = f"{val:.0f}"
+        else:
+            val_str = str(val)
         builder.row(InlineKeyboardButton(
-            text=f"{label}: {val}",
+            text=f"{label}: {val_str}",
             callback_data=f"clf:{card_id}:{field}"
         ))
     builder.row(InlineKeyboardButton(text="🔙 Назад до картки", callback_data=f"card:view:{card_id}"))

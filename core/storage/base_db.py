@@ -552,6 +552,7 @@ class MerchantDB:
         await self._ensure_column("merchant_reviews", "status", "TEXT DEFAULT 'OK'")
         await self._ensure_column("merchant_reviews", "error_reason", "TEXT DEFAULT ''")
         # Міграція колонок scanner_users
+        await self._ensure_column("scanner_users", "capital_mode", "TEXT DEFAULT 'manual'")
         await self._ensure_column("scanner_users", "min_amount_uah", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "merchant_filters_json", "TEXT DEFAULT '{}'")
         await self._ensure_column("scanner_users", "is_alerts_active", "INTEGER DEFAULT 1")
