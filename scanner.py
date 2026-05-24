@@ -156,7 +156,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             kb = None
             if exchange:
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="📲 Оновити через скрипт-закладку", callback_data=f"intercept:{exchange}")]
+                    [InlineKeyboardButton(text="🖥 Авторизуватись на ПК (видимо)", callback_data=f"session:login:{exchange}")],
+                    [InlineKeyboardButton(text="📲 Скрипт-закладка (телефон)", callback_data=f"intercept:{exchange}")],
+                    [InlineKeyboardButton(text="🏃‍♂️ Продовжити без сесій (Ігнор)", callback_data="boot_ignore_sessions")]
                 ])
 
             # Відправляємо конкретному юзеру або всім адмінам
@@ -218,6 +220,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         merchant_db, account_clients.as_dict(), trade_worker,
         single_leg_executor=single_leg_executor,
         maker_monitor=maker_monitor,
+        session_manager=session_manager,
     )
     stability_filter = SpreadStabilityFilter(
         required_hits=getattr(settings, "stability_hits", 2),
@@ -368,7 +371,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                     kb = InlineKeyboardMarkup(inline_keyboard=[
                         [InlineKeyboardButton(text="🏃‍♂️ Поїхали без сесій (Ігнор)", callback_data="boot_ignore_sessions")],
-                        [InlineKeyboardButton(text="📲 Оновити через скрипт-закладки", callback_data="menu:global_settings")]
+                        [InlineKeyboardButton(text="📲 Оновити через скрипт-закладки", callback_data="menu:sessions")]
                     ])
                     await notifier._send_with_retry(msg, keyboard=kb)
                     logger.warning(f"Safe Boot: відкладено старт через недійсні сесії ({ex_list}).")

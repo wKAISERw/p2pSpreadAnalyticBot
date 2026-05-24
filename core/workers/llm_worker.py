@@ -617,6 +617,17 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             diag += f", reason={rev_error_reason[:220]}"
         lines.append(diag)
 
+    from config.runtime import runtime_config
+    require_sessions = runtime_config.get("require_sessions", "true") == "true"
+    if not require_sessions:
+        lines.append(
+            "⚠️ РЕЖИМ ІГНОРУВАННЯ СЕСІЙ АКТИВНИЙ: Сесії вимкнені користувачем. Доступ до відгуків не очікується. НЕ вважайте відсутність відгуків підозрілим сигналом."
+        )
+    elif rev_status in ("NO_SESSION", "SESSION_EXPIRED"):
+        lines.append(
+            "⚠️ ТЕХНІЧНА ПОМИЛКА СЕСІЇ: Сесії увімкнені, але наразі недійсні (NO_SESSION/SESSION_EXPIRED). Тексти відгуків недоступні через технічну проблему з сесією. НЕ вважайте відсутність відгуків підозрілим фактором мерчанта."
+        )
+
     if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
         lines.append(
             f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків.")

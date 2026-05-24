@@ -95,10 +95,12 @@ class GlobalProxy:
 _trade_worker_impl = None
 _single_leg_executor_impl = None
 _maker_monitor_impl = None
+_session_manager_impl = None
 
 _trade_worker = GlobalProxy("_trade_worker_impl")
 _single_leg_executor = GlobalProxy("_single_leg_executor_impl")
 _maker_monitor = GlobalProxy("_maker_monitor_impl")
+_session_manager = GlobalProxy("_session_manager_impl")
 _active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 
 # ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
@@ -169,6 +171,10 @@ class ConnectStates(StatesGroup):
     waiting_api_key = State()
     waiting_api_secret = State()
     waiting_passphrase = State()
+
+
+class QRStates(StatesGroup):
+    waiting_for_code = State()
 
 
 class SettingStates(StatesGroup):
@@ -331,13 +337,15 @@ def is_muted() -> bool:
 
 
 def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None,
-          maker_monitor=None, bot=None) -> None:
-    global _db_impl, _account_clients_impl, _trade_worker_impl, _notifier_impl, _single_leg_executor_impl, _maker_monitor_impl, _bot_impl
+          maker_monitor=None, bot=None, session_manager=None) -> None:
+    global _db_impl, _account_clients_impl, _trade_worker_impl, _notifier_impl, _single_leg_executor_impl, _maker_monitor_impl, _bot_impl, _session_manager_impl
     if _trade_worker_impl and trade_worker and _trade_worker_impl is not trade_worker:
         logger.warning("setup(): TradeWorker перезаписується!")
     _db_impl = db
     _account_clients_impl = account_clients
     _trade_worker_impl = trade_worker
+    if session_manager is not None:
+        _session_manager_impl = session_manager
 
     if notifier is not None:
         _notifier_impl = notifier

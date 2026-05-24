@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional, Callable, Awaitable
 from playwright.async_api import async_playwright, Request
 from playwright_stealth import Stealth  # 🚀 ДОДАНО ДЛЯ МАСКУВАННЯ
+from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto, Message
+from aiogram.fsm.context import FSMContext
+from bot.handlers.core import QRStates
 
 from core.storage.merchant_db import MerchantDB
 
@@ -54,6 +57,13 @@ class SessionManager:
         # Трекінг вже надісланих попереджень (щоб не спамити)
         self._warned_sessions: set[str] = set()
         self._expired_sessions: set[str] = set()
+        self._locks = {}
+        self._active_qr_sessions = {}
+
+    def _get_lock(self, exchange: str) -> asyncio.Lock:
+        if exchange not in self._locks:
+            self._locks[exchange] = asyncio.Lock()
+        return self._locks[exchange]
 
     def set_notify_callback(self, callback: Callable[[str, int, str], Awaitable[None]]) -> None:
         """Встановлює callback для TG-сповіщень."""
@@ -80,21 +90,36 @@ class SessionManager:
         self._health_task = None
         logger.info("SessionManager зупинено")
 
+    async def trigger_headed_capture(self, exchange: str) -> None:
+        """Запускає оновлення сесії з видимим вікном (headless=False) для ручної авторизації."""
+        target = TARGETS.get(exchange)
+        if not target:
+            logger.error(f"Невідома біржа для ручного захоплення: {exchange}")
+            return
+        logger.info(f"🖥 Запуск видимого браузера (headed) для сесії {exchange}...")
+        asyncio.create_task(
+            self._capture_session(exchange, target, headless=False),
+            name=f"session-capture-headed-{exchange}"
+        )
+
     async def _worker_loop(self):
         # Даємо сканеру 10 секунд на старт
         await asyncio.sleep(10)
 
         while True:
             try:
-                now = time.time()
-                for exchange, target in TARGETS.items():
-                    _, _, updated_at = await self._db.get_auth_session(exchange)
+                from config.runtime import runtime_config
+                require_sessions = runtime_config.get("require_sessions", "true") == "true"
+                if require_sessions:
+                    now = time.time()
+                    for exchange, target in TARGETS.items():
+                        _, _, updated_at = await self._db.get_auth_session(exchange)
 
-                    if now - updated_at > target["ttl"]:
-                        logger.info(f"🔄 SessionManager: Оновлення сесії {exchange} у фоні...")
-                        await self._capture_session(exchange, target)
-                        # Робимо паузу 5 секунд між біржами
-                        await asyncio.sleep(5)
+                        if updated_at > 0 and now - updated_at > target["ttl"]:
+                            logger.info(f"🔄 SessionManager: Оновлення сесії {exchange} у фоні...")
+                            await self._capture_session(exchange, target)
+                            # Робимо паузу 5 секунд між біржами
+                            await asyncio.sleep(5)
 
             except asyncio.CancelledError:
                 break
@@ -103,98 +128,118 @@ class SessionManager:
 
             await asyncio.sleep(30)
 
-    async def _capture_session(self, exchange: str, target: dict):
+    async def _capture_session(self, exchange: str, target: dict, headless: Optional[bool] = None):
         user_data_dir = Path(f"data/browser_profiles/{exchange.lower()}")
         user_data_dir.mkdir(parents=True, exist_ok=True)
         captured_event = asyncio.Event()
 
-        try:
-            async with async_playwright() as p:
-                # 🚀 ДОДАНО АНТИ-ДЕТЕКТ АРГУМЕНТИ
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=str(user_data_dir),
-                    headless=False,  # 🚀 ЗМІНИ НА False (вікно буде з'являтися на 10-15 сек)
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-http2",
-                        "--window-size=1280,720",
-                    ],
-                )
-                # 🚀 НОВИЙ СИНТАКСИС ДЛЯ PLAYWRIGHT-STEALTH 2.0.2+
-                stealth_plugin = Stealth()
-                await stealth_plugin.apply_stealth_async(context)
+        lock = self._get_lock(exchange)
+        if lock.locked():
+            logger.warning(f"Session capture for {exchange} is already running. Skipping.")
+            return
 
-                # ФІКС 1: Беремо вже існуючу першу вкладку замість створення нової
-                page = context.pages[0] if context.pages else await context.new_page()
+        async with lock:
+            if headless is None:
+                headless = True
 
-                # ФІКС 2: Прибрали .css з блокування (щоб JS-фреймворки не крашились)
-                await page.route("**/*.{png,jpg,jpeg,svg,woff2}", lambda route: route.abort())
+            try:
+                async with async_playwright() as p:
+                    try:
+                        context = await p.chromium.launch_persistent_context(
+                            user_data_dir=str(user_data_dir),
+                            headless=headless,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-http2",
+                                "--window-size=1280,720",
+                            ],
+                        )
+                    except Exception as launch_err:
+                        if not headless:
+                            logger.error(f"Failed to launch headed browser: {launch_err}")
+                            raise Exception("Відсутній графічний дисплей на сервері (VPS). Будь ласка, скористайтеся Bookmarklet-скриптом для оновлення сесії з телефона/ПК.")
+                        raise launch_err
 
+                    stealth_plugin = Stealth()
+                    await stealth_plugin.apply_stealth_async(context)
 
-                async def handle_request(request: Request):
-                    if target["api_pattern"] in request.url:
-                        logger.debug(f"🎯 ПЕРЕХОПЛЕНО {exchange}: {request.url}")
+                    # ФІКС 1: Беремо вже існуючу першу вкладку замість створення нової
+                    page = context.pages[0] if context.pages else await context.new_page()
 
-                        headers = request.headers
-                        cookies_list = await context.cookies()
-                        cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+                    # ФІКС 2: Прибрали .css з блокування (щоб JS-фреймворки не крашились)
+                    await page.route("**/*.{png,jpg,jpeg,svg,woff2}", lambda route: route.abort())
 
-                        success = await self._db.save_auth_session(exchange, headers, cookies_dict)
-                        if success:
-                            logger.info(f"✅ SessionManager: Сесію {exchange} успішно подовжено!")
-                        captured_event.set()
+                    async def handle_request(request: Request):
+                        if target["api_pattern"] in request.url:
+                            logger.debug(f"🎯 ПЕРЕХОПЛЕНО {exchange}: {request.url}")
 
-                page.on("request", handle_request)
+                            headers = request.headers
+                            cookies_list = await context.cookies()
+                            cookies_dict = {c["name"]: c["value"] for c in cookies_list}
 
-                # Даємо браузеру цілих 60 секунд на завантаження важкої сторінки Bybit
-                # Шукай в кінці методу _capture_session (~145)
-                # ТЕПЕР ЦЕЙ БЛОК ВСЕРЕДИНІ 'async with'
-                try:
-                    await page.goto(target["url"], wait_until="commit", timeout=60000)
-                    
-                    # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
-                    if exchange == "Binance":
-                        await page.wait_for_timeout(7000)
-                    else:
-                        await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
-                    
-                    # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' – 
-                    # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
-                    success = await page.evaluate('''() => {
-                        const keywords = ["відгуки", "отзывы", "review", "feedback"];
-                        const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
-                        let clicked = false;
-                        for (let el of els) {
-                            if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
-                                // Фільтруємо за наявністю розміру екрану і чи не є він занадто великим (щоб не клікати весь body/header)
-                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
-                                    el.click();
-                                    clicked = true;
+                            success = await self._db.save_auth_session(exchange, headers, cookies_dict)
+                            if success:
+                                logger.info(f"✅ SessionManager: Сесію {exchange} успішно подовжено!")
+                            captured_event.set()
+
+                    page.on("request", handle_request)
+
+                    # Даємо браузеру цілих 60 секунд на завантаження важкої сторінки Bybit
+                    try:
+                        await page.goto(target["url"], wait_until="commit", timeout=60000)
+                        
+                        # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
+                        if exchange == "Binance":
+                            await page.wait_for_timeout(7000)
+                        else:
+                            await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
+                        
+                        # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' – 
+                        # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
+                        success = await page.evaluate('''() => {
+                            const keywords = ["відгуки", "отзывы", "review", "feedback"];
+                            const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
+                            let clicked = false;
+                            for (let el of els) {
+                                if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
+                                    // Фільтруємо за наявністю розміру екрану і чи не є він занадто великим (щоб не клікати весь body/header)
+                                    if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
+                                        el.click();
+                                        clicked = true;
+                                    }
                                 }
                             }
-                        }
-                        return clicked;
-                    }''')
-                    
-                    if success:
-                        logger.info(f"👉 SessionManager: Автоматично натиснуто вкладку відгуків для {exchange} (через JS-масив)")
-                    else:
-                        logger.error(f"❌ SessionManager: Жодного елемента 'Відгуки' не знайдено на екрані {exchange}!")
+                            return clicked;
+                        }''')
+                        
+                        if success:
+                            logger.info(f"👉 SessionManager: Автоматично натиснуто вкладку відгуків для {exchange} (через JS-масив)")
+                        else:
+                            logger.error(f"❌ SessionManager: Жодного елемента 'Відгуки' не знайдено на екрані {exchange}!")
 
-                    # Чекаємо поки перехопиться API запит
-                    await asyncio.wait_for(captured_event.wait(), timeout=30.0)
-                except Exception as e:
-                    logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
+                        # Чекаємо поки перехопиться API запит
+                        await asyncio.wait_for(captured_event.wait(), timeout=30.0)
+                    except Exception as e:
+                        logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
+                        raise e
 
-                await asyncio.sleep(1)
-                await context.close()
+                    await asyncio.sleep(1)
+                    await context.close()
 
-        except asyncio.TimeoutError:
-            logger.warning(f"⚠️ SessionManager: Таймаут {exchange}. Можливо, розлогінило або вилізла капча.")
-            logger.warning(
-                f"👉 Запусти вручну 'python scripts/session_interceptor.py' для відновлення логіну {exchange}.")
-        except Exception as e:
-            logger.error(f"❌ SessionManager помилка для {exchange}: {e}")
+            except (asyncio.TimeoutError, asyncio.exceptions.TimeoutError) as te:
+                msg = f"⚠️ <b>Помилка фонового оновлення сесії {exchange}!</b> (Таймаут).\nМожливо, ви розлогінились або вилізла капча."
+                logger.warning(f"⚠️ SessionManager: Таймаут {exchange}: {te}")
+                if headless:
+                    await self._send_notification(msg, exchange=exchange)
+                else:
+                    raise te
+            except Exception as e:
+                msg = f"❌ <b>Помилка фонового оновлення сесії {exchange}!</b>\nДеталі: {str(e)}"
+                logger.error(f"❌ SessionManager помилка для {exchange}: {e}")
+                if headless:
+                    await self._send_notification(msg, exchange=exchange)
+                else:
+                    raise e
 
     # ═══════════════════════════════════════════════════════════════════════
     # Блок C: Session Health Monitor
@@ -222,6 +267,11 @@ class SessionManager:
 
     async def _check_all_sessions(self):
         """Перевіряє всі активні сесії та їхні TTL."""
+        from config.runtime import runtime_config
+        require_sessions = runtime_config.get("require_sessions", "true") == "true"
+        if not require_sessions:
+            return
+
         sessions = await self._db.get_all_auth_sessions()
 
         for session in sessions:
@@ -352,4 +402,712 @@ class SessionManager:
                 await self._notify_callback(message, user_id, exchange)
             except Exception as e:
                 logger.error(f"Session health notification error: {e}")
+
+    async def trigger_qr_capture(self, exchange: str, user_id: int, message: Message, state: Optional[FSMContext] = None) -> None:
+        """
+        Запускає фоновий процес входу через QR-код для Binance або OKX.
+        message — це об'єкт повідомлення користувача (щоб надсилати скріншот).
+        """
+        import os
+        
+        session_key = f"{exchange}:{user_id}"
+        
+        # 1. Якщо сесія вже активна, закриваємо її
+        if session_key in self._active_qr_sessions:
+            await self.cancel_qr_session(exchange, user_id)
+            
+        logger.info(f"🔑 Запуск QR-авторизації для {exchange} (user_id={user_id})")
+        
+        # Створюємо папку для QR-кодів
+        qr_dir = Path("data/qr_codes")
+        qr_dir.mkdir(parents=True, exist_ok=True)
+        qr_path = qr_dir / f"{exchange.lower()}_{user_id}.png"
+        
+        # Створюємо подію для скасування
+        cancel_event = asyncio.Event()
+        
+        # Ініціалізуємо стан у словнику
+        self._active_qr_sessions[session_key] = {
+            "cancel_event": cancel_event,
+            "browser_context": None,
+            "qr_msg": None,
+            "code_queue": asyncio.Queue()
+        }
+        
+        # Оголосимо внутрішню функцію для виконання всього потоку
+        async def run_flow():
+            browser_context = None
+            qr_msg = None
+            try:
+                # Повідомляємо про старт
+                status_msg = await message.answer(f"⏳ Ініціалізація браузера для {exchange}...")
+                
+                # На Windows за замовчуванням запускаємо headed режим (headless=False) для обходу Cloudflare/Bybit.
+                # Якщо немає дисплея (наприклад, на VPS) - автоматично перемикаємось на headless.
+                headless = True
+                if os.name == 'nt':
+                    headless = False
+                    
+                async with async_playwright() as p:
+                    # Запускаємо в ізольованому профайлі
+                    user_data_dir = Path(f"data/browser_profiles/qr_{exchange.lower()}_{user_id}")
+                    user_data_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    try:
+                        browser_context = await p.chromium.launch_persistent_context(
+                            user_data_dir=str(user_data_dir),
+                            headless=headless,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--disable-http2",
+                                "--window-size=1280,800",
+                            ]
+                        )
+                    except Exception as launch_err:
+                        if not headless:
+                            logger.info(f"Failed to launch headed context for {exchange}: {launch_err}. Retrying in headless mode...")
+                            headless = True
+                            browser_context = await p.chromium.launch_persistent_context(
+                                user_data_dir=str(user_data_dir),
+                                headless=headless,
+                                args=[
+                                    "--disable-blink-features=AutomationControlled",
+                                    "--disable-http2",
+                                    "--window-size=1280,800",
+                                ]
+                            )
+                        else:
+                            raise launch_err
+                    
+                    # Записуємо контекст в сесію для можливості примусового закриття
+                    if session_key in self._active_qr_sessions:
+                        self._active_qr_sessions[session_key]["browser_context"] = browser_context
+                    else:
+                        await browser_context.close()
+                        return
+                    
+                    stealth_plugin = Stealth()
+                    await stealth_plugin.apply_stealth_async(browser_context)
+                    
+                    page = browser_context.pages[0] if browser_context.pages else await browser_context.new_page()
+                    await page.set_viewport_size({"width": 1280, "height": 800})
+                    
+                    # Налаштовуємо перехоплення API запитів (cookies/headers)
+                    captured_event = asyncio.Event()
+                    
+                    async def handle_request(req):
+                        target = TARGETS.get(exchange)
+                        if target and target["api_pattern"] in req.url:
+                            logger.debug(f"🎯 QR ПЕРЕХОПЛЕНО {exchange}: {req.url}")
+                            headers = req.headers
+                            cookies_list = await browser_context.cookies()
+                            cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+                            
+                            await self._db.save_auth_session(exchange, headers, cookies_dict, user_id)
+                            captured_event.set()
+                    
+                    page.on("request", handle_request)
+                    
+                    # Навігація до логін сторінки
+                    login_urls = {
+                        "Binance": "https://accounts.binance.com/en/login",
+                        "OKX": "https://www.okx.com/account/login",
+                        "Bybit": "https://www.bybit.com/en/login"
+                    }
+                    url = login_urls.get(exchange)
+                    if not url:
+                        await status_msg.edit_text(f"❌ Біржа {exchange} не підтримує QR-вхід.")
+                        return
+                        
+                    wait_mode = "domcontentloaded"
+                    await page.goto(url, wait_until=wait_mode, timeout=45000)
+                    await page.wait_for_timeout(3000)
+                    
+                    # Перевіряємо, чи ми вже авторизовані (наприклад, завдяки збереженій раніше сесії)
+                    authenticated = False
+                    
+                    # Чекаємо додатково, якщо/поки триває редирект (наприклад, ми вже авторизовані і нас перенаправляє на головну сторінку)
+                    is_already_logged_in = False
+                    logger.info(f"Checking if already logged in to {exchange} (waiting up to 8 seconds)...")
+                    for i in range(8):
+                        current_url = page.url.lower()
+                        # Якщо URL не містить login/verify/stay-signed-in, то ми залогінились
+                        if "login" not in current_url and "signin" not in current_url and "login-verify" not in current_url and "stay-signed-in" not in current_url and "stay-logged-in" not in current_url and current_url not in ["", "about:blank"]:
+                            is_already_logged_in = True
+                            logger.info(f"Already logged in detected by URL redirect: {page.url}")
+                            break
+                        # Якщо ми бачимо елементи входу (канвас, кнопка перемикання або інпути паролю), то ми точно не авторизовані
+                        try:
+                            if await page.query_selector("canvas, .qr-login-icon, input[type='password']"):
+                                logger.info("Login form or QR code detected. Proceeding to QR login flow.")
+                                break
+                        except Exception as query_err:
+                            logger.debug(f"Query selector ignored during navigation/redirect: {query_err}")
+                        await page.wait_for_timeout(1000)
+                    
+                    if is_already_logged_in:
+                        logger.info(f"User is already logged in to {exchange}. Skipping QR capture, proceeding to P2P.")
+                        authenticated = True
+                    else:
+                        # Перемикаємось на QR-код
+                        if exchange == "Binance":
+                            try:
+                                canvas = await page.query_selector("canvas")
+                                if canvas and await canvas.is_visible():
+                                    logger.info("Binance QR code is already visible.")
+                                else:
+                                    logger.info("Binance QR code not visible. Clicking toggle...")
+                                    await page.locator(".qr-login-icon").click(timeout=5000)
+                                    await page.wait_for_selector("canvas", timeout=5000)
+                            except Exception as toggle_err:
+                                logger.debug(f"Failed to click Binance QR toggle via locator: {toggle_err}")
+                                # Резервний спрощений клік через query_selector
+                                try:
+                                    toggle = await page.query_selector(".qr-login-icon")
+                                    if toggle:
+                                        await toggle.click()
+                                        await page.wait_for_selector("canvas", timeout=5000)
+                                except Exception as e2:
+                                    logger.debug(f"Fallback Binance QR toggle failed: {e2}")
+                        elif exchange == "OKX":
+                            try:
+                                canvas = await page.query_selector("canvas")
+                                if canvas and await canvas.is_visible():
+                                    logger.info("OKX QR code is already visible.")
+                                else:
+                                    logger.info("OKX QR code not visible. Clicking toggle...")
+                                    await page.locator("text=QR code").click(timeout=5000)
+                                    await page.wait_for_selector("canvas", timeout=5000)
+                            except Exception as toggle_err:
+                                logger.debug(f"Failed to click OKX QR toggle via locator: {toggle_err}")
+                                try:
+                                    toggle = await page.query_selector("text=QR code")
+                                    if toggle:
+                                        await toggle.click()
+                                        await page.wait_for_selector("canvas", timeout=5000)
+                                except Exception as e2:
+                                    logger.debug(f"Fallback OKX QR toggle failed: {e2}")
+                        elif exchange == "Bybit":
+                            try:
+                                canvas = await page.query_selector("canvas")
+                                if canvas and await canvas.is_visible():
+                                    logger.info("Bybit QR code is already visible.")
+                                else:
+                                    logger.info("Bybit QR code not visible. Clicking toggle...")
+                                    await page.locator("text=QR Code").click(timeout=5000)
+                                    await page.wait_for_selector("canvas", timeout=5000)
+                            except Exception as toggle_err:
+                                logger.debug(f"Failed to click Bybit QR toggle via locator: {toggle_err}")
+                                try:
+                                    toggle = await page.query_selector("text=QR Code")
+                                    if toggle:
+                                        await toggle.click()
+                                        await page.wait_for_selector("canvas", timeout=5000)
+                                except Exception as e2:
+                                    logger.debug(f"Fallback Bybit QR toggle failed: {e2}")
+                                
+                    if not authenticated:
+                        # Беремо перший скріншот QR
+                        qr_selector = "canvas"
+                        qr_el = await page.query_selector(qr_selector)
+                        if not qr_el:
+                            await status_msg.edit_text(f"❌ Не вдалося знайти QR-код на сторінці {exchange}.")
+                            return
+                            
+                        await qr_el.screenshot(path=str(qr_path))
+                        
+                        # Видаляємо тимчасовий статус-меседж
+                        await status_msg.delete()
+                        
+                        # Надсилаємо QR-код з кнопкою скасування
+                        caption = (
+                            f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                            f"1️⃣ Відкрий офіційний додаток {exchange} на своєму телефоні.\n"
+                            f"2️⃣ Знайди сканер QR-кодів і відскануй цей код.\n"
+                            f"3️⃣ Підтверди вхід у додатку.\n\n"
+                            f"<i>🔄 Бот автоматично оновлює цей QR-код кожні 25 секунд.</i>\n"
+                            f"<i>⏳ Залишилось часу: 90 сек.</i>"
+                        )
+                        kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="❌ Скасувати", callback_data=f"session:qr_cancel:{exchange}")]
+                        ])
+                        
+                        qr_msg = await message.answer_photo(
+                            photo=FSInputFile(str(qr_path)),
+                            caption=caption,
+                            reply_markup=kb
+                        )
+                        
+                        if session_key in self._active_qr_sessions:
+                            self._active_qr_sessions[session_key]["qr_msg"] = qr_msg
+                    else:
+                        # Видаляємо тимчасовий статус-меседж, якщо ми вже авторизовані
+                        await status_msg.delete()
+                        
+                    # Запускаємо цикл опитування (polling) успіху логіну
+                    start_time = time.time()
+                    last_refresh_time = time.time()
+                    authenticated = False
+                    
+                    while time.time() - start_time < 90:
+                        # Перевеверяємо подію скасування
+                        if cancel_event.is_set():
+                            logger.info(f"QR Login {exchange} canceled by user.")
+                            break
+                            
+                        # Детекція 2FA для будь-якої біржі
+                        try:
+                            has_2fa = False
+                            text_desc = ""
+                            
+                            # Отримуємо весь видимий текст сторінки для надійного аналізу
+                            page_text = await page.evaluate("document.body ? document.body.innerText : ''")
+                            page_text_lower = page_text.lower()
+                            
+                            if exchange == "OKX":
+                                okx_indicators = [
+                                    "enter code", "look out for a text", "verification code", 
+                                    "google authenticator", "authenticator code", "sms verification",
+                                    "введите код", "код подтверждения", "двухфакторная", "аутентификатор", "sms-код",
+                                    "введіть код", "код підтвердження", "двофакторна", "автентифікатор", "sms-код"
+                                ]
+                                if any(ind in page_text_lower for ind in okx_indicators):
+                                    has_2fa = True
+                                    text_desc = "OKX Verification Needed"
+                                    # Намагаємось знайти більш конкретний опис на сторінці
+                                    lines = page_text.split("\n")
+                                    for line in lines:
+                                        line_lower = line.lower()
+                                        if any(k in line_lower for k in ["sent to", "look out", "отправлен", "надіслано", "verification code", "код"]):
+                                            if len(line.strip()) > 5 and len(line.strip()) < 150:
+                                                text_desc = line.strip()
+                                                break
+                                                
+                            elif exchange == "Binance":
+                                binance_indicators = [
+                                    "security verification", "verification code", "authenticator code",
+                                    "enter 6-digit code", "email verification", "phone verification",
+                                    "код подтверждения", "код верификации", "безопасность", "аутентификатор",
+                                    "код підтвердження", "код верифікації", "безпека", "автентифікатор"
+                                ]
+                                if any(ind in page_text_lower for ind in binance_indicators):
+                                    has_2fa = True
+                                    text_desc = "Binance Security Verification"
+                                    lines = page_text.split("\n")
+                                    for line in lines:
+                                        line_lower = line.lower()
+                                        if any(k in line_lower for k in ["verification code", "код", "security", "безопасность", "безпека"]):
+                                            if len(line.strip()) > 5 and len(line.strip()) < 150:
+                                                text_desc = line.strip()
+                                                break
+                                                
+                            elif exchange == "Bybit":
+                                bybit_indicators = [
+                                    "security verification", "verification code", "authenticator code",
+                                    "enter verification code", "google authenticator", "email verification", "sms verification",
+                                    "код подтверждения", "код верификации", "безопасность", "аутентификатор",
+                                    "код підтвердження", "код верифікації", "безпека", "автентифікатор"
+                                ]
+                                if any(ind in page_text_lower for ind in bybit_indicators):
+                                    has_2fa = True
+                                    text_desc = "Bybit Security Verification"
+                                    lines = page_text.split("\n")
+                                    for line in lines:
+                                        line_lower = line.lower()
+                                        if any(k in line_lower for k in ["verification code", "код", "security", "безопасность", "безпека"]):
+                                            if len(line.strip()) > 5 and len(line.strip()) < 150:
+                                                text_desc = line.strip()
+                                                break
+                                                
+                            if has_2fa:
+                                if not self._active_qr_sessions[session_key].get("notified_2fa"):
+                                    self._active_qr_sessions[session_key]["notified_2fa"] = True
+                                    seconds_left = int(90 - (time.time() - start_time))
+                                    qr_msg = self._active_qr_sessions[session_key].get("qr_msg")
+                                    
+                                    caption_2fa = (
+                                        f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                                        f"⚠️ <b>Потрібен 2FA-код підтвердження!</b>\n"
+                                        f"Опис: <i>{text_desc}</i>\n\n"
+                                        f"👉 <b>Будь ласка, введіть цей код безпосередньо у цей чат:</b>\n"
+                                        f"<i>(Бот автоматично підставить його на сторінці)</i>\n\n"
+                                        f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                                    )
+                                    
+                                    if qr_msg:
+                                        await qr_msg.edit_caption(caption=caption_2fa, reply_markup=kb)
+                                    else:
+                                        # Надсилаємо нове повідомлення із скріншотом поточного стану, якщо раніше фото не створювалось
+                                        await page.screenshot(path=str(qr_path))
+                                        qr_msg = await message.answer_photo(
+                                            photo=FSInputFile(str(qr_path)),
+                                            caption=caption_2fa,
+                                            reply_markup=kb
+                                        )
+                                        self._active_qr_sessions[session_key]["qr_msg"] = qr_msg
+                                        
+                                    if state:
+                                        await state.set_state(QRStates.waiting_for_code)
+                                        await state.update_data(session_key=session_key, exchange=exchange)
+                        except Exception as e2fa:
+                            logger.debug(f"Error checking 2FA state: {e2fa}")
+                            
+                        # Перевіряємо чи є код у черзі для введення в браузері
+                        code_queue = self._active_qr_sessions[session_key].get("code_queue")
+                        if code_queue and not code_queue.empty():
+                            code = await code_queue.get()
+                            logger.info(f"Received 2FA code from user for {exchange}: {code}")
+                            try:
+                                inputs = await page.query_selector_all("input[type='text'], input[type='number'], input[type='tel'], input[placeholder*='code'], input[placeholder*='Code']")
+                                if not inputs:
+                                    inputs = await page.query_selector_all("input")
+                                    
+                                visible_inputs = []
+                                for inp in inputs:
+                                    if await inp.is_visible():
+                                        visible_inputs.append(inp)
+                                        
+                                if len(visible_inputs) == 6:
+                                    # 6 окремих комірок для введення (OKX / Binance)
+                                    for idx, char in enumerate(code[:6]):
+                                        try:
+                                            await visible_inputs[idx].click()
+                                            await visible_inputs[idx].fill("")
+                                            await page.keyboard.send_character(char)
+                                            await page.wait_for_timeout(150)
+                                        except Exception as fill_char_err:
+                                            logger.debug(f"Failed to fill 2FA cell {idx} via keyboard: {fill_char_err}")
+                                            await visible_inputs[idx].fill(char)
+                                elif len(visible_inputs) >= 1:
+                                    # Одне суцільне поле для введення
+                                    await visible_inputs[0].click()
+                                    await visible_inputs[0].fill("")
+                                    await page.keyboard.type(code)
+                                    
+                                # Натискаємо кнопку підтвердження
+                                confirm_btn = await page.query_selector("button:has-text('Confirm'), button:has-text('Submit'), button:has-text('Verify'), button[type='submit']")
+                                if confirm_btn:
+                                    await confirm_btn.click()
+                                else:
+                                    if visible_inputs:
+                                        await visible_inputs[-1].press("Enter")
+                                        
+                                await page.wait_for_timeout(3000)
+                            except Exception as fill_err:
+                                current_url = page.url.lower()
+                                if "login" not in current_url and "login-verify" not in current_url:
+                                    logger.debug(f"2FA input interrupted by successful redirect/login: {fill_err}")
+                                else:
+                                    logger.error(f"Failed to fill 2FA code: {fill_err}")
+                                
+                        # Якщо це сторінка Stay Signed In для Binance - авто-клікаємо Yes
+                        if exchange == "Binance" and ("stay-signed-in" in page.url or "stay-logged-in" in page.url):
+                            logger.info("Stay Signed In page detected for Binance. Clicking Yes automatically...")
+                            try:
+                                for selector in ["button:has-text('Yes')", "text=Yes", "button.cht-register-login-button"]:
+                                    yes_btn = await page.query_selector(selector)
+                                    if yes_btn:
+                                        await yes_btn.click()
+                                        logger.info("Clicked Yes on Stay Signed In page.")
+                                        await page.wait_for_timeout(2000)
+                                        break
+                            except Exception as btn_err:
+                                logger.debug(f"Failed to click Yes: {btn_err}")
+                            authenticated = True
+                            break
+
+                        # Перевіряємо чи змінився URL (авторизація)
+                        is_stay_signed_in = "stay-signed-in" in page.url or "stay-logged-in" in page.url
+                        is_logged_in_url = "login" not in page.url and "login-verify" not in page.url
+                        
+                        if is_logged_in_url or is_stay_signed_in:
+                            authenticated = True
+                            break
+                            
+                        # Автоматичне оновлення QR-коду кожні 25 секунд
+                        now_time = time.time()
+                        if now_time - last_refresh_time >= 25.0:
+                            last_refresh_time = now_time
+                            logger.info(f"🔄 Авто-оновлення QR-скріншоту для {exchange}...")
+                            
+                            qr_el = await page.query_selector(qr_selector)
+                            if qr_el:
+                                # Видаляємо попередній файл скріншоту
+                                if qr_path.exists():
+                                    try:
+                                        os.remove(qr_path)
+                                    except Exception:
+                                        pass
+                                await qr_el.screenshot(path=str(qr_path))
+                                
+                                # Оновлюємо фото в надісланому повідомленні
+                                seconds_left = int(90 - (time.time() - start_time))
+                                new_caption = (
+                                    f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                                    f"1️⃣ Відкрий офіційний додаток {exchange} на своєму телефоні.\n"
+                                    f"2️⃣ Знайди сканер QR-кодів і відскануй цей код.\n"
+                                    f"3️⃣ Підтверди вхід у додатку.\n\n"
+                                    f"<i>🔄 QR-код автоматично оновлено!</i>\n"
+                                    f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                                )
+                                await qr_msg.edit_media(
+                                    media=InputMediaPhoto(
+                                        media=FSInputFile(str(qr_path)),
+                                        caption=new_caption
+                                    ),
+                                    reply_markup=kb
+                                )
+                                
+                        await asyncio.sleep(1.0)
+                        
+                    if authenticated:
+                        logger.info(f"🎉 QR Login {exchange} authenticated! Redirecting to P2P URL...")
+                        # Оновлюємо повідомлення
+                        if qr_msg:
+                            try:
+                                if qr_msg.photo:
+                                    await qr_msg.edit_caption(
+                                        caption=f"⏳ <b>Авторизація пройшла успішно!</b>\nПерехоплюю сесію {exchange}...",
+                                        reply_markup=None
+                                    )
+                                else:
+                                    await qr_msg.edit_text(
+                                        text=f"⏳ <b>Авторизація пройшла успішно!</b>\nПерехоплюю сесію {exchange}...",
+                                        reply_markup=None
+                                    )
+                            except Exception as edit_err:
+                                logger.debug(f"Failed to edit qr_msg caption/text: {edit_err}")
+                        else:
+                            try:
+                                qr_msg = await message.answer(
+                                    f"⏳ <b>Авторизація пройшла успішно (вже залогінені)!</b>\nПерехоплюю сесію {exchange}..."
+                                )
+                                self._active_qr_sessions[session_key]["qr_msg"] = qr_msg
+                            except Exception as send_err:
+                                logger.debug(f"Failed to send success session capture notice: {send_err}")
+                        
+                        # Навігація до P2P profile
+                        p2p_url = TARGETS[exchange]["url"]
+                        
+                        if exchange == "OKX":
+                            try:
+                                import aiohttp
+                                api_url = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdsPrelogin"
+                                params = {
+                                    "fiatCurrency": "UAH",
+                                    "cryptoCurrency": "USDT",
+                                    "paymentMethod": "all",
+                                    "side": "sell",
+                                    "userType": "all",
+                                    "sortType": "price_asc",
+                                    "numberPerPage": "5",
+                                    "t": str(int(time.time() * 1000)),
+                                }
+                                logger.info("Fetching active OKX merchant ID dynamically...")
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(api_url, params=params, timeout=10) as resp:
+                                        if resp.status == 200:
+                                            res_data = await resp.json()
+                                            if res_data.get("code") == 0:
+                                                items = res_data.get("data", {}).get("sell", [])
+                                                if items:
+                                                    active_id = items[0].get("publicUserId")
+                                                    if active_id:
+                                                        p2p_url = f"https://www.okx.com/p2p/ads-merchant?publicUserId={active_id}"
+                                                        logger.info(f"Dynamically resolved active OKX merchant profile URL: {p2p_url}")
+                                                    else:
+                                                        logger.warning("No publicUserId found in first OKX sell ad.")
+                                                else:
+                                                    logger.warning("OKX sell marketplace ads list is empty.")
+                                            else:
+                                                logger.warning(f"OKX prelogin API returned non-zero code: {res_data.get('code')}")
+                                        else:
+                                            logger.warning(f"OKX prelogin API status code: {resp.status}")
+                            except Exception as fetch_err:
+                                logger.error(f"Failed to fetch active OKX merchant dynamically (using fallback): {fetch_err}")
+                                
+                        p2p_wait_mode = "domcontentloaded"
+                        await page.goto(p2p_url, wait_until=p2p_wait_mode, timeout=30000)
+                        
+                        # Даємо сторінці час на стабілізацію та рендер JS
+                        if exchange == "Binance":
+                            await page.wait_for_timeout(7000)
+                        else:
+                            await page.wait_for_timeout(6000)
+                            
+                        # Очікуємо перехоплення API-запиту (до 25 сек) з періодичним кліком по відгуках та перевіркою редиректів
+                        logger.info(f"Waiting for request capture on P2P profile for {exchange}...")
+                        capture_timeout = 25.0
+                        poll_start = time.time()
+                        
+                        while time.time() - poll_start < capture_timeout:
+                            if captured_event.is_set():
+                                break
+                                
+                            # Якщо раптом нас перенаправило на сторінку підтримки/фідбеку, повертаємось назад
+                            current_url = page.url.lower()
+                            if "user-support" in current_url or "feedback/entry" in current_url:
+                                logger.warning(f"Detected support redirect on {exchange}, navigating back...")
+                                try:
+                                    await page.go_back(wait_until="domcontentloaded")
+                                    await page.wait_for_timeout(2000)
+                                except Exception as back_err:
+                                    logger.debug(f"Failed to navigate back from support page: {back_err}")
+                            
+                            # Знаходимо і клікаємо елементи відгуків за межами навігаційних панелей та шапок/підвалів
+                            clicked = await page.evaluate('''() => {
+                                const keywords = ["відгуки", "отзывы", "review"];
+                                const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
+                                let clicked = false;
+                                
+                                for (let el of els) {
+                                    if (el.closest('header') || el.closest('nav') || el.closest('footer')) continue;
+                                    
+                                    const href = el.getAttribute('href') || '';
+                                    if (href.includes('feedback') || href.includes('support') || href.includes('user-support')) continue;
+                                    
+                                    if (el.innerText && keywords.some(k => el.innerText.toLowerCase().trim() === k)) {
+                                        if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.innerText.length < 25) {
+                                            el.click();
+                                            clicked = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                if (!clicked) {
+                                    for (let el of els) {
+                                        if (el.closest('header') || el.closest('nav') || el.closest('footer')) continue;
+                                        
+                                        const href = el.getAttribute('href') || '';
+                                        if (href.includes('feedback') || href.includes('support') || href.includes('user-support')) continue;
+                                        
+                                        if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
+                                            if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.innerText.length < 25) {
+                                                el.click();
+                                                clicked = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                return clicked;
+                            }''')
+                            
+                            if clicked:
+                                logger.debug(f"Successfully triggered click on reviews tab for {exchange}")
+                            
+                            await asyncio.sleep(4.0)
+                            
+                        try:
+                            await asyncio.wait_for(captured_event.wait(), timeout=1.0)
+                            if qr_msg:
+                                await qr_msg.answer(f"✅ <b>Сесію {exchange} успішно оновлено через QR-код!</b>")
+                                try:
+                                    await qr_msg.delete()
+                                except Exception:
+                                    pass
+                        except asyncio.TimeoutError:
+                            logger.error(f"Timeout waiting for request capture on P2P page for {exchange}")
+                            if qr_msg:
+                                try:
+                                    if qr_msg.photo:
+                                        await qr_msg.edit_caption(
+                                            caption=f"❌ <b>Помилка:</b> не вдалося перехопити API-запити на сторінці P2P {exchange}. Спробуйте ручну авторизацію.",
+                                            reply_markup=None
+                                        )
+                                    else:
+                                        await qr_msg.edit_text(
+                                            text=f"❌ <b>Помилка:</b> не вдалося перехопити API-запити на сторінці P2P {exchange}. Спробуйте ручну авторизацію.",
+                                            reply_markup=None
+                                        )
+                                except Exception:
+                                    pass
+                    else:
+                        if not cancel_event.is_set():
+                            if qr_msg:
+                                try:
+                                    if qr_msg.photo:
+                                        await qr_msg.edit_caption(
+                                            caption=f"⚠️ <b>Час очікування сканування QR-коду {exchange} вичерпано.</b> Спробуйте ще раз.",
+                                            reply_markup=None
+                                        )
+                                    else:
+                                        await qr_msg.edit_text(
+                                            text=f"⚠️ <b>Час очікування сканування QR-коду {exchange} вичерпано.</b> Спробуйте ще раз.",
+                                            reply_markup=None
+                                        )
+                                except Exception:
+                                    pass
+                            
+            except Exception as e:
+                logger.error(f"Error in QR capture flow for {exchange}: {e}", exc_info=True)
+                if qr_msg:
+                    try:
+                        if qr_msg.photo:
+                            await qr_msg.edit_caption(
+                                caption=f"❌ <b>Помилка під час QR-входу:</b> {str(e)}",
+                                reply_markup=None
+                            )
+                        else:
+                            await qr_msg.edit_text(
+                                text=f"❌ <b>Помилка під час QR-входу:</b> {str(e)}",
+                                reply_markup=None
+                            )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await message.answer(f"❌ <b>Помилка QR-входу для {exchange}:</b> {str(e)}")
+                    except Exception:
+                        pass
+            finally:
+                # Очищаємо FSM стан
+                if state:
+                    try:
+                        await state.clear()
+                    except Exception:
+                        pass
+                # Закриваємо браузер
+                if browser_context:
+                    try:
+                        await browser_context.close()
+                    except Exception as close_err:
+                        logger.debug(f"Failed to close browser context (might be already closed): {close_err}")
+                # Видаляємо файл QR коду
+                if qr_path.exists():
+                    try:
+                        os.remove(qr_path)
+                    except Exception:
+                        pass
+                # Видаляємо із сесій
+                self._active_qr_sessions.pop(session_key, None)
+                
+        # Запускаємо асинхронно
+        asyncio.create_task(run_flow(), name=f"qr-login-flow-{session_key}")
+
+    async def cancel_qr_session(self, exchange: str, user_id: int) -> None:
+        """Скасовує активний процес QR-входу для вказаного користувача/біржі."""
+        session_key = f"{exchange}:{user_id}"
+        session = self._active_qr_sessions.get(session_key)
+        if session:
+            logger.info(f"Canceling QR session for {session_key}")
+            # Встановлюємо подію скасування
+            session["cancel_event"].set()
+            # Видаляємо кнопку та пишемо про скасування в Telegram
+            qr_msg = session.get("qr_msg")
+            if qr_msg:
+                try:
+                    if qr_msg.photo:
+                        await qr_msg.edit_caption(
+                            caption=f"❌ <b>Авторизацію {exchange} скасовано користувачем.</b>",
+                            reply_markup=None
+                        )
+                    else:
+                        await qr_msg.edit_text(
+                            text=f"❌ <b>Авторизацію {exchange} скасовано користувачем.</b>",
+                            reply_markup=None
+                        )
+                except Exception:
+                    pass
 

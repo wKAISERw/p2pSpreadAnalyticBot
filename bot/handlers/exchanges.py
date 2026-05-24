@@ -19,7 +19,7 @@ from bot.handlers.core import (
     _trade_worker, _single_leg_executor, is_muted, update_stats,
     _generate_dashboard_text,
     ConnectStates, ExchangeCooldownStates, SETTING_DESCRIPTIONS, _mute_until, _scanner_stats, _KEY_LABELS,
-    GlobalSettingStates, SettingStates
+    GlobalSettingStates, SettingStates, _session_manager, QRStates
 )
 from bot.keyboards import exchanges_status_kb, global_settings_kb, back_to_settings_kb, back_to_main_kb, \
     exchange_cooldown_kb, main_menu_kb, exchange_toggle_kb, exchange_connect_kb, banks_selection_kb, exchange_down_kb, \
@@ -221,7 +221,14 @@ async def cmd_settings(message: Message, state: FSMContext) -> None:
     await state.clear()
     if not _is_admin(message.from_user.id):
         return await message.answer("⛔ Глобальні налаштування доступні тільки адміну.")
-    await message.answer(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
+    
+    current_settings = {
+        "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+        "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+        "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+        "require_sessions": runtime_config.get("require_sessions", "true"),
+    }
+    await message.answer(_generate_settings_text(), reply_markup=global_settings_kb(current_settings))
 
 
 @router.callback_query(F.data == "menu:global_settings")
@@ -230,8 +237,20 @@ async def on_global_settings_menu(call: CallbackQuery, state: FSMContext) -> Non
         await call.answer("⛔ Тільки адмін", show_alert=True)
         return
     await state.clear()
+    
+    current_settings = {
+        "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+        "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+        "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+        "require_sessions": runtime_config.get("require_sessions", "true"),
+    }
+    text = (
+        "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+        "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+        "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+    )
     with suppress(TelegramBadRequest):
-        await call.message.edit_text(_generate_settings_text(), reply_markup=global_settings_kb(_KEY_LABELS))
+        await call.message.edit_text(text, reply_markup=global_settings_kb(current_settings))
     await call.answer()
 
 
@@ -240,7 +259,83 @@ async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
     if not _is_admin(call.from_user.id):
         await call.answer("⛔ Тільки адмін", show_alert=True)
         return
-    key = call.data.split(":", 1)[1]
+        
+    data = call.data
+    
+    # 1. Головне вікно налаштувань
+    if data == "gset:main":
+        await state.clear()
+        current_settings = {
+            "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+            "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+            "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+            "require_sessions": runtime_config.get("require_sessions", "true"),
+        }
+        text = (
+            "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+            "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+            "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+        )
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=global_settings_kb(current_settings))
+        await call.answer()
+        return
+
+    # 2. Тумблер вимоги сесій
+    if data == "gset:toggle:require_sessions":
+        current = runtime_config.get("require_sessions", "true") == "true"
+        new_val = "false" if current else "true"
+        await runtime_config.set("require_sessions", new_val)
+        await call.answer(f"Статус змінено на: {'Валідувати' if new_val == 'true' else 'Ігнорувати'}")
+        
+        # Ререндер головного вікна
+        current_settings = {
+            "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+            "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+            "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+            "require_sessions": new_val,
+        }
+        text = (
+            "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+            "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+            "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+        )
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=global_settings_kb(current_settings))
+        return
+
+    # 3. Клік по редагуванню полів
+    if data.startswith("gset:edit:"):
+        field = data.split(":")[-1]
+        config_keys = {
+            "min_spread": "min_spread_pct",
+            "safety_buffer": "safety_buffer_pct",
+            "max_alerts": "max_alerts_per_cycle"
+        }
+        config_key = config_keys.get(field)
+        if not config_key:
+            await call.answer("❌ Невідомий параметр", show_alert=True)
+            return
+            
+        await state.update_data(setting_key=config_key)
+        await state.set_state(GlobalSettingStates.waiting_value)
+        
+        val = runtime_config.get(config_key, getattr(settings, config_key, "—"))
+        labels = {
+            "min_spread": "Мінімальний спред (%)",
+            "safety_buffer": "Буфер безпеки (%)",
+            "max_alerts": "Макс. алертів за цикл"
+        }
+        desc = labels.get(field, field)
+        hint = "<i>Введіть число (наприклад, 0.5 або 5)</i>"
+        text = f"✏️ <b>{desc}</b>\n<code>{config_key}</code>\n\nПоточне: <b>{val}</b>\n\n{hint}"
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=back_to_settings_kb())
+        await call.answer()
+        return
+
+    # 4. Fallback для решти параметрів (якщо раптом прийшов legacy gset:...)
+    key = data.split(":", 1)[1]
     if key not in SETTING_DESCRIPTIONS:
         await call.answer("❌ Невідомий параметр", show_alert=True)
         return
@@ -277,15 +372,15 @@ async def on_gset_value_input(message: Message, state: FSMContext) -> None:
     formatted_value = raw_value
 
     try:
-        if key in ("velocity_spike_per_hour", "review_ttl_hours"):
-            formatted_value = str(round(float(raw_value), 1))
+        if key in ("velocity_spike_per_hour", "review_ttl_hours", "min_spread_pct", "safety_buffer_pct"):
+            formatted_value = str(round(float(raw_value), 2))
         elif key in ("behavior_alert_score", "sticky_min_chain", "max_alerts_per_cycle"):
             formatted_value = str(int(float(raw_value)))
         elif key == "risk_mode":
             formatted_value = raw_value.upper()
             if formatted_value not in ("STRICT", "WARNING", "RELAXED"):
                 raise ValueError("Допустимі тільки STRICT, WARNING, RELAXED")
-        elif key not in SETTING_DESCRIPTIONS:
+        elif key not in SETTING_DESCRIPTIONS and key not in ("min_spread_pct", "safety_buffer_pct"):
             raise ValueError(f"Параметр {key!r} не є глобальним налаштуванням")
     except ValueError as e:
         return await message.answer(
@@ -984,14 +1079,23 @@ async def on_sessions_button(call: CallbackQuery) -> None:
     import time as _time
     sessions = await _db.get_all_auth_sessions()
 
-    if not sessions:
-        with suppress(TelegramBadRequest):
-            await call.message.edit_text("📭 Жодних auth-сесій не знайдено.", reply_markup=keyboards.back_to_sessions_kb())
-        return await call.answer()
+    # Завантажуємо стан require_sessions з runtime_config
+    require_sessions = runtime_config.get("require_sessions", "true") == "true"
 
-    lines = ["🩺 <b>Auth-сесії:</b>\n"]
-    for s in sessions:
-        exchange = s.get("exchange", "?")
+    lines = [
+        "🩺 <b>Моніторинг Auth-сесій</b>\n",
+        f"Статус авто-перевірки: <b>{'АКТИВНИЙ 🟢' if require_sessions else 'ВИМКНЕНИЙ 🔴'}</b>\n",
+    ]
+
+    # Мапимо існуючі сесії для виведення
+    session_map = {s.get("exchange"): s for s in sessions if s.get("exchange")}
+
+    for exchange in ["Binance", "Bybit", "OKX"]:
+        s = session_map.get(exchange)
+        if not s:
+            lines.append(f"❌ <b>{exchange}</b>: Відсутня сесія")
+            continue
+
         updated_at = float(s.get("updated_at", 0))
         is_active = s.get("is_active", 0)
         age_h = (_time.time() - updated_at) / 3600 if updated_at else 0
@@ -999,7 +1103,7 @@ async def on_sessions_button(call: CallbackQuery) -> None:
         remaining_h = ttl_h - age_h
 
         if not is_active:
-            status = "❌ Протухла"
+            status = "❌ Недійсна (протухла)"
         elif remaining_h < 2:
             status = f"⚠️ Спливає ({remaining_h:.1f}г)"
         else:
@@ -1007,12 +1111,132 @@ async def on_sessions_button(call: CallbackQuery) -> None:
 
         lines.append(
             f"{'🟢' if is_active else '🔴'} <b>{exchange}</b>: {status}\n"
-            f"  Вік: {age_h:.1f}г / TTL: {ttl_h:.0f}г"
+            f"  Оновлено: {age_h:.1f}г тому / TTL: {ttl_h:.0f}г"
         )
 
+    lines.append("\n<i>Оберіть дію нижче для авторизації або керування:</i>")
+
+    builder = InlineKeyboardBuilder()
+    
+    # Кнопка перемикання авто-перевірки
+    toggle_text = "🛡️ Авто-перевірка: АКТИВНА 🟢" if require_sessions else "🛡️ Авто-перевірка: ПАУЗА 🔴"
+    builder.row(InlineKeyboardButton(text=toggle_text, callback_data="session:toggle_require"))
+    
+    # Кнопки входу та Bookmarklet для кожної біржі
+    builder.row(
+        InlineKeyboardButton(text="🖥 Binance (ПК)", callback_data="session:login:Binance"),
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Binance"),
+        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:Binance")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🖥 Bybit (ПК)", callback_data="session:login:Bybit"),
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Bybit"),
+        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:Bybit")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🖥 OKX (ПК)", callback_data="session:login:OKX"),
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:OKX"),
+        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:OKX")
+    )
+    
+    # Кнопки повернення
+    builder.row(
+        InlineKeyboardButton(text="🔙 До бірж", callback_data="menu:exchanges"),
+        InlineKeyboardButton(text="🏠 Меню", callback_data="menu:main")
+    )
+
     with suppress(TelegramBadRequest):
-        await call.message.edit_text("\n".join(lines), reply_markup=keyboards.back_to_sessions_kb())
+        await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
     await call.answer()
+
+
+@router.callback_query(F.data == "session:toggle_require")
+async def on_session_toggle_require(call: CallbackQuery) -> None:
+    current = runtime_config.get("require_sessions", "true") == "true"
+    new_val = "false" if current else "true"
+    await runtime_config.set("require_sessions", new_val)
+    
+    status_msg = "увімкнено" if new_val == "true" else "вимкнено"
+    await call.answer(f"⚙️ Авто-перевірку сесій {status_msg}!", show_alert=True)
+    
+    # Оновлюємо відображення меню сесій
+    return await on_sessions_button(call)
+
+
+@router.callback_query(F.data.startswith("session:login:"))
+async def on_session_login_visible(call: CallbackQuery) -> None:
+    exchange = call.data.split(":")[-1]
+    
+    if not _session_manager:
+        await call.answer("❌ SessionManager не підключено!", show_alert=True)
+        return
+        
+    await call.answer(f"🖥 Запуск браузера для {exchange}...", show_alert=False)
+    
+    await call.message.answer(
+        f"🖥 <b>Запущено видиме вікно браузера для {exchange}!</b>\n\n"
+        f"1️⃣ На твоєму ПК (де запущено бот) відкриється вікно Chromium.\n"
+        f"2️⃣ Авторизуйся у своєму акаунті біржі {exchange} (якщо не залогінений).\n"
+        f"3️⃣ Перейди на сторінку P2P або сторінку мерчанта.\n"
+        f"4️⃣ Бот перехопить сесію автоматично, після чого вікно закриється.\n\n"
+        f"<i>⚠️ Якщо бот запущено на VPS (сервері), ця дія видасть помилку (немає дисплею). "
+        f"В такому випадку використовуй <b>📲 Скрипт-закладку</b> для телефонів/ПК.</i>"
+    )
+    
+    try:
+        await _session_manager.trigger_headed_capture(exchange)
+    except Exception as e:
+        logger.error(f"Failed to trigger headed capture for {exchange}: {e}")
+        await call.message.answer(f"❌ <b>Помилка запуску:</b> {str(e)}")
+
+
+@router.callback_query(F.data.startswith("session:qr:"))
+async def on_session_qr_login(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[-1]
+    if not _session_manager:
+        await call.answer("❌ SessionManager не підключено!", show_alert=True)
+        return
+        
+    await call.answer(f"🔑 Запуск QR-входу для {exchange}...")
+    await _session_manager.trigger_qr_capture(exchange, call.from_user.id, call.message, state)
+
+
+@router.callback_query(F.data.startswith("session:qr_cancel:"))
+async def on_session_qr_cancel(call: CallbackQuery) -> None:
+    exchange = call.data.split(":")[-1]
+    if not _session_manager:
+        await call.answer("❌ SessionManager не підключено!", show_alert=True)
+        return
+        
+    await _session_manager.cancel_qr_session(exchange, call.from_user.id)
+    await call.answer("❌ QR-вхід скасовано.")
+
+
+@router.message(QRStates.waiting_for_code)
+async def on_qr_code_received(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    session_key = data.get("session_key")
+    exchange = data.get("exchange")
+    
+    code = message.text.strip()
+    if not code.isdigit() or len(code) < 4 or len(code) > 8:
+        await message.answer("❌ Некоректний формат коду. Будь ласка, введіть цифровий 2FA-код (зазвичай 6 цифр):")
+        return
+        
+    if _session_manager:
+        session = _session_manager._active_qr_sessions.get(session_key)
+        if session and "code_queue" in session:
+            await session["code_queue"].put(code)
+            # Не викликаємо state.clear() відразу, щоб у користувача була можливість
+            # ввести код знову у разі помилки/тайпу, оскільки очищення відбудеться у run_flow() -> finally.
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+            
+    await state.clear()
+    await message.answer("❌ Активну сесію QR-входу не знайдено або термін її дії закінчився.")
 
 
 @router.callback_query(F.data == "keys:connect")

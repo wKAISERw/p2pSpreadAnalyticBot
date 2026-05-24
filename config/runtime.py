@@ -20,6 +20,9 @@ ALLOWED_KEYS = frozenset({
     "max_alerts_per_cycle",
     "is_scanner_active",
     "disabled_exchanges",
+    "require_sessions",
+    "min_spread_pct",
+    "safety_buffer_pct",
 })
 
 

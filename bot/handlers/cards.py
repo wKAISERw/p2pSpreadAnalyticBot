@@ -439,6 +439,21 @@ async def cb_card_delete(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("card:update_bal:"))
 async def cb_card_update_bal_start(call: CallbackQuery, state: FSMContext) -> None:
     card_id = call.data.split(":")[2]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    
+    if card and card.get("bank_name", "").lower() == "monobank" and card.get("mono_account_id") and card.get("mono_x_token_encrypted"):
+        await call.answer("🔄 Запит до серверів Monobank API...")
+        new_balance = await _db.force_refresh_mono_balance(card_id)
+        if new_balance is not None:
+            await call.answer(f"✅ Баланс успішно оновлено через API: {new_balance:,.2f} ₴", show_alert=True)
+            # Rerender card details
+            call.data = f"card:view:{card_id}"
+            await cb_card_view(call)
+            return
+        else:
+            await call.answer("⚠️ Не вдалося оновити через API. Переходимо до ручного введення.", show_alert=True)
+
     await state.update_data(card_id=card_id)
     await call.message.edit_text(
         "Введіть точний актуальний баланс картки (грн):\n\n"
@@ -447,7 +462,6 @@ async def cb_card_update_bal_start(call: CallbackQuery, state: FSMContext) -> No
             inline_keyboard=[[InlineKeyboardButton(text="🔙 Скасувати", callback_data=f"card:view:{card_id}")]])
     )
     await state.set_state(CardUpdateStates.waiting_true_balance)
-    await call.answer()
 
 
 @router.message(CardUpdateStates.waiting_true_balance)
@@ -1062,75 +1076,6 @@ async def cb_card_force_refresh_api(call: CallbackQuery, state: FSMContext):
     except Exception as e:
         logging.getLogger("Commands").error(f"Помилка кнопки оновлення балансу: {e}")
         await call.answer("🔥 Внутрішня помилка хендлера", show_alert=True)
-
-        # Шукаємо або додаємо обробник головного екрану налаштувань у commands.py:
-        @router.callback_query(F.data == "gset:main")
-        async def cb_global_settings_main(call: CallbackQuery):
-            """
-            Рендерить головне вікно налаштувань (як на скріншоті).
-            Підтягує актуальний стан конфігу та викликає оновлену клавіатуру.
-            """
-            from config.runtime import runtime_config
-            from bot.keyboards import global_settings_kb
-
-            # Збираємо поточний зріз конфігурації для рендерингу бейджів на кнопках
-            current_settings = {
-                "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
-                "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
-                "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
-                "require_sessions": runtime_config.get("require_sessions", "true"),
-            }
-
-            text = (
-                "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
-                "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
-                "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
-            )
-
-            # Викликаємо клавіатуру з keyboards.py, куди ми вже додали нову кнопку
-            await call.message.edit_text(
-                text=text,
-                reply_markup=global_settings_kb(current_settings)
-            )
-
-        @router.callback_query(F.data.startswith("card:update_bal:"))
-        async def cb_card_update_balance_mexc(call: CallbackQuery):
-            """
-            Обробник кнопки '🔄 Актуалізувати баланс' з меню деталей картки.
-            Стукає в direct API Монобанку, оновлює SQLite та робить ререндер картки.
-            """
-            try:
-                card_id = call.data.split(":")[-1]
-
-                # 1. Повідомляємо юзера про початок сесії
-                await call.answer("🔄 Запит до серверів Monobank API...")
-
-                # 2. Викликаємо наш прямий метод полінгу з MerchantDB
-                # Об'єкт бази даних у твоїх командах зазвичай доступний як _db або self._db
-                new_balance = await _db.force_refresh_mono_balance(card_id)
-
-                if new_balance is not None:
-                    await call.answer(f"✅ Баланс успішно оновлено: {new_balance:,.2f} ₴", show_alert=True)
-
-                    # 3. 🚀 Автоматичний РЕРЕНДЕР: імітуємо повторний клік на перегляд картки,
-                    # щоб юзер одразу побачив нову цифру балансу в ТГ без закриття меню.
-                    call.data = f"card:view:{card_id}"
-                    try:
-                        # Викликаємо твій існуючий хендлер детального перегляду картки
-                        await cb_card_view(call)
-                    except NameError:
-                        # Якщо назва хендлера відрізняється, бот просто оновить сповіщення
-                        pass
-                else:
-                    await call.answer(
-                        "❌ Не вдалося оновити через API.\n\n"
-                        "Перевірте, чи це картка Monobank та чи підключено дійсний X-Token.",
-                        show_alert=True
-                    )
-
-            except Exception as e:
-                logging.getLogger("Commands").error(f"Помилка мануального оновлення балансу: {e}")
-                await call.answer("🔥 Внутрішня помилка обробника балансу", show_alert=True)
 
 
 from bot.keyboards import card_display_settings_kb  # Імпортуємо твою нову клавіатуру
