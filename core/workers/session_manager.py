@@ -15,21 +15,23 @@ from core.storage.merchant_db import MerchantDB
 logger = logging.getLogger("SessionManager")
 
 # Таргети для перехоплення з індивідуальними таймерами "протухання"
+# ttl = через скільки секунд ПІСЛЯ оновлення запускати Playwright-перехоплення.
+# Значення мають бути МЕНШЕ SESSION_TTL але достатньо великі, щоб не спамити.
 TARGETS = {
     "Bybit": {
         "url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
         "api_pattern": "appraiseList",
-        "ttl": 3600  # 1 година
+        "ttl": 48 * 3600   # 48 годин — перехоплення лише якщо сесія стара >48г
     },
     "Binance": {
         "url": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=s95b25fd3a5113bb0a054393e4289a471",
         "api_pattern": "review/list-by-page",
-        "ttl": 14400  # 4 години (було 15 хв). Тепер ми покладаємось на AuthError!
+        "ttl": 72 * 3600  # 72 години — JWT живе 5 днів, оновлюємо за 2 дні до кінця
     },
     "OKX": {
         "url": "https://www.okx.com/ru/p2p/ads-merchant?publicUserId=0e37a42aca",
         "api_pattern": "review/history",
-        "ttl": 3600  # Поки заглушка
+        "ttl": 72 * 3600  # 72 години — JWT живе 14 днів, Playwright тільки якщо справді треба
     }
 }
 
@@ -116,7 +118,20 @@ class SessionManager:
                         _, _, updated_at = await self._db.get_auth_session(exchange)
 
                         if updated_at > 0 and now - updated_at > target["ttl"]:
-                            logger.info(f"🔄 SessionManager: Оновлення сесії {exchange} у фоні...")
+                            # Спочатку пробуємо легкий API-піng без браузера
+                            refreshed = await self._try_lightweight_refresh(exchange)
+                            if refreshed:
+                                logger.info(
+                                    "🔄 SessionManager: Сесія %s продовжена API-пінгом (без браузера)",
+                                    exchange
+                                )
+                                continue
+
+                            # Піng не вдався — сесія справді протухла, запускаємо Playwright
+                            logger.info(
+                                "🔄 SessionManager: Оновлення сесії %s через Playwright...",
+                                exchange
+                            )
                             await self._capture_session(exchange, target)
                             # Робимо паузу 5 секунд між біржами
                             await asyncio.sleep(5)
@@ -363,6 +378,124 @@ class SessionManager:
                     invalid_exchanges.append(ex)
                     
         return invalid_exchanges
+
+    async def _try_lightweight_refresh(self, exchange: str, user_id: int = 0) -> bool:
+        """
+        Легка перевірка сесії без Playwright — просто API-піng.
+        Якщо сесія жива, оновлює updated_at у БД.
+        Повертає True якщо сесія валідна і updated_at оновлено.
+        """
+        if exchange == "OKX":
+            return await self._try_okx_refresh(user_id)
+        elif exchange == "Bybit":
+            return await self._try_bybit_refresh(user_id)
+        elif exchange == "Binance":
+            return await self._try_binance_refresh(user_id)
+        return False
+
+    async def _try_okx_refresh(self, user_id: int = 0) -> bool:
+        """
+        OKX auto-refresh: POST /v3/c2c/review/history з браузерними cookies.
+        JWT токен живе ~14 днів — просто перевіряємо що він ще валідний.
+        """
+        try:
+            import time as time_mod
+            from curl_cffi.requests import AsyncSession as CurlSession
+
+            headers_dict, cookies_dict, _ = await self._db.get_auth_session("OKX", user_id)
+            if not headers_dict or not cookies_dict:
+                return False
+
+            auth = headers_dict.get("authorization", "")
+            if not auth:
+                return False
+
+            req_headers = {
+                "accept": "application/json",
+                "content-type": "application/json",
+                "app-type": "web",
+                "x-locale": "ru_RU",
+                "authorization": auth,
+            }
+            for k in ("devid", "x-id-group", "x-site-info", "user-agent"):
+                v = headers_dict.get(k)
+                if v:
+                    req_headers[k] = v
+
+            ts = int(time_mod.time() * 1000)
+            url = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
+            payload = {
+                "currentPage": 1, "hasComment": False, "pageSize": 1,
+                "reviewFromBuyer": True, "reviewScoreType": "",
+                "pubUserId": "0e37a42aca",  # тестовий публічний мерчант
+            }
+
+            async with CurlSession(impersonate="chrome124") as session:
+                resp = await session.post(url, json=payload,
+                                         headers=req_headers, cookies=cookies_dict,
+                                         timeout=8)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == 0:
+                    # Сесія жива — оновлюємо updated_at
+                    await self._db.save_auth_session("OKX", headers_dict, cookies_dict, user_id)
+                    logger.info("🔄 OKX сесія авто-оновлена через API ping (без браузера)")
+                    return True
+
+            logger.debug("OKX refresh ping: code=%s status=%d",
+                        resp.json().get("code") if resp.status_code == 200 else "?",
+                        resp.status_code)
+            return False
+
+        except Exception as e:
+            logger.debug("OKX auto-refresh failed: %s", e)
+            return False
+
+    async def _try_binance_refresh(self, user_id: int = 0) -> bool:
+        """
+        Binance auto-refresh: легкий GET запит до публічного ендпоінту з сесійними cookies.
+        Перевіряємо що cookies ще валідні (HTTP 200 + не редірект на логін).
+        """
+        try:
+            from curl_cffi.requests import AsyncSession as CurlSession
+
+            headers_dict, cookies_dict, _ = await self._db.get_auth_session("Binance", user_id)
+            if not headers_dict or not cookies_dict:
+                return False
+
+            # Перевіряємо через публічний endpoint — якщо cookies протухли, отримаємо redirect
+            req_headers = {
+                "accept": "application/json",
+                "user-agent": headers_dict.get("user-agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"),
+                "referer": "https://c2c.binance.com/",
+            }
+            # Копіюємо Csrftoken та інші важливі заголовки
+            for k in ("csrftoken", "bnc-uuid", "fvideo-id", "fvideo-token"):
+                v = headers_dict.get(k) or headers_dict.get(k.upper())
+                if v:
+                    req_headers[k] = v
+
+            url = "https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/user/get-profile"
+            async with CurlSession(impersonate="chrome124") as session:
+                resp = await session.get(url, headers=req_headers,
+                                         cookies=cookies_dict, timeout=8)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                # Binance повертає {"code": "000000"} якщо авторизований
+                if data.get("code") == "000000":
+                    await self._db.save_auth_session("Binance", headers_dict, cookies_dict, user_id)
+                    logger.info("🔄 Binance сесія авто-оновлена через API ping (без браузера)")
+                    return True
+
+            logger.debug("Binance refresh ping: status=%d", resp.status_code)
+            return False
+
+        except Exception as e:
+            logger.debug("Binance auto-refresh failed: %s", e)
+            return False
 
     async def _try_bybit_refresh(self, user_id: int = 0) -> bool:
         """

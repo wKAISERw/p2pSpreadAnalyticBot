@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # ── Risk Engine та Безпека ──────────────────────────────────────────────
     risk_mode: str = "WARNING"
     dry_run_mode: bool = False  # Блокує реальні POST/PUT запити на біржі
+    public_url: Optional[str] = None
 
     # ── Логування ─────────────────────────────────────────────────────────
     log_level: str = "INFO"

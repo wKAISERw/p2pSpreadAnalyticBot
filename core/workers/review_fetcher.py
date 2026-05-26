@@ -157,10 +157,10 @@ class ReviewFetcher:
         if okx is not None: self._okx = okx
         if mexc is not None: self._mexc = mexc # 🚀 ДОДАНО
         logger.info(
-            "ReviewFetcher clients bound: Binance=%s(session) Bybit=%s(session) OKX=%s(api) MEXC=%s(public)",
+            "ReviewFetcher clients bound: Binance=%s(session) Bybit=%s(session) OKX=%s(session) MEXC=%s(public)",
             "✅" if self._binance else "❌",
             "✅" if self._bybit else "❌",
-            "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
+            "✅" if self._okx else "❌",
             "✅" if self._mexc else "❌",
         )
 
@@ -172,13 +172,14 @@ class ReviewFetcher:
             self._worker_loop(), name="review-fetcher"
         )
         logger.info(
-            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | auth: B=%s By=%s OKX=%s",
+            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | clients: B=%s By=%s OKX=%s MEXC=%s",
             self._review_ttl,
             self._urgent_queue.maxsize,
             self._queue.maxsize,
-            "✅" if self._binance and getattr(self._binance, "is_authenticated", False) else "❌",
-            "✅" if self._bybit and getattr(self._bybit, "is_authenticated", False) else "❌",
-            "✅" if self._okx and getattr(self._okx, "is_authenticated", False) else "❌",
+            "✅" if self._binance else "❌",
+            "✅" if self._bybit else "❌",
+            "✅" if self._okx else "❌",
+            "✅" if self._mexc else "❌",
         )
 
     async def stop(self) -> None:
@@ -248,10 +249,9 @@ class ReviewFetcher:
                     "status": "NO_AUTH", "error_reason": "MEXC client is not initialized"
                 }
 
-        elif exchange in ("Bybit", "Binance"):
-            # Bybit/Binance: профіль API мертвий (404).
-            # Тексти відгуків → тільки через перехоплену браузерну сесію.
-            # Клієнт потрібен для HTTP запитів, але API-ключі не обов'язкові.
+        elif exchange in ("Bybit", "Binance", "OKX"):
+            # Bybit/Binance/OKX: всі три потребують браузерну сесію.
+            # OKX використовує POST /v3/c2c/review/history (аналогічно Bybit/Binance).
             if not client:
                 return {
                     "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
@@ -260,7 +260,6 @@ class ReviewFetcher:
             session_h, _, _ = await self._db.get_auth_session(exchange)
             if not session_h:
                 logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
-                # Зберігаємо NO_SESSION щоб needs_review_fetch перевіряв кожні 10 хв
                 try:
                     await self._db.save_reviews(
                         exchange, merchant_id, 0, 0, 0, [],
@@ -275,13 +274,8 @@ class ReviewFetcher:
                 }
 
         else:
-            # OKX: класична API-автентифікація
-            if not client or not getattr(client, "is_authenticated", False):
-                logger.debug("fetch_now: %s [%s] — клієнт не автентифікований, skip", exchange, merchant_id[:12])
-                return {
-                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                    "status": "NO_AUTH", "error_reason": f"{exchange} API client is not authenticated"
-                }
+            # Невідома біржа з клієнтом — без перевірки
+            pass
 
         try:
             if exchange == "Binance":
@@ -295,9 +289,9 @@ class ReviewFetcher:
             else:
                 return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
 
-            # Bybit/Binance: без сесії → NO_SESSION (не OK!) щоб needs_review_fetch
+            # Bybit/Binance/OKX: без сесії → NO_SESSION щоб needs_review_fetch
             # повернув True через 10 хв — як тільки сесія з'явиться, всі перефетчаться
-            if exchange in ("Bybit", "Binance"):
+            if exchange in ("Bybit", "Binance", "OKX"):
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 save_status = "OK" if session_h else "NO_SESSION"
             else:
@@ -305,8 +299,11 @@ class ReviewFetcher:
 
             save_reason = ""
             if save_status == "OK" and (pos + neg + neutral) == 0 and not bad_texts:
-                save_status = "NO_FEEDBACK"
-                save_reason = f"{exchange} API returned 0 feedback entries"
+                if exchange in ("Binance", "Bybit"):
+                    pass  # For Binance/Bybit, 0 negative reviews is a normal successful result, NOT "no feedback"
+                else:
+                    save_status = "NO_FEEDBACK"
+                    save_reason = f"{exchange} API returned 0 feedback entries"
 
             await self._db.save_reviews(
                 exchange, merchant_id, pos, neg, neutral, bad_texts,
@@ -403,10 +400,10 @@ class ReviewFetcher:
                     )
                     return
 
-            elif exchange in ("Bybit", "Binance"):
-                # Bybit/Binance: профіль API мертвий (404).
-                # Тексти відгуків → тільки через браузерну сесію.
-                _client_map = {"Bybit": self._bybit, "Binance": self._binance}
+            elif exchange in ("Bybit", "Binance", "OKX"):
+                # Bybit/Binance/OKX: всі потребують браузерну сесію.
+                # OKX використовує POST /v3/c2c/review/history з reviewScoreType="negative".
+                _client_map = {"Bybit": self._bybit, "Binance": self._binance, "OKX": self._okx}
                 client = _client_map.get(exchange)
                 if not client:
                     logger.debug("_fetch_and_save: %s [%s] — клієнт відсутній", exchange, merchant_id[:12])
@@ -425,16 +422,8 @@ class ReviewFetcher:
                     return
 
             else:
-                # OKX: класична API-автентифікація
-                _client_map = {"OKX": self._okx}
-                client = _client_map.get(exchange)
-                if not client or not getattr(client, "is_authenticated", False):
-                    logger.debug("_fetch_and_save: %s [%s] — no auth, skip", exchange, merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_AUTH", error_reason=f"{exchange} API client is not authenticated"
-                    )
-                    return
+                # Невідома біржа — пропускаємо
+                pass
 
             if exchange == "Binance":
                 pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
@@ -453,8 +442,8 @@ class ReviewFetcher:
 
             self._known_merchants.add((exchange, merchant_id))
 
-            # Bybit/Binance: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
-            if exchange in ("Bybit", "Binance"):
+            # Bybit/Binance/OKX: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
+            if exchange in ("Bybit", "Binance", "OKX"):
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 save_status = "OK" if session_h else "NO_SESSION"
             else:
@@ -462,8 +451,11 @@ class ReviewFetcher:
 
             save_reason = ""
             if save_status == "OK" and total == 0 and not bad_texts:
-                save_status = "NO_FEEDBACK"
-                save_reason = f"{exchange} API returned 0 feedback entries"
+                if exchange in ("Binance", "Bybit"):
+                    pass  # For Binance/Bybit, 0 negative reviews is a normal successful result, NOT "no feedback"
+                else:
+                    save_status = "NO_FEEDBACK"
+                    save_reason = f"{exchange} API returned 0 feedback entries"
 
             await self._db.save_reviews(
                 exchange, merchant_id, pos, neg, neutral, bad_texts,
@@ -559,7 +551,7 @@ class ReviewFetcher:
 
         bad_texts: list[dict] = []
         for item in raw_neg:
-            content = str(item.get("content") or item.get("message") or "").strip()
+            content = str(item.get("comments") or item.get("content") or item.get("message") or "").strip()
             if content:
                 enriched = _enrich_bad_text(content)
                 enriched["keyword_flagged"] = _has_bad_keywords(content)
@@ -625,76 +617,227 @@ class ReviewFetcher:
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
-        OKX: два окремих виклики — type=1 (positive) і type=2 (negative).
-        v2.1: додана пагінація щоб обійти ліміт в 20 відгуків за запит.
-        Без пагінації neg_pct рахувався відносно max(20+20=40) відгуків,
-        що давало хибно завищений % для мерчантів з сотнями угод.
+        OKX v3: браузерна сесія + POST /v3/c2c/review/history.
+
+        Раніше використовувався /api/v5/c2c/order/user-feedback з API-ключами,
+        але цей ендпоінт повертає 404 для P2P відгуків (доступний лише через браузер).
+
+        Новий підхід (перехоплено через Playwright):
+          - Endpoint: POST https://www.okx.com/v3/c2c/review/history
+          - Payload: {currentPage, hasComment, pageSize, reviewFromBuyer,
+                      reviewScoreType: "" | "negative" | "positive", pubUserId}
+          - Auth: authorization JWT + cookies з браузерної сесії
         """
-        client = self._okx
-        if not client or not getattr(client, "is_authenticated", False):
-            return 0, 0, 0, []
+        import time
+        from curl_cffi.requests import AsyncSession as CurlSession
+
+        headers_dict, cookies_dict, _ = await self._db.get_auth_session("OKX")
+        if not headers_dict:
+            raise RuntimeError("AuthError: OKX browser session not captured")
+
+        # Беремо лише потрібні заголовки з перехопленої сесії
+        req_headers: dict[str, str] = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "app-type": "web",
+            "x-locale": "ru_RU",
+        }
+        for key in ("authorization", "devid", "x-id-group", "x-site-info",
+                    "user-agent", "x-client-signature", "x-client-signature-version"):
+            val = headers_dict.get(key)
+            if val:
+                req_headers[key] = val
+
+        if "authorization" not in req_headers:
+            raise RuntimeError("AuthError: OKX authorization header missing in session")
 
         try:
-            # type=1 → позитивні, type=2 → негативні; пагінація до 3 сторінок
-            pos_raw = await self._fetch_okx_paginated(client, merchant_id, feedback_type=1, max_pages=3)
-            neg_raw = await self._fetch_okx_paginated(client, merchant_id, feedback_type=2, max_pages=3)
+            async with CurlSession(impersonate="chrome124") as session:
+                # 1) Загальна статистика: від покупців та від продавців
+                ts = int(time.time() * 1000)
+                url_all = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
+                
+                payload_buyer = {
+                    "currentPage": 1,
+                    "hasComment": False,
+                    "pageSize": 1,
+                    "reviewFromBuyer": True,
+                    "reviewScoreType": "",
+                    "pubUserId": merchant_id,
+                }
+                payload_seller = {
+                    "currentPage": 1,
+                    "hasComment": False,
+                    "pageSize": 1,
+                    "reviewFromBuyer": False,
+                    "reviewScoreType": "",
+                    "pubUserId": merchant_id,
+                }
+                
+                resp_buyer, resp_seller = await asyncio.gather(
+                    session.post(url_all, json=payload_buyer, headers=req_headers, cookies=cookies_dict, timeout=10),
+                    session.post(url_all, json=payload_seller, headers=req_headers, cookies=cookies_dict, timeout=10),
+                    return_exceptions=True
+                )
 
-            pos = len(pos_raw)
-            neg = len(neg_raw)
-            neutral = 0
+                if isinstance(resp_buyer, Exception):
+                    raise resp_buyer
+                if isinstance(resp_seller, Exception):
+                    raise resp_seller
 
-            bad_texts: list[dict] = []
-            for item in neg_raw:
-                content = str(item.get("content") or item.get("feedback") or "").strip()
-                if content:
-                    enriched = _enrich_bad_text(content)
-                    enriched["keyword_flagged"] = _has_bad_keywords(content)
-                    bad_texts.append(enriched)
+                if resp_buyer.status_code == 401 or resp_seller.status_code == 401:
+                    raise RuntimeError("AuthError: OKX session expired (HTTP 401)")
 
-            logger.debug("OKX [auth] %s: pos=%d neg=%d (paginated) | bad_texts=%d (keyword_flagged=%d)",
-                         merchant_id, pos, neg, len(bad_texts),
-                         sum(1 for t in bad_texts if t.get("keyword_flagged")))
-            return pos, neg, neutral, bad_texts
+                pos_buyer, neg_buyer = 0, 0
+                pos_seller, neg_seller = 0, 0
 
+                if resp_buyer.status_code == 200:
+                    data_buyer = resp_buyer.json()
+                    if data_buyer.get("code") == 0:
+                        item_stats = data_buyer.get("data", {}).get("item", {})
+                        pos_buyer = int(item_stats.get("positiveCount") or 0)
+                        neg_buyer = int(item_stats.get("negativeCount") or 0)
+                    else:
+                        raise RuntimeError(f"API_ERROR: OKX buyer code={data_buyer.get('code')}, msg={data_buyer.get('msg', '')}")
+                else:
+                    raise RuntimeError(f"API_ERROR: OKX buyer history returned {resp_buyer.status_code}")
+
+                if resp_seller.status_code == 200:
+                    data_seller = resp_seller.json()
+                    if data_seller.get("code") == 0:
+                        item_stats = data_seller.get("data", {}).get("item", {})
+                        pos_seller = int(item_stats.get("positiveCount") or 0)
+                        neg_seller = int(item_stats.get("negativeCount") or 0)
+                    else:
+                        raise RuntimeError(f"API_ERROR: OKX seller code={data_seller.get('code')}, msg={data_seller.get('msg', '')}")
+                else:
+                    raise RuntimeError(f"API_ERROR: OKX seller history returned {resp_seller.status_code}")
+
+                pos = pos_buyer + pos_seller
+                neg = neg_buyer + neg_seller
+
+                # 2) Тексти негативних відгуків (reviewScoreType="negative")
+                bad_texts: list[dict] = []
+                
+                # Завантаження негативних відгуків покупців
+                if neg_buyer > 0:
+                    neg_buyer_items = await self._fetch_okx_review_pages(
+                        session, merchant_id, req_headers, cookies_dict,
+                        score_type="negative", from_buyer=True, max_pages=3
+                    )
+                    for rev in neg_buyer_items:
+                        comment_str = str(rev.get("comment") or "").strip()
+                        reply_dict = rev.get("reviewReply") or {}
+                        reply_str = str(reply_dict.get("comment") or "").strip() if isinstance(reply_dict, dict) else ""
+                        
+                        parts = []
+                        if comment_str:
+                            parts.append(comment_str)
+                        else:
+                            parts.append("Покупець не залишив коментаря")
+                            
+                        if reply_str:
+                            parts.append(f"Відповідь мейкера: {reply_str}")
+                            
+                        content = " | ".join(parts)
+                        if comment_str or reply_str:
+                            enriched = _enrich_bad_text(content)
+                            enriched["keyword_flagged"] = _has_bad_keywords(content)
+                            bad_texts.append(enriched)
+
+                # Завантаження негативних відгуків продавців
+                if neg_seller > 0:
+                    neg_seller_items = await self._fetch_okx_review_pages(
+                        session, merchant_id, req_headers, cookies_dict,
+                        score_type="negative", from_buyer=False, max_pages=3
+                    )
+                    for rev in neg_seller_items:
+                        comment_str = str(rev.get("comment") or "").strip()
+                        reply_dict = rev.get("reviewReply") or {}
+                        reply_str = str(reply_dict.get("comment") or "").strip() if isinstance(reply_dict, dict) else ""
+                        
+                        parts = []
+                        if comment_str:
+                            parts.append(comment_str)
+                        else:
+                            parts.append("Продавець не залишив коментаря")
+                            
+                        if reply_str:
+                            parts.append(f"Відповідь мейкера: {reply_str}")
+                            
+                        content = " | ".join(parts)
+                        if comment_str or reply_str:
+                            enriched = _enrich_bad_text(content)
+                            enriched["keyword_flagged"] = _has_bad_keywords(content)
+                            bad_texts.append(enriched)
+
+                logger.debug(
+                    "OKX [session] %s: pos=%d neg=%d | bad_texts=%d (keyword_flagged=%d)",
+                    merchant_id, pos, neg, len(bad_texts),
+                    sum(1 for t in bad_texts if t.get("keyword_flagged"))
+                )
+                return pos, neg, 0, bad_texts
+
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.debug("OKX fetch error %s: %s", merchant_id, e)
-            raise RuntimeError(f"API_ERROR: OKX feedback API failed: {e}")
+            raise RuntimeError(f"API_ERROR: OKX review history failed: {e}")
 
-    async def _fetch_okx_paginated(self, client, merchant_id: str, feedback_type: int, max_pages: int = 3) -> list[
-        dict]:
-        """Завантажує OKX відгуки з пагінацією (cursor-based)."""
+    async def _fetch_okx_review_pages(
+        self,
+        session,
+        merchant_id: str,
+        req_headers: dict,
+        cookies_dict: dict,
+        score_type: str,
+        from_buyer: bool,
+        max_pages: int = 3,
+        page_size: int = 10,
+    ) -> list[dict]:
+        """
+        Завантажує відгуки OKX з пагінацією через POST /v3/c2c/review/history.
+        score_type: "" (всі) | "positive" | "negative"
+        """
+        import time
         all_items: list[dict] = []
-        cursor = ""
-        for _ in range(max_pages):
+        for page in range(1, max_pages + 1):
+            ts = int(time.time() * 1000)
+            url = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
+            payload = {
+                "currentPage": page,
+                "hasComment": False,
+                "pageSize": page_size,
+                "reviewFromBuyer": from_buyer,
+                "reviewScoreType": score_type,
+                "pubUserId": merchant_id,
+            }
             try:
-                cursor_param = f"&cursor={cursor}" if cursor else ""
-                path = f"/api/v5/c2c/order/user-feedback?userId={merchant_id}&type={feedback_type}&limit=20{cursor_param}"
-                url = f"https://www.okx.com{path}"
-                headers = client._sign_headers("GET", path)
-                data = await client._get(url, headers=headers)
+                resp = await session.post(
+                    url, json=payload,
+                    headers=req_headers, cookies=cookies_dict, timeout=10
+                )
+                if resp.status_code == 401:
+                    raise RuntimeError("AuthError: OKX session expired (HTTP 401)")
+                if resp.status_code != 200:
+                    logger.debug("OKX review pages %s page=%d: status %d", merchant_id, page, resp.status_code)
+                    break
 
-                code = str(data.get("code", "0"))
-                if code not in ("0", ""):
-                    raise RuntimeError(f"OKX returned code={code}, msg={data.get('msg', '')}")
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.debug("OKX review pages %s: code=%s", merchant_id, data.get("code"))
+                    break
 
-                items = data.get("data", []) or []
+                items = data.get("data", {}).get("item", {}).get("reviewHistoryDetail", []) or []
                 all_items.extend(items)
 
-                # OKX повертає nextCursor якщо є ще сторінки
-                next_cursor = data.get("nextCursor", "")
-                if not next_cursor or len(items) < 20:
-                    break
-                cursor = next_cursor
+                if len(items) < page_size:
+                    break  # Остання сторінка
 
+            except RuntimeError:
+                raise
             except Exception as e:
-                # 🚀 ДОДАНО: Граціозно ковтаємо 404 помилку
-                if "Status 404" in str(e):
-                    logger.debug("OKX 404 Not Found для %s (ендпоінт змінено або юзера видалено).", merchant_id)
-                    break
-
-                if not all_items:
-                    raise RuntimeError(f"OKX pagination failed: {e}")
-                logger.debug("OKX pagination partial for %s type=%s: %s", merchant_id, feedback_type, e)
+                logger.debug("OKX review pages partial %s page=%d: %s", merchant_id, page, e)
                 break
 
         return all_items

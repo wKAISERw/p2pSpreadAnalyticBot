@@ -186,6 +186,15 @@ class UserRepo:
                 row = await cur.fetchone()
 
             if not row:
+                # 🚀 ДОДАНО ФОЛБЕК: Якщо для вказаного користувача немає активної сесії (наприклад, для фонових тасок з user_id=0),
+                # завантажуємо будь-яку останню активну сесію для цієї біржі
+                async with self._db.execute(
+                        "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE exchange=? AND is_active=1 ORDER BY updated_at DESC LIMIT 1",
+                        (exchange,),
+                ) as cur:
+                    row = await cur.fetchone()
+
+            if not row:
                 return {}, {}, 0.0
 
             headers = json.loads(row["headers_json"] or "{}")
@@ -201,10 +210,17 @@ class UserRepo:
         if not self._db:
             return False
         try:
-            await self._db.execute(
-                "UPDATE auth_sessions SET is_active=0 WHERE user_id=? AND exchange=?",
-                (user_id, exchange)
-            )
+            if user_id == 0:
+                # 🚀 ДОДАНО: Якщо анулюємо сесію глобально (user_id=0), анулюємо ВСІ активні сесії для цієї біржі
+                await self._db.execute(
+                    "UPDATE auth_sessions SET is_active=0 WHERE exchange=?",
+                    (exchange,)
+                )
+            else:
+                await self._db.execute(
+                    "UPDATE auth_sessions SET is_active=0 WHERE user_id=? AND exchange=?",
+                    (user_id, exchange)
+                )
             await self._db.commit()
             logger.warning("Auth session invalidated (burnt out) for %s (user_id=%d)", exchange, user_id)
             return True

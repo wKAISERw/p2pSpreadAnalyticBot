@@ -35,6 +35,12 @@ def _get_fernet():
             "Потрібен пакет cryptography: pip install cryptography"
         )
 
+    try:
+        import dotenv
+        dotenv.load_dotenv()
+    except ImportError:
+        pass
+
     key_str = os.environ.get("ENCRYPTION_KEY", "")
 
     if not key_str:
@@ -56,7 +62,9 @@ def _get_fernet():
         # Можливо ключ у старому форматі — конвертуємо
         padded = key_str + "=" * (4 - len(key_str) % 4)
         raw = base64.urlsafe_b64decode(padded)[:32]
-        _fernet = Fernet(base64.urlsafe_b64encode(raw.ljust(32, b"\x00")))
+        if len(raw) < 32:
+            raw = raw + b"\x00" * (32 - len(raw))
+        _fernet = Fernet(base64.urlsafe_b64encode(raw))
 
     return _fernet
 

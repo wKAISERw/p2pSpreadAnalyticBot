@@ -162,24 +162,23 @@ class BinanceClient(BaseHttpClient):
         if not session_headers or not session_cookies:
             if not self.is_authenticated:
                 return []
-            payload = {"advertiserNo": merchant_id, "type": 2, "page": 1, "rows": rows}
+            payload = {"userNo": merchant_id, "rating": 3, "page": 1, "rows": rows}
             endpoints = [
-                "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/feedback-list",
-                "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/user/feedback-list"
+                "https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page",
+                "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page"
             ]
         else:
-            payload = {"advertiserNo": merchant_id, "page": 1, "rows": rows, "reviewType": "NEGATIVE"}
-            # Для відгуків через сесію зараз працює v1
+            payload = {"userNo": merchant_id, "rating": 3, "page": 1, "rows": rows}
             endpoints = [
-                "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page",
-                "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/review/list-by-page"
+                "https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page",
+                "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page"
             ]
 
         last_exc = None
         for url in endpoints:
             try:
                 data = await self._post(url, json=payload, headers=req_headers if req_headers else None,
-                                        cookies=session_cookies)
+                                         cookies=session_cookies)
                 if isinstance(data, list):
                     return data
             except Exception as e:

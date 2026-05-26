@@ -631,17 +631,39 @@ async def process_mono_token(message: Message, state: FSMContext):
     await state.clear()
     await message.delete()  # hide token
 
+    webhook_registered = False
+    webhook_url = ""
+    if getattr(settings, "public_url", None):
+        webhook_url = f"{settings.public_url.rstrip('/')}/api/v1/webhooks/mono/card/{card_id}/{secret}"
+        try:
+            webhook_registered = await client.setup_webhook(webhook_url)
+            if webhook_registered:
+                logger.info(f"Successfully registered Monobank webhook for card {card_id}: {webhook_url}")
+            else:
+                logger.error(f"Monobank API refused webhook registration for card {card_id}")
+        except Exception as e:
+            logger.error(f"Failed to register Monobank webhook for card {card_id}: {e}")
+
     status_text = "✅ <b>Monobank успішно підключено!</b>\n"
     if mapped:
         status_text += "Картку знайдено в API та успішно прив'язано.\n\n"
     else:
         status_text += "⚠️ Увага: Картку з такими останніми цифрами не знайдено в цьому токені.\n\n"
 
-    await msg.edit_text(
-        status_text +
-        f"Встановіть цей Webhook URL у налаштуваннях Mono:\n"
-        f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/card/{card_id}/{secret}</code>\n"
-    )
+    if getattr(settings, "public_url", None):
+        if webhook_registered:
+            status_text += f"🔔 <b>Вебхуки підключено авто-запитом!</b>\nТранзакції оновлюватимуться миттєво.\nURL: <code>{webhook_url}</code>\n\n"
+        else:
+            status_text += f"⚠️ <b>Помилка реєстрації вебхуку в API Моно.</b>\nУвімкнено фоновий оновлювач (Fallback Sync Worker).\n\n"
+    else:
+        status_text += (
+            f"ℹ️ <code>PUBLIC_URL</code> не налаштований у <code>.env</code>.\n"
+            f"Оновлення балансу працюватиме автоматично у фоновому режимі (Fallback Sync Worker) кожні 90 секунд.\n\n"
+            f"Якщо бажаєте миттєві вебхуки, додайте <code>PUBLIC_URL</code> та зареєструйте URL:\n"
+            f"<code>https://&lt;your-domain&gt;/api/v1/webhooks/mono/card/{card_id}/{secret}</code>\n\n"
+        )
+
+    await msg.edit_text(status_text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

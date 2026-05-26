@@ -22,8 +22,11 @@ _THIS_FILE = Path(__file__).resolve()
 _TESTS_DIR = _THIS_FILE.parent
 _PROJECT_ROOT = _TESTS_DIR.parent
 
-if _TESTS_DIR.name in ("core", "tests"):
-    _PROJECT_ROOT = _TESTS_DIR.parent
+# Resolve project root by walking up until we find config or core
+for p in [_THIS_FILE] + list(_THIS_FILE.parents):
+    if (p / "core").exists() and (p / "config").exists():
+        _PROJECT_ROOT = p
+        break
 
 sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -43,7 +46,7 @@ def _load(module_name: str, rel_path: str):
     return mod
 
 
-risk_mod = _load("core.risk_engine", "core/risk_engine.py")
+risk_mod = _load("core.engine.risk_engine", "core/engine/risk_engine.py")
 
 from core.engine.risk_engine import (
     RiskEngine,
@@ -91,6 +94,7 @@ def make_regex_result(
 
 
 def make_db_mock():
+    import time
     db = MagicMock()
     db.is_blacklisted = AsyncMock(return_value=(False, ""))
     db.get_reviews_summary = AsyncMock(return_value={"positive": 0, "negative": 0, "neutral": 0, "bad_texts": []})
@@ -98,6 +102,11 @@ def make_db_mock():
     db.get_risk_score = AsyncMock(return_value=0)
     db.get_reason = AsyncMock(return_value=("", ""))
     db.save_verdict = AsyncMock()
+    db.get_recent_snapshots = AsyncMock(return_value=[])
+    db.find_digital_twins = AsyncMock(return_value=[])
+    db.get_verdict_timestamp = AsyncMock(return_value=time.time())
+    db.needs_review_fetch = AsyncMock(return_value=False)
+    db.mark_rechecking = AsyncMock()
     return db
 
 
@@ -233,11 +242,13 @@ class TestRiskEngineAsync(unittest.IsolatedAsyncioTestCase):
 
         await engine._async_analyze(order, behavior_flags=[])
 
-        self.assertTrue(order.risk_flag.startswith("BLOCK:BADREVIEWS:"))
+        self.assertTrue(order.risk_flag.startswith("NEEDS_LLM:BADREVIEWS:"))
 
     async def test_async_regex_block_saves_verdict(self):
         db = make_db_mock()
-        engine = RiskEngine(db=db, llm_pool=None)
+        llm = MagicMock()
+        llm.schedule.return_value = True
+        engine = RiskEngine(db=db, llm_pool=llm)
         order = make_order()
 
         rr = make_regex_result(
@@ -250,8 +261,9 @@ class TestRiskEngineAsync(unittest.IsolatedAsyncioTestCase):
         with patch.object(risk_mod, "regex_analyze", return_value=rr):
             await engine._async_analyze(order, behavior_flags=["LOW_STATS"])
 
-        db.save_verdict.assert_awaited_once()
-        self.assertIn("BLOCK:TRIANGLE:Оплата від третьої особи", order.risk_flag)
+        llm.schedule.assert_called_once()
+        db.save_verdict.assert_not_called()
+        self.assertIn("LLM_PENDING:TRIANGLE:S100", order.risk_flag)
         self.assertIn("LOW_STATS", order.risk_flag)
 
     async def test_async_trusted_merchant_skips_llm_when_score_below_trusted_threshold(self):
@@ -345,7 +357,7 @@ class TestReviewFlags(unittest.IsolatedAsyncioTestCase):
         flags = await engine._build_review_flags("Binance", "m1")
 
         self.assertEqual(len(flags), 1)
-        self.assertTrue(flags[0].startswith("BLOCK:BADREVIEWS:"))
+        self.assertTrue(flags[0].startswith("NEEDS_LLM:BADREVIEWS:"))
 
     async def test_build_review_flags_warn_reviews(self):
         db = make_db_mock()

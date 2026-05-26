@@ -15,6 +15,7 @@ from bot.handlers import get_router as get_bot_router
 from bot.notifier import TelegramNotifier
 from core.storage.merchant_db import MerchantDB
 from core.workers.db_maintenance import DBMaintenanceTask
+from core.workers.card_sync import CardBalanceSyncTask
 from scanner import run_scanner
 
 # Імпортуємо чисті модульні роутери нашого власного API сервера
@@ -52,11 +53,12 @@ scanner_task = None
 notifier = None
 stop_event = asyncio.Event()
 db_maintainer = None
+card_sync_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global scanner_task, notifier, stop_event, db_maintainer
+    global scanner_task, notifier, stop_event, db_maintainer, card_sync_task
 
     setup_logging()
     logger = logging.getLogger("Main")
@@ -69,6 +71,10 @@ async def lifespan(app: FastAPI):
     # 2. Ініціалізація обслуговування бази
     db_maintainer = DBMaintenanceTask(db)
     db_maintainer.start()
+
+    # 2.1. Ініціалізація фонового оновлення балансів карток
+    card_sync_task = CardBalanceSyncTask(db)
+    card_sync_task.start()
 
     # 3. Ініціалізація та зв'язування компонентів Telegram
     notifier = TelegramNotifier()
@@ -103,6 +109,9 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(scanner_task, timeout=5.0)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+
+    if card_sync_task:
+        await card_sync_task.stop()
 
     if db_maintainer:
         await db_maintainer.stop()

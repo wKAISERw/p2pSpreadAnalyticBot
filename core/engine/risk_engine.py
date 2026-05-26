@@ -302,6 +302,12 @@ class RiskEngine:
         self._id_cache  = TTLCache(ttl_seconds=60.0, max_size=2000)
         self._db_sem    = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
+    async def _build_review_flags(self, exchange: str, merchant_id: str) -> list[str]:
+        if not self._db:
+            return []
+        summary = await self._db.get_reviews_summary(exchange, merchant_id)
+        return _build_review_flags_from_summary(summary)
+
         # 🚀 ДОДАЄМО МЕТОД СИНЕРГІЙ ОДРАЗУ ПІСЛЯ __init__
     def _check_synergies(self, order: Order, regex_flags: list[str], behavior_flags: list[str]) -> list[str]:
         synergies = []
@@ -443,7 +449,7 @@ class RiskEngine:
             if (
                 exchange in ("Bybit", "Binance")
                 and review_summary_raw
-                and review_summary_raw.get("status") in ("OK", "NO_SESSION")
+                and review_summary_raw.get("status") in ("OK", "NO_SESSION", "NO_FEEDBACK")
                 and order.month_order_count > 0
                 and review_summary_raw.get("positive", 0) == 0
             ):
@@ -835,20 +841,41 @@ class RiskEngine:
     def _behavior(self, order: Order) -> list[str]:
         """
         Швидкий синхронний pre-check до завантаження снапшотів з БД.
-        EXACT_LIMITS: min ≈ max (diff ≤ 5) — класичний бот/трикутник.
-        NARROW_SPREAD: аномально вузький діапазон (< 1% spread).
+        LOW_STATS: статистика нижче порогових значень.
+        PERFECT_RATING: підозріло високий рейтинг у неверифікованого.
+        EXACT_LIMITS / SUSPICIOUS_LIMITS: min ≈ max.
+        NARROW_SPREAD: аномально вузький діапазон.
         """
         flags = []
+        exchange = getattr(order, "exchange", "Binance") or "Binance"
+
+        # 1. LOW_STATS
+        min_orders_threshold = MIN_ORDERS.get(exchange, 30)
+        min_completion_threshold = MIN_COMPLETION.get(exchange, 90.0)
+        if order.month_order_count < min_orders_threshold or order.finish_rate_pct < min_completion_threshold:
+            flags.append("LOW_STATS")
+
+        # 2. PERFECT_RATING
+        if order.finish_rate_pct >= 99.9 and not order.is_verified and order.month_order_count >= 50:
+            flags.append("PERFECT_RATING")
+
+        # 3. Limits & Spread checks
         if order.min_limit > 0 and order.max_limit > 0:
             max_f = float(order.max_limit)
             min_f = float(order.min_limit)
             diff  = max_f - min_f
-            if abs(diff) <= 5.0:
-                # EXACT_LIMITS — min ≈ max, завжди підозріло
+            is_exact = abs(diff) <= 5.0
+
+            if is_exact:
                 flags.append("EXACT_LIMITS")
-            elif max_f > 500:
+                flags.append("SUSPICIOUS_LIMITS")
+            else:
                 spread = diff / max_f
-                if spread < 0.01:
+                if spread < 0.02 and max_f > 500:
+                    if not (order.is_verified or order.month_order_count > 1000):
+                        flags.append("SUSPICIOUS_LIMITS")
+
+                if spread <= 0.01 and max_f > 500:
                     if not (order.is_verified or order.month_order_count > 1000):
                         flags.append("NARROW_SPREAD")
         return flags
