@@ -5,48 +5,52 @@ from exchanges.base import Order
 from core.engine.cross_matcher import CrossMatchingEngine
 from config.banks import BANK_NAMES
 
-# Mock orders matching the user's alert
 buy_o = Order(
-    id="buy_1",
-    price=Decimal("44.10"),
-    available_amount=Decimal("200.0"),
-    min_limit=Decimal("8599.0"),
-    max_limit=Decimal("8600.0"),
-    merchant_id="buy_merch",
-    merchant_name="User-2faf8",
-    month_order_count=229,
-    finish_rate_pct=100.0,
-    exchange="Binance",
-    link="https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=s793c0a23291b3139910234d65d2ad96d",
-    bank_codes=["43"],  # Monobank
+    id="260527042755984",
+    price=Decimal("44.84"),
+    available_amount=Decimal("269.52"),
+    min_limit=Decimal("3000.00"),
+    max_limit=Decimal("12085.27"),
+    merchant_id="c9b13c9063",
+    merchant_name="Ilya_ZAV",
+    month_order_count=162,
+    finish_rate_pct=98.78,
+    exchange="OKX",
+    link="https://www.okx.com/p2p/ads-merchant?publicUserId=c9b13c9063",
+    bank_codes=["64", "43", "48", "328"],
     trade_terms="",
     is_verified=False
 )
 
 sell_o = Order(
-    id="sell_1",
-    price=Decimal("45.45"),
-    available_amount=Decimal("350.0"),
-    min_limit=Decimal("3000.0"),
-    max_limit=Decimal("15907.50"),
-    merchant_id="sell_merch",
+    id="260527045745190",
+    price=Decimal("45.52"),
+    available_amount=Decimal("380.00"),
+    min_limit=Decimal("3000.00"),
+    max_limit=Decimal("17297.60"),
+    merchant_id="93e50b50bb",
     merchant_name="oleks_bazza",
-    month_order_count=97,
-    finish_rate_pct=97.0,
+    month_order_count=114,
+    finish_rate_pct=97.43,
     exchange="OKX",
     link="https://www.okx.com/p2p/ads-merchant?publicUserId=93e50b50bb",
-    bank_codes=["43", "14", "48", "64"],  # Monobank, PrivatBank, А-Банк, ПУМБ
+    bank_codes=["64", "43", "48", "14"],
     trade_terms="",
     is_verified=False
 )
 
-buy_grouped = {"43": [buy_o]}
-sell_grouped = {
-    "43": [sell_o],
-    "14": [sell_o],
-    "48": [sell_o],
-    "64": [sell_o]
-}
+# Simulate target_banks = {"43", "14", "64"}
+buy_grouped = {}
+sell_grouped = {}
+
+for b in ["43", "14", "64"]:
+    buy_grouped[b] = []
+    sell_grouped[b] = []
+    
+    if b in buy_o.bank_codes:
+        buy_grouped[b].append(buy_o)
+    if b in sell_o.bank_codes:
+        sell_grouped[b].append(sell_o)
 
 engine = CrossMatchingEngine(max_capital_uah=11000.0, min_trade_uah=1000.0, min_spread_pct=0.5)
 raw_opps = engine.match(buy_grouped, sell_grouped, experimental_mode=True)

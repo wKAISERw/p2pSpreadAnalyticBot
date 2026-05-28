@@ -6,9 +6,10 @@ import os
 from logging.handlers import RotatingFileHandler
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from bot.handlers.core import setup as bot_setup
 from bot.handlers import get_router as get_bot_router
@@ -137,6 +138,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 📈 Prometheus /metrics endpoint
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Expose Prometheus metrics for scraping."""
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 # 🚀 ПІД КАТАЛОГ ОДНОЧАСНО ПІДКЛЮЧАЄМО ВСІ НАШІ БОЙОВІ РОУТЕРИ
 app.include_router(dashboard_router)

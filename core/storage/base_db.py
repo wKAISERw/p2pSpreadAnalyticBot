@@ -445,8 +445,23 @@ class MerchantDB:
                                          was_sent        INTEGER DEFAULT 0,
                                          created_at      REAL NOT NULL
                                      );
-                                     CREATE INDEX IF NOT EXISTS idx_proposals_ts
-                                         ON scanner_proposals(created_at);
+                                      CREATE INDEX IF NOT EXISTS idx_proposals_ts
+                                          ON scanner_proposals(created_at);
+
+                                      -- 🚀 Відправлені алерти (для гасіння дублів та перемальовки)
+                                      CREATE TABLE IF NOT EXISTS sent_alerts (
+                                          exchange TEXT NOT NULL,
+                                          merchant_id TEXT NOT NULL,
+                                          chat_id INTEGER NOT NULL,
+                                          message_ids_json TEXT NOT NULL, -- JSON list of message IDs
+                                          sent_at REAL NOT NULL,
+                                          alert_json TEXT NOT NULL,        -- serialized SpreadAlert
+                                          display_settings_json TEXT NOT NULL,
+                                          is_sniper_match INTEGER DEFAULT 0,
+                                          PRIMARY KEY (chat_id, message_ids_json)
+                                      );
+                                      CREATE INDEX IF NOT EXISTS idx_sent_alerts_lookup 
+                                          ON sent_alerts(exchange, merchant_id, sent_at);
 
                                      /* =========================================================
                                         БЛОК УПРАВЛІННЯ КАРТКАМИ (CARD MANAGEMENT SYSTEM)

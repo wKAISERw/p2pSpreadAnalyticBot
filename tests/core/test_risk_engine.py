@@ -105,9 +105,11 @@ def make_db_mock():
     db.get_recent_snapshots = AsyncMock(return_value=[])
     db.find_digital_twins = AsyncMock(return_value=[])
     db.get_verdict_timestamp = AsyncMock(return_value=time.time())
+    db.get_trade_recommendation = AsyncMock(return_value="APPROVE")  # v2.3: anti-recheck guard
     db.needs_review_fetch = AsyncMock(return_value=False)
     db.mark_rechecking = AsyncMock()
     return db
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

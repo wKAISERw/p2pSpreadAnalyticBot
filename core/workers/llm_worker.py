@@ -81,6 +81,8 @@ MAX_EXCERPT_LEN = 90
 SYSTEM_PROMPT = """Ти — антифрод-система для P2P криптообміну UAH/USDT на ринку України (Deep Research Engine v5.2).
 Твоє завдання — визначити, чи умови мерчанта, його відгуки або математика стакану містять ризик.
 
+УСІ ТЕКСТОВІ ПОЛЯ (thought_process, reason, terms_summary, reviews_analysis) ПОВИННІ БУТИ ВИКЛЮЧНО УКРАЇНСЬКОЮ МОВОЮ. Категорично забороняється писати відповіді англійською, російською чи іншими мовами!
+
 ГОЛОВНІ РИЗИКИ (допустимі значення для поля risk):
 - TRIANGLE: вимагає або допускає оплату від третьої особи, дропа.
 - THIRD_PARTY_HINT: двозначна згадка третіх осіб (уважно читай контекст).
@@ -142,7 +144,13 @@ REJECT      — НЕ торгувати. Чіткі ознаки скаму, б�
 - Приклад: "Тільки Моно/Приват, оплата протягом 15 хв, ПІБ має збігатися, без 3-х осіб."
 - Максимум 2 короткі речення.
 
-ПОЛЕ reviews_analysis — ОБОВ'ЯЗКОВЕ. Якщо відгуків нема або вони чисті, напиши "Відгуки чисті, загроз зі сторони коментарів не виявлено". Якщо їх не завантажено - "Тексти відгуків недоступні". Сумаризуй на що скаржаться люди."""
+ПОЛЕ reviews_analysis — ОБОВ'ЯЗКОВЕ. Формат: категоризована вижимка у вигляді:
+  • "повільно/не відповідає: X скарг" — якщо відгуки переважно про затримки або мовчання мерчанта.
+  • "скам/рефанд/трикутник: X скарг" — якщо є обвинувачення в шахрайстві або рефандах.
+  • "інше: X скарг" — інші негативні відгуки без явної категорії.
+  Якщо відгуків нема або вони чисті — "Відгуки чисті, загроз не виявлено".
+  Якщо їх не завантажено — "Тексти відгуків недоступні".
+  ОБОВ'ЯЗКОВО зазнач кількість в кожній категорії якщо є декілька відгуків."""
 
 
 @dataclass
@@ -163,8 +171,9 @@ class LLMTask:
 
 
 class LLMWorkerPool:
-    def __init__(self, db: MerchantDB):
+    def __init__(self, db: MerchantDB, notifier=None):
         self._db = db
+        self._notifier = notifier  # TelegramNotifier for redrawing alerts after verdict
         self._queue: asyncio.Queue[LLMTask] = asyncio.Queue(maxsize=MAX_QUEUE)
         self._pending: set[tuple[str, str]] = set()
         self._workers: list[asyncio.Task] = []
@@ -231,6 +240,11 @@ class LLMWorkerPool:
         try:
             self._queue.put_nowait(task)
             self._pending.add(key)
+            try:
+                from core.analytics.metrics import llm_queue_size
+                llm_queue_size.set(self._queue.qsize())
+            except Exception:
+                pass
             logger.debug("В чергу LLM: %s [%s]", merchant_name, exchange)
             return True
         except asyncio.QueueFull:
@@ -242,10 +256,20 @@ class LLMWorkerPool:
             try:
                 task = await self._queue.get()
                 try:
+                    from core.analytics.metrics import llm_queue_size
+                    llm_queue_size.set(self._queue.qsize())
+                except Exception:
+                    pass
+                try:
                     await self._process(task)
                 finally:
                     self._pending.discard((task.exchange, task.merchant_id))
                     self._queue.task_done()
+                    try:
+                        from core.analytics.metrics import llm_queue_size
+                        llm_queue_size.set(self._queue.qsize())
+                    except Exception:
+                        pass
                 await asyncio.sleep(0.25)
             except asyncio.CancelledError:
                 break
@@ -255,11 +279,13 @@ class LLMWorkerPool:
                 await asyncio.sleep(1.0)
 
     async def _process(self, task: LLMTask) -> None:
-        cached = await self._db.get_verdict(
-            task.exchange, task.merchant_id, task.trade_terms
-        )
-        if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
-            return
+        rec = await self._db.get_trade_recommendation(task.exchange, task.merchant_id)
+        if rec != "RECHECKING":
+            cached = await self._db.get_verdict(
+                task.exchange, task.merchant_id, task.trade_terms
+            )
+            if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
+                return
 
         if task.review_summary:
             review_summary = task.review_summary
@@ -307,6 +333,15 @@ class LLMWorkerPool:
 
         self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
 
+        # 🔄 Trigger alert redraw after verdict is saved — edits sent Telegram messages
+        if self._notifier is not None:
+            try:
+                asyncio.ensure_future(
+                    self._notifier.redraw_alerts_for_merchant(task.exchange, task.merchant_id)
+                )
+            except Exception as _re:
+                logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
+
     # ── Groq / OpenAI / Gemini cooldown (class-level) ─────────────────────────
     _groq_cooldown_until: float = 0.0
     _groq_consecutive_429: int = 0
@@ -328,62 +363,137 @@ class LLMWorkerPool:
 
         # Groq
         if groq_available:
+            t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self._call_groq(user_msg), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"groq_{GROQ_MODEL}"
                 LLMWorkerPool._groq_consecutive_429 = 0
+                try:
+                    from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
+                    llm_requests_total.labels(provider="groq", status="success").inc()
+                    llm_request_duration_seconds.labels(provider="groq").observe(_time.monotonic() - t0)
+                except Exception:
+                    pass
                 return result
             except RateLimitError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="groq", status="rate_limit").inc()
+                except Exception:
+                    pass
                 n = LLMWorkerPool._groq_consecutive_429 + 1
                 LLMWorkerPool._groq_consecutive_429 = n
                 wait = min(30.0 * (2 ** min(n - 1, 4)), 300.0)
                 LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
                 logger.warning("Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
             except asyncio.TimeoutError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="groq", status="timeout").inc()
+                except Exception:
+                    pass
                 self._stats["timeouts"] += 1
                 logger.warning("Groq timeout: %s", task.merchant_name)
             except Exception as e:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="groq", status="error").inc()
+                except Exception:
+                    pass
                 logger.error("Groq помилка: %s", e)
 
         # Gemini
         if gemini_available:
+            t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self._call_gemini(user_msg), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"gemini_{GEMINI_MODEL}"
+                try:
+                    from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
+                    llm_requests_total.labels(provider="gemini", status="success").inc()
+                    llm_request_duration_seconds.labels(provider="gemini").observe(_time.monotonic() - t0)
+                except Exception:
+                    pass
                 return result
             except PermanentModelError as e:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="gemini", status="permanent_error").inc()
+                except Exception:
+                    pass
                 logger.error("Gemini 404: %s → OpenAI", e)
                 # НЕ return — падаємо на OpenAI
             except ProviderRateLimitError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="gemini", status="rate_limit").inc()
+                except Exception:
+                    pass
                 LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
                 logger.warning("Gemini 429 → OpenAI")
             except asyncio.TimeoutError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="gemini", status="timeout").inc()
+                except Exception:
+                    pass
                 self._stats["timeouts"] += 1
                 logger.warning("Gemini timeout: %s", task.merchant_name)
             except Exception as e:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="gemini", status="error").inc()
+                except Exception:
+                    pass
                 logger.error("Gemini помилка: %s", e)
 
         # OpenAI — останній резерв
         if openai_available:
+            t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
                     self._call_openai(user_msg), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"openai_{OPENAI_MODEL}"
+                try:
+                    from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
+                    llm_requests_total.labels(provider="openai", status="success").inc()
+                    llm_request_duration_seconds.labels(provider="openai").observe(_time.monotonic() - t0)
+                except Exception:
+                    pass
                 return result
             except PermanentModelError:
-                pass
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="openai", status="permanent_error").inc()
+                except Exception:
+                    pass
             except ProviderRateLimitError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="openai", status="rate_limit").inc()
+                except Exception:
+                    pass
                 LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
                 logger.warning("OpenAI 429")
             except asyncio.TimeoutError:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="openai", status="timeout").inc()
+                except Exception:
+                    pass
                 self._stats["timeouts"] += 1
                 logger.warning("OpenAI timeout: %s", task.merchant_name)
             except Exception as e:
+                try:
+                    from core.analytics.metrics import llm_requests_total
+                    llm_requests_total.labels(provider="openai", status="error").inc()
+                except Exception:
+                    pass
                 logger.error("OpenAI помилка: %s", e)
 
         self._stats["timeouts"] += 1

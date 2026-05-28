@@ -72,16 +72,36 @@ class CompositeScorer:
     W_IDENTITY     = 0.10   # підвищено з 0.05 — підтверджений клон важливий
 
     @classmethod
+    async def load_weights(cls, db) -> None:
+        """Loads weights from bot_settings database table."""
+        try:
+            conn = getattr(db, "db", None) or getattr(db, "_db", db)
+            async with conn.execute(
+                "SELECT key, value FROM bot_settings WHERE user_id = 0 AND key IN ('W_REGEX', 'W_BEHAVIOR', 'W_REVIEWS_PCT', 'W_REVIEWS_TEXT', 'W_LLM', 'W_IDENTITY')"
+            ) as cur:
+                rows = await cur.fetchall()
+            for row in rows:
+                key = row[0] if isinstance(row, tuple) else row["key"]
+                val = row[1] if isinstance(row, tuple) else row["value"]
+                if val is not None:
+                    setattr(cls, key, float(val))
+            logger.info("CompositeScorer weights loaded: W_REGEX=%.2f, W_BEHAVIOR=%.2f, W_REVIEWS_PCT=%.2f, W_REVIEWS_TEXT=%.2f, W_LLM=%.2f, W_IDENTITY=%.2f",
+                        cls.W_REGEX, cls.W_BEHAVIOR, cls.W_REVIEWS_PCT, cls.W_REVIEWS_TEXT, cls.W_LLM, cls.W_IDENTITY)
+        except Exception as e:
+            logger.warning("Failed to load weights from bot_settings: %s", e)
+
+    @classmethod
     def compute(
         cls,
-        regex_score:       int,
-        behavior_score:    int,
-        review_neg_pct:    float,
-        llm_verdict:       str,
-        is_twin:           bool,
-        finish_rate:       float = 100.0,
-        order_count:       int   = 0,
-        review_text_score: float = 0.0,   # новий: avg score текстів bad_texts
+        regex_score:           int,
+        behavior_score:        int,
+        review_neg_pct:        float,
+        llm_verdict:           str,
+        is_twin:               bool,
+        finish_rate:           float = 100.0,
+        order_count:           int   = 0,
+        review_text_score:     float = 0.0,   # avg score текстів bad_texts
+        review_trend_penalty:  int   = 0,     # -5 (improving) … +20 (worsening)
     ) -> int:
         """Повертає composite_score 0-100."""
 
@@ -102,11 +122,14 @@ class CompositeScorer:
             id_norm    * cls.W_IDENTITY
         )
 
+        # Тренд відгуків: погіршення додає бали, поліпшення знімає
+        raw = raw + review_trend_penalty
+
         # Підвищений ризик для нових акаунтів з поганим рейтингом
         if order_count < 50 and finish_rate < 92.0:
             raw = min(100, raw * 1.3)
 
-        return min(100, int(raw))
+        return min(100, max(0, int(raw)))
 
     @classmethod
     def to_verdict(cls, score: int) -> str:
@@ -414,6 +437,7 @@ class RiskEngine:
                 self._db.get_verdict(exchange, mid, terms),
                 self._db.get_risk_score(exchange, mid),
                 self._db.get_verdict_timestamp(exchange, mid),   # v2: для freshness check
+                self._db.get_trade_recommendation(exchange, mid),  # v2.3: для anti-recheck guard
             ]
 
             (
@@ -424,6 +448,7 @@ class RiskEngine:
                 cached_verdict,
                 score,
                 verdict_ts,
+                current_rec,
             ) = await asyncio.gather(*coros)
 
             # ── Lazy fetch відгуків для кандидата спреду ──────────────
@@ -501,13 +526,48 @@ class RiskEngine:
             else:
                 review_text_score = 0.0
 
+            # ── v2.2: Тренд відгуків (зберігаємо снапшот + рахуємо штраф) ───────────
+            review_trend_penalty = 0
+            rev_status_for_snap = rev_summary.get("status", "")
+            if rev_total > 0 and rev_status_for_snap == "OK":
+                # Записуємо снапшот для історії тренду
+                try:
+                    await self._db.save_review_snapshot(exchange, mid, rev_pos, rev_neg, review_neg_pct)
+                except Exception as _snap_err:
+                    logger.debug("save_review_snapshot error: %s", _snap_err)
+                # Отримуємо тренд за 7 днів
+                try:
+                    trend_data = await self._db.get_review_trend(exchange, mid, days=7)
+                    trend_dir = trend_data.get("trend", "stable")
+                    if trend_dir == "worsening":
+                        review_trend_penalty = 20   # +20 балів за погіршення
+                        behavior_flags.append("TREND_WORSENING")
+                        logger.debug(
+                            "📈 Review trend WORSENING: %s [%s] delta=%.1f%%",
+                            order.merchant_name, exchange, trend_data.get("delta", 0),
+                        )
+                    elif trend_dir == "improving":
+                        review_trend_penalty = -5   # -5 балів за поліпшення
+                except Exception as _trend_err:
+                    logger.debug("get_review_trend error: %s", _trend_err)
+
             # ── 1. Behavioral ───────────────────────────────────────────────
             cached_b = self._b_cache.get(cache_key)
             if cached_b is not None:
                 behavior_result = cached_b
+                try:
+                    from core.analytics.metrics import cache_requests_total
+                    cache_requests_total.labels(cache_type="behavior", result="hit").inc()
+                except Exception:
+                    pass
             else:
                 behavior_result = analyze_history(order, snapshots_raw or [])
                 self._b_cache.set(cache_key, behavior_result)
+                try:
+                    from core.analytics.metrics import cache_requests_total
+                    cache_requests_total.labels(cache_type="behavior", result="miss").inc()
+                except Exception:
+                    pass
 
             if behavior_result.flags:
                 behavior_flags.extend(behavior_result.flags)
@@ -522,9 +582,19 @@ class RiskEngine:
                 cached_id = self._id_cache.get(cache_key)
                 if cached_id is not None:
                     id_result = cached_id
+                    try:
+                        from core.analytics.metrics import cache_requests_total
+                        cache_requests_total.labels(cache_type="identity", result="hit").inc()
+                    except Exception:
+                        pass
                 else:
                     id_result = analyze_identity(order, twins_raw or [])
                     self._id_cache.set(cache_key, id_result)
+                    try:
+                        from core.analytics.metrics import cache_requests_total
+                        cache_requests_total.labels(cache_type="identity", result="miss").inc()
+                    except Exception:
+                        pass
 
                 if id_result.is_twin:
                     is_twin = True
@@ -552,6 +622,7 @@ class RiskEngine:
                 finish_rate        = order.finish_rate_pct,
                 order_count        = order.month_order_count,
                 review_text_score  = review_text_score,
+                review_trend_penalty = review_trend_penalty,
             )
             order.composite_score = composite_score   # зберігаємо на ордері
 
@@ -581,12 +652,36 @@ class RiskEngine:
             # ── v2.2: Інвалідація вердикту коли відгуки стали доступні ────
             # Якщо вердикт був зроблений БЕЗ текстів відгуків (NO_SESSION/estimated),
             # а тепер вони доступні — LLM має перепроаналізувати з реальними текстами.
-            if cached_verdict is not None and rev_summary:
+            is_pending = False
+            if self._llm:
+                cache_key = f"{exchange}:{mid}"
+                is_in_pending = hasattr(self._llm, "_pending") and (exchange, mid) in self._llm._pending
+                is_seen_recent = hasattr(self._llm, "_recent_calls") and hasattr(self._llm._recent_calls, "seen") and self._llm._recent_calls.seen(cache_key)
+                if is_in_pending or is_seen_recent:
+                    is_pending = True
+
+            # v2.3: якщо БД вже містить RECHECKING — LLM вже запущений (або недавно завершився
+            # але TTL _recent_calls ще не вичерпався). Не запускаємо повторно.
+            if current_rec == "RECHECKING":
+                is_pending = True
+
+            # Мінімальний поріг між оновленням відгуків і вердиктом — 60 секунд.
+            # Без цього порогу LLM завершує роботу, зберігає updated_at=T,
+            # але rev_updated може бути T-10s або T+5s — і умова rev_updated>verdict_ts
+            # одразу спрацьовує знову на наступному циклі.
+            REV_VERDICT_MIN_DELTA = 60.0
+
+            if cached_verdict is not None and rev_summary and not is_pending:
                 rev_updated = float(rev_summary.get("updated_at", 0) or 0)
                 rev_status = rev_summary.get("status", "")
                 has_real_texts = bool(bad_texts)  # bad_texts вже визначено вище
                 # Вердикт зроблено ДО оновлення відгуків — тексти з'явились після
-                if rev_updated > 0 and verdict_ts > 0 and rev_updated > verdict_ts:
+                # Перевіряємо мінімальну різницю щоб уникнути повторних тригерів
+                if (
+                    rev_updated > 0
+                    and verdict_ts > 0
+                    and rev_updated > verdict_ts + REV_VERDICT_MIN_DELTA
+                ):
                     if has_real_texts:
                         logger.info(
                             "🔄 Review upgrade: %s [%s] — вердикт від %.0fs ago, "
@@ -644,14 +739,15 @@ class RiskEngine:
 
             # Оновлюємо composite з реальним regex_score
             composite_score = CompositeScorer.compute(
-                regex_score        = order.regex_score,
-                behavior_score     = behavior_score,
-                review_neg_pct     = review_neg_pct,
-                llm_verdict        = "UNKNOWN",
-                is_twin            = is_twin,
-                finish_rate        = order.finish_rate_pct,
-                order_count        = order.month_order_count,
-                review_text_score  = review_text_score,
+                regex_score           = order.regex_score,
+                behavior_score        = behavior_score,
+                review_neg_pct        = review_neg_pct,
+                llm_verdict           = "UNKNOWN",
+                is_twin               = is_twin,
+                finish_rate           = order.finish_rate_pct,
+                order_count           = order.month_order_count,
+                review_text_score     = review_text_score,
+                review_trend_penalty  = review_trend_penalty,
             )
             order.composite_score = composite_score
 

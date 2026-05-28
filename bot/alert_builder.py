@@ -44,6 +44,7 @@ class SpreadAlert:
     sell_banks_fit: list[str] | None = None
     route_variants: list[str] | None = None
     route_type: str = "UNKNOWN"
+    route_pairs: list[list[str]] | None = None
     # 🚀 ДОДАНО ПОЛЯ ДЛЯ LLM
     buy_rec: str = "PENDING"
     sell_rec: str = "PENDING"
@@ -66,7 +67,8 @@ async def send_single(
     chat_id: int | None = None,
     display_settings: dict | None = None,
     is_sniper_match: bool = False,
-) -> None:
+    edit_message_ids: list[int] | None = None,
+) -> list[int]:
     # Display settings (per-user)
     ds = display_settings or {
         "show_ai_terms_summary": True, "show_full_terms": True,
@@ -76,10 +78,10 @@ async def send_single(
     # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
     if notifier._db:
         try:
-            b_rec, _, b_reason, b_terms, b_rev = await notifier._db.get_trade_recommendation_full(
+            b_rec, b_verdict, b_reason, b_terms, b_rev = await notifier._db.get_trade_recommendation_full(
                 alert.buy_order.exchange, alert.buy_order.merchant_id
             )
-            s_rec, _, s_reason, s_terms, s_rev = await notifier._db.get_trade_recommendation_full(
+            s_rec, s_verdict, s_reason, s_terms, s_rev = await notifier._db.get_trade_recommendation_full(
                 alert.sell_order.exchange, alert.sell_order.merchant_id
             )
             alert.buy_rec = b_rec
@@ -90,8 +92,75 @@ async def send_single(
             alert.sell_terms_summary = s_terms
             alert.buy_reviews_analysis = b_rev
             alert.sell_reviews_analysis = s_rev
-        except Exception:
-            pass  # fallback: використовуємо значення з алерту
+
+            # Також підвантажуємо актуальні відгуки та оновлюємо risk_flag і stats
+            b_rev_sum = await notifier._db.get_reviews_summary(alert.buy_order.exchange, alert.buy_order.merchant_id)
+            s_rev_sum = await notifier._db.get_reviews_summary(alert.sell_order.exchange, alert.sell_order.merchant_id)
+
+            from core.engine.risk_engine import _build_review_flags_from_summary
+
+            for order, rec, verdict, reason, rev_sum in [
+                (alert.buy_order, b_rec, b_verdict, b_reason, b_rev_sum),
+                (alert.sell_order, s_rec, s_verdict, s_reason, s_rev_sum),
+            ]:
+                flags = []
+                # 1. Додаємо статус перевірки/вердикту LLM
+                if rec == "RECHECKING":
+                    flags.append("LLM_PENDING:RECHECK")
+                elif rec == "PENDING" or not verdict:
+                    flags.append("LLM_PENDING")
+                elif verdict == "BLOCK":
+                    flags.append(f"BLOCK:LLM_BLOCK:{reason or 'block'}")
+                elif verdict == "SUSPICIOUS":
+                    flags.append("LLM_SUSPICIOUS")
+                elif verdict == "UNKNOWN":
+                    flags.append("LLM_UNKNOWN")
+                
+                # 2. Додаємо прапори відгуків з бази
+                if rev_sum:
+                    rev_flags = _build_review_flags_from_summary(rev_sum)
+                    flags.extend(rev_flags)
+                    
+                    pos = int(rev_sum.get("positive", 0) or 0)
+                    neg = int(rev_sum.get("negative", 0) or 0)
+                    neutral = int(rev_sum.get("neutral", 0) or 0)
+                    total = pos + neg + neutral
+                    if total > 0:
+                        order.review_neg_pct = (neg / total) * 100.0
+                    else:
+                        order.review_neg_pct = 0.0
+                    order.review_fetched = True
+                
+                # 3. Зберігаємо існуючі не-LLM і не-відгукові прапори з оригінального risk_flag
+                orig_flags = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
+                for f in orig_flags:
+                    is_llm_flag = (
+                        f.startswith("LLM_PENDING") or 
+                        f.startswith("BLOCK") or 
+                        f.startswith("LLM_SUSPICIOUS") or 
+                        f.startswith("LLM_UNKNOWN") or
+                        f == "OK" or 
+                        f == "PENDING"
+                    )
+                    is_review_flag = (
+                        f.startswith("NEEDS_LLM:BADREVIEWS") or
+                        f.startswith("BADREVIEWS_TEXTS") or
+                        f.startswith("BADREVIEWS") or
+                        f.startswith("REVIEW_SOFT") or
+                        f.startswith("REVIEW_UNFLAGGED")
+                    )
+                    if not (is_llm_flag or is_review_flag):
+                        flags.append(f)
+                
+                # Записуємо очищені дедубльовані прапори
+                unique_flags = []
+                for f in flags:
+                    if f not in unique_flags:
+                        unique_flags.append(f)
+                order.risk_flag = ",".join(unique_flags) if unique_flags else "OK"
+
+        except Exception as e:
+            logger.error("Error refreshing LLM verdicts inside send_single: %s", e)
 
     title, silent = _alert_grade(alert.spread_pct)
     if is_sniper_match:
@@ -388,6 +457,8 @@ async def send_single(
             if sell_card_rows != buy_card_rows:
                 kb.extend(sell_card_rows)
 
+    sent_message_ids = []
+
     # ── ФІНАЛЬНИЙ ПУШ У TELEGRAM З ПІДТРИМКОЮ SINGLE-LEG REPLY-ВІДПОВІДЕЙ ──
     if card_text_combined and output_mode == "reply":
         # 🔀 РЕЖИМ REPLY: Відокремлюємо карти. Текст спреду лишається ідеально чистим.
@@ -402,35 +473,94 @@ async def send_single(
         main_msg = None
 
         for i, chunk in enumerate(main_chunks):
-            main_msg = await notifier._send_with_retry(
-                chunk,
-                keyboard=main_keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            # Check if we should edit instead of send
+            edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
+            if edited_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_msg_id,
+                        text=chunk,
+                        reply_markup=main_keyboard if i == 0 else None,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_msg_id)
+                    if i == 0:
+                        # set main_msg reference with message_id to reply to it
+                        class DummyMsg:
+                            def __init__(self, mid):
+                                self.message_id = mid
+                        main_msg = DummyMsg(edited_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit main message chunk %d: %s", edited_msg_id, ex)
+            else:
+                main_msg = await notifier._send_with_retry(
+                    chunk,
+                    keyboard=main_keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+                if main_msg and hasattr(main_msg, "message_id"):
+                    sent_message_ids.append(main_msg.message_id)
 
         # 2. Якщо алерт пройшов — стріляємо реплаєм з картою
         if main_msg and hasattr(main_msg, "message_id"):
             card_text_header = "💳 <b>Рекомендований пластик під угоду:</b>\n\n"
-            await notifier._send_with_retry(
-                f"{card_text_header}{card_text_combined}",
-                keyboard=card_keyboard,
-                disable_notification=silent,
-                chat_id=chat_id,
-                reply_to_message_id=main_msg.message_id
-            )
+            reply_chunk = f"{card_text_header}{card_text_combined}"
+            
+            edited_reply_msg_id = edit_message_ids[len(main_chunks)] if edit_message_ids and len(main_chunks) < len(edit_message_ids) else None
+            if edited_reply_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_reply_msg_id,
+                        text=reply_chunk,
+                        reply_markup=card_keyboard,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_reply_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit reply message %d: %s", edited_reply_msg_id, ex)
+            else:
+                reply_msg = await notifier._send_with_retry(
+                    reply_chunk,
+                    keyboard=card_keyboard,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                    reply_to_message_id=main_msg.message_id
+                )
+                if reply_msg and hasattr(reply_msg, "message_id"):
+                    sent_message_ids.append(reply_msg.message_id)
 
     else:
         # 📥 ДЕФОЛТНИЙ INLINE РЕЖИМ (Або випадок, коли взагалі немає підходящих карток)
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
         chunks = notifier._split_message(text)
         for i, chunk in enumerate(chunks):
-            await notifier._send_with_retry(
-                chunk,
-                keyboard=keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
+            if edited_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_msg_id,
+                        text=chunk,
+                        reply_markup=keyboard if i == 0 else None,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit inline message chunk %d: %s", edited_msg_id, ex)
+            else:
+                msg = await notifier._send_with_retry(
+                    chunk,
+                    keyboard=keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+                if msg and hasattr(msg, "message_id"):
+                    sent_message_ids.append(msg.message_id)
+                    
+    return sent_message_ids
 
 
 async def send_batch(notifier, batch: list[SpreadAlert]) -> None:

@@ -227,6 +227,7 @@ async def cmd_settings(message: Message, state: FSMContext) -> None:
         "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
         "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
         "require_sessions": runtime_config.get("require_sessions", "true"),
+        "show_spread_logs": runtime_config.get("show_spread_logs", "true"),
     }
     await message.answer(_generate_settings_text(), reply_markup=global_settings_kb(current_settings))
 
@@ -243,6 +244,7 @@ async def on_global_settings_menu(call: CallbackQuery, state: FSMContext) -> Non
         "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
         "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
         "require_sessions": runtime_config.get("require_sessions", "true"),
+        "show_spread_logs": runtime_config.get("show_spread_logs", "true"),
     }
     text = (
         "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
@@ -270,6 +272,7 @@ async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
             "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
             "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
             "require_sessions": runtime_config.get("require_sessions", "true"),
+            "show_spread_logs": runtime_config.get("show_spread_logs", "true"),
         }
         text = (
             "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
@@ -294,7 +297,40 @@ async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
             "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
             "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
             "require_sessions": new_val,
+            "show_spread_logs": runtime_config.get("show_spread_logs", "true"),
         }
+        text = (
+            "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+            "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+            "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+        )
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=global_settings_kb(current_settings))
+        return
+
+    # 2b. Тумблер логування спредів
+    if data == "gset:toggle:show_spread_logs":
+        current = runtime_config.get("show_spread_logs", "true") == "true"
+        new_val = "false" if current else "true"
+        await runtime_config.set("show_spread_logs", new_val)
+        await call.answer(f"Логування спредів: {'Увімкнено' if new_val == 'true' else 'Вимкнено'}")
+        
+        # Ререндер головного вікна
+        current_settings = {
+            "min_spread_pct": float(runtime_config.get("min_spread_pct", 0.5)),
+            "safety_buffer_pct": float(runtime_config.get("safety_buffer_pct", 0.3)),
+            "max_alerts_per_cycle": int(runtime_config.get("max_alerts_per_cycle", 4)),
+            "require_sessions": runtime_config.get("require_sessions", "true"),
+            "show_spread_logs": new_val,
+        }
+        text = (
+            "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
+            "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "
+            "Для конфігурації експериментальних фіч перейдіть у відповідну вкладку:"
+        )
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(text, reply_markup=global_settings_kb(current_settings))
+        return
         text = (
             "⚙️ <b>Глобальні налаштування ядра Arbix Quantum</b>\n\n"
             "Тут ви можете змінити базові параметри пошуку спредів для всього сканера. "

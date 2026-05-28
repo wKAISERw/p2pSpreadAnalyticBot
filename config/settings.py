@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # ── Логування ─────────────────────────────────────────────────────────
     log_level: str = "INFO"
+    show_spread_logs: bool = True
 
     # ── Review Fetcher ────────────────────────────────────────────────────
     review_ttl_hours: float = 24.0

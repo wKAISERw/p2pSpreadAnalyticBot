@@ -19,7 +19,11 @@ logger = logging.getLogger("SessionManager")
 # Значення мають бути МЕНШЕ SESSION_TTL але достатньо великі, щоб не спамити.
 TARGETS = {
     "Bybit": {
-        "url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
+        # P2P market URL — гарантовано тригерить appraiseList (на відміну від профілю мерчанта
+        # який може рендеритись пустим після QR redirect через SPA lazy-loading)
+        "url": "https://www.bybit.com/en/p2p/trade/buy/USDT/?paymentMethod=&fiatCurrency=UAH",
+        # Fallback: профіль мерчанта якщо market не спрацював
+        "fallback_url": "https://www.bybit.com/en/p2p/profile/s9260bda0f121429184f1a258ee726a9f/USDT/UAH/item",
         "api_pattern": "appraiseList",
         "ttl": 48 * 3600   # 48 годин — перехоплення лише якщо сесія стара >48г
     },
@@ -113,28 +117,36 @@ class SessionManager:
                 from config.runtime import runtime_config
                 require_sessions = runtime_config.get("require_sessions", "true") == "true"
                 if require_sessions:
-                    now = time.time()
-                    for exchange, target in TARGETS.items():
-                        _, _, updated_at = await self._db.get_auth_session(exchange)
+                    # Не запускаємо фоновий Playwright якщо активна QR-сесія
+                    # (паралельні Playwright-контексти заважають один одному)
+                    if self._active_qr_sessions:
+                        logger.debug(
+                            "SessionManager: є активна QR-сесія (%s), пропускаємо фонове оновлення",
+                            list(self._active_qr_sessions.keys())
+                        )
+                    else:
+                        now = time.time()
+                        for exchange, target in TARGETS.items():
+                            _, _, updated_at = await self._db.get_auth_session(exchange)
 
-                        if updated_at > 0 and now - updated_at > target["ttl"]:
-                            # Спочатку пробуємо легкий API-піng без браузера
-                            refreshed = await self._try_lightweight_refresh(exchange)
-                            if refreshed:
+                            if updated_at > 0 and now - updated_at > target["ttl"]:
+                                # Спочатку пробуємо легкий API-піng без браузера
+                                refreshed = await self._try_lightweight_refresh(exchange)
+                                if refreshed:
+                                    logger.info(
+                                        "🔄 SessionManager: Сесія %s продовжена API-пінгом (без браузера)",
+                                        exchange
+                                    )
+                                    continue
+
+                                # Піng не вдався — сесія справді протухла, запускаємо Playwright
                                 logger.info(
-                                    "🔄 SessionManager: Сесія %s продовжена API-пінгом (без браузера)",
+                                    "🔄 SessionManager: Оновлення сесії %s через Playwright...",
                                     exchange
                                 )
-                                continue
-
-                            # Піng не вдався — сесія справді протухла, запускаємо Playwright
-                            logger.info(
-                                "🔄 SessionManager: Оновлення сесії %s через Playwright...",
-                                exchange
-                            )
-                            await self._capture_session(exchange, target)
-                            # Робимо паузу 5 секунд між біржами
-                            await asyncio.sleep(5)
+                                await self._capture_session(exchange, target)
+                                # Робимо паузу 5 секунд між біржами
+                                await asyncio.sleep(5)
 
             except asyncio.CancelledError:
                 break
@@ -199,44 +211,137 @@ class SessionManager:
 
                     page.on("request", handle_request)
 
-                    # Даємо браузеру цілих 60 секунд на завантаження важкої сторінки Bybit
-                    try:
-                        await page.goto(target["url"], wait_until="commit", timeout=60000)
-                        
-                        # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
-                        if exchange == "Binance":
-                            await page.wait_for_timeout(7000)
-                        else:
-                            await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
-                        
-                        # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' – 
-                        # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
-                        success = await page.evaluate('''() => {
-                            const keywords = ["відгуки", "отзывы", "review", "feedback"];
-                            const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
-                            let clicked = false;
-                            for (let el of els) {
-                                if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
-                                    // Фільтруємо за наявністю розміру екрану і чи не є він занадто великим (щоб не клікати весь body/header)
-                                    if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
-                                        el.click();
-                                        clicked = true;
+                    # Bybit: P2P SPA не рендерується в Playwright — використовуємо browser fetch()
+                    # щоб тригернути API запит з авторизованого браузера
+                    if exchange == "Bybit":
+                        try:
+                            # Спочатку переходимо на bybit.com щоб були правильні cookies для cross-origin fetch
+                            await page.goto("https://www.bybit.com/en/dashboard", wait_until="commit", timeout=30000)
+                            await page.wait_for_timeout(3000)
+
+                            logger.info("Bybit _capture_session: тригеримо API через browser fetch()...")
+                            await page.evaluate("""
+                                () => {
+                                    fetch('https://api2.bybit.com/fiat/otc/item/list', {
+                                        method: 'POST',
+                                        credentials: 'include',
+                                        headers: {
+                                            'Content-Type': 'application/json;charset=UTF-8',
+                                            'Accept': 'application/json'
+                                        },
+                                        body: JSON.stringify({
+                                            tokenId: 'USDT',
+                                            currencyId: 'UAH',
+                                            payment: [],
+                                            side: '1',
+                                            size: '5',
+                                            page: '1',
+                                            amount: ''
+                                        })
+                                    }).catch(() => {});
+                                    fetch('https://api2.bybit.com/fiat/otc/user/feedback/appraiseList', {
+                                        method: 'POST',
+                                        credentials: 'include',
+                                        headers: {
+                                            'Content-Type': 'application/json;charset=UTF-8',
+                                            'Accept': 'application/json'
+                                        },
+                                        body: JSON.stringify({
+                                            memberId: 's9260bda0f121429184f1a258ee726a9f',
+                                            evaluateType: 1,
+                                            page: 1,
+                                            size: 5
+                                        })
+                                    }).catch(() => {});
+                                }
+                            """)
+                            await page.wait_for_timeout(4000)
+
+                            if not captured_event.is_set():
+                                logger.warning("Bybit _capture_session: fetch() не перехоплено, зберігаємо cookies напряму...")
+                                cookies_list = await context.cookies()
+                                cookies_dict_fb = {c["name"]: c["value"] for c in cookies_list}
+                                fallback_headers = {"content-type": "application/json;charset=UTF-8"}
+                                success = await self._db.save_auth_session(exchange, fallback_headers, cookies_dict_fb)
+                                if success:
+                                    logger.info("✅ SessionManager: Bybit сесія збережена через прямий cookie capture!")
+                                captured_event.set()
+                        except Exception as bybit_err:
+                            logger.error(f"Bybit _capture_session fetch error: {bybit_err}")
+                            try:
+                                cookies_list = await context.cookies()
+                                cookies_dict_fb = {c["name"]: c["value"] for c in cookies_list}
+                                await self._db.save_auth_session(exchange, {}, cookies_dict_fb)
+                                captured_event.set()
+                                logger.info("Bybit: ultimate fallback cookies збережено")
+                            except Exception:
+                                pass
+                    else:
+                        # Для Binance та OKX: звичайна навігація на сторінку мерчанта
+                        try:
+                            await page.goto(target["url"], wait_until="commit", timeout=60000)
+
+                            # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
+                            if exchange == "Binance":
+                                await page.wait_for_timeout(7000)
+                            else:
+                                await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
+
+                            # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' –
+                            # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
+                            success = await page.evaluate('''() => {
+                                const keywords = ["відгуки", "отзывы", "review", "feedback"];
+                                const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
+                                let clicked = false;
+                                for (let el of els) {
+                                    if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
+                                        // Фільтруємо за наявністю розміру екрану і чи не є він занадто великим (щоб не клікати весь body/header)
+                                        if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
+                                            el.click();
+                                            clicked = true;
+                                        }
                                     }
                                 }
-                            }
-                            return clicked;
-                        }''')
-                        
-                        if success:
-                            logger.info(f"👉 SessionManager: Автоматично натиснуто вкладку відгуків для {exchange} (через JS-масив)")
-                        else:
-                            logger.error(f"❌ SessionManager: Жодного елемента 'Відгуки' не знайдено на екрані {exchange}!")
+                                return clicked;
+                            }''')
 
-                        # Чекаємо поки перехопиться API запит
-                        await asyncio.wait_for(captured_event.wait(), timeout=30.0)
-                    except Exception as e:
-                        logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
-                        raise e
+                            if success:
+                                logger.info(f"👉 SessionManager: Автоматично натиснуто вкладку відгуків для {exchange} (через JS-масив)")
+                            else:
+                                logger.error(f"❌ SessionManager: Жодного елемента 'Відгуки' не знайдено на екрані {exchange}!")
+
+                            # Чекаємо поки перехопиться API запит (розширено до 35 сек)
+                            try:
+                                await asyncio.wait_for(captured_event.wait(), timeout=35.0)
+                            except (asyncio.TimeoutError, asyncio.exceptions.TimeoutError):
+                                # Якщо є fallback URL — пробуємо його
+                                fallback_url = target.get("fallback_url")
+                                if fallback_url and not captured_event.is_set():
+                                    logger.warning(
+                                        "⚠️ SessionManager: Таймаут на основному URL %s, пробуємо fallback: %s",
+                                        exchange, fallback_url
+                                    )
+                                    await page.goto(fallback_url, wait_until="commit", timeout=30000)
+                                    await page.wait_for_timeout(6000)
+                                    await page.evaluate('''() => {
+                                        const keywords = ["відгуки", "отзывы", "review", "feedback"];
+                                        const els = Array.from(document.querySelectorAll('div, span, a, button, li'));
+                                        for (let el of els) {
+                                            if (el.innerText && keywords.some(k => el.innerText.toLowerCase().includes(k))) {
+                                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetWidth < 500) {
+                                                    el.click();
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }''')
+                                    await asyncio.wait_for(captured_event.wait(), timeout=20.0)
+                                else:
+                                    raise asyncio.TimeoutError(f"{exchange}: no API request captured in time")
+
+                        except Exception as e:
+                            logger.error(f"❌ SessionManager помилка завантаження {exchange}: {e}")
+                            raise e
 
                     await asyncio.sleep(1)
                     await context.close()
@@ -1021,7 +1126,7 @@ class SessionManager:
                         
                         # Навігація до P2P profile
                         p2p_url = TARGETS[exchange]["url"]
-                        
+
                         if exchange == "OKX":
                             try:
                                 import aiohttp
@@ -1058,14 +1163,86 @@ class SessionManager:
                                             logger.warning(f"OKX prelogin API status code: {resp.status}")
                             except Exception as fetch_err:
                                 logger.error(f"Failed to fetch active OKX merchant dynamically (using fallback): {fetch_err}")
-                                
-                        p2p_wait_mode = "domcontentloaded"
-                        await page.goto(p2p_url, wait_until=p2p_wait_mode, timeout=30000)
-                        
-                        # Даємо сторінці час на стабілізацію та рендер JS
+
+                        # ── Bybit: P2P SPA не рендерується в Playwright (завжди пуста сторінка)
+                        # Замість навігації на P2P — виконуємо fetch() прямо в браузері,
+                        # який вже авторизований і автоматично додає cookies.
+                        # handle_request перехопить цей запит і збереже сесію.
+                        if exchange == "Bybit":
+                            logger.info("Bybit: тригеримо API через browser fetch() (P2P SPA не рендерується)...")
+                            try:
+                                await page.evaluate("""
+                                    () => {
+                                        // Робимо запит до Bybit P2P ads — браузер автоматично додасть всі cookies
+                                        fetch('https://api2.bybit.com/fiat/otc/item/list', {
+                                            method: 'POST',
+                                            credentials: 'include',
+                                            headers: {
+                                                'Content-Type': 'application/json;charset=UTF-8',
+                                                'Accept': 'application/json'
+                                            },
+                                            body: JSON.stringify({
+                                                tokenId: 'USDT',
+                                                currencyId: 'UAH',
+                                                payment: [],
+                                                side: '1',
+                                                size: '5',
+                                                page: '1',
+                                                amount: ''
+                                            })
+                                        }).catch(() => {});
+                                        // Запасний: також запит до feedback/appraise (оригінальний api_pattern)
+                                        fetch('https://api2.bybit.com/fiat/otc/user/feedback/appraiseList', {
+                                            method: 'POST',
+                                            credentials: 'include',
+                                            headers: {
+                                                'Content-Type': 'application/json;charset=UTF-8',
+                                                'Accept': 'application/json'
+                                            },
+                                            body: JSON.stringify({
+                                                memberId: 's9260bda0f121429184f1a258ee726a9f',
+                                                evaluateType: 1,
+                                                page: 1,
+                                                size: 5
+                                            })
+                                        }).catch(() => {});
+                                    }
+                                """)
+                                # Чекаємо на перехоплення (запити асинхронні)
+                                await page.wait_for_timeout(4000)
+
+                                if not captured_event.is_set():
+                                    # Fallback: зберігаємо cookies напряму якщо fetch не спрацював
+                                    logger.warning("Bybit: fetch() не перехоплено, зберігаємо cookies напряму...")
+                                    cookies_list = await browser_context.cookies()
+                                    cookies_dict_direct = {c["name"]: c["value"] for c in cookies_list}
+                                    # Мінімальний headers dict (cookies — основне для Bybit)
+                                    fallback_headers = {
+                                        "content-type": "application/json;charset=UTF-8",
+                                        "accept": "application/json",
+                                    }
+                                    await self._db.save_auth_session(exchange, fallback_headers, cookies_dict_direct, user_id)
+                                    captured_event.set()
+                                    logger.info("Bybit: сесія збережена через прямий cookie capture")
+                            except Exception as bybit_fetch_err:
+                                logger.error(f"Bybit browser fetch error: {bybit_fetch_err}")
+                                # Ultimate fallback: cookies напряму
+                                try:
+                                    cookies_list = await browser_context.cookies()
+                                    cookies_dict_direct = {c["name"]: c["value"] for c in cookies_list}
+                                    await self._db.save_auth_session(exchange, {}, cookies_dict_direct, user_id)
+                                    captured_event.set()
+                                    logger.info("Bybit: ultimate fallback — cookies збережено напряму")
+                                except Exception:
+                                    pass
+                        else:
+                            p2p_wait_mode = "domcontentloaded"
+                            await page.goto(p2p_url, wait_until=p2p_wait_mode, timeout=30000)
+
+                        # Даємо сторінці час на стабілізацію та рендер JS (не для Bybit — там вже чекали вище)
                         if exchange == "Binance":
                             await page.wait_for_timeout(7000)
-                        else:
+                        elif exchange != "Bybit":
                             await page.wait_for_timeout(6000)
                             
                         # Очікуємо перехоплення API-запиту (до 25 сек) з періодичним кліком по відгуках та перевіркою редиректів

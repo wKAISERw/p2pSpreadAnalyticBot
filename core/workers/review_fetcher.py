@@ -129,9 +129,11 @@ class ReviewFetcher:
             bybit_client=None,
             okx_client=None,
             mexc_client=None,  # 🚀 ДОДАНО
+            notifier=None,
     ):
         self._db = db
         self._review_ttl = review_ttl_hours
+        self._notifier = notifier
 
         self._urgent_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
@@ -163,6 +165,9 @@ class ReviewFetcher:
             "✅" if self._okx else "❌",
             "✅" if self._mexc else "❌",
         )
+
+    def bind_notifier(self, notifier) -> None:
+        self._notifier = notifier
 
     async def start(self) -> None:
         if self._worker_task and not self._worker_task.done():
@@ -310,6 +315,22 @@ class ReviewFetcher:
                 status=save_status, error_reason=save_reason
             )
             self._known_merchants.add((exchange, merchant_id))
+
+            if save_status == "OK":
+                total = pos + neg + neutral
+                bad_pct = (neg / total * 100.0) if total > 0 else 0.0
+                try:
+                    await self._db.save_review_snapshot(exchange, merchant_id, pos, neg, bad_pct)
+                except Exception as _snap_err:
+                    logger.debug("save_review_snapshot error: %s", _snap_err)
+
+                if self._notifier is not None:
+                    try:
+                        asyncio.ensure_future(
+                            self._notifier.redraw_alerts_for_merchant(exchange, merchant_id)
+                        )
+                    except Exception as _re:
+                        logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
 
             return {
                 "positive": pos,
@@ -463,6 +484,20 @@ class ReviewFetcher:
             )
             self._processed += 1
 
+            if save_status == "OK":
+                try:
+                    await self._db.save_review_snapshot(exchange, merchant_id, pos, neg, bad_pct)
+                except Exception as _snap_err:
+                    logger.debug("save_review_snapshot error: %s", _snap_err)
+
+                if self._notifier is not None:
+                    try:
+                        asyncio.ensure_future(
+                            self._notifier.redraw_alerts_for_merchant(exchange, merchant_id)
+                        )
+                    except Exception as _re:
+                        logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
+
             if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
                 logger.warning(
                     "🚨 Поганий мерчант %s [%s]: %.0f%% негативних (%d/%d)",
@@ -590,7 +625,10 @@ class ReviewFetcher:
                 session_cookies=cookies
             )
         except Exception as fe:
-            if "AuthError" in str(fe):
+            fe_str = str(fe)
+            # ret_code=10007 = "User authentication failed" (Bybit) → сесія протухла
+            is_auth_error = "AuthError" in fe_str or "10007" in fe_str or "authentication failed" in fe_str.lower()
+            if is_auth_error:
                 logger.error("🚨 Bybit session burnout detected! %s", fe)
                 asyncio.create_task(self._db.invalidate_auth_session("Bybit", user_id=0))
                 self._send_burnout_alert("Bybit")
@@ -690,6 +728,7 @@ class ReviewFetcher:
 
                 pos_buyer, neg_buyer = 0, 0
                 pos_seller, neg_seller = 0, 0
+                neutral_buyer, neutral_seller = 0, 0
 
                 if resp_buyer.status_code == 200:
                     data_buyer = resp_buyer.json()
@@ -697,6 +736,8 @@ class ReviewFetcher:
                         item_stats = data_buyer.get("data", {}).get("item", {})
                         pos_buyer = int(item_stats.get("positiveCount") or 0)
                         neg_buyer = int(item_stats.get("negativeCount") or 0)
+                        all_buyer = int(item_stats.get("allCount") or 0)
+                        neutral_buyer = max(0, all_buyer - pos_buyer - neg_buyer)
                     else:
                         raise RuntimeError(f"API_ERROR: OKX buyer code={data_buyer.get('code')}, msg={data_buyer.get('msg', '')}")
                 else:
@@ -708,6 +749,8 @@ class ReviewFetcher:
                         item_stats = data_seller.get("data", {}).get("item", {})
                         pos_seller = int(item_stats.get("positiveCount") or 0)
                         neg_seller = int(item_stats.get("negativeCount") or 0)
+                        all_seller = int(item_stats.get("allCount") or 0)
+                        neutral_seller = max(0, all_seller - pos_seller - neg_seller)
                     else:
                         raise RuntimeError(f"API_ERROR: OKX seller code={data_seller.get('code')}, msg={data_seller.get('msg', '')}")
                 else:
@@ -715,6 +758,7 @@ class ReviewFetcher:
 
                 pos = pos_buyer + pos_seller
                 neg = neg_buyer + neg_seller
+                neutral = neutral_buyer + neutral_seller
 
                 # 2) Тексти негативних відгуків (reviewScoreType="negative")
                 bad_texts: list[dict] = []
@@ -772,11 +816,11 @@ class ReviewFetcher:
                             bad_texts.append(enriched)
 
                 logger.debug(
-                    "OKX [session] %s: pos=%d neg=%d | bad_texts=%d (keyword_flagged=%d)",
-                    merchant_id, pos, neg, len(bad_texts),
+                    "OKX [session] %s: pos=%d neg=%d neutral=%d | bad_texts=%d (keyword_flagged=%d)",
+                    merchant_id, pos, neg, neutral, len(bad_texts),
                     sum(1 for t in bad_texts if t.get("keyword_flagged"))
                 )
-                return pos, neg, 0, bad_texts
+                return pos, neg, neutral, bad_texts
 
         except RuntimeError:
             raise

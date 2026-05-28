@@ -155,7 +155,7 @@ class MerchantRepo:
             if verdict and verdict != "UNKNOWN":
                 _derive = {"OK": "APPROVE", "SUSPICIOUS": "CONDITIONAL", "BLOCK": "REJECT"}
                 rec = _derive.get(verdict, "PENDING")
-        return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING") else "PENDING"
+        return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING", "RECHECKING") else "PENDING"
 
     async def get_trade_recommendation_full(
             self, exchange: str, merchant_id: str
@@ -272,13 +272,19 @@ class MerchantRepo:
         )
 
     async def mark_rechecking(self, exchange: str, merchant_id: str) -> None:
-        """Позначає мерчанта як 'AI перепровіряє' — вердикт інвалідовано, LLM перезапущено."""
+        """Позначає мерчанта як 'AI перепровіряє' — вердикт інвалідовано, LLM перезапущено.
+
+        Також оновлює updated_at щоб verdict_ts відображав момент початку перепровірки.
+        Це запобігає повторному спрацьовуванню умови rev_updated > verdict_ts на
+        наступному циклі сканера (бо після save_verdict updated_at знову оновиться).
+        """
         if not self._db:
             return
+        now = time.time()
         await self._db.execute(
-            "UPDATE merchant_verdict SET trade_recommendation = 'RECHECKING' "
+            "UPDATE merchant_verdict SET trade_recommendation = 'RECHECKING', updated_at = ? "
             "WHERE exchange = ? AND merchant_id = ?",
-            (exchange, merchant_id),
+            (now, exchange, merchant_id),
         )
         await self._db.commit()
 
@@ -600,6 +606,77 @@ class MerchantRepo:
         except Exception as e:
             logger.error("get_best_sell_price: %s", e)
             return 0.0
+
+    async def save_sent_alert(
+        self,
+        exchange: str,
+        merchant_id: str,
+        chat_id: int,
+        message_ids: list[int],
+        alert_dict: dict,
+        display_settings: dict,
+        is_sniper: bool,
+    ) -> None:
+        import json
+        if not self._db:
+            return
+        now = time.time()
+        msg_ids_json = json.dumps(message_ids)
+        alert_json = json.dumps(alert_dict, default=str)
+        display_json = json.dumps(display_settings)
+        is_sniper_int = 1 if is_sniper else 0
+        
+        await self._db.execute(
+            """
+            INSERT OR REPLACE INTO sent_alerts
+            (exchange, merchant_id, chat_id, message_ids_json, sent_at, alert_json, display_settings_json, is_sniper_match)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (exchange, merchant_id, chat_id, msg_ids_json, now, alert_json, display_json, is_sniper_int)
+        )
+        await self._db.commit()
+        await self.prune_sent_alerts()
+
+    async def get_recent_sent_alerts(self, exchange: str, merchant_id: str, max_age_seconds: int = 1800) -> list[dict]:
+        import json
+        if not self._db:
+            return []
+        since = time.time() - max_age_seconds
+        async with self._db.execute(
+            """
+            SELECT chat_id, message_ids_json, alert_json, display_settings_json, is_sniper_match, sent_at
+            FROM sent_alerts
+            WHERE exchange = ? AND merchant_id = ? AND sent_at > ?
+            ORDER BY sent_at DESC
+            """,
+            (exchange, merchant_id, since)
+        ) as cur:
+            rows = await cur.fetchall()
+            
+        out = []
+        for r in rows:
+            try:
+                msg_ids = json.loads(r["message_ids_json"])
+                alert_dict = json.loads(r["alert_json"])
+                display_settings = json.loads(r["display_settings_json"])
+                out.append({
+                    "chat_id": r["chat_id"],
+                    "message_ids": msg_ids,
+                    "alert_dict": alert_dict,
+                    "display_settings": display_settings,
+                    "is_sniper_match": bool(r["is_sniper_match"]),
+                    "sent_at": r["sent_at"],
+                })
+            except Exception as e:
+                logger.error("Error parsing sent alert row: %s", e)
+        return out
+
+    async def prune_sent_alerts(self, max_age_seconds: int = 1800) -> None:
+        if not self._db:
+            return
+        limit = time.time() - max_age_seconds
+        await self._db.execute("DELETE FROM sent_alerts WHERE sent_at < ?", (limit,))
+        await self._db.commit()
 
     # ═══════════════════════════════════════════════════════════════════════
     # API Credentials (encrypted storage)

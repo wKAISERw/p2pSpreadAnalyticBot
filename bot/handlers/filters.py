@@ -1199,6 +1199,186 @@ async def on_feedback(call: CallbackQuery):
         await _db.add_to_blacklist(exchange, mid, "Unknown", reason, "manual_tg")
         await call.answer(f"✅ Успіх! Заблоковано: {reason}", show_alert=True)
 
+        # 📊 Feedback Loop: записуємо лічильники для аналізу пропущених ризиків
+        # Ці дані дозволяють відстежувати, які категорії ризику найчастіше пропускає AI
+        try:
+            counter_key = f"feedback_loop_{action}"
+            total_key = "feedback_loop_total"
+            current_count = int(runtime_config.get(counter_key, "0") or "0")
+            total_count = int(runtime_config.get(total_key, "0") or "0")
+            await runtime_config.set(counter_key, str(current_count + 1))
+            await runtime_config.set(total_key, str(total_count + 1))
+            logger.info(
+                "📊 Feedback loop: user=%d action=%s exchange=%s merchant=%s (total=%d %s=%d)",
+                call.from_user.id, action, exchange, mid[:12],
+                total_count + 1, action, current_count + 1,
+            )
+            # Prometheus counter
+            from core.analytics.metrics import feedback_blacklist_total
+            feedback_blacklist_total.labels(action=action).inc()
+        except Exception as _fb_err:
+            logger.debug("Feedback loop counter error: %s", _fb_err)
+
+        # ── Feedback Loop Weights Adjustment ─────────────────────────────────
+        try:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            
+            # Read active signals from DB for this merchant
+            regex_active = False
+            llm_active = False
+            behavior_active = False
+            identity_active = False
+            
+            async with conn.execute(
+                "SELECT verdict, risk_score, reason, risk_type FROM merchant_verdict WHERE exchange=? AND merchant_id=?",
+                (exchange, mid)
+            ) as cur:
+                verdict_row = await cur.fetchone()
+                
+            if verdict_row:
+                verdict_dict = dict(verdict_row)
+                if (verdict_dict.get("risk_score") or 0) > 0:
+                    regex_active = True
+                
+                v_str = str(verdict_dict.get("verdict") or "").upper()
+                if v_str in ("SUSPICIOUS", "WARN", "NEEDS_LLM"):
+                    llm_active = True
+                    
+                risk_t = str(verdict_dict.get("risk_type") or "").upper()
+                reason_t = str(verdict_dict.get("reason") or "").lower()
+                if risk_t == "BOT_API" or "bot" in reason_t or "behavior" in reason_t:
+                    behavior_active = True
+                if risk_t == "TRIANGLE" or "twin" in reason_t or "identity" in reason_t:
+                    identity_active = True
+
+            reviews_pct_active = False
+            reviews_text_active = False
+            
+            async with conn.execute(
+                "SELECT negative, bad_texts_json FROM merchant_reviews WHERE exchange=? AND merchant_id=?",
+                (exchange, mid)
+            ) as cur:
+                reviews_row = await cur.fetchone()
+                
+            if reviews_row:
+                rev_dict = dict(reviews_row)
+                if (rev_dict.get("negative") or 0) > 0:
+                    reviews_pct_active = True
+                
+                bad_txt = rev_dict.get("bad_texts_json")
+                if bad_txt:
+                    import json
+                    try:
+                        bad_arr = json.loads(bad_txt)
+                        if bad_arr:
+                            reviews_text_active = True
+                    except Exception:
+                        pass
+
+            async with conn.execute(
+                "SELECT min_limit, max_limit FROM merchant_snapshots WHERE exchange=? AND merchant_id=?",
+                (exchange, mid)
+            ) as cur:
+                snapshots = await cur.fetchall()
+            if snapshots:
+                if any(s[0] == s[1] and s[0] > 0 for s in snapshots):
+                    behavior_active = True
+
+            # Deltas
+            delta_weights = {
+                "W_REGEX": 0.02 if regex_active else 0.0,
+                "W_BEHAVIOR": 0.02 if behavior_active else 0.0,
+                "W_REVIEWS_PCT": 0.02 if reviews_pct_active else 0.0,
+                "W_REVIEWS_TEXT": 0.02 if reviews_text_active else 0.0,
+                "W_LLM": 0.02 if llm_active else 0.0,
+                "W_IDENTITY": 0.02 if identity_active else 0.0
+            }
+            
+            # Fallback deltas if no active signals were found
+            if sum(delta_weights.values()) == 0.0:
+                if action == "triangle":
+                    delta_weights["W_IDENTITY"] = 0.02
+                    delta_weights["W_REGEX"] = 0.01
+                elif action == "receipt":
+                    delta_weights["W_REVIEWS_TEXT"] = 0.02
+                    delta_weights["W_REGEX"] = 0.01
+                elif action == "chat":
+                    delta_weights["W_REGEX"] = 0.02
+                elif action == "fincrime":
+                    delta_weights["W_LLM"] = 0.02
+                    delta_weights["W_BEHAVIOR"] = 0.01
+
+            # Get current weights from runtime config or CompositeScorer defaults
+            from core.engine.risk_engine import CompositeScorer
+            current_w = {
+                "W_REGEX": float(runtime_config.get("W_REGEX") or CompositeScorer.W_REGEX),
+                "W_BEHAVIOR": float(runtime_config.get("W_BEHAVIOR") or CompositeScorer.W_BEHAVIOR),
+                "W_REVIEWS_PCT": float(runtime_config.get("W_REVIEWS_PCT") or CompositeScorer.W_REVIEWS_PCT),
+                "W_REVIEWS_TEXT": float(runtime_config.get("W_REVIEWS_TEXT") or CompositeScorer.W_REVIEWS_TEXT),
+                "W_LLM": float(runtime_config.get("W_LLM") or CompositeScorer.W_LLM),
+                "W_IDENTITY": float(runtime_config.get("W_IDENTITY") or CompositeScorer.W_IDENTITY),
+            }
+            
+            # Apply delta
+            raw_new = {k: current_w[k] + delta_weights[k] for k in current_w}
+            
+            # Iterative clamping and normalization solver
+            bounds = {
+                "W_REGEX": (0.05, 0.45),
+                "W_BEHAVIOR": (0.05, 0.35),
+                "W_REVIEWS_PCT": (0.05, 0.25),
+                "W_REVIEWS_TEXT": (0.05, 0.20),
+                "W_LLM": (0.05, 0.35),
+                "W_IDENTITY": (0.05, 0.25)
+            }
+            
+            w = raw_new.copy()
+            for _ in range(15):
+                tot = sum(w.values())
+                if tot == 0:
+                    w = {k: 1.0/6.0 for k in w}
+                    break
+                w = {k: v / tot for k, v in w.items()}
+                
+                clamped = {}
+                free = {}
+                for k, v in w.items():
+                    low, high = bounds[k]
+                    if v < low:
+                        clamped[k] = low
+                    elif v > high:
+                        clamped[k] = high
+                    else:
+                        free[k] = v
+                if not clamped:
+                    break
+                
+                clamped_sum = sum(clamped.values())
+                free_sum = sum(free.values())
+                if free_sum > 0:
+                    rem = 1.0 - clamped_sum
+                    w = {}
+                    for k in clamped:
+                        w[k] = clamped[k]
+                    for k in free:
+                        w[k] = free[k] * (rem / free_sum)
+                else:
+                    break
+                    
+            tot = sum(w.values())
+            optimized_w = {k: round(v / tot, 4) for k, v in w.items()}
+            
+            # Save via runtime_config
+            for key, val in optimized_w.items():
+                await runtime_config.set(key, str(val))
+                
+            # Immediately reload in CompositeScorer
+            await CompositeScorer.load_weights(_db)
+            
+            logger.info("📊 Feedback loop weights adjusted: %s", optimized_w)
+        except Exception as _w_err:
+            logger.warning("Feedback loop weight adjustment error: %s", _w_err, exc_info=True)
+
         # Перекреслюємо повідомлення, щоб візуально закрити тікет
         old_text = call.message.html_text or "Ордер"
         new_text = f"🚨 <b>МЕРЧАНТ ЗАБЛОКОВАНИЙ (Blacklist)!</b>\nПричина: {reason}\nБіржа: {exchange}\n\n<del>{old_text[:3000]}</del>"
@@ -1209,5 +1389,4 @@ async def on_feedback(call: CallbackQuery):
     except Exception as e:
         logger.error("Помилка обробки кнопки: %s", e)
         await call.answer("Помилка БД при блокуванні", show_alert=True)
-
 

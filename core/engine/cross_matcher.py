@@ -195,6 +195,7 @@ class CrossMatchingEngine:
                     key=lambda p: (bank_names.get(p[0], p[0]), bank_names.get(p[1], p[1])),
                 )
             ]
+            base["route_pairs"] = [list(p) for p in item["route_pairs"]]
             merged.append(base)
 
         merged.sort(

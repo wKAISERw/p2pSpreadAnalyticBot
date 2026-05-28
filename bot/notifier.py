@@ -50,6 +50,7 @@ class TelegramNotifier:
         self._queue: asyncio.Queue[SpreadAlert] = asyncio.Queue(maxsize=max_queue_size)
         self._worker_task: asyncio.Task | None = None
         self._polling_task: asyncio.Task | None = None
+        self._redraw_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def bind_db(self, db: MerchantDB):
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
@@ -85,14 +86,200 @@ class TelegramNotifier:
         """
         try:
             display = await self._get_display_settings(chat_id)
-            await self._send_single(alert, chat_id=chat_id, display_settings=display, is_sniper_match=is_sniper_match)
+            sent_ids = await self._send_single(alert, chat_id=chat_id, display_settings=display, is_sniper_match=is_sniper_match)
+            
+            if sent_ids and self._db:
+                def _serialize_order(order: Order) -> dict:
+                    """Серіалізує Order у JSON-сумісний dict, зберігаючи списки та tuple-поля коректно."""
+                    result = {}
+                    for k, v in order.__dict__.items():
+                        if k == "regex_warn_flags":
+                            # list[tuple[str, str]] → list[list[str, str]] (JSON-safe)
+                            result[k] = [list(item) if isinstance(item, (tuple, list)) else [str(item), ""] for item in (v or [])]
+                        elif k in ("bank_codes", "regex_score", "composite_score", "review_score",
+                                   "review_neg_pct", "review_fetched", "positive_rate",
+                                   "month_order_count", "finish_rate_pct", "is_verified",
+                                   "account_age_days"):
+                            result[k] = v  # зберігаємо оригінальний тип
+                        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                            result[k] = float(v)
+                        elif isinstance(v, (list, dict, bool)) or v is None:
+                            result[k] = v
+                        else:
+                            result[k] = str(v)
+                    return result
+
+                alert_dict = {
+                    "buy_order": _serialize_order(alert.buy_order),
+                    "sell_order": _serialize_order(alert.sell_order),
+                    "spread_pct": alert.spread_pct,
+                    "profit_uah": alert.profit_uah,
+                    "deal_amount_uah": alert.deal_amount_uah,
+                    "buy_bank": alert.buy_bank,
+                    "sell_bank": alert.sell_bank,
+                    "buy_banks_all": alert.buy_banks_all,
+                    "sell_banks_all": alert.sell_banks_all,
+                    "buy_banks_fit": alert.buy_banks_fit,
+                    "sell_banks_fit": alert.sell_banks_fit,
+                    "route_variants": alert.route_variants,
+                    "route_type": alert.route_type,
+                    "route_pairs": getattr(alert, "route_pairs", None),
+                    "is_asymmetric": getattr(alert, "is_asymmetric", False),
+                    "asymmetric_details": getattr(alert, "asymmetric_details", None),
+                }
+                
+                # Save mapping for both merchants to allow triggering updates on either of them
+                if alert.buy_order.merchant_id:
+                    await self._db.save_sent_alert(
+                        alert.buy_order.exchange,
+                        alert.buy_order.merchant_id,
+                        chat_id,
+                        sent_ids,
+                        alert_dict,
+                        display,
+                        is_sniper_match
+                    )
+                if alert.sell_order.merchant_id:
+                    await self._db.save_sent_alert(
+                        alert.sell_order.exchange,
+                        alert.sell_order.merchant_id,
+                        chat_id,
+                        sent_ids,
+                        alert_dict,
+                        display,
+                        is_sniper_match
+                    )
+
+                # 📈 Prometheus: count sent alerts
+                try:
+                    from core.analytics.metrics import alerts_sent_total
+                    alerts_sent_total.labels(
+                        route_type=alert_dict.get("route_type", "UNKNOWN")
+                    ).inc()
+                except Exception:
+                    pass
         except Exception as e:
             logger.error("send_to_user [%d]: %s", chat_id, e)
 
     async def _send_single(self, alert: SpreadAlert, chat_id: int | None = None, display_settings: dict | None = None,
-                           is_sniper_match: bool = False) -> None:
+                           is_sniper_match: bool = False) -> list[int]:
         from bot.alert_builder import send_single
-        await send_single(self, alert, chat_id=chat_id, display_settings=display_settings, is_sniper_match=is_sniper_match)
+        return await send_single(self, alert, chat_id=chat_id, display_settings=display_settings, is_sniper_match=is_sniper_match)
+
+    async def redraw_alerts_for_merchant(self, exchange: str, merchant_id: str) -> None:
+        """
+        Знаходить алерти, відправлені за останні 30 хвилин для цього мерчанта,
+        і перемальовує (редагує) їх за новими даними з бази даних.
+        """
+        if not self._db:
+            return
+        
+        lock = self._redraw_locks.setdefault((exchange, merchant_id), asyncio.Lock())
+        async with lock:
+            try:
+                recent_alerts = await self._db.get_recent_sent_alerts(exchange, merchant_id, max_age_seconds=1800)
+                if not recent_alerts:
+                    return
+                
+                logger.info("🔄 Перемальовка %d алертів для мерчанта %s [%s]", len(recent_alerts), merchant_id, exchange)
+                
+                from bot.alert_builder import send_single, SpreadAlert
+                from exchanges.base import Order
+                from decimal import Decimal
+                
+                for item in recent_alerts:
+                    chat_id = item["chat_id"]
+                    message_ids = item["message_ids"]
+                    alert_dict = item["alert_dict"]
+                    display = item["display_settings"]
+                    is_sniper = item["is_sniper_match"]
+                    
+                    # Reconstruct order objects from raw dict
+                    buy_dict = alert_dict["buy_order"]
+                    sell_dict = alert_dict["sell_order"]
+                    
+                    # Convert required fields to Decimal
+                    for o_dict in (buy_dict, sell_dict):
+                        for field in ("price", "available_amount", "min_limit", "max_limit"):
+                            if field in o_dict:
+                                o_dict[field] = Decimal(str(o_dict[field]))
+
+                        # Handle conversion of other numeric fields
+                        o_dict["month_order_count"] = int(float(o_dict.get("month_order_count", 0)))
+                        o_dict["finish_rate_pct"] = float(o_dict.get("finish_rate_pct", 100.0))
+                        o_dict["is_verified"] = str(o_dict.get("is_verified", "False")) in ("True", "1", "true")
+                        o_dict["account_age_days"] = int(float(o_dict.get("account_age_days", 0)))
+                        o_dict["composite_score"] = int(float(o_dict.get("composite_score", 0)))
+                        o_dict["review_score"] = int(float(o_dict.get("review_score", 0)))
+                        o_dict["review_neg_pct"] = float(o_dict.get("review_neg_pct", 0.0))
+                        o_dict["review_fetched"] = str(o_dict.get("review_fetched", "False")) in ("True", "1", "true")
+                        o_dict["positive_rate"] = float(o_dict.get("positive_rate", 0.0))
+
+                        # Normalize regex_warn_flags: може бути str (старий формат) або list[list/tuple]
+                        raw_warn = o_dict.get("regex_warn_flags")
+                        if isinstance(raw_warn, str):
+                            # Старий формат: str(list) — відновити неможливо, просто скидаємо
+                            o_dict["regex_warn_flags"] = []
+                        elif isinstance(raw_warn, list):
+                            # list[list[str]] → list[tuple[str, str]]
+                            normalized = []
+                            for item in raw_warn:
+                                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                                    normalized.append((str(item[0]), str(item[1])))
+                                elif isinstance(item, str):
+                                    normalized.append((item, ""))
+                            o_dict["regex_warn_flags"] = normalized
+                        else:
+                            o_dict["regex_warn_flags"] = []
+
+                    import inspect
+                    valid_fields = set(inspect.signature(Order).parameters.keys())
+                    buy_order = Order(**{k: v for k, v in buy_dict.items() if k in valid_fields})
+                    for k, v in buy_dict.items():
+                        if k not in valid_fields:
+                            setattr(buy_order, k, v)
+                    sell_order = Order(**{k: v for k, v in sell_dict.items() if k in valid_fields})
+                    for k, v in sell_dict.items():
+                        if k not in valid_fields:
+                            setattr(sell_order, k, v)
+                    
+                    alert = SpreadAlert(
+                        buy_order=buy_order,
+                        sell_order=sell_order,
+                        spread_pct=alert_dict["spread_pct"],
+                        profit_uah=alert_dict["profit_uah"],
+                        deal_amount_uah=alert_dict["deal_amount_uah"],
+                        buy_bank=alert_dict["buy_bank"],
+                        sell_bank=alert_dict["sell_bank"],
+                        buy_banks_all=alert_dict.get("buy_banks_all"),
+                        sell_banks_all=alert_dict.get("sell_banks_all"),
+                        buy_banks_fit=alert_dict.get("buy_banks_fit"),
+                        sell_banks_fit=alert_dict.get("sell_banks_fit"),
+                        route_variants=alert_dict.get("route_variants"),
+                        route_type=alert_dict.get("route_type", "UNKNOWN"),
+                        route_pairs=alert_dict.get("route_pairs"),
+                    )
+                    alert.is_asymmetric = alert_dict.get("is_asymmetric", False)
+                    alert.asymmetric_details = alert_dict.get("asymmetric_details")
+                    
+                    # Trigger edit
+                    await send_single(
+                        self,
+                        alert,
+                        chat_id=chat_id,
+                        display_settings=display,
+                        is_sniper_match=is_sniper,
+                        edit_message_ids=message_ids
+                    )
+
+                    # 📈 Prometheus
+                    try:
+                        from core.analytics.metrics import alerts_redrawn_total
+                        alerts_redrawn_total.labels(exchange=exchange).inc()
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error("Error in redraw_alerts_for_merchant: %s", e, exc_info=True)
 
     async def _send_batch(self, batch: list[SpreadAlert]) -> None:
         from bot.alert_builder import send_batch

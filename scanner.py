@@ -123,6 +123,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     runtime_config._db = merchant_db
     await runtime_config.load()
+    from core.engine.risk_engine import CompositeScorer
+    await CompositeScorer.load_weights(merchant_db)
 
     # Завантажуємо credentials один раз через ProviderFactory
     all_creds = await merchant_db.get_all_credentials()
@@ -138,12 +140,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     notifier.bind_db(merchant_db)
     # bind_commands відкладено до ініціалізації MakerAdMonitor (після risk_engine)
 
-    llm_pool = LLMWorkerPool(merchant_db)
+    llm_pool = LLMWorkerPool(merchant_db, notifier=notifier)
     await llm_pool.start()
 
     review_fetcher = ReviewFetcher(
         merchant_db,
         review_ttl_hours=getattr(settings, "review_ttl_hours", 24.0),
+        notifier=notifier,
     )
     await review_fetcher.start()
     # 🚀 ДОДАНО: Запуск фонового менеджера сесій
@@ -351,6 +354,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
             # ── Safe Boot Flow ──────────────────────────────────────────────
             await runtime_config.load()
+            await CompositeScorer.load_weights(merchant_db)
 
             # Перевірялка "здоров'я" при старті
             require_sessions = runtime_config.get("require_sessions", "true") == "true"
@@ -392,6 +396,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     # Runtime config — не частіше ніж раз на 10s
                     if time.monotonic() - _runtime_last_load >= 10.0:
                         await runtime_config.load()
+                        await CompositeScorer.load_weights(merchant_db)
                         _runtime_last_load = time.monotonic()
 
                     # 🚀 ФІКС: Перевірка чи сканер на паузі
@@ -421,11 +426,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         current_capital = max(float(u["capital"]) for u in active_users) if active_users else settings.working_capital_uah
                         current_spread  = min(float(u["min_spread"]) for u in active_users)
                         # Динамічні банки — union всіх активних юзерів (загальні + buy + sell)
+                        import re
                         _all_banks: set[str] = set()
                         for _u in active_users:
-                            _all_banks.update(_u["bank_codes"])
-                            _all_banks.update(_u.get("buy_bank_codes") or [])
-                            _all_banks.update(_u.get("sell_bank_codes") or [])
+                            for field in ("bank_codes", "buy_bank_codes", "sell_bank_codes"):
+                                val = _u.get(field)
+                                if val:
+                                    if isinstance(val, str):
+                                        codes = re.findall(r'\d+', val)
+                                        _all_banks.update(codes)
+                                    elif isinstance(val, (list, tuple, set)):
+                                        _all_banks.update(str(x) for x in val)
                         target_banks = {c: BANK_NAMES[c] for c in _all_banks if c in BANK_NAMES}
                         if not target_banks:  # fallback якщо банки порожні
                             target_banks = {c: BANK_NAMES[c] for c in DEFAULT_BANK_CODES if c in BANK_NAMES}
@@ -505,6 +516,18 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         },
                     )
 
+                    # 📈 Prometheus metrics update
+                    try:
+                        from core.analytics.metrics import (
+                            scanner_cycle_duration_seconds,
+                            llm_queue_size, review_queue_size,
+                        )
+                        scanner_cycle_duration_seconds.observe(latency)
+                        llm_queue_size.set(llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0)
+                        review_queue_size.set(review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0)
+                    except Exception:
+                        pass
+
                     # --- ДОДАНО ДЛЯ ФРОНТЕНДУ ---
                     state.stats["totalScanned"] += len(all_cycle_orders)
                     state.stats["opportunitiesFound"] += len(opportunities)
@@ -552,7 +575,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         s_rec, _, s_reason, _, _ = await merchant_db.get_trade_recommendation_full(sell_o.exchange, sell_o.merchant_id)
                         # 2. Формуємо об'єкт для React ДО фільтрів дедуплікації і лімітів алертів.
                         # Це гарантує, що ордер буде на сайті рівно стільки, скільки він реально висить в стакані.
-                        logger.warning(
+                        logger.debug(
                             "🚨 СПРЕД! %s | %s ➔ %s | %s | Net: %.2f%% | Профіт: %.2f ₴",
                             opp.get("route_type", "?"),
                             buy_o.exchange, sell_o.exchange,
@@ -574,6 +597,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             sell_banks_fit=opp.get("sell_banks_fit"),
                             route_variants=opp.get("route_variants"),
                             route_type=opp.get("route_type", "UNKNOWN"),
+                            route_pairs=opp.get("route_pairs"),
                             buy_rec=b_rec,
                             sell_rec=s_rec,
                             buy_reason=b_reason,
@@ -704,7 +728,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         ))
 
                         if not is_muted():
-                            logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
+                            if runtime_config.get("show_spread_logs", "true") == "true":
+                                logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
+                            else:
+                                logger.debug("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
                             # Fire-and-forget з логуванням помилок
                             task = asyncio.create_task(dispatcher.dispatch(alert, opp))
                             task.add_done_callback(

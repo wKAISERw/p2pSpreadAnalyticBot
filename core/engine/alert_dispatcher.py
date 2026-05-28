@@ -120,7 +120,6 @@ class AlertDispatcher:
                 return False, f"{side_label} merchant rate {order_obj.finish_rate_pct:.1f}% < {min_rate}", entry
 
         return True, "", scaled_entry
-
     async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
         """Відправляє алерт з розумним підбором банку на основі ВСІХ спільних фільтрів."""
         users = await self._get_users()
@@ -129,7 +128,13 @@ class AlertDispatcher:
             await self._notifier.push(alert)
             return
 
-        logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
+        from config.runtime import runtime_config
+        show_logs = runtime_config.get("show_spread_logs", "true") == "true"
+
+        if show_logs:
+            logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
+        else:
+            logger.debug("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
         matched_count = 0
 
         for user in users:
@@ -197,19 +202,70 @@ class AlertDispatcher:
                 # 🧠 АДАПТИВНИЙ ПРІОРИТЕТ:
                 # Якщо є збіг по живих картах (напр. Monobank) — ставимо його.
                 # Якщо немає — беремо канонічний код, який виплюнув матчер (opp["buy_bank"])
-                engine_buy_name = str(BankRegistry.get_name(opp.get("buy_bank", "43"))).lower()
-                engine_sell_name = str(BankRegistry.get_name(opp.get("sell_bank", "43"))).lower()
-
-                final_buy_name = list(cards_buy_match)[0] if cards_buy_match else (
-                    engine_buy_name if engine_buy_name in allowed_buy_names else (list(allowed_buy_names)[0] if allowed_buy_names else "monobank")
-                )
-                final_sell_name = list(cards_sell_match)[0] if cards_sell_match else (
-                    engine_sell_name if engine_sell_name in allowed_sell_names else (list(allowed_sell_names)[0] if allowed_sell_names else "monobank")
-                )
+                engine_buy_list = list(self._clean_and_normalize_banks(opp.get("buy_bank", "43")))
+                engine_sell_list = list(self._clean_and_normalize_banks(opp.get("sell_bank", "43")))
+                engine_buy_name = engine_buy_list[0] if engine_buy_list else "monobank"
+                engine_sell_name = engine_sell_list[0] if engine_sell_list else "monobank"
 
                 NAME_TO_CODE = {"monobank": "43", "privatbank": "14", "pumb": "64", "a-bank": "48", "izibank": "553", "sense": "328"}
-                chosen_buy = NAME_TO_CODE.get(final_buy_name, "43")
-                chosen_sell = NAME_TO_CODE.get(final_sell_name, "43")
+                CODE_TO_NAME = {v: k for k, v in NAME_TO_CODE.items()}
+
+                # Отримаємо дозволені коди для Buy та Sell
+                allowed_buy_codes = {NAME_TO_CODE[name] for name in allowed_buy_names if name in NAME_TO_CODE}
+                allowed_sell_codes = {NAME_TO_CODE[name] for name in allowed_sell_names if name in NAME_TO_CODE}
+
+                # Отримуємо коди живих карток користувача
+                user_card_codes = {NAME_TO_CODE[name] for name in user_card_names if name in NAME_TO_CODE}
+
+                route_pairs = opp.get("route_pairs")
+                chosen_pair = None
+
+                if route_pairs:
+                    # Шукаємо пари (buy_code, sell_code), де користувач має активні карти для обох сторін
+                    valid_pairs = []
+                    for pair in route_pairs:
+                        if len(pair) == 2:
+                            b_code, s_code = pair[0], pair[1]
+                            if b_code in allowed_buy_codes and b_code in user_card_codes:
+                                if s_code in allowed_sell_codes and s_code in user_card_codes:
+                                    valid_pairs.append((b_code, s_code))
+
+                    if valid_pairs:
+                        from core.utils.fees import get_calculator
+                        
+                        best_profit = -999999.0
+                        best_pair = None
+                        
+                        buy_price = float(opp["buy_order"].price)
+                        sell_price = float(opp["sell_order"].price)
+                        gross_profit = (scaled_amount / buy_price) * sell_price - scaled_amount
+                        
+                        for b_code, s_code in valid_pairs:
+                            try:
+                                calc = get_calculator(b_code, s_code, opp["buy_order"].exchange, opp["sell_order"].exchange)
+                                _, total_fee, _ = calc.calculate_net(scaled_amount, usdt_price=buy_price)
+                                net_profit = gross_profit - total_fee
+                                if net_profit > best_profit:
+                                    best_profit = net_profit
+                                    best_pair = (b_code, s_code)
+                            except Exception:
+                                pass
+                        
+                        if best_pair:
+                            chosen_pair = best_pair
+
+                if chosen_pair:
+                    chosen_buy, chosen_sell = chosen_pair
+                else:
+                    # Fallback на існуючу незалежну логіку
+                    final_buy_name = list(cards_buy_match)[0] if cards_buy_match else (
+                        engine_buy_name if engine_buy_name in allowed_buy_names else (list(allowed_buy_names)[0] if allowed_buy_names else "monobank")
+                    )
+                    final_sell_name = list(cards_sell_match)[0] if cards_sell_match else (
+                        engine_sell_name if engine_sell_name in allowed_sell_names else (list(allowed_sell_names)[0] if allowed_sell_names else "monobank")
+                    )
+                    chosen_buy = NAME_TO_CODE.get(final_buy_name, "43")
+                    chosen_sell = NAME_TO_CODE.get(final_sell_name, "43")
 
                 # Створюємо ізольовану копію алерта під користувача
                 local_alert = copy.copy(alert)
@@ -233,13 +289,22 @@ class AlertDispatcher:
 
                 try:
                     await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
-                    logger.info(
-                        "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
-                        match_type, uid, chosen_buy.upper(), chosen_sell.upper()
-                    )
+                    if show_logs:
+                        logger.info(
+                            "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
+                            match_type, uid, chosen_buy.upper(), chosen_sell.upper()
+                        )
+                    else:
+                        logger.debug(
+                            "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
+                            match_type, uid, chosen_buy.upper(), chosen_sell.upper()
+                        )
                 except Exception as e:
                     logger.warning("  └─ ❌ Помилка відправки юзеру %s: %s", uid, e)
             else:
                 logger.debug("  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Причина: %s", uid, skip_reason)
 
-        logger.info("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))
+        if show_logs:
+            logger.info("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))
+        else:
+            logger.debug("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))

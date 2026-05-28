@@ -108,9 +108,11 @@ def global_settings_kb(settings_dict: dict) -> InlineKeyboardMarkup:
     safety_buffer = settings_dict.get("safety_buffer_pct", 0.3)
     max_alerts = settings_dict.get("max_alerts_per_cycle", 4)
     require_sessions = settings_dict.get("require_sessions", "true") == "true"
+    show_spread_logs = settings_dict.get("show_spread_logs", "true") == "true"
 
     # Конвертуємо стан сесій у красивий візуальний бейдж
     session_status = "🟢 Валідувати" if require_sessions else "⚪ Ігнорувати"
+    spread_logs_status = "🟢 Показувати" if show_spread_logs else "⚪ Приховувати"
 
     # 2. Будуємо сітку кнопок (як на твоєму скріншоті UI)
     builder.row(InlineKeyboardButton(text=f"📉 Мін. Спред: {min_spread}%", callback_data="gset:edit:min_spread"))
@@ -119,6 +121,8 @@ def global_settings_kb(settings_dict: dict) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text=f"📦 Макс. алертів/цикл: {max_alerts}", callback_data="gset:edit:max_alerts"))
     builder.row(
         InlineKeyboardButton(text=f"🩺 Стан сесій: {session_status}", callback_data="gset:toggle:require_sessions"))
+    builder.row(
+        InlineKeyboardButton(text=f"📋 Логи спредів: {spread_logs_status}", callback_data="gset:toggle:show_spread_logs"))
 
     # 🚀 ДОДАЄМО НАШУ НОВУ ВКЛАДКУ ЕКСПЕРИМЕНТАЛЬНИХ ФІЧ
     builder.row(InlineKeyboardButton(

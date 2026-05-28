@@ -23,6 +23,13 @@ ALLOWED_KEYS = frozenset({
     "require_sessions",
     "min_spread_pct",
     "safety_buffer_pct",
+    "show_spread_logs",
+    "W_REGEX",
+    "W_BEHAVIOR",
+    "W_REVIEWS_PCT",
+    "W_REVIEWS_TEXT",
+    "W_LLM",
+    "W_IDENTITY",
 })
 
 
