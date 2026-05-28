@@ -472,8 +472,11 @@ async def cmd_status(message: Message) -> None:
     mute_left = max(0, _mute_until - _t.monotonic())
     mute_line = f"\n🔕 Пауза: <b>{mute_left / 3600:.1f} год</b>" if mute_left > 0 else ""
 
+    internet_status = "🟢 OK" if _scanner_stats.get("internet_connected", True) else "🔴 ВІДСУТНІЙ"
+
     text = (
             "📊 <b>Стан системного сканера</b>\n\n"
+            f"🌐 Інтернет: <b>{internet_status}</b>\n"
             f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
             f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
             f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"

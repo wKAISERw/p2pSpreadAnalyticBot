@@ -113,6 +113,13 @@ class CardMatchingEngine:
                     card["_tx_count"] = tx_count
             
             if not reason:
+                now = time.time()
+                tx_count_total, last_tx_ts = await self.db.get_card_warmth_stats(card["id"])
+                warmup_limit = self.db.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now)
+                
+                is_warm = (warmup_limit is None)
+                card["_is_warm"] = is_warm
+
                 used_daily = await self.db.get_rolling_used(card["id"], direction, hours=24)
                 used_monthly = await self.db.get_rolling_used(card["id"], direction, hours=24*30) 
                 
@@ -124,9 +131,15 @@ class CardMatchingEngine:
                 if direction == "buy":
                     max_avail_uncapped = min(max_avail_uncapped, card["balance"])
                 
+                if warmup_limit is not None:
+                    max_avail_uncapped = min(max_avail_uncapped, warmup_limit)
+
                 max_avail = min(max_avail_uncapped, max_single)
+                
+                if warmup_limit is not None and amount > warmup_limit:
+                    reason = f"Непрогріта картка (ліміт прогріву {warmup_limit:,.0f} ₴)"
                     
-                if max_avail <= 0:
+                if not reason and max_avail <= 0:
                     reason = "Daily/Monthly limits exhausted"
                 else:
                     card["_max_avail"] = max_avail
@@ -161,6 +174,8 @@ class CardMatchingEngine:
             score = 100
             if not card.get("is_own", 1):
                 score += 50
+            if card.get("_is_warm", False):
+                score += 100
             
             last_tx = card.get("last_tx_timestamp", 0)
             if last_tx > 0 and (time.time() - last_tx) < 3600:

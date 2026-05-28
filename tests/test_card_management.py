@@ -77,6 +77,7 @@ async def _setup_user_and_card(db: MerchantDB, balance: float = 50000.0, bank: s
         "last_monthly_reset": time.time(),
         "created_at": time.time(),
         "last_tx_timestamp": 0,
+        "is_warmed_up": 1,  # Legacy tests assume no warmup restrictions
     }
     await db.add_card(card_data)
     return card_id

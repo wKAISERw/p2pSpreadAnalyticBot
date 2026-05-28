@@ -47,6 +47,11 @@ class CardBalanceSyncTask:
                 await asyncio.sleep(30)  # retry after 30 seconds on error
 
     async def sync_balances(self) -> None:
+        from state import state
+        if not state.stats.get("internet_connected", True):
+            logger.debug("Card Balance Sync: Skipped because internet is offline.")
+            return
+
         if not self.db:
             return
 

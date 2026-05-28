@@ -326,6 +326,7 @@ _scanner_stats: dict = {
     "llm_queue": 0,
     "review_queue": 0,
     "cb_status": {},
+    "internet_connected": True,
 }
 _mute_until: float = 0.0
 

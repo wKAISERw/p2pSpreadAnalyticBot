@@ -252,9 +252,14 @@ class LLMWorkerPool:
             return False
 
     async def _worker(self, worker_id: int) -> None:
+        from state import state
         while True:
             try:
                 task = await self._queue.get()
+                
+                # Очікуємо відновлення інтернету якщо він пропав
+                while not state.stats.get("internet_connected", True):
+                    await asyncio.sleep(5.0)
                 try:
                     from core.analytics.metrics import llm_queue_size
                     llm_queue_size.set(self._queue.qsize())

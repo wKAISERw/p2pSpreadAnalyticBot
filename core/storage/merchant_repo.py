@@ -678,6 +678,18 @@ class MerchantRepo:
         await self._db.execute("DELETE FROM sent_alerts WHERE sent_at < ?", (limit,))
         await self._db.commit()
 
+    async def update_sent_alert_dict(self, chat_id: int, message_ids: list[int], alert_dict: dict) -> None:
+        import json
+        if not self._db:
+            return
+        msg_ids_json = json.dumps(message_ids)
+        alert_json = json.dumps(alert_dict, default=str)
+        await self._db.execute(
+            "UPDATE sent_alerts SET alert_json = ? WHERE chat_id = ? AND message_ids_json = ?",
+            (alert_json, chat_id, msg_ids_json)
+        )
+        await self._db.commit()
+
     # ═══════════════════════════════════════════════════════════════════════
     # API Credentials (encrypted storage)
     # ═══════════════════════════════════════════════════════════════════════

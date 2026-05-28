@@ -142,7 +142,11 @@ class AlertDispatcher:
             chat_id = user.get("chat_id")
 
             # 🚀 Отримуємо авто-капітал та налаштування карт
-            auto_cap = await self._db.get_user_auto_capital(uid)
+            user_buy_names = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
+            opp_buy_names = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
+            allowed_buy_names = opp_buy_names & user_buy_names
+
+            auto_cap = await self._db.get_user_auto_capital(uid, allowed_banks=allowed_buy_names)
             card_settings = await self._db.get_user_card_settings(uid)
             card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
 

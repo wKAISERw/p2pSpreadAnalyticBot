@@ -32,19 +32,23 @@ class CardRepo:
         enable_smart_spoiler = 1 if settings_dict.get("enable_smart_spoiler", True) else 0
         card_detail_level = settings_dict.get("card_detail_level", "full")
         enable_in_single_modes = 1 if settings_dict.get("enable_in_single_modes", False) else 0
+        show_balances_breakdown = 1 if settings_dict.get("show_balances_breakdown", True) else 0
+        show_transfer_tips = 1 if settings_dict.get("show_transfer_tips", True) else 0
 
         await self._db.execute(
             """
             INSERT INTO user_card_settings (user_id, card_output_mode, enable_smart_spoiler, card_detail_level,
-                                            enable_in_single_modes)
-            VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
+                                            enable_in_single_modes, show_balances_breakdown, show_transfer_tips)
+            VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
             UPDATE SET
                 card_output_mode = EXCLUDED.card_output_mode,
                 enable_smart_spoiler = EXCLUDED.enable_smart_spoiler,
                 card_detail_level = EXCLUDED.card_detail_level,
-                enable_in_single_modes = EXCLUDED.enable_in_single_modes
+                enable_in_single_modes = EXCLUDED.enable_in_single_modes,
+                show_balances_breakdown = EXCLUDED.show_balances_breakdown,
+                show_transfer_tips = EXCLUDED.show_transfer_tips
             """,
-            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level, enable_in_single_modes)
+            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level, enable_in_single_modes, show_balances_breakdown, show_transfer_tips)
         )
         await self._db.commit()
 
@@ -600,10 +604,12 @@ class CardRepo:
             )
             await self._db.commit()
 
-    async def get_user_auto_capital(self, user_id: int) -> float:
+    async def get_user_auto_capital(self, user_id: int, allowed_banks: list[str] | set[str] | None = None) -> float:
         """
         Calculates the user's maximum available capital based on the sum of
         available balances/limits on all active and healthy connected cards.
+        If allowed_banks is provided, calculates capital per-bank (grouping by bank)
+        and returns the max single bank's capital.
         """
         if not self._db:
             return 0.0
@@ -612,13 +618,38 @@ class CardRepo:
         cards = await self.get_cards(user_id, status="active")
         if not cards:
             return 0.0
+
+        # Normalization map for banks
+        name_map = {
+            "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
+            "14": "privatbank", "pb": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
+            "64": "pumb", "pumb": "pumb", "пумб": "pumb",
+            "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
+            "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
+            "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
+        }
+        
+        def normalize_bank_name(name: str) -> str:
+            if not name:
+                return ""
+            name_low = str(name).strip().lower()
+            return name_map.get(name_low, name_low)
+
+        if allowed_banks is not None:
+            allowed_banks_norm = {normalize_bank_name(b) for b in allowed_banks}
+        else:
+            allowed_banks_norm = None
             
-        total_capital = 0.0
+        bank_capitals = {}  # bank_norm -> float
         now = time.time()
         
         for card in cards:
             # 1. Cooldown check
             if card.get("cooldown_until", 0) > now:
+                continue
+                
+            bank_norm = normalize_bank_name(card.get("bank_name", ""))
+            if allowed_banks_norm is not None and bank_norm not in allowed_banks_norm:
                 continue
                 
             card_id = card["id"]
@@ -628,7 +659,6 @@ class CardRepo:
             max_tx = limits.get("max_tx_per_day", 15)
             daily_out = limits.get("daily_out_max", 150000.0)
             monthly_out = limits.get("monthly_out_max", 400000.0)
-            max_single = limits.get("max_single_tx_out", 29999.0)
             
             # 3. Daily tx count check
             tx_count = await self.get_card_transactions_count(card_id, hours=24)
@@ -642,7 +672,7 @@ class CardRepo:
             avail_daily = max(0.0, daily_out - used_daily)
             avail_monthly = max(0.0, monthly_out - used_monthly)
             
-            # Money we can actually spend from this card: bounded by balance, limits, and max single tx
+            # Money we can actually spend from this card: bounded by balance and limits
             card_avail = min(
                 float(card.get("balance", 0.0)),
                 avail_daily,
@@ -650,6 +680,57 @@ class CardRepo:
             )
             
             if card_avail > 0:
-                total_capital += card_avail
+                # Check warmup limits
+                tx_count_total, last_tx_ts = await self.get_card_warmth_stats(card_id)
+                warmup_limit = self.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now)
+                if warmup_limit is not None:
+                    card_avail = min(card_avail, warmup_limit)
+
+                if card_avail > 0:
+                    bank_capitals[bank_norm] = bank_capitals.get(bank_norm, 0.0) + card_avail
                 
-        return total_capital
+        if allowed_banks_norm is not None:
+            return max(bank_capitals.values()) if bank_capitals else 0.0
+        else:
+            return sum(bank_capitals.values())
+
+    async def get_card_warmth_stats(self, card_id: str) -> tuple[int, float]:
+        """
+        Returns (total_tx_count, last_tx_timestamp) from card_transactions table.
+        If no transactions exist, returns (0, 0.0).
+        """
+        if not self._db:
+            return 0, 0.0
+        async with self._db.execute(
+            "SELECT COUNT(id) as cnt, MAX(timestamp) as last_ts FROM card_transactions WHERE card_id=?",
+            (card_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                cnt = int(row["cnt"]) if row["cnt"] is not None else 0
+                last_ts = float(row["last_ts"]) if row["last_ts"] is not None else 0.0
+                return cnt, last_ts
+        return 0, 0.0
+
+    def get_card_warmup_limit(self, card: dict, tx_count_total: int, last_tx_ts: float, now: float) -> float | None:
+        """
+        Returns the warmup limit for a card if it is not warm, or None if it is warm.
+        """
+        is_warm = bool(card.get("is_warmed_up", 0))
+        if is_warm:
+            return None
+
+        # Auto-warmup rule: 10+ transactions and active within last 30 days
+        if tx_count_total >= 10 and (now - last_tx_ts) <= 30 * 86400:
+            return None
+
+        # Determine warmup limits
+        if tx_count_total <= 2:
+            return 2000.0
+        elif tx_count_total <= 5:
+            return 5000.0
+        elif tx_count_total <= 9:
+            return 10000.0
+        else:
+            # tx_count_total >= 10 but dormant (>30 days inactive)
+            return 5000.0

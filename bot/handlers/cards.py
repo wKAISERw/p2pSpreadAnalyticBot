@@ -281,6 +281,9 @@ async def cb_card_view(call: CallbackQuery) -> None:
     is_custom = card.get("is_custom_limits", 0)
     limits_label = "🟢 Локальні" if is_custom else "⚪ Глобальні"
 
+    is_warmed_up = bool(card.get("is_warmed_up", 0))
+    warmth_status_text = "🔥 Прогріта" if is_warmed_up else "⚪ Не прогріта"
+
     import datetime
     cooldown_str = "Немає"
     if card["cooldown_until"] > time.time():
@@ -291,6 +294,7 @@ async def cb_card_view(call: CallbackQuery) -> None:
         f"💳 <b>Картка:</b> {card['bank_name'].capitalize()} {card['last_four']}\n"
         f"🏷 <b>Мітка:</b> {card['label']}\n"
         f"👤 <b>Тип:</b> {'Власна' if card['is_own'] else 'Дроп'}\n"
+        f"🌡️ <b>Прогрів:</b> {warmth_status_text}\n"
         f"💰 <b>Баланс:</b> {card['balance']:.2f} ₴\n\n"
         f"📊 <b>Статистика за 24г:</b>\n"
         f"📥 Надходження: {used_daily_in:.0f} ₴ (Залишок: {rem_in:.0f} ₴)\n"
@@ -304,14 +308,32 @@ async def cb_card_view(call: CallbackQuery) -> None:
     # Якщо викликано з FakeCall (message), то треба відповісти або відредагувати існуюче
     if hasattr(call, "message") and hasattr(call.message, "edit_text"):
         await call.message.edit_text(text,
-                                     reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
+                                     reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"], is_warmed_up))
     else:
         # Для фейкового call
         await call.message.answer(text,
-                                  reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"]))
+                                  reply_markup=keyboards.card_details_kb(card_id, card["status"], card["bank_name"], is_warmed_up))
 
     if hasattr(call, "answer"):
         await call.answer()
+
+
+@router.callback_query(F.data.startswith("card:toggle_warmth:"))
+async def cb_card_toggle_warmth(call: CallbackQuery) -> None:
+    card_id = call.data.split(":")[2]
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+
+    new_warmth = 0 if card.get("is_warmed_up", 0) else 1
+    await _db.update_card(card_id, {"is_warmed_up": new_warmth})
+
+    status_str = "Прогріта" if new_warmth else "Не прогріта"
+    await call.answer(f"Картка тепер {status_str}")
+    # Refresh view
+    call.data = f"card:view:{card_id}"
+    await cb_card_view(call)
 
 
 @router.callback_query(F.data.startswith("card:toggle:"))
@@ -1138,7 +1160,10 @@ async def cb_open_card_display_menu(call: CallbackQuery):
 @router.callback_query(F.data.in_({
     "disp:toggle:card_output_mode",
     "disp:toggle:enable_smart_spoiler",
-    "disp:toggle:card_detail_level"
+    "disp:toggle:card_detail_level",
+    "disp:toggle:enable_in_single_modes",
+    "disp:toggle:show_balances_breakdown",
+    "disp:toggle:show_transfer_tips"
 }))
 async def cb_toggle_card_display_fields(call: CallbackQuery):
     """
@@ -1168,6 +1193,12 @@ async def cb_toggle_card_display_fields(call: CallbackQuery):
             current_settings["card_detail_level"] = (
                 "compact" if current_settings.get("card_detail_level", "full") == "full" else "full"
             )
+        elif field == "enable_in_single_modes":
+            current_settings["enable_in_single_modes"] = not current_settings.get("enable_in_single_modes", False)
+        elif field == "show_balances_breakdown":
+            current_settings["show_balances_breakdown"] = not current_settings.get("show_balances_breakdown", True)
+        elif field == "show_transfer_tips":
+            current_settings["show_transfer_tips"] = not current_settings.get("show_transfer_tips", True)
 
         # 3. Зберігаємо оновлений словник назад у базу даних
         # Переконайся, що назва твого методу оновлення саме така, або адаптуй під свій update_user_card_settings

@@ -75,6 +75,80 @@ def safe_float(val) -> float:
 # Watchdog і DB Maintenance (без змін — вже чисто)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_internet_connected = True
+_internet_lost_at = 0.0
+
+async def check_internet_connection(timeout: float = 3.0) -> bool:
+    """Перевірка наявності інтернет-зв'язку."""
+    hosts = [
+        ("1.1.1.1", 80),            # Cloudflare HTTP
+        ("8.8.8.8", 443),           # Google DNS over HTTPS
+        ("api.telegram.org", 443),  # Telegram API HTTPS
+    ]
+    for host, port in hosts:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=timeout
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True
+        except Exception:
+            continue
+    return False
+
+async def _internet_watchdog(
+    notifier: TelegramNotifier,
+    on_restored_callback = None,
+    check_interval: float = 5.0
+) -> None:
+    global _internet_connected, _internet_lost_at
+    while True:
+        try:
+            ok = await check_internet_connection()
+            if ok:
+                if not _internet_connected:
+                    duration = time.monotonic() - _internet_lost_at
+                    logger.info("🌐 [Internet Connection] Інтернет-зв'язок відновлено! Відсутній був %.1fs.", duration)
+                    _internet_connected = True
+                    _internet_lost_at = 0.0
+                    
+                    if on_restored_callback:
+                        try:
+                            if asyncio.iscoroutinefunction(on_restored_callback):
+                                await on_restored_callback()
+                            else:
+                                on_restored_callback()
+                        except Exception as cb_err:
+                            logger.error("Error executing on_restored_callback: %s", cb_err)
+
+                    msg = (
+                        f"🌐 <b>Інтернет-зв'язок відновлено!</b>\n\n"
+                        f"Зв'язок був відсутній протягом <code>{duration:.0f}s</code>.\n"
+                        f"Сканер автоматично продовжує роботу."
+                    )
+                    asyncio.create_task(notifier._send_with_retry(msg))
+            else:
+                if _internet_connected:
+                    _internet_connected = False
+                    _internet_lost_at = time.monotonic()
+                    logger.error("🌐 [Internet Connection] Інтернет-зв'язок втрачено! Сканування тимчасово призупинено.")
+            
+            # Оновлюємо стан для UI та API
+            state.stats["internet_connected"] = ok
+            update_stats(internet_connected=ok)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Error in internet watchdog loop: %s", e)
+            
+        await asyncio.sleep(check_interval)
+
 async def _watchdog(
         last_cycle_time: list[float],
         interval: float = getattr(settings, "watchdog_interval", 30.0),
@@ -135,7 +209,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     # 🚀 Блок A: Single-Leg Executor
     from core.engine.single_leg_executor import SingleLegExecutor
-    single_leg_executor = SingleLegExecutor(merchant_db)
+    single_leg_executor = SingleLegExecutor(merchant_db, notifier=notifier)
 
     notifier.bind_db(merchant_db)
     # bind_commands відкладено до ініціалізації MakerAdMonitor (після risk_engine)
@@ -352,6 +426,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
             exchange_manager.set_health_check(_health_check)
 
+            async def on_internet_restored():
+                for cfg in ex_configs:
+                    cfg["cb"].reset()
+                    exchange_manager.reset_failures(cfg["name"])
+                logger.info("⚡ [Internet Watchdog] Circuit Breakers & failures reset for all exchanges.")
+
+            internet_watchdog_task = asyncio.create_task(
+                _internet_watchdog(notifier, on_restored_callback=on_internet_restored)
+            )
+
             # ── Safe Boot Flow ──────────────────────────────────────────────
             await runtime_config.load()
             await CompositeScorer.load_weights(merchant_db)
@@ -404,6 +488,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     if not is_active:
                         last_cycle_time[0] = time.monotonic()
                         await asyncio.sleep(3.0)
+                        continue
+
+                    # Перевіряємо інтернет-зв'язок
+                    if not _internet_connected:
+                        logger.warning("🌐 [Scanner] Пропуск циклу сканування через відсутність інтернету...")
+                        last_cycle_time[0] = time.monotonic()
+                        await asyncio.sleep(5.0)
                         continue
 
                     current_max_alerts = int(
@@ -770,6 +861,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     await asyncio.sleep(cycle_error_sleep)
 
     finally:
+        if "internet_watchdog_task" in locals():
+            internet_watchdog_task.cancel()
         watchdog_task.cancel()
         maintenance_task.cancel()
         if "cb_userbot" in locals():

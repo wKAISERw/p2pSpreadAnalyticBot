@@ -91,6 +91,8 @@ class CardNotifier:
             tx_after_str = str(tx_count + 1)
 
         drop_text = "Власна" if c.get("is_own") else "Дроп"
+        is_warmed_up = bool(c.get("is_warmed_up", 0))
+        warmth_badge = "🔥 Прогріта" if is_warmed_up else "⚪ Не прогріта"
         bank_name = c.get("bank_name", "unknown").capitalize()
         last_four = c.get("last_four", "####")
         label_str = f" [{c['label']}]" if c.get("label") else ""
@@ -98,7 +100,7 @@ class CardNotifier:
         dir_label = "💸 КУПІВЛЯ (BUY)" if direction == "buy" else "📥 ПРИЙМАЄМО (SELL)"
 
         text = (
-            f"💳 <b>{dir_label}: {bank_name} *{last_four}</b> ({drop_text}{label_str})\n"
+            f"💳 <b>{dir_label}: {bank_name} *{last_four}</b> ({drop_text} | {warmth_badge}{label_str})\n"
             f"  ├ 💰 Баланс у боті: <code>{bal_before:,.2f} ₴</code> ➔ <b>{bal_after:,.2f} ₴</b>\n"
             f"  ├ 🛡️ Одноразовий ліміт TX: <code>{max_single_str}</code> (макс. за один переказ)\n"
             f"  ├ 📅 Денний {dir_word} (твій ліміт): <code>{limit_lbl}</code> ➔ <b>{avail_after_str}</b>\n"
@@ -106,6 +108,127 @@ class CardNotifier:
             f"  └ 🔢 Лічильник TX за добу: <code>{tx_count}/{max_tx_str}</code> операцій ➔ <b>{tx_after_str}</b>\n"
         )
         return text
+
+    async def _render_balances_breakdown(self, chat_id: int) -> str:
+        """
+        Генерує компактну розбивку балансів по всіх активних картках.
+        """
+        all_cards = await self._db.get_cards(owner_id=chat_id, status="active")
+        if not all_cards:
+            return ""
+        
+        lines = ["\n📊 <b>Баланси активних карток:</b>"]
+        for c in all_cards:
+            is_warmed = bool(c.get("is_warmed_up", 0))
+            warmed_icon = "🔥" if is_warmed else "⚪"
+            label_part = f" [{c['label']}]" if c.get("label") else ""
+            lines.append(f"  ├ 💳 {c['bank_name'].capitalize()} *{c['last_four']}{label_part} ({warmed_icon}): <code>{c['balance']:,.2f} ₴</code>")
+        if len(lines) > 1:
+            lines[-1] = lines[-1].replace("  ├", "  └")
+            return "\n".join(lines) + "\n"
+        return ""
+
+    async def _generate_transfer_recommendation(
+        self,
+        chat_id: int,
+        target_bank: str,
+        target_amount: float
+    ) -> str:
+        """
+        Знаходить пари (джерело -> цільова картка), які дозволят покрити нестачу балансу,
+        перевіряючи при цьому ліміти на вихід (OUT) для джерела та на вхід (IN) для цільової.
+        """
+        all_cards = await self._db.get_cards(owner_id=chat_id, status="active")
+        if not all_cards:
+            return ""
+
+        # Normalize target bank name
+        target_bank_normalized = target_bank.lower()
+
+        # Destination candidates: active cards in target_bank with balance < target_amount
+        dest_candidates = [
+            c for c in all_cards 
+            if c.get("bank_name", "").lower() == target_bank_normalized and c.get("balance", 0.0) < target_amount
+        ]
+        if not dest_candidates:
+            return ""
+
+        suggestions = []
+        now = time.time()
+
+        for dest in dest_candidates:
+            dest_id = dest["id"]
+            dest_bal = float(dest.get("balance", 0.0))
+            needed_transfer = target_amount - dest_bal
+            if needed_transfer <= 0:
+                continue
+
+            # Fetch destination IN limits
+            dest_limits = await self._db.get_card_effective_limits(dest_id)
+            dest_single_in = dest_limits.get("max_single_tx_in", 29999.0)
+            dest_daily_in = dest_limits.get("daily_in_max", 150000.0)
+            dest_monthly_in = dest_limits.get("monthly_in_max", 400000.0)
+            dest_max_tx = dest_limits.get("max_tx_per_day", 15)
+
+            # Check if destination can accept this single transaction amount
+            if dest_single_in != -1 and dest_single_in != -1.0 and needed_transfer > dest_single_in:
+                continue
+
+            # Check destination rolling used IN
+            dest_used_daily = await self._db.get_rolling_used(dest_id, "in", hours=24)
+            dest_used_monthly = await self._db.get_rolling_used(dest_id, "in", hours=24*30)
+            dest_tx_count = await self._db.get_card_transactions_count(dest_id, hours=24)
+
+            if dest_daily_in != -1 and dest_daily_in != -1.0 and (dest_used_daily + needed_transfer) > dest_daily_in:
+                continue
+            if dest_monthly_in != -1 and dest_monthly_in != -1.0 and (dest_used_monthly + needed_transfer) > dest_monthly_in:
+                continue
+            if dest_max_tx != -1 and dest_max_tx != -1.0 and dest_tx_count >= dest_max_tx:
+                continue
+
+            # Source candidates: any active card OTHER than dest card, with balance >= needed_transfer
+            src_candidates = [
+                c for c in all_cards 
+                if c["id"] != dest_id and float(c.get("balance", 0.0)) >= needed_transfer
+            ]
+
+            for src in src_candidates:
+                src_id = src["id"]
+                
+                # Fetch source OUT limits
+                src_limits = await self._db.get_card_effective_limits(src_id)
+                src_single_out = src_limits.get("max_single_tx_out", 29999.0)
+                src_daily_out = src_limits.get("daily_out_max", 150000.0)
+                src_monthly_out = src_limits.get("monthly_out_max", 400000.0)
+                src_max_tx = src_limits.get("max_tx_per_day", 15)
+
+                # Check if source can send this single transaction amount
+                if src_single_out != -1 and src_single_out != -1.0 and needed_transfer > src_single_out:
+                    continue
+
+                # Check source rolling used OUT
+                src_used_daily = await self._db.get_rolling_used(src_id, "out", hours=24)
+                src_used_monthly = await self._db.get_rolling_used(src_id, "out", hours=24*30)
+                src_tx_count = await self._db.get_card_transactions_count(src_id, hours=24)
+
+                if src_daily_out != -1 and src_daily_out != -1.0 and (src_used_daily + needed_transfer) > src_daily_out:
+                    continue
+                if src_monthly_out != -1 and src_monthly_out != -1.0 and (src_used_monthly + needed_transfer) > src_monthly_out:
+                    continue
+                if src_max_tx != -1 and src_max_tx != -1.0 and src_tx_count >= src_max_tx:
+                    continue
+
+                # If all limit checks pass, we have a valid transfer suggestion!
+                src_lbl = f"{src['bank_name'].capitalize()} *{src['last_four']}"
+                dest_lbl = f"{dest['bank_name'].capitalize()} *{dest['last_four']}"
+                suggestions.append(
+                    f"  💡 <b>Порада:</b> Перекажіть <code>{needed_transfer:,.2f} ₴</code> з <b>{src_lbl}</b> на <b>{dest_lbl}</b>"
+                )
+
+        if suggestions:
+            # Return unique and formatted tips
+            return "\n💡 <b>Рекомендовані перекази між картками:</b>\n" + "\n".join(suggestions) + "\n"
+        return ""
 
     async def _build_rejection_diagnosis(
             self,
@@ -198,6 +321,15 @@ class CardNotifier:
                     card_issues.append(f"⏳ Кулдаун ще <code>{mins_left} хв</code>")
                     reasons_summary["cooldown"] = reasons_summary.get("cooldown", 0) + 1
 
+                # 1b. Card Warmup Limits Check
+                tx_count_total, last_tx_ts = await self._db.get_card_warmth_stats(card_id)
+                warmup_limit = self._db.get_card_warmup_limit(c, tx_count_total, last_tx_ts, _t.time())
+                if warmup_limit is not None and target_amount > warmup_limit:
+                    card_issues.append(
+                        f"🌡️ Непрогріта картка (ліміт прогріву <code>{warmup_limit:,.0f} ₴</code>)"
+                    )
+                    reasons_summary["warmup_limit"] = reasons_summary.get("warmup_limit", 0) + 1
+
                 # 2. Баланс (BUY) — нуль = тверде відхилення; > 0 але < суми = кандидат на спліт
                 if direction == "buy":
                     if balance == 0:
@@ -262,6 +394,8 @@ class CardNotifier:
 
                 # Збираємо кандидатів на спліт (є хоч якийсь доступний ліміт)
                 avail_for_split = min(avail_daily, avail_monthly, max_single)
+                if warmup_limit is not None:
+                    avail_for_split = min(avail_for_split, warmup_limit)
                 if direction == "buy":
                     avail_for_split = min(avail_for_split, balance)
                 if avail_for_split > 0 and (max_tx == -1 or tx_count < max_tx) and cooldown_until <= _t.time():
@@ -316,6 +450,8 @@ class CardNotifier:
             root_parts.append(f"ліміт одного TX ({reasons_summary['max_single']}/{total})")
         if reasons_summary.get("cooldown"):
             root_parts.append(f"кулдаун ({reasons_summary['cooldown']}/{total})")
+        if reasons_summary.get("warmup_limit"):
+            root_parts.append(f"ліміт прогріву ({reasons_summary['warmup_limit']}/{total})")
 
         if root_parts:
             header = "  └ ❌ <b>Причина:</b> " + ", ".join(root_parts) + "\n"
@@ -323,7 +459,21 @@ class CardNotifier:
             header = "  └ ❓ <b>Причина невідома</b> — всі ліміти ОК, але рушій відхилив\n"
 
         card_lines = "\n".join(lines) + "\n" if lines else ""
-        return header + card_lines + split_note
+        
+        # Read user display settings to decide if we append balance breakdown and transfer tips
+        card_settings = await self._db.get_user_card_settings(chat_id) or {}
+        show_breakdown = bool(card_settings.get("show_balances_breakdown", 1))
+        show_tips = bool(card_settings.get("show_transfer_tips", 1))
+        
+        breakdown_text = ""
+        if show_breakdown:
+            breakdown_text = await self._render_balances_breakdown(chat_id)
+            
+        tips_text = ""
+        if show_tips:
+            tips_text = await self._generate_transfer_recommendation(chat_id, bank, target_amount)
+            
+        return header + card_lines + split_note + breakdown_text + tips_text
 
     async def get_card_block(
             self,
@@ -334,7 +484,8 @@ class CardNotifier:
             order_id: str,
             cache_key: str = None,
             buy_card_spent_fiat: float = 0.0,
-            buy_card_id: str = None
+            buy_card_id: str = None,
+            show_breakdown: bool = True
     ) -> tuple[str, list, Optional[dict]]:
         """
         Повертає (text_block, keyboard_rows, chosen_card_dict) для вбудовування в алерт.
@@ -383,6 +534,8 @@ class CardNotifier:
         c = cards[0]
         card_id = c.get("id") or c.get("card_id")
         drop_text = "Власна" if c.get("is_own", 1) else "Дроп"
+        is_warmed_up = bool(c.get("is_warmed_up", 0))
+        warmth_badge = "🔥 Прогріта" if is_warmed_up else "⚪ Не прогріта"
 
         # Стягуємо актуальні ліміти для побудови проєкції (ефективні з урахуванням локальних)
         limits = await self._db.get_card_effective_limits(card_id)
@@ -470,13 +623,20 @@ class CardNotifier:
         use_smart_spoiler = card_settings.get("enable_smart_spoiler", True)
 
         if use_smart_spoiler and is_red_zone:
-            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text}) 🚨\n"
+            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text} | {warmth_badge}) 🚨\n"
             warn_msg = f"⚠️ <b>РИЗИК ФІНМОНУ: {', '.join(warning_reasons)}</b>\n"
             text = f"{prefix_header}{warn_msg}{card_info_body}"  # Без блокуblockquote!
         else:
             # Звичайний безпечний режим — ховаємо все під спойлер
-            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text})\n"
+            prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text} | {warmth_badge})\n"
             text = f"{prefix_header}<blockquote expandable>{card_info_body}</blockquote>"
+
+        # Check settings to decide if we append balance breakdown
+        show_breakdown_config = bool(card_settings.get("show_balances_breakdown", 1))
+        if show_breakdown and show_breakdown_config:
+            breakdown_text = await self._render_balances_breakdown(chat_id)
+            if breakdown_text:
+                text += breakdown_text
 
         rows = [[InlineKeyboardButton(text="✅ Взяти в роботу", callback_data=f"card_match:confirm:{cache_key}"),
                  InlineKeyboardButton(text="🔄 Інша картка", callback_data=f"card_match:other:{cache_key}")]]

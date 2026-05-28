@@ -31,6 +31,16 @@ def card_display_settings_kb(current: dict) -> InlineKeyboardMarkup:
     esm_text = "🔌 В окремих режимах: ✅ Увімк" if esm else "🔌 В окремих режимах: ❌ Вимк"
     builder.row(InlineKeyboardButton(text=esm_text, callback_data="disp:toggle:enable_in_single_modes"))
 
+    # 5. Новий пункт: Відображення розбивки балансу
+    sbb = current.get("show_balances_breakdown", True)
+    sbb_text = "📊 Розбивка балансів: ✅ Увімк" if sbb else "📊 Розбивка балансів: ❌ Вимк"
+    builder.row(InlineKeyboardButton(text=sbb_text, callback_data="disp:toggle:show_balances_breakdown"))
+
+    # 6. Новий пункт: Поради з переказу
+    stt = current.get("show_transfer_tips", True)
+    stt_text = "💡 Поради щодо лімітів: ✅ Увімк" if stt else "💡 Поради щодо лімітів: ❌ Вимк"
+    builder.row(InlineKeyboardButton(text=stt_text, callback_data="disp:toggle:show_transfer_tips"))
+
     builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="set:display_menu"))
     return builder.as_markup()
 
@@ -93,11 +103,15 @@ def card_is_own_kb() -> InlineKeyboardMarkup:
 
 
 
-def card_details_kb(card_id: str, status: str, bank_name: str = "") -> InlineKeyboardMarkup:
+def card_details_kb(card_id: str, status: str, bank_name: str = "", is_warmed_up: bool = False) -> InlineKeyboardMarkup:
     """Управління конкретною карткою."""
     builder = InlineKeyboardBuilder()
     
     builder.row(InlineKeyboardButton(text="🔄 Актуалізувати баланс", callback_data=f"card:update_bal:{card_id}"))
+    
+    warmth_text = "🔥 Прогріта: Так" if is_warmed_up else "⚪ Прогріта: Ні"
+    builder.row(InlineKeyboardButton(text=warmth_text, callback_data=f"card:toggle_warmth:{card_id}"))
+
     builder.row(
         InlineKeyboardButton(text="🏷 Мітка", callback_data=f"card:edit:label:{card_id}"),
         InlineKeyboardButton(text="📝 Нотатка", callback_data=f"card:edit:note:{card_id}"),

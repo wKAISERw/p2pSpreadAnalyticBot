@@ -188,7 +188,7 @@ async def cb_unified_display_toggle(call: CallbackQuery):
         field = call.data.split(":")[-1]
 
         # Реєстр полів карткового модуля
-        CARD_FIELDS = {"card_output_mode", "enable_smart_spoiler", "card_detail_level", "enable_in_single_modes"}
+        CARD_FIELDS = {"card_output_mode", "enable_smart_spoiler", "card_detail_level", "enable_in_single_modes", "show_balances_breakdown", "show_transfer_tips"}
 
         if field in CARD_FIELDS:
             current_settings = await _db.get_user_card_settings(chat_id) or {}
@@ -207,6 +207,10 @@ async def cb_unified_display_toggle(call: CallbackQuery):
             # 🚀 Обробка булевого перемикача для Taker/Maker режимів
             elif field == "enable_in_single_modes":
                 current_settings["enable_in_single_modes"] = not current_settings.get("enable_in_single_modes", False)
+            elif field == "show_balances_breakdown":
+                current_settings["show_balances_breakdown"] = not current_settings.get("show_balances_breakdown", True)
+            elif field == "show_transfer_tips":
+                current_settings["show_transfer_tips"] = not current_settings.get("show_transfer_tips", True)
 
             await _db.update_user_card_settings(chat_id, current_settings)
 

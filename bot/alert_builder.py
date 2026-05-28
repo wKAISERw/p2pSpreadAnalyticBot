@@ -436,7 +436,18 @@ async def send_single(
         )
 
         # Прораховуємо SELL ногу
-        buy_card_id = buy_card_obj.get("id") if buy_card_obj else None
+        buy_card_id = None
+        if buy_card_obj:
+            buy_card_id = buy_card_obj.get("id")
+        else:
+            try:
+                owner_uid = chat_id or notifier._chat_id
+                buy_bank_db = _bank_code_to_db(alert.buy_bank or "")
+                buy_cards = await notifier._db.get_cards(owner_id=owner_uid, bank_name=buy_bank_db, status="active")
+                if buy_cards:
+                    buy_card_id = buy_cards[0].get("id")
+            except Exception as e:
+                logger.warning("Error fetching fallback buy_card_id: %s", e)
         sell_card_text, sell_card_rows, _ = await notifier.card_notifier.get_card_block(
             chat_id=chat_id or notifier._chat_id,
             target_amount=sell_target,

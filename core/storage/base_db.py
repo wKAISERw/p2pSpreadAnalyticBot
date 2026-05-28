@@ -78,6 +78,18 @@ class MerchantDB:
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.commit()
 
+        # Check if sent_alerts has the correct primary key, if not, drop it (it's just a 30 min cache)
+        try:
+            async with self._db.execute("PRAGMA table_info(sent_alerts)") as cur:
+                rows = await cur.fetchall()
+            pk_cols = [r["name"] for r in rows if r["pk"] > 0]
+            if pk_cols and len(pk_cols) < 4:
+                logger.info("Migrating sent_alerts table: dropping old PK constraint")
+                await self._db.execute("DROP TABLE sent_alerts")
+                await self._db.commit()
+        except Exception as e:
+            logger.warning("Error checking/dropping sent_alerts table: %s", e)
+
         await self._init_schema()
         
         # Apply migrations for new columns safely
@@ -89,6 +101,9 @@ class MerchantDB:
         except Exception: pass
         try:
             await self._db.execute("ALTER TABLE cards ADD COLUMN mono_webhook_secret TEXT")
+        except Exception: pass
+        try:
+            await self._db.execute("ALTER TABLE cards ADD COLUMN is_warmed_up INTEGER DEFAULT 0")
         except Exception: pass
         await self._db.commit()
         await self._db.execute("""
@@ -119,7 +134,9 @@ class MerchantDB:
             ("card_output_mode", "TEXT DEFAULT 'inline'"),
             ("enable_smart_spoiler", "INTEGER DEFAULT 1"),
             ("card_detail_level", "TEXT DEFAULT 'full'"),
-            ("enable_in_single_modes", "INTEGER DEFAULT 0")
+            ("enable_in_single_modes", "INTEGER DEFAULT 0"),
+            ("show_balances_breakdown", "INTEGER DEFAULT 1"),
+            ("show_transfer_tips", "INTEGER DEFAULT 1")
         ]
 
         for col_name, col_type in columns_to_add:
@@ -458,7 +475,7 @@ class MerchantDB:
                                           alert_json TEXT NOT NULL,        -- serialized SpreadAlert
                                           display_settings_json TEXT NOT NULL,
                                           is_sniper_match INTEGER DEFAULT 0,
-                                          PRIMARY KEY (chat_id, message_ids_json)
+                                          PRIMARY KEY (exchange, merchant_id, chat_id, message_ids_json)
                                       );
                                       CREATE INDEX IF NOT EXISTS idx_sent_alerts_lookup 
                                           ON sent_alerts(exchange, merchant_id, sent_at);
@@ -470,7 +487,13 @@ class MerchantDB:
                                      CREATE TABLE IF NOT EXISTS user_card_settings (
                                          user_id              INTEGER PRIMARY KEY,
                                          card_module_mode     TEXT DEFAULT 'off',
-                                         max_cards_per_order  INTEGER DEFAULT 3
+                                         max_cards_per_order  INTEGER DEFAULT 3,
+                                         card_output_mode     TEXT DEFAULT 'inline',
+                                         enable_smart_spoiler INTEGER DEFAULT 1,
+                                         card_detail_level    TEXT DEFAULT 'full',
+                                         enable_in_single_modes INTEGER DEFAULT 0,
+                                         show_balances_breakdown INTEGER DEFAULT 1,
+                                         show_transfer_tips   INTEGER DEFAULT 1
                                      );
 
                                      CREATE TABLE IF NOT EXISTS user_bank_limits (
@@ -508,7 +531,8 @@ class MerchantDB:
                                          mono_account_id      TEXT,
                                          card_number          TEXT,
                                          mono_x_token_encrypted TEXT,
-                                         mono_webhook_secret  TEXT
+                                         mono_webhook_secret  TEXT,
+                                         is_warmed_up         INTEGER DEFAULT 0
                                      );
                                      CREATE INDEX IF NOT EXISTS idx_cards_owner_status ON cards(owner_id, status);
                                      

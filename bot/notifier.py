@@ -78,6 +78,48 @@ class TelegramNotifier:
             }
         return settings_dict
 
+    @staticmethod
+    def _serialize_order(order: Order) -> dict:
+        """Серіалізує Order у JSON-сумісний dict, зберігаючи списки та tuple-поля коректно."""
+        result = {}
+        for k, v in order.__dict__.items():
+            if k == "regex_warn_flags":
+                # list[tuple[str, str]] → list[list[str, str]] (JSON-safe)
+                result[k] = [list(item) if isinstance(item, (tuple, list)) else [str(item), ""] for item in (v or [])]
+            elif k in ("bank_codes", "regex_score", "composite_score", "review_score",
+                       "review_neg_pct", "review_fetched", "positive_rate",
+                       "month_order_count", "finish_rate_pct", "is_verified",
+                       "account_age_days"):
+                result[k] = v  # зберігаємо оригінальний тип
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                result[k] = float(v)
+            elif isinstance(v, (list, dict, bool)) or v is None:
+                result[k] = v
+            else:
+                result[k] = str(v)
+        return result
+
+    def _serialize_alert(self, alert: SpreadAlert) -> dict:
+        """Серіалізує SpreadAlert у JSON-сумісний dict."""
+        return {
+            "buy_order": self._serialize_order(alert.buy_order),
+            "sell_order": self._serialize_order(alert.sell_order),
+            "spread_pct": alert.spread_pct,
+            "profit_uah": alert.profit_uah,
+            "deal_amount_uah": alert.deal_amount_uah,
+            "buy_bank": alert.buy_bank,
+            "sell_bank": alert.sell_bank,
+            "buy_banks_all": alert.buy_banks_all,
+            "sell_banks_all": alert.sell_banks_all,
+            "buy_banks_fit": alert.buy_banks_fit,
+            "sell_banks_fit": alert.sell_banks_fit,
+            "route_variants": alert.route_variants,
+            "route_type": alert.route_type,
+            "route_pairs": getattr(alert, "route_pairs", None),
+            "is_asymmetric": getattr(alert, "is_asymmetric", False),
+            "asymmetric_details": getattr(alert, "asymmetric_details", None),
+        }
+
     async def send_to_user(self, chat_id: int, alert: "SpreadAlert", is_sniper_match: bool = False) -> None:
         """
         Multi-user: відправляє алерт в конкретний chat_id.
@@ -89,44 +131,7 @@ class TelegramNotifier:
             sent_ids = await self._send_single(alert, chat_id=chat_id, display_settings=display, is_sniper_match=is_sniper_match)
             
             if sent_ids and self._db:
-                def _serialize_order(order: Order) -> dict:
-                    """Серіалізує Order у JSON-сумісний dict, зберігаючи списки та tuple-поля коректно."""
-                    result = {}
-                    for k, v in order.__dict__.items():
-                        if k == "regex_warn_flags":
-                            # list[tuple[str, str]] → list[list[str, str]] (JSON-safe)
-                            result[k] = [list(item) if isinstance(item, (tuple, list)) else [str(item), ""] for item in (v or [])]
-                        elif k in ("bank_codes", "regex_score", "composite_score", "review_score",
-                                   "review_neg_pct", "review_fetched", "positive_rate",
-                                   "month_order_count", "finish_rate_pct", "is_verified",
-                                   "account_age_days"):
-                            result[k] = v  # зберігаємо оригінальний тип
-                        elif isinstance(v, (int, float)) and not isinstance(v, bool):
-                            result[k] = float(v)
-                        elif isinstance(v, (list, dict, bool)) or v is None:
-                            result[k] = v
-                        else:
-                            result[k] = str(v)
-                    return result
-
-                alert_dict = {
-                    "buy_order": _serialize_order(alert.buy_order),
-                    "sell_order": _serialize_order(alert.sell_order),
-                    "spread_pct": alert.spread_pct,
-                    "profit_uah": alert.profit_uah,
-                    "deal_amount_uah": alert.deal_amount_uah,
-                    "buy_bank": alert.buy_bank,
-                    "sell_bank": alert.sell_bank,
-                    "buy_banks_all": alert.buy_banks_all,
-                    "sell_banks_all": alert.sell_banks_all,
-                    "buy_banks_fit": alert.buy_banks_fit,
-                    "sell_banks_fit": alert.sell_banks_fit,
-                    "route_variants": alert.route_variants,
-                    "route_type": alert.route_type,
-                    "route_pairs": getattr(alert, "route_pairs", None),
-                    "is_asymmetric": getattr(alert, "is_asymmetric", False),
-                    "asymmetric_details": getattr(alert, "asymmetric_details", None),
-                }
+                alert_dict = self._serialize_alert(alert)
                 
                 # Save mapping for both merchants to allow triggering updates on either of them
                 if alert.buy_order.merchant_id:
@@ -179,7 +184,11 @@ class TelegramNotifier:
             try:
                 recent_alerts = await self._db.get_recent_sent_alerts(exchange, merchant_id, max_age_seconds=1800)
                 if not recent_alerts:
-                    return
+                    # Retry once after a 2.5s delay to resolve in-flight Telegram HTTP request race condition
+                    await asyncio.sleep(2.5)
+                    recent_alerts = await self._db.get_recent_sent_alerts(exchange, merchant_id, max_age_seconds=1800)
+                    if not recent_alerts:
+                        return
                 
                 logger.info("🔄 Перемальовка %d алертів для мерчанта %s [%s]", len(recent_alerts), merchant_id, exchange)
                 
@@ -271,6 +280,10 @@ class TelegramNotifier:
                         is_sniper_match=is_sniper,
                         edit_message_ids=message_ids
                     )
+
+                    # Update the alert serialization in DB to match latest state
+                    updated_dict = self._serialize_alert(alert)
+                    await self._db.update_sent_alert_dict(chat_id, message_ids, updated_dict)
 
                     # 📈 Prometheus
                     try:

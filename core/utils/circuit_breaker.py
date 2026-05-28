@@ -67,6 +67,10 @@ class CircuitBreaker:
         self._state = State.CLOSED
         self._opened_at = None
 
+    def reset(self) -> None:
+        """Скидає Circuit Breaker у початковий стан CLOSED."""
+        self._record_success()
+
     def record_failure(self, reason: str = "") -> None:
         """Публічний метод для ручної реєстрації помилки (напр. TimeoutError з зовні)."""
         self._record_failure(Exception(reason or "manual failure"))

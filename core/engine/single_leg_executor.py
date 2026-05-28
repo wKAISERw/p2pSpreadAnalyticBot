@@ -9,6 +9,7 @@ SingleLegExecutor — Блок A: Гнучка одноногова торгів
 """
 import logging
 import uuid
+import asyncio
 from typing import Optional
 
 from core.storage.merchant_db import MerchantDB
@@ -24,10 +25,11 @@ class SingleLegExecutor:
     Використовується з Telegram-алертів (кнопки "Купити" / "Продати").
     """
 
-    def __init__(self, db: MerchantDB):
+    def __init__(self, db: MerchantDB, notifier=None):
         self._db = db
         self._executor = RouteExecutor()
         self._monitor = OrderMonitor(db)
+        self._notifier = notifier
 
     async def execute_single_buy(
         self,
@@ -145,6 +147,7 @@ class SingleLegExecutor:
             credentials=creds,
             fsm_status="PENDING_PAYMENT",
             on_filled=self._on_single_filled,
+            on_paid=self._on_single_paid,
         )
 
         logger.info(
@@ -270,6 +273,7 @@ class SingleLegExecutor:
             credentials=creds,
             fsm_status="SELL_PENDING",
             on_filled=self._on_single_filled,
+            on_paid=self._on_single_paid,
         )
 
         logger.info(
@@ -352,6 +356,37 @@ class SingleLegExecutor:
             return {"headers": headers, "cookies": cookies}
         else:
             return await self._db.get_credentials(exchange=exchange, user_id=user_id) or {}
+
+    async def _on_single_paid(
+        self, trade_id: int, order_id: str
+    ) -> None:
+        """Callback коли контрагент оплатив ордер."""
+        logger.info(
+            f"[SingleLeg] 💸 Ордер #{trade_id} ({order_id}) PAID (оплачено контрагентом)"
+        )
+        try:
+            trade = await self._db.get_active_trade_by_id(trade_id)
+            if trade:
+                owner_id = trade.get("owner_user_id") or 0
+                exchange = trade.get("exchange") or ""
+                amount = trade.get("amount") or 0.0
+                price = trade.get("price") or 0.0
+                fiat_amount = trade.get("fiat_amount") or 0.0
+                leg = trade.get("leg") or ""
+                
+                if self._notifier:
+                    msg = (
+                        f"💸 <b>Контрагент оплатив ордер!</b>\n\n"
+                        f"Угода: <b>#{trade_id}</b>\n"
+                        f"Біржа: <b>{exchange}</b>\n"
+                        f"Тип: <b>Taker-{leg.capitalize()}</b>\n"
+                        f"Сума: <code>{amount:.2f} USDT</code> за курсом <code>{price:.2f}</code> (<code>{fiat_amount:.2f} ₴</code>)\n"
+                        f"ID ордера: <code>{order_id}</code>\n\n"
+                        f"👉 Будь ласка, перевірте надходження коштів на картку/рахунок та підтвердіть (звільніть активи)."
+                    )
+                    asyncio.create_task(self._notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None))
+        except Exception as e:
+            logger.error(f"[SingleLeg] Помилка обробки on_paid: {e}")
 
     async def _on_single_filled(
         self, trade_id: int, order_id: str, data: dict

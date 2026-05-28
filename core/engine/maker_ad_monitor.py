@@ -166,6 +166,11 @@ class MakerAdMonitor:
 
     async def _poll_user(self, watch: UserWatch) -> None:
         """Опитує Bybit API для конкретного юзера (одна ітерація)."""
+        from state import state
+        if not state.stats.get("internet_connected", True):
+            logger.debug("[MakerAdMonitor] Poll skipped: internet is down")
+            return
+
         client = BybitP2PClient()
         client.set_credentials(
             watch.credentials.get("api_key", ""),

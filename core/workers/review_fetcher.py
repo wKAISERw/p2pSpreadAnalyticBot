@@ -227,6 +227,13 @@ class ReviewFetcher:
         щоб уникнути 'стану перегонів' (Race Condition), коли ордер аналізується швидше,
         ніж завантажаться його відгуки.
         """
+        from state import state
+        if not state.stats.get("internet_connected", True):
+            return {
+                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                "status": "UNAVAILABLE", "error_reason": "Internet is offline"
+            }
+
         if not merchant_id:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN", "error_reason": "empty merchant_id"}
 
@@ -363,8 +370,13 @@ class ReviewFetcher:
     # ─── Worker loop ────────────────────────────────────────────────────────
 
     async def _worker_loop(self) -> None:
+        from state import state
         while True:
             try:
+                # Очікуємо відновлення інтернету якщо він пропав
+                while not state.stats.get("internet_connected", True):
+                    await asyncio.sleep(5.0)
+
                 # Пріоритет: спочатку urgent, потім normal
                 try:
                     exchange, merchant_id = self._urgent_queue.get_nowait()

@@ -19,7 +19,8 @@ class AppState:
                 "MEXC": "CLOSED",
                 "Wallet": "CLOSED"
             },
-            "is_scanner_active": False
+            "is_scanner_active": False,
+            "internet_connected": True
         }
 
         self.opportunities = []

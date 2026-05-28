@@ -266,6 +266,18 @@ class StatsRepo:
             logger.error("get_active_trades_by_status: %s", e)
             return []
 
+    async def get_active_trade_by_id(self, trade_id: int) -> dict | None:
+        """Повертає інформацію про конкретну активну угоду по її ID."""
+        if not self._db:
+            return None
+        try:
+            async with self._db.execute("SELECT * FROM active_trades WHERE id = ?", (trade_id,)) as cur:
+                row = await cur.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error("get_active_trade_by_id error: %s", e)
+            return None
+
     async def get_user_active_trades(self, user_id: int) -> list[dict]:
         """Отримує всі активні поточні угоди користувача, які не закриті кінцевими статусами."""
         if not self._db:

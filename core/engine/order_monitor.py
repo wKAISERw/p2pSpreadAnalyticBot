@@ -131,6 +131,10 @@ class OrderMonitor:
 
         while True:
             try:
+                from state import state
+                while not state.stats.get("internet_connected", True):
+                    await asyncio.sleep(5.0)
+
                 elapsed = time.time() - started_at
 
                 # Таймаут
@@ -172,6 +176,27 @@ class OrderMonitor:
                     await self._db.update_active_trade_status(trade_id, mapped)
                     if on_expired:
                         await on_expired(trade_id, order_id)
+                    break
+
+                # Апеляція
+                elif mapped == "APPEAL":
+                    logger.warning(f"[OrderMonitor] trade#{trade_id} APPEAL ⚠️")
+                    await self._db.update_active_trade_status(trade_id, "APPEAL")
+                    try:
+                        from bot.handlers.core import _notifier
+                        trade = await self._db.get_active_trade_by_id(trade_id)
+                        owner_id = trade.get("owner_user_id") if trade else None
+                        msg = (
+                            f"⚠️ <b>Апеляція по ордеру — зайди на біржу!</b>\n\n"
+                            f"Угода: <b>#{trade_id}</b>\n"
+                            f"ID ордера: <code>{order_id}</code>\n"
+                            f"Біржа: <b>{exchange}</b>\n"
+                            f"Будь ласка, перевірте статус ордера на біржі та розберіться в апеляції."
+                        )
+                        if _notifier:
+                            asyncio.create_task(_notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None))
+                    except Exception as notify_err:
+                        logger.error(f"[OrderMonitor] Appeal notification error: {notify_err}")
                     break
 
             except asyncio.CancelledError:
