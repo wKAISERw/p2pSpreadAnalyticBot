@@ -590,7 +590,7 @@ async def cb_sys_debug(call: CallbackQuery):
     # Check cache clear action
     if call.data == "sys:clear_caches":
         # Clear caches in notifier / card_notifier
-        from bot.notifier import _single_leg_cache, _spread_cache, _taker_order_cache
+        from bot.handlers.core import _single_leg_cache, _spread_cache, _taker_order_cache
         from bot.card_notifier import _card_matching_cache
         _single_leg_cache.clear()
         _spread_cache.clear()

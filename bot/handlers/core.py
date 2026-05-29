@@ -106,7 +106,8 @@ _active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 # ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
 _single_leg_cache: dict = {}  # "b:<key>" / "s:<key>" → {ad_id, exchange, price, ...}
 _spread_cache: dict = {}  # "<key>" → (SpreadAlert, timestamp)
-_taker_order_cache: dict = {}  # 🚀 Кеш для Тейкер-ордерів (додано для bind_commands)
+from core.utils.cache import TTLCache as _TTLCache
+_taker_order_cache: _TTLCache = _TTLCache(ttl_seconds=300.0, max_size=500)
 # 🧠 РЕЄСТР ЕКСПЕРИМЕНТАЛЬНИХ ФІЧ (Для легкого масштабування)
 EXPERIMENTAL_FEATURES = {
     "routing": {

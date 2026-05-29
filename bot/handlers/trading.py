@@ -19,6 +19,7 @@ from bot.handlers.core import (
     _trade_worker, _single_leg_executor, is_muted, update_stats,
     _generate_dashboard_text, CreateAdStates, _maker_monitor, TakerExecuteStates, MakerSettingsStates,
     TakerSellSettingsStates, TakerBuySettingsStates, _active_repricers, _single_leg_cache, _spread_cache,
+    _taker_order_cache,
 )
 from bot.handlers.filters import _get_network_fee, _sell_roi_text, _tbuy_banks_kb, _tbuy_price_strategy_kb, _calc_roi, \
     _buy_confirm_text, _buy_final_kb, _save_taker_sell_db, _sell_final_kb, _save_taker_buy_db
@@ -432,9 +433,7 @@ async def on_ad_cancel(call: CallbackQuery, state: FSMContext) -> None:
 # ⚡ TAKER EXECUTE — швидке відкриття ордера
 # =========================================================================
 
-from core.utils.cache import TTLCache as _TTLCache
-
-_taker_order_cache: _TTLCache = _TTLCache(ttl_seconds=300.0, max_size=500)
+# (shared _taker_order_cache is imported from bot.handlers.core)
 
 
 @router.callback_query(F.data.startswith("taker:take:"))

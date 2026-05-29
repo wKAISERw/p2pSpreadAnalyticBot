@@ -459,6 +459,36 @@ def test_ttl_cache_cleanup():
     del _card_matching_cache[fresh_key]
 
 
+def test_taker_order_cache_flow():
+    """Verify that _taker_order_cache from bot.handlers.core can save, retrieve and clear values."""
+    from bot.handlers.core import _taker_order_cache
+    
+    # Verify the cache behaves like a TTLCache
+    assert hasattr(_taker_order_cache, "set")
+    assert hasattr(_taker_order_cache, "get")
+    assert hasattr(_taker_order_cache, "clear")
+    
+    test_key = "test_taker_key_123"
+    test_data = {"price": 41.50, "merchant_id": "m123"}
+    
+    _taker_order_cache.set(test_key, test_data)
+    assert _taker_order_cache.get(test_key) == test_data
+    
+    # Test clearing caches as done in system.py
+    from bot.handlers.core import _single_leg_cache, _spread_cache
+    _single_leg_cache["sl_key"] = {"test": True}
+    _spread_cache["sp_key"] = ("alert", 123)
+    
+    # Call the clear block
+    _single_leg_cache.clear()
+    _spread_cache.clear()
+    _taker_order_cache.clear()
+    
+    assert len(_single_leg_cache) == 0
+    assert len(_spread_cache) == 0
+    assert _taker_order_cache.get(test_key) is None
+
+
 # ═══════════════════════════════════════════════════════════════
 # Expired Reservations Release
 # ═══════════════════════════════════════════════════════════════
