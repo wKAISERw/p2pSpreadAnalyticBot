@@ -16,7 +16,7 @@ class OkxExchange(BaseExchange):
         self.client = client
         self.url = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdsPrelogin"
 
-    def _parse_order(self, item: dict) -> Order:
+    def _parse_order(self, item: dict, api_side: str = "") -> Order:
         bank_codes = []
         raw_methods = item.get("paymentMethods", [])
 
@@ -29,6 +29,16 @@ class OkxExchange(BaseExchange):
         if not bank_codes:
             logger.debug("⚠️ Не вдалося розпізнати банки в ордері OKX: %s", raw_methods)
 
+        frontend_side = ""
+        if api_side == "sell":
+            frontend_side = "buy"
+        elif api_side == "buy":
+            frontend_side = "sell"
+
+        link = f"https://www.okx.com/ua/p2p/ads-merchant?publicUserId={item.get('publicUserId', '')}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT"
+        if frontend_side:
+            link += f"&side={frontend_side}"
+
         return Order(
             id=str(item.get("id", "")),
             price=Decimal(str(item.get("price", "0"))),
@@ -40,10 +50,11 @@ class OkxExchange(BaseExchange):
             month_order_count=int(item.get("completedOrderQuantity", 0)),
             finish_rate_pct=float(item.get("completedRate", "0")) * 100,
             exchange="OKX",
-            link=f"https://www.okx.com/p2p/ads-merchant?publicUserId={item.get('publicUserId', '')}",
+            link=link,
             bank_codes=bank_codes,
             trade_terms=str(item.get("tradingOrderInfo", {}).get("tradeOrderDesc", "") or "").strip().lower(),
             is_verified=bool(item.get("isAuthenticatedMerchant") or item.get("isMerchant")),
+            last_online_mins=None,
         )
 
     async def _fetch_orders(self, amount: float, bank_code: str, side: str) -> List[Order]:
@@ -65,7 +76,7 @@ class OkxExchange(BaseExchange):
             if not isinstance(data, dict) or data.get("code") != 0:
                 return []
             items = data.get("data", {}).get(side, [])
-            return [self._parse_order(item) for item in items]
+            return [self._parse_order(item, side) for item in items]
         except Exception as e:
             logger.error("❌ OKX Fetch Error: %s", e)
             return []

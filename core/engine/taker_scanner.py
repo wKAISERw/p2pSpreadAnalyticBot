@@ -7,8 +7,10 @@ TakerScanner — пайплайн для режимів TAKER_BUY / TAKER_SELL.
 """
 from __future__ import annotations
 import logging
+from typing import Optional
 from exchanges.base import Order
 from config.defaults import MIN_ORDERS, MIN_COMPLETION
+from core.storage.merchant_db import MerchantDB
 
 logger = logging.getLogger("TakerScanner")
 
@@ -20,7 +22,15 @@ class TakerScanner:
     TAKER_SELL: buy-ордери (хто купує USDT) — ти продаєш.
     """
 
-    def find_orders_for_user(
+    def __init__(self, db: Optional[MerchantDB] = None):
+        self.db = db
+        if db:
+            from core.engine.card_matching_engine import CardMatchingEngine
+            self.card_engine = CardMatchingEngine(db)
+        else:
+            self.card_engine = None
+
+    async def find_orders_for_user(
         self, user: dict,
         buy_grouped: dict[str, list[Order]],
         sell_grouped: dict[str, list[Order]],
@@ -44,8 +54,29 @@ class TakerScanner:
         mf = user.get("merchant_filters") or {}
         emf = user.get("exchange_merchant_filters") or {}
 
+        # ── Smart Card Pre-filtering Setup ──
+        card_matching_active = False
+        user_cards_by_bank = {}
+        if self.card_engine and self.db:
+            try:
+                card_settings = await self.db.get_user_card_settings(user["user_id"])
+                if card_settings and card_settings.get("card_module_mode") != "off" and card_settings.get("enable_in_single_modes"):
+                    card_matching_active = True
+                    raw_cards = await self.db.get_cards(user["user_id"], status="active")
+                    import time
+                    now_epoch = time.time()
+                    for c in raw_cards:
+                        if float(c.get("cooldown_until", 0.0)) > now_epoch:
+                            continue
+                        b_name = str(c.get("bank_name", "")).lower()
+                        if b_name not in user_cards_by_bank:
+                            user_cards_by_bank[b_name] = []
+                        user_cards_by_bank[b_name].append(c)
+            except Exception as e:
+                logger.warning("Error initializing card pre-filtering: %s", e)
+
         seen_ids: set[str] = set()
-        matched: list[Order] = []
+        candidates: list[Order] = []
 
         for bank_code, orders in source_grouped.items():
             if bank_code not in user_banks:
@@ -62,6 +93,32 @@ class TakerScanner:
                 if min_amount > 0 and order_max < min_amount:
                     continue
 
+                order_price = float(order.price)
+
+                # ── In-Memory Card Pre-filtering ──
+                if card_matching_active:
+                    from bot.formatters import _bank_code_to_db
+                    card_bank_db = _bank_code_to_db(bank_code)
+                    if not card_bank_db or card_bank_db not in user_cards_by_bank:
+                        continue
+                    
+                    # Calculate target UAH amount for card limit checks
+                    target_uah = order_min
+                    if mode == "TAKER_SELL":
+                        t_amount = float(user.get("taker_sell_amount", 0))
+                        if t_amount > 0:
+                            target_uah = t_amount * order_price
+                    elif mode == "TAKER_BUY":
+                        t_amount = float(user.get("taker_buy_amount", 0))
+                        if t_amount > 0:
+                            target_uah = t_amount * order_price
+
+                    # For TAKER_BUY we need enough total UAH balance across active cards
+                    if mode == "TAKER_BUY":
+                        total_bal = sum(float(c.get("balance", 0.0)) for c in user_cards_by_bank[card_bank_db])
+                        if total_bal < target_uah:
+                            continue
+
                 # ── Фільтри TAKER_SELL (використовуємо обчислений min_sell_price) ──
                 if mode == "TAKER_SELL":
                     strategy = user.get("taker_sell_price_strategy", "roi")
@@ -69,7 +126,6 @@ class TakerScanner:
                     price_to = float(user.get("taker_sell_price_to", 0))
                     t_amount = float(user.get("taker_sell_amount", 0))
                     t_speed = user.get("taker_sell_speed", "ANY")
-                    order_price = float(order.price)
 
                     # ── Цінова стратегія ──────────────────────────────────
                     if strategy in ("roi", "min") and min_sell_price > 0:
@@ -103,7 +159,6 @@ class TakerScanner:
                     t_limit_min = float(user.get("taker_buy_limit_min", 0))
                     t_limit_max = float(user.get("taker_buy_limit_max", 0))
                     t_speed = user.get("taker_buy_speed", "ANY")
-                    order_price = float(order.price)
 
                     # ── Цінова стратегія ──────────────────────────────────
                     if strategy == "max" and price_to > 0:
@@ -137,8 +192,41 @@ class TakerScanner:
                     continue
                 if "BLOCK" in (getattr(order, "risk_flag", "") or ""):
                     continue
+                
                 seen_ids.add(order.id)
-                matched.append(order)
+                candidates.append(order)
+
+        # ── Final Card Matching & Filtering on candidates only (N+1 avoidance) ──
+        matched: list[Order] = []
+        for order in candidates:
+            if card_matching_active:
+                order_bank_code = order.bank_codes[0] if order.bank_codes else ""
+                from bot.formatters import _bank_code_to_db
+                card_bank_db = _bank_code_to_db(order_bank_code)
+                
+                target_uah = float(order.min_limit)
+                order_price = float(order.price)
+                if mode == "TAKER_SELL":
+                    t_amount = float(user.get("taker_sell_amount", 0))
+                    if t_amount > 0:
+                        target_uah = t_amount * order_price
+                elif mode == "TAKER_BUY":
+                    t_amount = float(user.get("taker_buy_amount", 0))
+                    if t_amount > 0:
+                        target_uah = t_amount * order_price
+
+                card_direction = "buy" if mode == "TAKER_BUY" else "sell"
+                
+                match_res = await self.card_engine.run(
+                    user_id=user["user_id"],
+                    bank=card_bank_db,
+                    amount=target_uah,
+                    direction=card_direction,
+                    crypto_available=True
+                )
+                if match_res.status not in ("success", "needs_split"):
+                    continue
+            matched.append(order)
 
         # BUY → найнижча ціна спершу, SELL → найвища
         if mode == "TAKER_BUY":
@@ -164,4 +252,36 @@ class TakerScanner:
             return False
         if min_rate > 0 and order.finish_rate_pct < min_rate:
             return False
+
+        # --- Reliability Filters ---
+        # 1. Verification status ("all", "verified", "unverified")
+        verified_filter = ex_filters.get("verified_filter") or mf.get("verified_filter") or "all"
+        if verified_filter == "verified" and not order.is_verified:
+            return False
+        if verified_filter == "unverified" and order.is_verified:
+            return False
+
+        # 2. Account age (days) - only filter if exchange provides positive age > 0
+        min_age = int(ex_filters.get("min_account_age_days") or mf.get("min_account_age_days") or 0)
+        if min_age > 0:
+            age = getattr(order, "account_age_days", 0)
+            if age > 0 and age < min_age:
+                return False
+
+        # 3. Positive review rate (%)
+        min_pos_rate = float(ex_filters.get("min_positive_rate") or mf.get("min_positive_rate") or 0.0)
+        if min_pos_rate > 0.0:
+            pos_rate = getattr(order, "positive_rate", 0.0)
+            if pos_rate > 0.0:
+                actual_pct = pos_rate * 100.0 if pos_rate <= 1.0 else pos_rate
+                if actual_pct < min_pos_rate:
+                    return False
+
+        # 4. Max offline minutes
+        max_offline = int(ex_filters.get("max_offline_mins") or mf.get("max_offline_mins") or 0)
+        if max_offline > 0:
+            last_online = getattr(order, "last_online_mins", None)
+            if last_online is not None and last_online > max_offline:
+                return False
+
         return True

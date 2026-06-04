@@ -30,12 +30,12 @@ class AccountClients:
         }
 
 
-async def load_credentials(db: MerchantDB) -> AccountClients:
+async def load_credentials(db: MerchantDB, user_id: int = 0) -> AccountClients:
     """
     Завантажує зашифровані credentials з БД і ініціалізує account клієнтів.
     Повертає AccountClients — навіть якщо credentials немає (порожні клієнти).
     """
-    creds = await db.get_all_credentials()
+    creds = await db.get_all_credentials(user_id=user_id)
 
     bybit_acc = BybitAccountClient()
     binance_acc = BinanceAccountClient()

@@ -38,18 +38,67 @@ def stats_source_kb() -> InlineKeyboardMarkup:
 
 
 
-def stats_metrics_kb(source: str) -> InlineKeyboardMarkup:
+def stats_metrics_kb(source: str, period: int = 30, mode: str = "ALL") -> InlineKeyboardMarkup:
     """Другий рівень: Вибір метрики (однаковий для обох джерел)."""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📅 По днях", callback_data=f"stats:daily:{source}"),
-        InlineKeyboardButton(text="🏦 Топ бірж", callback_data=f"stats:exchanges:{source}")
+        InlineKeyboardButton(text="📅 По днях", callback_data=f"stats:daily:{source}:{period}:{mode}"),
+        InlineKeyboardButton(text="🏦 Топ бірж", callback_data=f"stats:exchanges:{source}:{period}:{mode}")
     )
     builder.row(
-        InlineKeyboardButton(text="🔥 Теплова карта", callback_data=f"stats:heatmap:{source}"),
-        InlineKeyboardButton(text="🗺 Маршрути", callback_data=f"stats:routes:{source}")
+        InlineKeyboardButton(text="🔥 Активність по год.", callback_data=f"stats:heatmap:{source}:{period}:{mode}"),
+        InlineKeyboardButton(text="🗺 Маршрути", callback_data=f"stats:routes:{source}:{period}:{mode}")
+    )
+    
+    # Фільтри
+    period_labels = {1: "1д", 7: "7д", 14: "14д", 30: "30д"}
+    period_txt = period_labels.get(period, f"{period}д")
+    
+    builder.row(
+        InlineKeyboardButton(text=f"⏱ Період: {period_txt}", callback_data=f"stats:pick_period:{source}:{period}:{mode}"),
+        InlineKeyboardButton(text=f"🎯 Режим: {mode}", callback_data=f"stats:pick_mode:{source}:{period}:{mode}")
     )
     builder.row(InlineKeyboardButton(text="🔙 Назад до вибору", callback_data="stats:main:none")) # Повернення на 1-й рівень
+    return builder.as_markup()
+
+
+def stats_period_kb(source: str, current_period: int, mode: str) -> InlineKeyboardMarkup:
+    """Вибір періоду статистики."""
+    builder = InlineKeyboardBuilder()
+    periods = [1, 7, 14, 30]
+    for p in periods:
+        label = f"✅ {p} днів" if p == current_period else f"{p} днів"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"stats:change_period:{source}:{p}:{mode}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"stats:menu:{source}:{current_period}:{mode}"))
+    return builder.as_markup()
+
+
+def stats_mode_kb(source: str, period: int, current_mode: str) -> InlineKeyboardMarkup:
+    """Вибір режиму статистики."""
+    builder = InlineKeyboardBuilder()
+    modes = ["ALL", "SPREAD", "TAKER_BUY", "TAKER_SELL", "MAKER_BUY", "MAKER_SELL"]
+    for m in modes:
+        label = f"✅ {m}" if m == current_mode else f"{m}"
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"stats:change_mode:{source}:{period}:{m}"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"stats:menu:{source}:{period}:{current_mode}"))
+    return builder.as_markup()
+
+
+def stats_daily_with_details_kb(source: str, period: int, mode: str, dates: list[str]) -> InlineKeyboardMarkup:
+    """Показує звіт по днях + кнопки для перегляду деталей конкретного дня."""
+    builder = InlineKeyboardBuilder()
+    
+    if dates:
+        row_buttons = []
+        for d in dates:
+            short_label = d[5:] if len(d) >= 10 else d
+            row_buttons.append(
+                InlineKeyboardButton(text=f"🔍 {short_label}", callback_data=f"stats:daydetail:{source}:{period}:{mode}:{d}")
+            )
+        for i in range(0, len(row_buttons), 2):
+            builder.row(*row_buttons[i:i+2])
+            
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data=f"stats:menu:{source}:{period}:{mode}"))
     return builder.as_markup()
 
 

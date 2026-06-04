@@ -238,11 +238,8 @@ async def cmd_mode(message: Message) -> None:
 async def cmd_stats(message: Message) -> None:
     if not _db:
         return await message.answer("❌ БД не підключена.")
-    from core.analytics.stats_engine import StatsEngine
-    stats = StatsEngine(_db)
-    text = await stats.format_stats_message(period_days=30)
-    text += "\n\n<i>👇 Оберіть розділ для деталей:</i>"
-    await message.answer(text, reply_markup=stats_overview_kb())
+    text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть, яку саме статистику ви хочете переглянути:"
+    await message.answer(text, reply_markup=keyboards.stats_source_kb())
 
 
 # ── /sessions (AUTH-СЕСІЇ) ────────────────────────────────────────────────
@@ -420,6 +417,12 @@ async def cmd_active(message: Message) -> None:
                 fresh.buy_reason = b_reason
                 fresh.sell_reason = s_reason
 
+            if user and _db:
+                from core.engine.alert_dispatcher import AlertDispatcher
+                chosen_buy, chosen_sell = await AlertDispatcher.adapt_alert_for_user(_db, user, fresh)
+                fresh.buy_bank = chosen_buy
+                fresh.sell_bank = chosen_sell
+
             await _notifier.send_to_user(chat_id, fresh)
             sent += 1
         except Exception as e:
@@ -594,10 +597,10 @@ async def cmd_debugfilters(message: Message) -> None:
         lines.append(f"  sell банки: {', '.join(sell_bank_names) if sell_bank_names else '⚠️ ПОРОЖНЬО'}")
 
         if mf:
-            lines.append(f"  mf глобал:  ордери≥{mf.get('min_orders', 0):.0f}  рейт≥{mf.get('min_rate', 0):.0f}%")
+            lines.append(f"  mf глобал:  ордери≥{mf.get('min_orders', 0):.0f}  рейт≥{mf.get('min_rate', 0):.0f}%  офлайн≤{mf.get('max_offline_mins', 0):.0f}хв")
         if emf:
             for ex, ef in emf.items():
-                lines.append(f"  mf {ex}: ордери≥{ef.get('min_orders', 0):.0f}  рейт≥{ef.get('min_rate', 0):.0f}%")
+                lines.append(f"  mf {ex}: ордери≥{ef.get('min_orders', 0):.0f}  рейт≥{ef.get('min_rate', 0):.0f}%  офлайн≤{ef.get('max_offline_mins', 0):.0f}хв")
 
         # ── Симуляція фільтру на кожному поточному алерті ──
         if mode != "SPREAD":
@@ -648,16 +651,25 @@ async def cmd_debugfilters(message: Message) -> None:
                 ex_filt = emf.get(ex_name, {})
                 min_ord = float(ex_filt.get("min_orders", 0) or mf.get("min_orders", 0) or DEF_ORDERS.get(ex_name, 0))
                 min_rate = float(ex_filt.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or DEF_RATE.get(ex_name, 0.0))
+                max_off = int(ex_filt.get("max_offline_mins") or mf.get("max_offline_mins") or 0)
+
                 if min_ord > 0 and getattr(order_obj, "month_order_count", 0) < min_ord:
                     r = f"{side_label} merchant orders < {min_ord:.0f}"
                     failed_reasons[r] = failed_reasons.get(r, 0) + 1
-                    mf_fail = True;
+                    mf_fail = True
                     break
                 if min_rate > 0 and getattr(order_obj, "finish_rate_pct", 0.0) < min_rate:
                     r = f"{side_label} merchant rate < {min_rate:.1f}%"
                     failed_reasons[r] = failed_reasons.get(r, 0) + 1
-                    mf_fail = True;
+                    mf_fail = True
                     break
+                if max_off > 0:
+                    last_online = getattr(order_obj, "last_online_mins", None)
+                    if last_online is not None and last_online > max_off:
+                        r = f"{side_label} merchant offline {last_online}m > {max_off}m"
+                        failed_reasons[r] = failed_reasons.get(r, 0) + 1
+                        mf_fail = True
+                        break
             if mf_fail:
                 continue
 

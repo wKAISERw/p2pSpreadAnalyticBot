@@ -44,9 +44,29 @@ class BybitAccountClient(BaseHttpClient):
             "X-BAPI-RECV-WINDOW": RECV_WINDOW,
         }
 
-    async def get_balance(self, account_type: str = "UNIFIED") -> list[dict]:
-        """Баланс по монетах. account_type: UNIFIED | FUND | SPOT"""
+    async def get_balance(self, account_type: str = "ALL") -> list[dict]:
+        """Баланс по монетах. account_type: UNIFIED | FUND | SPOT | ALL"""
         if not self.is_authenticated: return []
+        if account_type == "ALL":
+            unified = await self.get_balance("UNIFIED")
+            funding = await self.get_balance("FUND")
+            merged = {}
+            for coin_dict in unified + funding:
+                coin = coin_dict["coin"]
+                if coin not in merged:
+                    merged[coin] = {
+                        "coin": coin,
+                        "free": 0.0,
+                        "locked": 0.0,
+                        "total": 0.0,
+                        "usd_value": 0.0
+                    }
+                merged[coin]["free"] += coin_dict["free"]
+                merged[coin]["locked"] += coin_dict["locked"]
+                merged[coin]["total"] += coin_dict["total"]
+                merged[coin]["usd_value"] += coin_dict.get("usd_value", 0.0)
+            return list(merged.values())
+
         query = f"accountType={account_type}"
         try:
             data = await self._get(f"{BASE_URL}/v5/account/wallet-balance?{query}", headers=self._sign_headers(query))

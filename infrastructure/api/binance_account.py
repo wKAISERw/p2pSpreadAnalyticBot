@@ -47,7 +47,19 @@ class BinanceAccountClient(BaseHttpClient):
         headers = {"X-MBX-APIKEY": self._api_key, "content-type": "application/json"}
         return await self._post(url, params=self._sign(params or {}), headers=headers)
 
-    async def get_balance(self) -> list[dict]:
+    async def get_funding_balance(self) -> list[dict]:
+        """Баланс Funding акаунта (для P2P)."""
+        if not self.is_authenticated: return []
+        try:
+            data = await self._signed_post(f"{BASE_URL}/sapi/v1/asset/get-funding-asset")
+            return [{"coin": d["asset"], "free": float(d["free"]), "locked": float(d["locked"]),
+                     "total": float(d["free"]) + float(d["locked"])}
+                    for d in (data if isinstance(data, list) else [])
+                    if float(d.get("free", 0)) + float(d.get("locked", 0)) > 0]
+        except Exception as e:
+            logger.warning("get_funding_balance: %s", e); return []
+
+    async def get_spot_balance(self) -> list[dict]:
         """Баланс Spot акаунта."""
         if not self.is_authenticated: return []
         try:
@@ -57,7 +69,26 @@ class BinanceAccountClient(BaseHttpClient):
                     for d in (data if isinstance(data, list) else [])
                     if float(d.get("free", 0)) + float(d.get("locked", 0)) > 0]
         except Exception as e:
-            logger.warning("get_balance: %s", e); return []
+            logger.warning("get_spot_balance: %s", e); return []
+
+    async def get_balance(self) -> list[dict]:
+        """Комбінований баланс Spot + Funding акаунтів."""
+        spot = await self.get_spot_balance()
+        funding = await self.get_funding_balance()
+        merged = {}
+        for coin_dict in spot + funding:
+            coin = coin_dict["coin"]
+            if coin not in merged:
+                merged[coin] = {
+                    "coin": coin,
+                    "free": 0.0,
+                    "locked": 0.0,
+                    "total": 0.0
+                }
+            merged[coin]["free"] += coin_dict["free"]
+            merged[coin]["locked"] += coin_dict["locked"]
+            merged[coin]["total"] += coin_dict["total"]
+        return list(merged.values())
 
     async def get_my_p2p_orders(self, trade_type: str = "BUY", rows: int = 20) -> list[dict]:
         """

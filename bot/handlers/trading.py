@@ -21,8 +21,12 @@ from bot.handlers.core import (
     TakerSellSettingsStates, TakerBuySettingsStates, _active_repricers, _single_leg_cache, _spread_cache,
     _taker_order_cache,
 )
-from bot.handlers.filters import _get_network_fee, _sell_roi_text, _tbuy_banks_kb, _tbuy_price_strategy_kb, _calc_roi, \
-    _buy_confirm_text, _buy_final_kb, _save_taker_sell_db, _sell_final_kb, _save_taker_buy_db
+from bot.handlers.filters import (
+    _get_network_fee, _sell_roi_text, _tbuy_banks_kb, _tbuy_price_strategy_kb, _tsell_price_strategy_kb, _calc_roi,
+    _buy_confirm_text, _buy_final_kb, _save_taker_sell_db, _sell_final_kb, _save_taker_buy_db,
+    _update_taker_sell_param_db, _update_taker_buy_param_db, _get_taker_sell_preset, _get_taker_buy_preset,
+    _get_current_market_rate, _sell_preset_text, _buy_preset_text, _taker_preset_kb
+)
 from bot.keyboards import back_to_main_kb, main_menu_kb
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
@@ -840,6 +844,30 @@ async def on_target_margin_input(message: Message, state: FSMContext) -> None:
 # 💸 TAKER SELL FSM  (4 кроки → ROI → підтвердження)
 # =========================================================================
 
+@router.callback_query(TakerSellSettingsStates.waiting_amount_type, F.data.startswith("tsell_type:"))
+async def on_tsell_amount_type(call: CallbackQuery, state: FSMContext) -> None:
+    amt_type = call.data.split(":")[1]
+    await state.update_data(amount_type=amt_type)
+    await state.set_state(TakerSellSettingsStates.waiting_amount)
+    await call.answer()
+    
+    if amt_type == "USDT":
+        text = (
+            "💸 <b>TAKER SELL — Крок 2/5</b>\n\n"
+            "📦 <b>Скільки USDT ти хочеш продати?</b>\n"
+            "<i>Введи кількість у USDT (наприклад: 500)</i>"
+        )
+    else:
+        text = (
+            "💸 <b>TAKER SELL — Крок 2/5</b>\n\n"
+            "📦 <b>Скільки UAH ти інвестував?</b>\n"
+            "<i>Введи суму в гривнях (наприклад: 20000)</i>"
+        )
+        
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(text, reply_markup=back_to_main_kb())
+
+
 @router.message(TakerSellSettingsStates.waiting_amount)
 async def on_tsell_amount(message: Message, state: FSMContext) -> None:
     try:
@@ -848,11 +876,45 @@ async def on_tsell_amount(message: Message, state: FSMContext) -> None:
             raise ValueError
     except ValueError:
         return await message.answer("❌ Введи число > 0. Наприклад: <code>500</code>")
-    await state.update_data(amount=val)
+        
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    amt_type = data.get("amount_type", "USDT")
+    
+    if is_edit:
+        if amt_type == "UAH":
+            users = await _db.get_active_users()
+            user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+            buy_price = float(user_row.get("taker_sell_price", 0)) if user_row else 0.0
+            if buy_price <= 0:
+                buy_price = 41.50
+            amount_usdt = val / buy_price
+        else:
+            amount_usdt = val
+            
+        await _update_taker_sell_param_db(message.from_user.id, "amount", amount_usdt)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_sell_preset(user_row)
+        current_rate = await _get_current_market_rate(_db, preset["amount"])
+        await message.answer(
+            f"✅ Об'єм оновлено до {amount_usdt:.1f} USDT!\n\n" + _sell_preset_text(preset, current_rate),
+            reply_markup=_taker_preset_kb("TAKER_SELL")
+        )
+        return
+
+    if amt_type == "UAH":
+        await state.update_data(amount_type="UAH", amount_uah=val)
+    else:
+        await state.update_data(amount_type="USDT", amount=val)
+        
     await state.set_state(TakerSellSettingsStates.waiting_buy_price)
+    label_vol = f"{val:.1f} UAH" if amt_type == "UAH" else f"{val:.1f} USDT"
     await message.answer(
-        f"📦 Об'єм: <b>{val:.1f} USDT</b>\n\n"
-        "💹 <b>TAKER SELL — крок 2/5</b>\n\n"
+        f"📦 Об'єм: <b>{label_vol}</b>\n\n"
+        "💹 <b>TAKER SELL — крок 3/5</b>\n\n"
         "💲 За скільки ти купував ці USDT?\n"
         "<i>Введи курс купівлі в UAH/USDT (наприклад: 41.25)</i>",
         reply_markup=back_to_main_kb(),
@@ -867,7 +929,32 @@ async def on_tsell_buy_price(message: Message, state: FSMContext) -> None:
             raise ValueError
     except ValueError:
         return await message.answer("❌ Наприклад: <code>41.25</code>")
-    await state.update_data(buy_price=val)
+        
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    
+    if is_edit:
+        await _update_taker_sell_param_db(message.from_user.id, "buy_price", val)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_sell_preset(user_row)
+        current_rate = await _get_current_market_rate(_db, preset["amount"])
+        await message.answer(
+            f"✅ Ціну купівлі оновлено до {val:.4f} ₴!\n\n" + _sell_preset_text(preset, current_rate),
+            reply_markup=_taker_preset_kb("TAKER_SELL")
+        )
+        return
+        
+    amt_type = data.get("amount_type", "USDT")
+    if amt_type == "UAH":
+        amount_uah = float(data["amount_uah"])
+        amount_usdt = amount_uah / val
+        await state.update_data(amount=amount_usdt, buy_price=val)
+    else:
+        await state.update_data(buy_price=val)
+        
     await state.set_state(TakerSellSettingsStates.waiting_exchange)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -884,7 +971,7 @@ async def on_tsell_buy_price(message: Message, state: FSMContext) -> None:
     ])
     await message.answer(
         f"💲 Ціна купівлі: <b>{val:.4f} ₴</b>\n\n"
-        "🏦 <b>TAKER SELL — крок 3/5</b>\n\n"
+        "🏦 <b>TAKER SELL — крок 4/5</b>\n\n"
         "З якої біржі виводитимеш USDT?\n"
         "<i>(потрібно для розрахунку Network Fee)</i>",
         reply_markup=kb,
@@ -894,14 +981,29 @@ async def on_tsell_buy_price(message: Message, state: FSMContext) -> None:
 @router.callback_query(TakerSellSettingsStates.waiting_exchange, F.data.startswith("tsell_ex:"))
 async def on_tsell_exchange(call: CallbackQuery, state: FSMContext) -> None:
     exchange = call.data.split(":")[1]
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    
+    if is_edit:
+        await _update_taker_sell_param_db(call.from_user.id, "exchange", exchange)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        preset = _get_taker_sell_preset(user_row)
+        current_rate = await _get_current_market_rate(_db, preset["amount"])
+        await call.message.edit_text(
+            _sell_preset_text(preset, current_rate),
+            reply_markup=_taker_preset_kb("TAKER_SELL")
+        )
+        return await call.answer("✅ Біржу виводу оновлено!")
+        
     await state.update_data(exchange=exchange)
     await call.answer()
 
-    data = await state.get_data()
     amount = float(data["amount"])
     buy_price = float(data["buy_price"])
 
-    # Рахуємо breakeven прямо тут
     network_fee, network_name = _get_network_fee(exchange)
     usable_volume = max(amount - network_fee, 0.001)
     breakeven_price = (amount * buy_price) / usable_volume
@@ -924,19 +1026,118 @@ async def on_tsell_exchange(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(TakerSellSettingsStates.waiting_profit)
 async def on_tsell_profit(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    expect_price_input = data.get("expect_price_input", False)
+    expect_exact_price = data.get("expect_exact_price", False)
+    expect_price_range = data.get("expect_price_range", False)
+    
+    if expect_price_input or expect_exact_price:
+        try:
+            val = float(message.text.strip().replace(",", "."))
+            if val <= 0: raise ValueError
+        except ValueError:
+            return await message.answer("❌ Введіть ціну (наприклад: 41.50)")
+            
+        strategy_name = "exact" if expect_exact_price else "min"
+        
+        if is_edit:
+            await _update_taker_sell_param_db(message.from_user.id, "price_strategy", strategy_name)
+            await _update_taker_sell_param_db(message.from_user.id, "price_input", val)
+            await state.clear()
+            
+            users = await _db.get_active_users()
+            user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+            preset = _get_taker_sell_preset(user_row)
+            current_rate = await _get_current_market_rate(_db, preset["amount"])
+            await message.answer(
+                f"✅ Стратегію оновлено ({strategy_name}) та встановлено ціну {val:.4f} ₴!\n\n" + _sell_preset_text(preset, current_rate),
+                reply_markup=_taker_preset_kb("TAKER_SELL")
+            )
+        else:
+            await state.update_data(price_strategy=strategy_name, price_input=val, min_sell_price=val)
+            speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⚡ Так, швидко!", callback_data="tsell_speed:FAST"),
+                InlineKeyboardButton(text="🐢 Ні, чекатиму", callback_data="tsell_speed:ANY"),
+            ]])
+            await message.answer(
+                f"✅ Встановлено стратегію {strategy_name} з ціною {val:.4f} ₴\n\n"
+                "⏱ <b>Чи важлива швидкість продажу?</b>",
+                reply_markup=speed_kb
+            )
+        return
+
+    if expect_price_range:
+        try:
+            val = float(message.text.strip().replace(",", "."))
+            if val <= 0: raise ValueError
+        except ValueError:
+            return await message.answer("❌ Введіть ціну (наприклад: 41.20)")
+            
+        step = data.get("range_step", "from")
+        if step == "from":
+            await state.update_data(price_from=val, range_step="to")
+            await message.answer(
+                f"↔️ Нижня межа: <b>{val:.4f} ₴</b>\n\n"
+                "Тепер введіть <b>верхню межу</b> ціни продажу:"
+            )
+        else:
+            price_from = float(data.get("price_from", 0.0))
+            if val < price_from:
+                return await message.answer(f"❌ Верхня межа ({val:.4f}) не може бути меншою за нижню ({price_from:.4f})")
+                
+            if is_edit:
+                await _update_taker_sell_param_db(message.from_user.id, "price_strategy", "range")
+                await _update_taker_sell_param_db(message.from_user.id, "price_range", (price_from, val))
+                await state.clear()
+                
+                users = await _db.get_active_users()
+                user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+                preset = _get_taker_sell_preset(user_row)
+                current_rate = await _get_current_market_rate(_db, preset["amount"])
+                await message.answer(
+                    f"✅ Встановлено діапазон {price_from:.4f} - {val:.4f} ₴!\n\n" + _sell_preset_text(preset, current_rate),
+                    reply_markup=_taker_preset_kb("TAKER_SELL")
+                )
+            else:
+                await state.update_data(price_strategy="range", price_from=price_from, price_to=val, min_sell_price=price_from)
+                speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="⚡ Так, швидко!", callback_data="tsell_speed:FAST"),
+                    InlineKeyboardButton(text="🐢 Ні, чекатиму", callback_data="tsell_speed:ANY"),
+                ]])
+                await message.answer(
+                    f"✅ Встановлено діапазон {price_from:.4f} - {val:.4f} ₴\n\n"
+                    "⏱ <b>Чи важлива швидкість продажу?</b>",
+                    reply_markup=speed_kb
+                )
+        return
+
     try:
         val = float(message.text.strip().replace(",", ".").replace("%", ""))
         if val <= 0:
             raise ValueError
     except ValueError:
         return await message.answer("❌ Введи число > 0. Наприклад: <code>0.8</code>")
-
-    data = await state.get_data()
+        
+    if is_edit:
+        await _update_taker_sell_param_db(message.from_user.id, "price_strategy", "roi")
+        await _update_taker_sell_param_db(message.from_user.id, "profit", val)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_sell_preset(user_row)
+        current_rate = await _get_current_market_rate(_db, preset["amount"])
+        await message.answer(
+            f"✅ Профіт оновлено до {val:.2f}%!\n\n" + _sell_preset_text(preset, current_rate),
+            reply_markup=_taker_preset_kb("TAKER_SELL")
+        )
+        return
+        
     network_fee = float(data.get("network_fee", 1.0))
     roi = _calc_roi(data["amount"], data["buy_price"], val, network_fee)
 
     await state.update_data(profit=val, roi=roi)
-    # Стан залишається waiting_profit → speed-кнопки підхоплюються нижче
 
     speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="⚡ Так, швидко!", callback_data="tsell_speed:FAST"),
@@ -954,43 +1155,267 @@ async def on_tsell_profit(message: Message, state: FSMContext) -> None:
 @router.callback_query(TakerSellSettingsStates.waiting_profit, F.data.startswith("tsell_speed:"))
 async def on_tsell_speed(call: CallbackQuery, state: FSMContext) -> None:
     speed = call.data.split(":")[1]
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    
+    if is_edit:
+        await _update_taker_sell_param_db(call.from_user.id, "speed", speed)
+        await state.clear()
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        preset = _get_taker_sell_preset(user_row)
+        current_rate = await _get_current_market_rate(_db, preset["amount"])
+        await call.message.edit_text(
+            _sell_preset_text(preset, current_rate),
+            reply_markup=_taker_preset_kb("TAKER_SELL")
+        )
+        return await call.answer("✅ Швидкість оновлено!")
+        
     await state.update_data(speed=speed)
     data = await state.get_data()
     roi = data.get("roi", {})
     await call.answer()
-    with suppress(TelegramBadRequest):
-        await call.message.edit_text(
-            _sell_roi_text(data, roi),
-            reply_markup=_sell_final_kb(),
+    
+    if data.get("price_strategy", "roi") != "roi":
+        min_sell = data.get("min_sell_price", 0.0)
+        confirm_text = (
+            "💸 <b>TAKER SELL | Підтвердження:</b>\n\n"
+            f"├ 📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n"
+            f"├ 💲 Стратегія: <b>{data['price_strategy']}</b>\n"
+            f"├ 🔒 Ціна: <b>{min_sell:.4f} ₴</b>\n"
+            f"└ ⏱ Швидкість: <b>{speed}</b>\n\n"
+            "🚀 Запустити сканер?"
         )
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                confirm_text,
+                reply_markup=_sell_final_kb(),
+            )
+    else:
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                _sell_roi_text(data, roi),
+                reply_markup=_sell_final_kb(),
+            )
 
 
 @router.callback_query(F.data.in_({"tsell:launch", "tsell:save_and_launch"}))
 async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
-    """✅ ФІКС Bug 1: ТІЛЬКИ тут записуємо scanner_mode і параметри в БД."""
     data = await state.get_data()
-    roi = data.get("roi")
-    if not roi or not data.get("amount"):
-        return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
+    strategy = data.get("price_strategy", "roi")
+    
+    if strategy == "roi":
+        roi = data.get("roi")
+        if not roi or not data.get("amount"):
+            return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
+    else:
+        roi = {
+            "min_sell_price": data.get("min_sell_price", 0.0),
+            "net_profit_uah": 0.0,
+            "invest_uah": data.get("amount", 0.0) * data.get("buy_price", 0.0)
+        }
+        if not data.get("amount"):
+            return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
 
     await _save_taker_sell_db(call.from_user.id, data, roi)
     await state.clear()
 
     from bot.keyboards import scanner_mode_kb
+    price_label = f"{roi['min_sell_price']:.4f} ₴"
+    if strategy == "range":
+        price_label = f"{data.get('price_from', 0.0):.4f} - {data.get('price_to', 0.0):.4f} ₴"
+        
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
             "🚀 <b>TAKER SELL запущено!</b>\n\n"
-            f"🔒 Мін. ціна продажу: <b>{roi['min_sell_price']:.4f} ₴</b>\n"
-            f"📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n"
-            f"💰 Цільовий профіт: <b>+{roi['net_profit_uah']:.2f} ₴</b>\n\n"
+            f"🔒 Ціна продажу: <b>{price_label}</b>\n"
+            f"📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n\n"
             "<i>Сканер шукає ордери — алерт прийде як тільки знайдеться підходящий.</i>",
             reply_markup=scanner_mode_kb("TAKER_SELL"),
         )
     await call.answer("🚀 Запущено!")
 
 
+def _tsell_edit_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📦 Об'єм", callback_data="tsell_edit:amount"),
+            InlineKeyboardButton(text="💲 Ціна входу", callback_data="tsell_edit:buy_price"),
+        ],
+        [
+            InlineKeyboardButton(text="🏦 Біржа", callback_data="tsell_edit:exchange"),
+            InlineKeyboardButton(text="📈 Стратегія", callback_data="tsell_edit:strategy"),
+        ],
+        [
+            InlineKeyboardButton(text="⏱ Швидкість", callback_data="tsell_edit:speed"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад до пресету", callback_data="smode:TAKER_SELL"),
+        ]
+    ])
+
+
+def _tbuy_edit_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📦 Об'єм", callback_data="tbuy_edit:amount"),
+            InlineKeyboardButton(text="📈 Стратегія ціни", callback_data="tbuy_edit:strategy"),
+        ],
+        [
+            InlineKeyboardButton(text="📏 Ліміти", callback_data="tbuy_edit:limits"),
+            InlineKeyboardButton(text="🏦 Банки", callback_data="tbuy_edit:banks"),
+        ],
+        [
+            InlineKeyboardButton(text="⏱ Швидкість", callback_data="tbuy_edit:speed"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад до пресету", callback_data="smode:TAKER_BUY"),
+        ]
+    ])
+
+
+@router.callback_query(F.data == "tsell_edit_menu")
+async def on_tsell_edit_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_reply_markup(reply_markup=_tsell_edit_menu_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data == "tbuy_edit_menu")
+async def on_tbuy_edit_menu(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    with suppress(TelegramBadRequest):
+        await call.message.edit_reply_markup(reply_markup=_tbuy_edit_menu_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("tsell_edit:"))
+async def on_tsell_edit(call: CallbackQuery, state: FSMContext) -> None:
+    param = call.data.split(":")[1]
+    await state.clear()
+    await state.update_data(is_edit=True, pending_mode="TAKER_SELL", edit_param=param)
+    
+    if param == "amount":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💵 USDT (крипта)", callback_data="tsell_type:USDT"),
+                InlineKeyboardButton(text="₴ UAH (гривня)", callback_data="tsell_type:UAH"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_SELL"),
+            ]
+        ])
+        await call.message.edit_text("📦 <b>Редагування об'єму для продажу</b>\n\nОберіть валюту:", reply_markup=kb)
+        await call.answer()
+        
+    elif param == "buy_price":
+        await state.set_state(TakerSellSettingsStates.waiting_buy_price)
+        await call.message.edit_text(
+            "💲 <b>Редагування ціни купівлі</b>\n\nВведіть нову ціну купівлі (UAH/USDT):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_SELL")
+            ]])
+        )
+        await call.answer()
+        
+    elif param == "exchange":
+        await state.set_state(TakerSellSettingsStates.waiting_exchange)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Binance", callback_data="tsell_ex:Binance"),
+                InlineKeyboardButton(text="Bybit", callback_data="tsell_ex:Bybit"),
+            ],
+            [
+                InlineKeyboardButton(text="OKX", callback_data="tsell_ex:OKX"),
+                InlineKeyboardButton(text="MEXC", callback_data="tsell_ex:MEXC"),
+            ],
+            [
+                InlineKeyboardButton(text="⚡ P2P (без комісії)", callback_data="tsell_ex:INTERNAL"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_SELL"),
+            ]
+        ])
+        await call.message.edit_text("🏦 <b>Редагування біржі виводу</b>\n\nОберіть біржу:", reply_markup=kb)
+        await call.answer()
+        
+    elif param == "strategy":
+        await state.set_state(TakerSellSettingsStates.waiting_profit)
+        await call.message.edit_text(
+            "📈 <b>Редагування стратегії ціни</b>\n\nОберіть нову стратегію:",
+            reply_markup=_tsell_price_strategy_kb()
+        )
+        await call.answer()
+        
+    elif param == "speed":
+        await state.set_state(TakerSellSettingsStates.waiting_speed)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚡ Так, швидко!", callback_data="tsell_speed:FAST"),
+                InlineKeyboardButton(text="🐢 Ні, чекатиму", callback_data="tsell_speed:ANY"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_SELL"),
+            ]
+        ])
+        await call.message.edit_text("⏱ <b>Редагування швидкості</b>\n\nЧи важлива швидкість?", reply_markup=kb)
+        await call.answer()
+
+
+@router.callback_query(TakerSellSettingsStates.waiting_profit, F.data.startswith("tsell_ps:"))
+async def on_tsell_price_strategy_cb(call: CallbackQuery, state: FSMContext) -> None:
+    strategy = call.data.split(":")[1]
+    await state.update_data(price_strategy=strategy)
+    await call.answer()
+    
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    cancel_cb = "smode:TAKER_SELL" if is_edit else "menu:main"
+    
+    if strategy == "roi":
+        await state.set_state(TakerSellSettingsStates.waiting_profit)
+        await call.message.edit_text(
+            "📈 <b>Введіть прибуток (спред %) який ви хочете отримати:</b>\n"
+            "<i>Наприклад: 0.8</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+            ]])
+        )
+    elif strategy == "min":
+        await state.set_state(TakerSellSettingsStates.waiting_profit)
+        await state.update_data(expect_price_input=True)
+        await call.message.edit_text(
+            "⬆️ <b>Введіть мінімальну ціну продажу (UAH/USDT):</b>\n"
+            "<i>Наприклад: 41.50</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+            ]])
+        )
+    elif strategy == "range":
+        await state.set_state(TakerSellSettingsStates.waiting_profit)
+        await state.update_data(expect_price_range=True, range_step="from")
+        await call.message.edit_text(
+            "↔️ <b>Введіть нижню межу ціни продажу (UAH/USDT):</b>\n"
+            "<i>Наприклад: 41.20</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+            ]])
+        )
+    elif strategy == "exact":
+        await state.set_state(TakerSellSettingsStates.waiting_profit)
+        await state.update_data(expect_exact_price=True)
+        await call.message.edit_text(
+            "🎯 <b>Введіть точну ціну для снайпера (UAH/USDT):</b>\n"
+            "<i>Наприклад: 41.35</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+            ]])
+        )
+
+
 # =========================================================================
-# 🛒 TAKER BUY FSM  (5 кроків + підтвердження)
+# 🛒 TAKER BUY FSM (Flexible Strategy, Single-param Edit, Confirmation)
 # =========================================================================
 
 @router.message(TakerBuySettingsStates.waiting_amount)
@@ -1001,6 +1426,21 @@ async def on_tbuy_amount(message: Message, state: FSMContext) -> None:
     except ValueError:
         return await message.answer("❌ Введи коректну суму USDT. Наприклад: <code>500</code>")
 
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    if is_edit:
+        await _update_taker_buy_param_db(message.from_user.id, "amount", val)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_buy_preset(user_row)
+        await message.answer(
+            f"✅ Об'єм оновлено до {val:.1f} USDT!\n\n" + _buy_preset_text(preset),
+            reply_markup=_taker_preset_kb("TAKER_BUY")
+        )
+        return
+        
     await state.update_data(amount=val)
     await state.set_state(TakerBuySettingsStates.waiting_price_strategy)
     await message.answer(
@@ -1017,7 +1457,7 @@ async def _ask_tbuy_limits_msg(message: Message, state: FSMContext) -> None:
         InlineKeyboardButton(text="⏭ Пропустити ліміти", callback_data="tbuy_skip:limits")
     ]])
     await message.answer(
-        "🛒 <b>TAKER BUY — Крок 3/5</b>\n\n"
+        "🛒 <b>TAKER BUY — Крок 4/6</b>\n\n"
         "📏 <b>Мінімальний ліміт ордерів (UAH)?</b>\n"
         "<i>Ордери з меншим лімітом ігноруються. Наприклад: 5000\nПропусти якщо не важливо.</i>",
         reply_markup=kb,
@@ -1032,14 +1472,22 @@ async def on_tbuy_limit_min(message: Message, state: FSMContext) -> None:
             raise ValueError
     except ValueError:
         return await message.answer("❌ Введи число (наприклад: 5000):")
+        
     await state.update_data(limit_min=val)
     await state.set_state(TakerBuySettingsStates.waiting_limit_max)
+    
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    cancel_cb = "smode:TAKER_BUY" if is_edit else "menu:main"
+    
     await message.answer(
         f"✅ Мін. ліміт: <b>{val:.0f} ₴</b>\n\n"
-        "🛒 <b>TAKER BUY — Крок 3b/5</b>\n\n"
+        "🛒 <b>TAKER BUY</b>\n\n"
         "📏 <b>Максимальний ліміт ордерів (UAH)?</b>\n"
         "<i>Ордери з більшим лімітом ігноруються. Наприклад: 50000</i>",
-        reply_markup=back_to_main_kb(),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+        ]]),
     )
 
 
@@ -1051,6 +1499,24 @@ async def on_tbuy_limit_max(message: Message, state: FSMContext) -> None:
             raise ValueError
     except ValueError:
         return await message.answer("❌ Введи число:")
+        
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    
+    if is_edit:
+        limit_min = float(data.get("limit_min", 0.0))
+        await _update_taker_buy_param_db(message.from_user.id, "limits", (limit_min, val))
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_buy_preset(user_row)
+        await message.answer(
+            f"✅ Ліміти оновлено до {limit_min:.0f} - {val:.0f} ₴!\n\n" + _buy_preset_text(preset),
+            reply_markup=_taker_preset_kb("TAKER_BUY")
+        )
+        return
+        
     await state.update_data(limit_max=val)
     await _show_tbuy_banks_msg(message.from_user.id, state, message.answer)
 
@@ -1060,11 +1526,27 @@ async def on_tbuy_limit_max(message: Message, state: FSMContext) -> None:
     F.data.startswith("tbuy_ps:")
 )
 async def on_tbuy_price_strategy(call: CallbackQuery, state: FSMContext) -> None:
-    strategy = call.data.split(":")[1]  # any | max | range | exact
+    strategy = call.data.split(":")[1]
     await state.update_data(price_strategy=strategy)
+    
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    cancel_cb = "smode:TAKER_BUY" if is_edit else "menu:main"
 
     if strategy == "any":
-        # Пропускаємо введення ціни → одразу до лімітів
+        if is_edit:
+            await _update_taker_buy_param_db(call.from_user.id, "price_strategy", "any")
+            await state.clear()
+            users = await _db.get_active_users()
+            user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+            preset = _get_taker_buy_preset(user_row)
+            await call.message.edit_text(
+                _buy_preset_text(preset),
+                reply_markup=_taker_preset_kb("TAKER_BUY")
+            )
+            await call.answer("✅ Встановлено стратегію: будь-яка ціна")
+            return
+            
         await state.set_state(TakerBuySettingsStates.waiting_limit_min)
         with suppress(TelegramBadRequest):
             await call.message.edit_text(
@@ -1081,7 +1563,9 @@ async def on_tbuy_price_strategy(call: CallbackQuery, state: FSMContext) -> None
                 "⬇️ <b>Макс. ціна купівлі</b>\n\n"
                 "Введи максимальну ціну (UAH/USDT):\n"
                 "<i>Наприклад: 41.50</i>",
-                reply_markup=keyboards.back_to_main_kb(),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+                ]]),
             )
     elif strategy == "range":
         await state.set_state(TakerBuySettingsStates.waiting_price_from)
@@ -1090,7 +1574,9 @@ async def on_tbuy_price_strategy(call: CallbackQuery, state: FSMContext) -> None
                 "↔️ <b>Ціновий діапазон — нижня межа</b>\n\n"
                 "Введи мінімальну ціну (UAH/USDT):\n"
                 "<i>Наприклад: 41.20</i>",
-                reply_markup=keyboards.back_to_main_kb(),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+                ]]),
             )
     elif strategy == "exact":
         await state.set_state(TakerBuySettingsStates.waiting_price_to)
@@ -1098,8 +1584,10 @@ async def on_tbuy_price_strategy(call: CallbackQuery, state: FSMContext) -> None
             await call.message.edit_text(
                 "🎯 <b>Точна ціна (Снайпер)</b>\n\n"
                 "Введи точну ціну (UAH/USDT):\n"
-                "<i>Бот реагуватиме лише на ордери з цією ціною ±0.005₴</i>",
-                reply_markup=keyboards.back_to_main_kb(),
+                "<i>Наприклад: 41.35\nБот реагуватиме лише на ордери з цією ціною ±0.005₴</i>",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+                ]]),
             )
     await call.answer()
 
@@ -1114,9 +1602,17 @@ async def on_tbuy_price_from(message: Message, state: FSMContext) -> None:
 
     await state.update_data(price_from=val)
     await state.set_state(TakerBuySettingsStates.waiting_price_to)
+    
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    cancel_cb = "smode:TAKER_BUY" if is_edit else "menu:main"
+    
     await message.answer(
         f"↔️ Від: <b>{val:.4f} ₴</b>\n\n"
         "Тепер введи <b>верхню межу</b> діапазону:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Скасувати", callback_data=cancel_cb)
+        ]])
     )
 
 
@@ -1131,11 +1627,28 @@ async def on_tbuy_price_to(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     strategy = data.get("price_strategy", "max")
     price_from = data.get("price_from", 0.0)
+    is_edit = data.get("is_edit", False)
 
     if strategy == "range" and val < price_from:
         return await message.answer(
             f"❌ Верхня межа <b>{val:.4f}</b> менша за нижню <b>{price_from:.4f}</b>"
         )
+
+    if is_edit:
+        await _update_taker_buy_param_db(message.from_user.id, "price_strategy", strategy)
+        if strategy == "range":
+            await _update_taker_buy_param_db(message.from_user.id, "price_from", price_from)
+        await _update_taker_buy_param_db(message.from_user.id, "price_to", val)
+        await state.clear()
+        
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
+        preset = _get_taker_buy_preset(user_row)
+        await message.answer(
+            f"✅ Стратегію ціни оновлено!\n\n" + _buy_preset_text(preset),
+            reply_markup=_taker_preset_kb("TAKER_BUY")
+        )
+        return
 
     await state.update_data(price_to=val)
     await state.set_state(TakerBuySettingsStates.waiting_limit_min)
@@ -1153,6 +1666,20 @@ async def on_tbuy_price_to(message: Message, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "tbuy_skip:limits")
 async def on_tbuy_skip_limits(call: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    if is_edit:
+        await _update_taker_buy_param_db(call.from_user.id, "limits", (0.0, 0.0))
+        await state.clear()
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        preset = _get_taker_buy_preset(user_row)
+        await call.message.edit_text(
+            _buy_preset_text(preset),
+            reply_markup=_taker_preset_kb("TAKER_BUY")
+        )
+        return await call.answer("✅ Ліміти скинуто!")
+
     await state.update_data(limit_min=0.0, limit_max=0.0)
     await call.answer()
     await state.set_state(TakerBuySettingsStates.waiting_banks)
@@ -1160,7 +1687,7 @@ async def on_tbuy_skip_limits(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(selected_banks=selected)
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "🛒 <b>TAKER BUY — Крок 4/5</b>\n\n"
+            "🛒 <b>TAKER BUY — Крок 5/6</b>\n\n"
             "🏦 <b>Обери банки для купівлі:</b>\n"
             "<i>Позначені банки вже з твоїх глобальних налаштувань</i>",
             reply_markup=_tbuy_banks_kb(selected),
@@ -1172,7 +1699,7 @@ async def _show_tbuy_banks_msg(user_id: int, state: FSMContext, send_fn) -> None
     selected = await _get_user_buy_banks_db(user_id)
     await state.update_data(selected_banks=selected)
     await send_fn(
-        "🛒 <b>TAKER BUY — Крок 4/5</b>\n\n"
+        "🛒 <b>TAKER BUY — Крок 5/6</b>\n\n"
         "🏦 <b>Обери банки для купівлі:</b>\n"
         "<i>Позначені банки вже з твоїх глобальних налаштувань</i>",
         reply_markup=_tbuy_banks_kb(selected),
@@ -1197,6 +1724,20 @@ async def on_tbuy_bank_action(call: CallbackQuery, state: FSMContext) -> None:
         data = await state.get_data()
         if not data.get("selected_banks"):
             return await call.answer("⚠️ Обери хоча б один банк!", show_alert=True)
+            
+        is_edit = data.get("is_edit", False)
+        if is_edit:
+            await _update_taker_buy_param_db(call.from_user.id, "banks", data["selected_banks"])
+            await state.clear()
+            users = await _db.get_active_users()
+            user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+            preset = _get_taker_buy_preset(user_row)
+            await call.message.edit_text(
+                _buy_preset_text(preset),
+                reply_markup=_taker_preset_kb("TAKER_BUY")
+            )
+            return await call.answer("✅ Банки оновлено!")
+
         await state.set_state(TakerBuySettingsStates.waiting_speed)
         await call.answer()
         speed_kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -1205,7 +1746,7 @@ async def on_tbuy_bank_action(call: CallbackQuery, state: FSMContext) -> None:
         ]])
         with suppress(TelegramBadRequest):
             await call.message.edit_text(
-                "🛒 <b>TAKER BUY — Крок 5/5</b>\n\n"
+                "🛒 <b>TAKER BUY — Крок 6/6</b>\n\n"
                 "⏱ <b>Чи важлива швидкість купівлі?</b>\n\n"
                 "⚡ <b>Важлива:</b> шукаємо ордери де ліміт ≥ твій об'єм (купиш одним ордером)\n"
                 "🐢 <b>Не важлива:</b> показуємо всі підходящі ордери, навіть якщо частинами",
@@ -1229,6 +1770,20 @@ async def on_tbuy_bank_action(call: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(TakerBuySettingsStates.waiting_speed, F.data.startswith("tbuy_speed:"))
 async def on_tbuy_speed(call: CallbackQuery, state: FSMContext) -> None:
     speed = call.data.split(":")[1]
+    data = await state.get_data()
+    is_edit = data.get("is_edit", False)
+    if is_edit:
+        await _update_taker_buy_param_db(call.from_user.id, "speed", speed)
+        await state.clear()
+        users = await _db.get_active_users()
+        user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
+        preset = _get_taker_buy_preset(user_row)
+        await call.message.edit_text(
+            _buy_preset_text(preset),
+            reply_markup=_taker_preset_kb("TAKER_BUY")
+        )
+        return await call.answer("✅ Швидкість оновлено!")
+        
     await state.update_data(speed=speed)
     data = await state.get_data()
     await call.answer()
@@ -1241,7 +1796,6 @@ async def on_tbuy_speed(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.in_({"tbuy:launch", "tbuy:save_and_launch"}))
 async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
-    """✅ ФІКС Bug 1: ТІЛЬКИ тут записуємо scanner_mode і параметри в БД."""
     data = await state.get_data()
     if not data.get("amount"):
         return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
@@ -1261,6 +1815,66 @@ async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
             reply_markup=scanner_mode_kb("TAKER_BUY"),
         )
     await call.answer("🚀 Запущено!")
+
+
+@router.callback_query(F.data.startswith("tbuy_edit:"))
+async def on_tbuy_edit(call: CallbackQuery, state: FSMContext) -> None:
+    param = call.data.split(":")[1]
+    await state.clear()
+    await state.update_data(is_edit=True, pending_mode="TAKER_BUY", edit_param=param)
+    
+    if param == "amount":
+        await state.set_state(TakerBuySettingsStates.waiting_amount)
+        await call.message.edit_text(
+            "📦 <b>Редагування об'єму для купівлі</b>\n\nВведіть нову кількість у USDT:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_BUY")
+            ]])
+        )
+        await call.answer()
+        
+    elif param == "strategy":
+        await state.set_state(TakerBuySettingsStates.waiting_price_strategy)
+        await call.message.edit_text(
+            "📈 <b>Редагування стратегії ціни</b>\n\nОберіть нову стратегію:",
+            reply_markup=_tbuy_price_strategy_kb()
+        )
+        await call.answer()
+        
+    elif param == "limits":
+        await state.set_state(TakerBuySettingsStates.waiting_limit_min)
+        await call.message.edit_text(
+            "📏 <b>Редагування лімітів</b>\n\nВведіть мінімальний ліміт ордера (UAH):\n"
+            "<i>0 — без обмежень</i>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_BUY")
+            ]])
+        )
+        await call.answer()
+        
+    elif param == "banks":
+        await state.set_state(TakerBuySettingsStates.waiting_banks)
+        selected = await _get_user_buy_banks_db(call.from_user.id)
+        await state.update_data(selected_banks=selected)
+        await call.message.edit_text(
+            "🏦 <b>Редагування банків для купівлі:</b>",
+            reply_markup=_tbuy_banks_kb(selected)
+        )
+        await call.answer()
+        
+    elif param == "speed":
+        await state.set_state(TakerBuySettingsStates.waiting_speed)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚡ Важлива (ордер ≥ мій об'єм)", callback_data="tbuy_speed:FAST"),
+                InlineKeyboardButton(text="🐢 Не важлива (частинами теж ок)", callback_data="tbuy_speed:ANY"),
+            ],
+            [
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_BUY"),
+            ]
+        ])
+        await call.message.edit_text("⏱ <b>Редагування швидкості</b>\n\nЧи важлива швидкість?", reply_markup=kb)
+        await call.answer()
 
 
 # =========================================================================

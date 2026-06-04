@@ -40,7 +40,7 @@ async def process_taker_path(
     ]
     for t_user in taker_users:
         try:
-            t_orders = taker_scanner.find_orders_for_user(
+            t_orders = await taker_scanner.find_orders_for_user(
                 t_user, buy_grouped, sell_grouped,
             )
             if not t_orders:
@@ -63,6 +63,30 @@ async def process_taker_path(
                         t_user["chat_id"], fresh, t_mode,
                     )
                 )
+                for o in fresh:
+                    buy_ex = o.exchange if t_mode == "TAKER_BUY" else ""
+                    sell_ex = o.exchange if t_mode == "TAKER_SELL" else ""
+                    buy_m = o.merchant_name if t_mode == "TAKER_BUY" else ""
+                    sell_m = o.merchant_name if t_mode == "TAKER_SELL" else ""
+                    buy_bk = o.bank_codes[0] if o.bank_codes and t_mode == "TAKER_BUY" else ""
+                    sell_bk = o.bank_codes[0] if o.bank_codes and t_mode == "TAKER_SELL" else ""
+                    
+                    asyncio.create_task(
+                        notifier._db.save_proposal(
+                            buy_exchange=buy_ex,
+                            sell_exchange=sell_ex,
+                            buy_merchant=buy_m,
+                            sell_merchant=sell_m,
+                            spread_pct=0.0,
+                            profit_uah=0.0,
+                            deal_amount=float(o.min_limit or 0),
+                            route_type=t_mode,
+                            buy_bank=buy_bk,
+                            sell_bank=sell_bk,
+                            was_sent=True,
+                            user_id=t_user["user_id"]
+                        )
+                    )
         except Exception as e:
             logger.warning(
                 "Taker dispatch error user %s: %s",
@@ -140,6 +164,22 @@ async def process_maker_path(
                     ms_user["chat_id"], advice,
                 )
             )
+            asyncio.create_task(
+                notifier._db.save_proposal(
+                    buy_exchange="",
+                    sell_exchange="",
+                    buy_merchant="",
+                    sell_merchant="",
+                    spread_pct=float(ms_user.get("target_margin", 0.003)) * 100,
+                    profit_uah=float(advice.get("expected_profit_uah", 0.0) or 0.0),
+                    deal_amount=capital,
+                    route_type="MAKER_SELL",
+                    buy_bank="",
+                    sell_bank="",
+                    was_sent=True,
+                    user_id=uid
+                )
+            )
         except Exception as e:
             logger.warning("Maker SELL error user %s: %s", ms_user.get("user_id"), e)
 
@@ -179,6 +219,22 @@ async def process_maker_path(
             asyncio.create_task(
                 notifier.send_maker_buy_suggestion(
                     mb_user["chat_id"], advice,
+                )
+            )
+            asyncio.create_task(
+                notifier._db.save_proposal(
+                    buy_exchange="",
+                    sell_exchange="",
+                    buy_merchant="",
+                    sell_merchant="",
+                    spread_pct=target_margin * 100,
+                    profit_uah=float(advice.get("expected_profit_uah", 0.0) or 0.0),
+                    deal_amount=capital,
+                    route_type="MAKER_BUY",
+                    buy_bank="",
+                    sell_bank="",
+                    was_sent=True,
+                    user_id=uid
                 )
             )
         except Exception as e:

@@ -16,6 +16,7 @@ class StatsRepo:
             spread_pct: float, profit_uah: float, deal_amount: float,
             route_type: str, buy_bank: str, sell_bank: str,
             was_sent: bool = False,
+            user_id: int = 0,
     ) -> None:
         """Зберігає пропозицію сканера для статистики."""
         if not self._db:
@@ -25,11 +26,11 @@ class StatsRepo:
                 """INSERT INTO scanner_proposals
                    (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
                     spread_pct, profit_uah, deal_amount, route_type,
-                    buy_bank, sell_bank, was_sent, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    buy_bank, sell_bank, was_sent, user_id, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (buy_exchange, sell_exchange, buy_merchant, sell_merchant,
                  spread_pct, profit_uah, deal_amount, route_type,
-                 buy_bank, sell_bank, 1 if was_sent else 0, time.time()),
+                 buy_bank, sell_bank, 1 if was_sent else 0, user_id, time.time()),
             )
             await self._db.commit()
         except Exception as e:
@@ -46,23 +47,28 @@ class StatsRepo:
         await self._db.commit()
         return cursor.rowcount
 
-    async def get_proposals_summary(self, period_days: int = 30) -> dict:
+    async def get_proposals_summary(self, period_days: int = 30, user_id: int = 0, mode: str = "ALL") -> dict:
         """Зведена статистика пропозицій сканера."""
         if not self._db:
             return {}
         try:
             since = time.time() - period_days * 86400
-            async with self._db.execute(
-                    """SELECT COUNT(*)                                      as total,
+            query = """SELECT COUNT(*)                                      as total,
                               SUM(CASE WHEN was_sent = 1 THEN 1 ELSE 0 END) as sent,
                               COALESCE(AVG(spread_pct), 0)                  as avg_spread,
                               COALESCE(AVG(profit_uah), 0)                  as avg_profit,
                               COALESCE(MAX(spread_pct), 0)                  as max_spread,
                               COALESCE(SUM(profit_uah), 0)                  as total_potential_profit
                        FROM scanner_proposals
-                       WHERE created_at >= ?""",
-                    (since,)
-            ) as cur:
+                       WHERE created_at >= ?"""
+            params = [since]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND route_type = ?"
+                params.append(mode)
+            async with self._db.execute(query, tuple(params)) as cur:
                 row = await cur.fetchone()
             if not row or row["total"] == 0:
                 return {}
@@ -78,24 +84,28 @@ class StatsRepo:
             logger.error("get_proposals_summary: %s", e)
             return {}
 
-    async def get_proposals_by_route(self, period_days: int = 30) -> list[dict]:
+    async def get_proposals_by_route(self, period_days: int = 30, user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """Топ маршрутів по кількості пропозицій."""
         if not self._db:
             return []
         try:
             since = time.time() - period_days * 86400
-            async with self._db.execute(
-                    """SELECT buy_exchange || '→' || sell_exchange as route,
+            query = """SELECT buy_exchange || '→' || sell_exchange as route,
                               route_type,
                               COUNT(*)                             as cnt,
                               AVG(spread_pct)                      as avg_spread,
                               AVG(profit_uah)                      as avg_profit
                        FROM scanner_proposals
-                       WHERE created_at >= ?
-                       GROUP BY route, route_type
-                       ORDER BY cnt DESC LIMIT 15""",
-                    (since,)
-            ) as cur:
+                       WHERE created_at >= ?"""
+            params = [since]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND route_type = ?"
+                params.append(mode)
+            query += " GROUP BY route, route_type ORDER BY cnt DESC LIMIT 15"
+            async with self._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
             return [
                 {
@@ -111,20 +121,24 @@ class StatsRepo:
             logger.error("get_proposals_by_route: %s", e)
             return []
 
-    async def get_proposals_by_day(self, period_days: int = 7) -> list[dict]:
+    async def get_proposals_by_day(self, period_days: int = 7, user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """Пропозиції по днях."""
         if not self._db:
             return []
         try:
             since = time.time() - period_days * 86400
-            async with self._db.execute(
-                    """SELECT DATE (created_at, 'unixepoch', 'localtime') as date, COUNT (*) as total, SUM (CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent, AVG (spread_pct) as avg_spread
+            query = """SELECT DATE (created_at, 'unixepoch', 'localtime') as date, COUNT (*) as total, SUM (CASE WHEN was_sent=1 THEN 1 ELSE 0 END) as sent, AVG (spread_pct) as avg_spread
                        FROM scanner_proposals
-                       WHERE created_at >= ?
-                       GROUP BY date
-                       ORDER BY date DESC""",
-                    (since,)
-            ) as cur:
+                       WHERE created_at >= ?"""
+            params = [since]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND route_type = ?"
+                params.append(mode)
+            query += " GROUP BY date ORDER BY date DESC"
+            async with self._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
             return [
                 {

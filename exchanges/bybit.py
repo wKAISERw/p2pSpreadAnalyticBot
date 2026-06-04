@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from typing import List, Tuple
 from decimal import Decimal
 from exchanges.base import BaseExchange, Order
@@ -23,6 +24,18 @@ class BybitExchange(BaseExchange):
             else:
                 parsed_banks.append(str(p))
 
+        is_online = bool(item.get("isOnline"))
+        last_online_mins = 0
+        if not is_online:
+            last_logout = item.get("lastLogoutTime")
+            if last_logout:
+                try:
+                    last_online_mins = max(0, (int(time.time()) - int(last_logout)) // 60)
+                except (ValueError, TypeError):
+                    last_online_mins = None
+            else:
+                last_online_mins = None
+
         return Order(
             id=str(item.get("id", "")),
             price=Decimal(str(item.get("price", "0"))),
@@ -38,6 +51,7 @@ class BybitExchange(BaseExchange):
             bank_codes=parsed_banks,
             trade_terms=str(item.get("remark", "") or "").strip().lower(),
             is_verified=bool(item.get("authTag") or item.get("isVerified")),
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, amount: float, banks: List[str], side: str) -> List[Order]:

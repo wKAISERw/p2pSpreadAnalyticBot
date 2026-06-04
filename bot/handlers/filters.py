@@ -260,15 +260,31 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
 
     min_orders = mf.get("min_orders", 0)
     min_rate = mf.get("min_rate", 0.0)
+    verified_filter = mf.get("verified_filter", "all")
+    min_age = mf.get("min_account_age_days", 0)
+    min_pos_rate = mf.get("min_positive_rate", 0.0)
+    max_offline = mf.get("max_offline_mins", 0)
 
     orders_label = f"{min_orders:.0f}" if min_orders else "без обмежень"
     rate_label = f"{min_rate:.0f}%" if min_rate else "без обмежень"
+    
+    verified_labels = {"all": "Усі", "verified": "Тільки верифіковані", "unverified": "Тільки звичайні"}
+    verified_label = verified_labels.get(verified_filter, verified_filter)
+    
+    age_label = f"{min_age:.0f} дн." if min_age else "без обмежень"
+    pos_label = f"{min_pos_rate:.1f}%" if min_pos_rate else "без обмежень"
+    offline_label = f"{max_offline:.0f} хв." if max_offline else "без обмежень"
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     builder.button(text=f"📊 Мін. угод: {orders_label}", callback_data="mf:orders")
     builder.button(text=f"⭐ Мін. рейтинг: {rate_label}", callback_data="mf:rate")
+    builder.button(text=f"🛡 Статус: {verified_label}", callback_data="mf:verified")
+    builder.button(text=f"📅 Вік акаунту: {age_label}", callback_data="mf:age")
+    builder.button(text=f"👍 % позитивних: {pos_label}", callback_data="mf:pos_rate")
+    builder.button(text=f"⏳ Макс. офлайн: {offline_label}", callback_data="mf:max_offline")
     builder.adjust(1)
+    
     # Per-exchange кнопки
     for ex in _MF_EXCHANGES:
         icon = _MF_EX_ICONS.get(ex, "🔌")
@@ -276,10 +292,27 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
         if ex_f:
             o = ex_f.get("min_orders", 0)
             r = ex_f.get("min_rate", 0.0)
+            v = ex_f.get("verified_filter", "all")
+            a = ex_f.get("min_account_age_days", 0)
+            p_r = ex_f.get("min_positive_rate", 0.0)
+            off = ex_f.get("max_offline_mins", 0)
+            
             parts = []
             if o: parts.append(f"≥{o:.0f} угод")
             if r: parts.append(f"≥{r:.0f}%")
-            label = f"{icon} {ex}: {', '.join(parts)}"
+            if v != "all":
+                parts.append("верифік." if v == "verified" else "звичайні")
+            if a:
+                parts.append(f"вік≥{a}дн.")
+            if p_r:
+                parts.append(f"відгуки≥{p_r}%")
+            if off:
+                parts.append(f"офлайн≤{off}хв")
+            
+            if parts:
+                label = f"{icon} {ex}: {', '.join(parts)}"
+            else:
+                label = f"{icon} {ex}: загальні"
         else:
             label = f"{icon} {ex}: загальні"
         builder.button(text=label, callback_data=f"mf:exchange:{ex}")
@@ -292,7 +325,11 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
         "Алерт прийде ТІЛЬКИ якщо обидва мерчанти (buy і sell) відповідають критеріям.\n",
         f"<b>🌐 Загальні:</b>",
         f"├ Мін. угод: <b>{orders_label}</b>",
-        f"└ Мін. рейтинг: <b>{rate_label}</b>",
+        f"├ Мін. рейтинг: <b>{rate_label}</b>",
+        f"├ Статус: <b>{verified_label}</b>",
+        f"├ Вік акаунту: <b>{age_label}</b>",
+        f"├ Позитивні відгуки: <b>{pos_label}</b>",
+        f"└ Макс. офлайн: <b>{offline_label}</b>",
     ]
     if emf:
         lines.append("")
@@ -302,7 +339,21 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
             if ef:
                 o = ef.get("min_orders", 0)
                 r = ef.get("min_rate", 0.0)
-                lines.append(f"  {_MF_EX_ICONS.get(ex, '')} {ex}: угод≥{o:.0f}, рейтинг≥{r:.0f}%")
+                v = ef.get("verified_filter", "all")
+                a = ef.get("min_account_age_days", 0)
+                p_r = ef.get("min_positive_rate", 0.0)
+                off = ef.get("max_offline_mins", 0)
+                
+                parts = []
+                if o: parts.append(f"угод≥{o:.0f}")
+                if r: parts.append(f"рейтинг≥{r:.0f}%")
+                if v != "all": parts.append(f"статус={v}")
+                if a: parts.append(f"вік≥{a}дн.")
+                if p_r: parts.append(f"відгуки≥{p_r}%")
+                if off: parts.append(f"офлайн≤{off}хв")
+                
+                if parts:
+                    lines.append(f"  {_MF_EX_ICONS.get(ex, '')} {ex}: {', '.join(parts)}")
     lines.append("\n<i>Per-exchange мають перевагу над загальними.</i>")
 
     with suppress(TelegramBadRequest):
@@ -366,6 +417,101 @@ async def on_mf_rate_input(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+@router.callback_query(F.data == "mf:verified")
+async def on_mf_verified(call: CallbackQuery) -> None:
+    mf, _ = await _load_merchant_filters(call.from_user.id)
+    current = mf.get("verified_filter", "all")
+    cycle = {"all": "verified", "verified": "unverified", "unverified": "all"}
+    next_val = cycle.get(current, "all")
+    await _save_merchant_filter(call.from_user.id, "verified_filter", next_val)
+    await call.answer(f"Статус змінено на: {next_val}")
+    await on_set_merchant_filters(call)
+
+
+@router.callback_query(F.data == "mf:age")
+async def on_mf_age(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_account_age)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "📅 <b>Мінімальний вік акаунту мерчанта (днів)</b>\n\n"
+            "Введи число днів (наприклад, <code>30</code>). <code>0</code> — вимкнути фільтр.\n"
+            "<i>Працює переважно на Binance.</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_account_age)
+async def on_mf_age_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        await _save_merchant_filter(message.from_user.id, "min_account_age_days", val)
+        label = f"{val} дн." if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. вік акаунту: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "mf:pos_rate")
+async def on_mf_pos_rate(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_min_positive_rate)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "👍 <b>Мінімальний % позитивних відгуків мерчанта (%)</b>\n\n"
+            "Введи число від 0 до 100. <code>0</code> — вимкнути.\n"
+            "<i>Приклад: 98 — тільки мерчанти з ≥98% позитивних відгуків</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_min_positive_rate)
+async def on_mf_pos_rate_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if not 0 <= val <= 100:
+            raise ValueError("Має бути від 0 до 100")
+        await _save_merchant_filter(message.from_user.id, "min_positive_rate", val)
+        label = f"{val:.1f}%" if val > 0 else "вимкнено"
+        await message.answer(f"✅ Мін. % позитивних відгуків: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data == "mf:max_offline")
+async def on_mf_max_offline(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(MerchantFilterStates.waiting_max_offline)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "⏳ <b>Максимальний час офлайн мерчанта (загальний, хвилин)</b>\n\n"
+            "Введи число в хвилинах. <code>0</code> — вимкнути фільтр.\n"
+            "<i>Приклад: 5 — не показувати мерчантів, які не в мережі більше 5 хвилин.</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_max_offline)
+async def on_mf_max_offline_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        await _save_merchant_filter(message.from_user.id, "max_offline_mins", val)
+        label = f"{val} хв." if val > 0 else "вимкнено"
+        await message.answer(f"✅ Макс. офлайн: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
 # ── Per-exchange фільтри мерчанта ──────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("mf:exchange:"))
@@ -377,8 +523,19 @@ async def on_mf_exchange(call: CallbackQuery) -> None:
 
     o = ef.get("min_orders", 0)
     r = ef.get("min_rate", 0.0)
+    v = ef.get("verified_filter", "all")
+    a = ef.get("min_account_age_days", 0)
+    p_r = ef.get("min_positive_rate", 0.0)
+    off = ef.get("max_offline_mins", 0)
+
     o_label = f"{o:.0f}" if o else "загальний"
     r_label = f"{r:.0f}%" if r else "загальний"
+    
+    verified_labels = {"all": "загальний", "verified": "верифіковані", "unverified": "звичайні"}
+    v_label = verified_labels.get(v, v)
+    a_label = f"{a:.0f} дн." if a else "загальний"
+    p_r_label = f"{p_r:.1f}%" if p_r else "загальний"
+    off_label = f"{off:.0f} хв." if off else "загальний"
 
     icon = _MF_EX_ICONS.get(ex_name, "🔌")
 
@@ -386,6 +543,10 @@ async def on_mf_exchange(call: CallbackQuery) -> None:
     builder = InlineKeyboardBuilder()
     builder.button(text=f"📊 Мін. угод: {o_label}", callback_data=f"mf:ex_orders:{ex_name}")
     builder.button(text=f"⭐ Мін. рейтинг: {r_label}", callback_data=f"mf:ex_rate:{ex_name}")
+    builder.button(text=f"🛡 Статус: {v_label}", callback_data=f"mf:ex_verified:{ex_name}")
+    builder.button(text=f"📅 Вік акаунту: {a_label}", callback_data=f"mf:ex_age:{ex_name}")
+    builder.button(text=f"👍 % позитивних: {p_r_label}", callback_data=f"mf:ex_pos_rate:{ex_name}")
+    builder.button(text=f"⏳ Макс. офлайн: {off_label}", callback_data=f"mf:ex_max_offline:{ex_name}")
     builder.adjust(1)
     if ef:
         builder.row(InlineKeyboardButton(text="🗑 Скинути (використ. загальні)", callback_data=f"mf:ex_reset:{ex_name}"))
@@ -395,8 +556,12 @@ async def on_mf_exchange(call: CallbackQuery) -> None:
         await call.message.edit_text(
             f"{icon} <b>Фільтри для {ex_name}</b>\n\n"
             f"├ Мін. угод: <b>{o_label}</b>\n"
-            f"└ Мін. рейтинг: <b>{r_label}</b>\n\n"
-            "<i>0 = використовувати загальний фільтр</i>",
+            f"├ Мін. рейтинг: <b>{r_label}</b>\n"
+            f"├ Статус: <b>{v_label}</b>\n"
+            f"├ Вік акаунту: <b>{a_label}</b>\n"
+            f"├ Позитивні відгуки: <b>{p_r_label}</b>\n"
+            f"└ Макс. офлайн: <b>{off_label}</b>\n\n"
+            "<i>0 / загальний = використовувати загальний фільтр</i>",
             reply_markup=builder.as_markup(),
         )
     await call.answer()
@@ -466,6 +631,117 @@ async def on_mf_ex_rate_input(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+@router.callback_query(F.data.startswith("mf:ex_verified:"))
+async def on_mf_ex_verified(call: CallbackQuery) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    _, emf = await _load_merchant_filters(call.from_user.id)
+    ef = emf.get(ex_name, {})
+    current = ef.get("verified_filter", "all")
+    cycle = {"all": "verified", "verified": "unverified", "unverified": "all"}
+    next_val = cycle.get(current, "all")
+    await _save_exchange_merchant_filter(call.from_user.id, ex_name, "verified_filter", next_val)
+    await call.answer(f"{ex_name} статус змінено на: {next_val}")
+    # Refresh menu
+    call.data = f"mf:exchange:{ex_name}"
+    await on_mf_exchange(call)
+
+
+@router.callback_query(F.data.startswith("mf:ex_age:"))
+async def on_mf_ex_age(call: CallbackQuery, state: FSMContext) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    await state.set_state(MerchantFilterStates.waiting_ex_min_account_age)
+    await state.update_data(mf_exchange=ex_name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"📅 <b>Мін. вік акаунту для {ex_name} (днів)</b>\n\n"
+            "Введи число. <code>0</code> — використати загальний.\n"
+            "<i>Приклад: 30</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_ex_min_account_age)
+async def on_mf_ex_age_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        data = await state.get_data()
+        ex_name = data.get("mf_exchange", "")
+        await _save_exchange_merchant_filter(message.from_user.id, ex_name, "min_account_age_days", val)
+        label = f"{val} дн." if val > 0 else "загальний"
+        await message.answer(f"✅ {ex_name} мін. вік акаунту: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("mf:ex_pos_rate:"))
+async def on_mf_ex_pos_rate(call: CallbackQuery, state: FSMContext) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    await state.set_state(MerchantFilterStates.waiting_ex_min_positive_rate)
+    await state.update_data(mf_exchange=ex_name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"👍 <b>Мін. % позитивних відгуків для {ex_name} (%)</b>\n\n"
+            "Введи число від 0 до 100. <code>0</code> — використати загальний.\n"
+            "<i>Приклад: 98</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_ex_min_positive_rate)
+async def on_mf_ex_pos_rate_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if not 0 <= val <= 100:
+            raise ValueError("Має бути від 0 до 100")
+        data = await state.get_data()
+        ex_name = data.get("mf_exchange", "")
+        await _save_exchange_merchant_filter(message.from_user.id, ex_name, "min_positive_rate", val)
+        label = f"{val:.1f}%" if val > 0 else "загальний"
+        await message.answer(f"✅ {ex_name} мін. % позитивних відгуків: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("mf:ex_max_offline:"))
+async def on_mf_ex_max_offline(call: CallbackQuery, state: FSMContext) -> None:
+    ex_name = call.data.split(":", 2)[2]
+    await state.set_state(MerchantFilterStates.waiting_ex_max_offline)
+    await state.update_data(mf_exchange=ex_name)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            f"⏳ <b>Макс. час офлайн для {ex_name} (хвилин)</b>\n\n"
+            "Введи число. <code>0</code> — використати загальний.\n"
+            "<i>Приклад: 3</i>",
+            reply_markup=back_to_main_kb(),
+        )
+    await call.answer()
+
+
+@router.message(MerchantFilterStates.waiting_ex_max_offline)
+async def on_mf_ex_max_offline_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(float(message.text.strip().replace(",", ".")))
+        if val < 0:
+            raise ValueError("Не може бути від'ємним")
+        data = await state.get_data()
+        ex_name = data.get("mf_exchange", "")
+        await _save_exchange_merchant_filter(message.from_user.id, ex_name, "max_offline_mins", val)
+        label = f"{val} хв." if val > 0 else "загальний"
+        await message.answer(f"✅ {ex_name} макс. офлайн: <b>{label}</b>", reply_markup=back_to_main_kb())
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+    finally:
+        await state.clear()
+
+
 @router.callback_query(F.data.startswith("mf:ex_reset:"))
 async def on_mf_ex_reset(call: CallbackQuery) -> None:
     """Скидає per-exchange фільтри — буде використовувати загальні."""
@@ -501,8 +777,8 @@ async def _save_merchant_filter(user_id: int, key: str, value) -> None:
     ) as cur:
         row = await cur.fetchone()
     mf = json.loads((row[0] if row else None) or "{}")
-    if value == 0 or value == 0.0:
-        mf.pop(key, None)  # 0 = вимкнути фільтр
+    if value == 0 or value == 0.0 or value == "all":
+        mf.pop(key, None)  # 0 / all = вимкнути фільтр
     else:
         mf[key] = value
     await conn.execute(
@@ -525,7 +801,7 @@ async def _save_exchange_merchant_filter(user_id: int, exchange: str, key: str, 
     emf = json.loads((row[0] if row else None) or "{}")
     if exchange not in emf:
         emf[exchange] = {}
-    if value == 0 or value == 0.0:
+    if value == 0 or value == 0.0 or value == "all":
         emf[exchange].pop(key, None)
         if not emf[exchange]:
             emf.pop(exchange, None)
@@ -656,6 +932,167 @@ async def _save_taker_buy_db(user_id: int, d: dict) -> None:
     await conn.commit()
 
 
+async def _update_taker_sell_param_db(user_id: int, key: str, value) -> None:
+    if not _db:
+        return
+    conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
+    
+    # Load current values
+    async with conn.execute(
+        """SELECT taker_sell_amount, taker_sell_price, taker_sell_exchange,
+                  taker_sell_profit, taker_sell_min_price, taker_sell_price_strategy,
+                  taker_sell_price_to, taker_sell_speed
+           FROM scanner_users WHERE user_id = ?""",
+        (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+        
+    if not row:
+        return
+        
+    d = {
+        "amount": float(row[0] or 0.0),
+        "buy_price": float(row[1] or 0.0),
+        "exchange": row[2] or "",
+        "profit": float(row[3] or 0.0) * 100.0,
+        "min_sell_price": float(row[4] or 0.0),
+        "price_strategy": row[5] or "roi",
+        "price_to": float(row[6] or 0.0),
+        "speed": row[7] or "ANY",
+    }
+    
+    # Update the modified key
+    if key == "amount":
+        d["amount"] = float(value)
+    elif key == "buy_price":
+        d["buy_price"] = float(value)
+    elif key == "exchange":
+        d["exchange"] = str(value)
+    elif key == "speed":
+        d["speed"] = str(value)
+    elif key == "profit":
+        d["profit"] = float(value)
+    elif key == "price_strategy":
+        d["price_strategy"] = str(value)
+        d["min_sell_price"] = 0.0
+        d["price_to"] = 0.0
+    elif key == "price_input":
+        d["min_sell_price"] = float(value)
+    elif key == "price_range":
+        d["min_sell_price"] = float(value[0])
+        d["price_to"] = float(value[1])
+        
+    # Recalculate ROI / min_sell_price if using roi strategy
+    if d["price_strategy"] == "roi" and d["amount"] > 0 and d["buy_price"] > 0:
+        network_fee, _ = _get_network_fee(d["exchange"])
+        roi = _calc_roi(d["amount"], d["buy_price"], d["profit"], network_fee)
+        d["min_sell_price"] = roi["min_sell_price"]
+        
+    # Save back to DB
+    await conn.execute(
+        """UPDATE scanner_users
+           SET taker_sell_amount         = ?,
+               taker_sell_price          = ?,
+               taker_sell_exchange       = ?,
+               taker_sell_profit         = ?,
+               taker_sell_min_price      = ?,
+               taker_sell_price_strategy = ?,
+               taker_sell_price_to       = ?,
+               taker_sell_speed          = ?
+           WHERE user_id = ?""",
+        (
+            d["amount"],
+            d["buy_price"],
+            d["exchange"],
+            d["profit"] / 100.0,
+            d["min_sell_price"],
+            d["price_strategy"],
+            d["price_to"],
+            d["speed"],
+            user_id
+        )
+    )
+    await conn.commit()
+
+
+async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
+    if not _db:
+        return
+    conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
+    
+    # Load current values
+    async with conn.execute(
+        """SELECT taker_buy_amount, taker_buy_price_strategy, taker_buy_price_from,
+                  taker_buy_max_price, taker_buy_limit_min, taker_buy_limit_max,
+                  taker_buy_speed, buy_bank_codes
+           FROM scanner_users WHERE user_id = ?""",
+        (user_id,)
+    ) as cur:
+        row = await cur.fetchone()
+        
+    if not row:
+        return
+        
+    d = {
+        "amount": float(row[0] or 0.0),
+        "price_strategy": row[1] or "any",
+        "price_from": float(row[2] or 0.0),
+        "max_price": float(row[3] or 0.0),
+        "limit_min": float(row[4] or 0.0),
+        "limit_max": float(row[5] or 0.0),
+        "speed": row[6] or "ANY",
+        "banks": (row[7] or "").split(",") if row[7] else [],
+    }
+    
+    # Update the modified key
+    if key == "amount":
+        d["amount"] = float(value)
+    elif key == "price_strategy":
+        d["price_strategy"] = str(value)
+        if d["price_strategy"] == "any":
+            d["price_from"] = 0.0
+            d["max_price"] = 0.0
+    elif key == "price_from":
+        d["price_from"] = float(value)
+    elif key == "price_to":
+        d["max_price"] = float(value)
+    elif key == "limits":
+        d["limit_min"] = float(value[0])
+        d["limit_max"] = float(value[1])
+    elif key == "banks":
+        d["banks"] = list(value)
+    elif key == "speed":
+        d["speed"] = str(value)
+        
+    banks_csv = ",".join(str(c) for c in d["banks"] if c)
+    
+    # Save back to DB
+    await conn.execute(
+        """UPDATE scanner_users
+           SET taker_buy_amount         = ?,
+               taker_buy_price_strategy = ?,
+               taker_buy_price_from     = ?,
+               taker_buy_max_price      = ?,
+               taker_buy_limit_min      = ?,
+               taker_buy_limit_max      = ?,
+               taker_buy_speed          = ?,
+               buy_bank_codes           = ?
+           WHERE user_id = ?""",
+        (
+            d["amount"],
+            d["price_strategy"],
+            d["price_from"],
+            d["max_price"],
+            d["limit_min"],
+            d["limit_max"],
+            d["speed"],
+            banks_csv,
+            user_id
+        )
+    )
+    await conn.commit()
+
+
 def _tbuy_price_strategy_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌐 Будь-яка ціна", callback_data="tbuy_ps:any")],
@@ -705,13 +1142,52 @@ def _get_network_fee(exchange: str) -> tuple[float, str]:
         return 1.0, "TRC20 (fallback)"
 
 
+async def _get_current_market_rate(db, amount_usdt: float) -> float:
+    """Отримує середній курс USDT/UAH з БД, відфільтрований за об'ємом (щоб прибрати пил/мікро-ордери)."""
+    if not db:
+        return 41.50
+    conn = getattr(db, "db", None) or getattr(db, "_db", db)
+    try:
+        import time
+        now = time.time()
+        since = now - 1800.0  # останні 30 хвилин
+        async with conn.execute(
+            "SELECT price, min_limit, max_limit FROM merchant_snapshots WHERE side = 'sell' AND recorded_at > ? ORDER BY recorded_at DESC LIMIT 100",
+            (since,)
+        ) as cur:
+            rows = await cur.fetchall()
+            
+        if not rows:
+            async with conn.execute(
+                "SELECT price, min_limit, max_limit FROM merchant_snapshots WHERE side = 'sell' ORDER BY recorded_at DESC LIMIT 50"
+            ) as cur:
+                rows = await cur.fetchall()
+                
+        if rows:
+            matching = []
+            for r in rows:
+                p = float(r["price"])
+                min_lim = float(r["min_limit"])
+                max_lim = float(r["max_limit"])
+                fiat_val = amount_usdt * p
+                if min_lim <= fiat_val <= max_lim:
+                    matching.append(p)
+            if matching:
+                return sum(matching) / len(matching)
+            # fallback: середнє з топ-5 останніх
+            return sum(float(r["price"]) for r in rows[:5]) / min(len(rows), 5)
+    except Exception as e:
+        logger.warning(f"Error getting market rate: {e}")
+    return 41.50
+
+
 def _get_taker_sell_preset(user_row: dict | None) -> dict | None:
     if not user_row:
         return None
     amount = float(user_row.get("taker_sell_amount", 0))
     price = float(user_row.get("taker_sell_price", 0))
     profit = float(user_row.get("taker_sell_profit", 0))
-    if amount > 0 and price > 0 and profit > 0:
+    if amount > 0 and price > 0:
         return {
             "amount": amount,
             "buy_price": price,
@@ -720,6 +1196,7 @@ def _get_taker_sell_preset(user_row: dict | None) -> dict | None:
             "min_sell_price": float(user_row.get("taker_sell_min_price", 0)),
             "speed": user_row.get("taker_sell_speed", "ANY"),
             "price_strategy": user_row.get("taker_sell_price_strategy", "roi"),
+            "price_to": float(user_row.get("taker_sell_price_to", 0)),
         }
     return None
 
@@ -742,6 +1219,20 @@ def _get_taker_buy_preset(user_row: dict | None) -> dict | None:
 
 
 def _taker_preset_kb(mode: str) -> InlineKeyboardMarkup:
+    if mode == "TAKER_SELL":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Швидкий старт", callback_data="taker_qs:TAKER_SELL")],
+            [InlineKeyboardButton(text="⚙️ Редагувати параметри", callback_data="tsell_edit_menu")],
+            [InlineKeyboardButton(text="🔄 Налаштувати повністю заново", callback_data="taker_manual:TAKER_SELL")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="set:scanner_mode")]
+        ])
+    elif mode == "TAKER_BUY":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Швидкий старт", callback_data="taker_qs:TAKER_BUY")],
+            [InlineKeyboardButton(text="⚙️ Редагувати параметри", callback_data="tbuy_edit_menu")],
+            [InlineKeyboardButton(text="🔄 Налаштувати повністю заново", callback_data="taker_manual:TAKER_BUY")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="set:scanner_mode")]
+        ])
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🚀 Швидкий старт", callback_data=f"taker_qs:{mode}"),
         InlineKeyboardButton(text="⚙️ Налаштувати вручну", callback_data=f"taker_manual:{mode}"),
@@ -779,7 +1270,7 @@ def _tbuy_banks_kb(selected: list) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _sell_preset_text(p: dict) -> str:
+def _sell_preset_text(p: dict, current_rate: float = 0.0) -> str:
     strategy_labels = {
         "roi": "🧮 ROI авто",
         "min": "⬆️ Мінімальна",
@@ -791,14 +1282,43 @@ def _sell_preset_text(p: dict) -> str:
 
     mp_line = f"  • Мін. ціна: <b>{p['min_sell_price']:.4f} ₴</b>\n" if p.get("min_sell_price", 0) > 0 else ""
     speed = "⚡ FAST" if p.get("speed") == "FAST" else "🐢 ANY"
+    
+    amount = p["amount"]
+    buy_price = p["buy_price"]
+    invested_uah = amount * buy_price
+    
+    roi_lines = ""
+    if buy_price > 0 and amount > 0:
+        roi_lines += f"  • 💸 Вкладено: <b>{invested_uah:.0f} ₴</b>\n"
+        if current_rate > 0:
+            current_val = amount * current_rate
+            current_profit = current_val - invested_uah
+            current_roi = (current_profit / invested_uah) * 100 if invested_uah > 0 else 0.0
+            sign = "+" if current_profit >= 0 else ""
+            roi_lines += f"  • 📈 Поточна вартість: <b>{current_val:.0f} ₴</b> (Профіт: <b>{sign}{current_profit:.0f} ₴</b>, <b>{sign}{current_roi:.1f}%</b> за курсом {current_rate:.2f})\n"
+            
+        target_price = float(p.get("min_sell_price", 0.0))
+        price_to = float(p.get("price_to", 0.0))
+        if strategy == "range" and price_to > 0:
+            target_price = price_to
+            
+        if target_price > 0:
+            target_val = amount * target_price
+            target_profit = target_val - invested_uah
+            target_roi = (target_profit / invested_uah) * 100 if invested_uah > 0 else 0.0
+            sign = "+" if target_profit >= 0 else ""
+            label_desc = "Цільовий вихід" if strategy == "exact" else "Цільовий вихід (макс)" if strategy == "range" else "Цільовий вихід (мін)"
+            roi_lines += f"  • 🎯 {label_desc}: <b>{target_val:.0f} ₴</b> (Профіт: <b>{sign}{target_profit:.0f} ₴</b>, <b>{sign}{target_roi:.1f}%</b> за ціною {target_price:.2f})\n"
+
     return (
         f"💾 <b>TAKER SELL — збережені налаштування</b>\n\n"
-        f"  • Об'єм: <b>{p['amount']:.1f} USDT</b>\n"
-        f"  • Купівля: <b>{p['buy_price']:.4f} ₴</b>\n"
+        f"  • Об'єм: <b>{amount:.1f} USDT</b>\n"
+        f"  • Купівля: <b>{buy_price:.4f} ₴</b>\n"
         f"  • Біржа: <b>{p['exchange']}</b>\n"
         f"  • Прибуток: <b>{p['profit']:.2f}%</b>\n"
         f"{strat_line}{mp_line}"
-        f"  • Швидкість: {speed}\n\n"
+        f"  • Швидкість: {speed}\n"
+        f"{roi_lines}\n"
         f"Що робимо?"
     )
 
@@ -830,16 +1350,30 @@ def _buy_preset_text(p: dict) -> str:
     )
 
 
-def _sell_roi_text(d: dict, roi: dict) -> str:
+def _sell_roi_text(d: dict, roi: dict, current_rate: float = 0.0) -> str:
     speed_text = "⚡ Важлива (лише великі ордери)" if d.get("speed") == "FAST" else "🐢 Не важлива"
+    
+    amount = d["amount"]
+    buy_price = d["buy_price"]
+    invest_uah = amount * buy_price
+    
+    actual_line = ""
+    if current_rate > 0:
+        actual_uah = amount * current_rate
+        diff_uah = actual_uah - invest_uah
+        diff_sign = "+" if diff_uah >= 0 else ""
+        diff_pct = (diff_uah / invest_uah) * 100 if invest_uah > 0 else 0.0
+        actual_line = f"📈 Вартість по факту: <b>{actual_uah:.2f} ₴</b> ({diff_sign}{diff_uah:.2f} ₴, {diff_sign}{diff_pct:.1f}% за курсом {current_rate:.2f})\n"
+
     return (
         "🧮 <b>ROI КАЛЬКУЛЯТОР | Результат:</b>\n\n"
-        f"📦 Продаю: <b>{d['amount']:.1f} USDT</b>\n"
-        f"💲 Ціна входу: <b>{d['buy_price']:.4f} ₴</b>\n"
+        f"📦 Продаю: <b>{amount:.1f} USDT</b>\n"
+        f"💲 Ціна входу: <b>{buy_price:.4f} ₴</b>\n"
         f"📤 Біржа відправки: <b>{d.get('exchange', '—')}</b>\n"
         f"🌐 Network Fee: <b>{roi['network_fee']:.2f} USDT</b> ({d.get('network_name', '')})\n"
         f"⚡ Корисний об'єм: <b>{roi['usable_volume']:.2f} USDT</b>\n\n"
         f"💸 Вкладено: <b>{roi['invest_uah']:.2f} ₴</b>\n"
+        f"{actual_line}"
         f"🎯 Цільовий виторг: <b>{roi['target_fiat']:.2f} ₴</b>\n"
         f"💰 Чистий профіт: <b>+{roi['net_profit_uah']:.2f} ₴</b>\n\n"
         f"🔒 <b>Мін. ціна продажу: {roi['min_sell_price']:.4f} ₴</b>\n"
@@ -870,13 +1404,24 @@ def _buy_confirm_text(d: dict) -> str:
 async def _start_taker_sell_fsm(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.update_data(pending_mode="TAKER_SELL")
-    await state.set_state(TakerSellSettingsStates.waiting_amount)
+    await state.set_state(TakerSellSettingsStates.waiting_amount_type)
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💵 USDT (крипта)", callback_data="tsell_type:USDT"),
+            InlineKeyboardButton(text="₴ UAH (гривня)", callback_data="tsell_type:UAH"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="set:scanner_mode"),
+        ]
+    ])
+    
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "💸 <b>TAKER SELL — Крок 1/4</b>\n\n"
-            "📦 <b>Скільки USDT ти хочеш продати?</b>\n"
-            "<i>Наприклад: 500</i>",
-            reply_markup=back_to_main_kb(),
+            "💸 <b>TAKER SELL — Крок 1/5</b>\n\n"
+            "📦 <b>Оберіть спосіб введення об'єму для продажу:</b>\n"
+            "<i>Ви можете вказати кількість у USDT або суму в гривнях, яку ви вклали.</i>",
+            reply_markup=kb,
         )
 
 
@@ -963,9 +1508,10 @@ async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
         preset = _get_taker_sell_preset(user_row)
         if preset:
             await state.update_data(pending_mode="TAKER_SELL")
+            current_rate = await _get_current_market_rate(_db, preset["amount"])
             with suppress(TelegramBadRequest):
                 await call.message.edit_text(
-                    _sell_preset_text(preset),
+                    _sell_preset_text(preset, current_rate),
                     reply_markup=_taker_preset_kb("TAKER_SELL"),
                 )
             return await call.answer()

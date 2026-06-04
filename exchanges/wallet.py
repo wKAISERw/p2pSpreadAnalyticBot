@@ -24,6 +24,8 @@ class WalletExchange(BaseExchange):
                 bank_codes.append(code)
 
         finish_rate = float(item.get("executeRate", "0")) * 100
+        is_online = bool(item.get("isOnline"))
+        last_online_mins = 0 if is_online else 5
 
         return Order(
             id=str(item.get("id", "")),
@@ -43,7 +45,8 @@ class WalletExchange(BaseExchange):
                 item.get("notice", "") or
                 item.get("description", "") or
                 item.get("terms", "")
-            ).strip().lower()
+            ).strip().lower(),
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:

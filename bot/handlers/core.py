@@ -182,6 +182,8 @@ class SettingStates(StatesGroup):
     waiting_capital = State()
     waiting_min_amount = State()
     waiting_spread = State()
+    waiting_spread_min = State()
+    waiting_spread_max = State()
 
 
 class GlobalSettingStates(StatesGroup):
@@ -193,6 +195,12 @@ class MerchantFilterStates(StatesGroup):
     waiting_min_rate = State()
     waiting_ex_min_orders = State()
     waiting_ex_min_rate = State()
+    waiting_min_account_age = State()
+    waiting_min_positive_rate = State()
+    waiting_ex_min_account_age = State()
+    waiting_ex_min_positive_rate = State()
+    waiting_max_offline = State()
+    waiting_ex_max_offline = State()
 
 
 class ExchangeCooldownStates(StatesGroup):
@@ -244,6 +252,7 @@ class TakerBuySettingsStates(StatesGroup):
 
 
 class TakerSellSettingsStates(StatesGroup):
+    waiting_amount_type = State() # UAH or USDT
     waiting_amount = State()  # крок 1 — об'єм
     waiting_buy_price = State()  # крок 2 — ціна купівлі
     waiting_exchange = State()  # крок 3 — біржа (Network Fee)
@@ -384,7 +393,19 @@ async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
                     user_capital = f"{auto_cap:.1f} (Авто)"
                 else:
                     user_capital = f"{u['capital']:.1f}"
-                user_spread = f"{u['min_spread']:.2f}"
+                strategy = u.get("spread_strategy", "min")
+                min_sp = u.get("min_spread", 0.5)
+                max_sp = u.get("max_spread", 0.0)
+                if strategy == "min":
+                    user_spread = f"≥ {min_sp:.2f}%"
+                elif strategy == "max":
+                    user_spread = f"≤ {max_sp:.2f}%"
+                elif strategy == "range":
+                    user_spread = f"{min_sp:.2f}% – {max_sp:.2f}%"
+                elif strategy == "exact":
+                    user_spread = f"≈ {min_sp:.2f}%"
+                else:
+                    user_spread = f"{min_sp:.2f}%"
                 _min_amt = float(u.get("min_amount") or 0.0)
                 user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
                 break

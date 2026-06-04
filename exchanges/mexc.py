@@ -1,6 +1,7 @@
 # exchanges/mexc.py
 import asyncio
 import logging
+import time
 from decimal import Decimal
 from typing import List, Tuple
 
@@ -52,6 +53,15 @@ class MexcExchange(BaseExchange):
         except ValueError:
             finish_rate = 0.0
 
+        last_online = merchant.get("lastOnlineTime")
+        if last_online is not None:
+            try:
+                last_online_mins = max(0, int((time.time() * 1000 - float(last_online)) // 60000))
+            except (ValueError, TypeError):
+                last_online_mins = None
+        else:
+            last_online_mins = None
+
         return Order(
             id=f"mx_{adv_no}",
             price=price,
@@ -67,6 +77,7 @@ class MexcExchange(BaseExchange):
             bank_codes=[bank_code],
             trade_terms=str(item.get("remark", "") or "").strip().lower(),
             is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, side: int, side_str: str, banks: List[str]) -> List[Order]:

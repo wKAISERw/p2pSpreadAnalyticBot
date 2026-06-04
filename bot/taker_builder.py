@@ -6,7 +6,7 @@ from html import escape
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
-from core.analytics.merchant_profile import build_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -48,7 +48,8 @@ async def send_taker_single(
     notifier, order: Order, mode: str,
     chat_id: int | None = None,
     display_settings: dict | None = None,
-) -> None:
+    edit_message_ids: list[int] | None = None,
+) -> list[int]:
     """
     Відправляє ОДИН тейкер-ордер як повноцінне повідомлення.
     Повністю інтегровано з кастомізацією карткового модуля (Inline/Reply, Smart-Spoilers, Compact).
@@ -81,7 +82,7 @@ async def send_taker_single(
             pass
 
     icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
-    merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name)
+    merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name, side="buy" if is_buy else "sell")
     name_str = f"{rec_badge(llm_rec)} {merchant_link}{_verified_badge(order)}"
 
     risk_block = _risk_badge(order)
@@ -113,7 +114,7 @@ async def send_taker_single(
         f"Мерчант: {name_str} "
         f"({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
         f"Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code>"
-        f"  💎 <code>{float(order.available_amount):.0f} USDT</code> в ордері\n"
+        f"  💎 <code>{float(order.available_amount):.2f} USDT</code> в ордері\n"
         f"{risk_block if risk_block else ''}"
         f"{warn_block if warn_block else ''}"
     )
@@ -240,7 +241,8 @@ async def send_taker_single(
                     text += f"\n{card_text_combined}"
                     kb.extend(card_keyboard_rows)
 
-    # ── ФІНАЛЬНА СЕЛЕКЦІЯ І НАДШИЛАННЯ В ТЕЛЕГРАМ ──
+    # ── ФІНАЛЬНА СЕЛЕКЦІЯ І НАДШИЛАННЯ/РЕДАГУВАННЯ В ТЕЛЕГРАМ ──
+    sent_message_ids = []
     if card_text_combined and output_mode == "reply":
         # 🔀 РЕЖИМ REPLY: Відокремлюємо карти в окремий зв'язаний потік (thread)
         main_keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -250,31 +252,107 @@ async def send_taker_single(
         main_chunks = notifier._split_message(text)
         main_msg = None
         for i, chunk in enumerate(main_chunks):
-            main_msg = await notifier._send_with_retry(
-                chunk,
-                keyboard=main_keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
+            if edited_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_msg_id,
+                        text=chunk,
+                        reply_markup=main_keyboard if i == 0 else None,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_msg_id)
+                    if i == 0:
+                        class DummyMsg:
+                            def __init__(self, mid):
+                                self.message_id = mid
+                        main_msg = DummyMsg(edited_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit main message chunk %d: %s", edited_msg_id, ex)
+            else:
+                main_msg = await notifier._send_with_retry(
+                    chunk,
+                    keyboard=main_keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+                if main_msg and hasattr(main_msg, "message_id"):
+                    sent_message_ids.append(main_msg.message_id)
 
         # 2. Стріляємо реплаєм суто по картках з прив'язкою до початкового повідомлення
         if main_msg and hasattr(main_msg, "message_id"):
             reply_text = f"💳 <b>Рекомендована картка під Тейкер-операцію:</b>\n\n{card_text_combined}"
-            await notifier._send_with_retry(
-                reply_text,
-                keyboard=card_keyboard,
-                disable_notification=silent,
-                chat_id=chat_id,
-                reply_to_message_id=main_msg.message_id
-            )
+            edited_reply_msg_id = edit_message_ids[len(main_chunks)] if edit_message_ids and len(main_chunks) < len(edit_message_ids) else None
+            if edited_reply_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_reply_msg_id,
+                        text=reply_text,
+                        reply_markup=card_keyboard,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_reply_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit reply message %d: %s", edited_reply_msg_id, ex)
+            else:
+                reply_msg = await notifier._send_with_retry(
+                    reply_text,
+                    keyboard=card_keyboard,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                    reply_to_message_id=main_msg.message_id
+                )
+                if reply_msg and hasattr(reply_msg, "message_id"):
+                    sent_message_ids.append(reply_msg.message_id)
     else:
         # 📥 ДЕФОЛТНИЙ INLINE АБО СТАН БЕЗ КАРТ
         keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
         chunks = notifier._split_message(text)
         for i, chunk in enumerate(chunks):
-            await notifier._send_with_retry(
-                chunk,
-                keyboard=keyboard if i == 0 else None,
-                disable_notification=silent,
-                chat_id=chat_id,
-            )
+            edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
+            if edited_msg_id:
+                try:
+                    await notifier._bot.edit_message_text(
+                        chat_id=chat_id or notifier._chat_id,
+                        message_id=edited_msg_id,
+                        text=chunk,
+                        reply_markup=keyboard if i == 0 else None,
+                        disable_web_page_preview=True,
+                    )
+                    sent_message_ids.append(edited_msg_id)
+                except Exception as ex:
+                    logger.error("Failed to edit inline message chunk %d: %s", edited_msg_id, ex)
+            else:
+                msg = await notifier._send_with_retry(
+                    chunk,
+                    keyboard=keyboard if i == 0 else None,
+                    disable_notification=silent,
+                    chat_id=chat_id,
+                )
+                if msg and hasattr(msg, "message_id"):
+                    sent_message_ids.append(msg.message_id)
+
+    # ── ЗБЕРЕЖЕННЯ АЛЕРТУ В БД ДЛЯ ПЕРЕМАЛЬОВКИ ──
+    if notifier._db and sent_message_ids:
+        try:
+            alert_dict = {
+                "is_taker": True,
+                "taker_mode": mode,
+                "order": notifier._serialize_order(order),
+            }
+            if order.merchant_id:
+                await notifier._db.save_sent_alert(
+                    order.exchange,
+                    order.merchant_id,
+                    chat_id or notifier._chat_id,
+                    sent_message_ids,
+                    alert_dict,
+                    ds,
+                    False
+                )
+        except Exception as e:
+            logger.error("Failed to save sent taker alert in DB: %s", e)
+
+    return sent_message_ids

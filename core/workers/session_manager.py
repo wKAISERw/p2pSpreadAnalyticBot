@@ -641,17 +641,23 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Session health notification error: {e}")
 
-    async def trigger_qr_capture(self, exchange: str, user_id: int, message: Message, state: Optional[FSMContext] = None) -> None:
+    async def trigger_qr_capture(self, exchange: str, user_id: int, message: Message, state: Optional[FSMContext] = None) -> bool:
         """
         Запускає фоновий процес входу через QR-код для Binance або OKX.
         message — це об'єкт повідомлення користувача (щоб надсилати скріншот).
         """
         import os
+        import time
         
         session_key = f"{exchange}:{user_id}"
         
         # 1. Якщо сесія вже активна, закриваємо її
         if session_key in self._active_qr_sessions:
+            existing = self._active_qr_sessions[session_key]
+            created_at = existing.get("created_at", 0.0)
+            if time.time() - created_at < 20:
+                logger.warning(f"⚠️ Повторний запит QR-входу менш ніж через 20 секунд для {session_key}. Ігноруємо.")
+                return False
             await self.cancel_qr_session(exchange, user_id)
             
         logger.info(f"🔑 Запуск QR-авторизації для {exchange} (user_id={user_id})")
@@ -669,7 +675,8 @@ class SessionManager:
             "cancel_event": cancel_event,
             "browser_context": None,
             "qr_msg": None,
-            "code_queue": asyncio.Queue()
+            "code_queue": asyncio.Queue(),
+            "created_at": time.time()
         }
         
         # Оголосимо внутрішню функцію для виконання всього потоку
@@ -1151,7 +1158,7 @@ class SessionManager:
                                                 if items:
                                                     active_id = items[0].get("publicUserId")
                                                     if active_id:
-                                                        p2p_url = f"https://www.okx.com/p2p/ads-merchant?publicUserId={active_id}"
+                                                        p2p_url = f"https://www.okx.com/ua/p2p/ads-merchant?publicUserId={active_id}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT"
                                                         logger.info(f"Dynamically resolved active OKX merchant profile URL: {p2p_url}")
                                                     else:
                                                         logger.warning("No publicUserId found in first OKX sell ad.")

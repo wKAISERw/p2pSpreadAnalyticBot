@@ -42,7 +42,7 @@ class OKXAccountClient(BaseHttpClient):
             "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": self._passphrase,
         }
 
-    async def get_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
+    async def get_trading_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
         """Баланс Trading акаунта."""
         if not self.is_authenticated: return []
         path = f"/api/v5/account/balance?ccy={currencies}"
@@ -54,7 +54,26 @@ class OKXAccountClient(BaseHttpClient):
                      "total": float(d.get("bal") or 0)}
                     for d in details if float(d.get("bal") or 0) > 0]
         except Exception as e:
-            logger.warning("get_balance: %s", e); return []
+            logger.warning("get_trading_balance: %s", e); return []
+
+    async def get_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
+        """Комбінований баланс Trading + Funding акаунтів."""
+        trading = await self.get_trading_balance(currencies)
+        funding = await self.get_funding_balance(currencies)
+        merged = {}
+        for coin_dict in trading + funding:
+            coin = coin_dict["coin"]
+            if coin not in merged:
+                merged[coin] = {
+                    "coin": coin,
+                    "free": 0.0,
+                    "locked": 0.0,
+                    "total": 0.0
+                }
+            merged[coin]["free"] += coin_dict["free"]
+            merged[coin]["locked"] += coin_dict["locked"]
+            merged[coin]["total"] += coin_dict["total"]
+        return list(merged.values())
 
     async def get_funding_balance(self, currencies: str = "USDT,UAH") -> list[dict]:
         """Баланс Funding акаунта (для P2P виводів)."""

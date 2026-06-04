@@ -32,6 +32,9 @@ class BinanceExchange(BaseExchange):
         # positiveRate — це % позитивних ВІДГУКІВ (не completion rate!)
         positive_rate = float(user.get("positiveRate", 0) or 0)
 
+        active_sec = user.get("activeTimeInSecond")
+        last_online_mins = int(active_sec) // 60 if active_sec is not None else None
+
         return Order(
             id=f"bn_{adv.get('advNo', '')}",
             price=Decimal(str(adv.get("price", "0"))),
@@ -48,6 +51,7 @@ class BinanceExchange(BaseExchange):
             bank_codes=bank_codes if bank_codes else [bank_code],
             trade_terms=str(adv.get("remarks", "") or "").strip().lower(),
             is_verified=str(user.get("userType", "")) == "merchant",
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:

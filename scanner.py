@@ -315,7 +315,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     )
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
     dispatcher = AlertDispatcher(merchant_db, notifier)
-    taker_scanner = TakerScanner()
+    taker_scanner = TakerScanner(merchant_db)
     taker_dedup = TTLCache(
         ttl_seconds=getattr(settings, "taker_dedup_ttl", 90.0),
         max_size=500,
@@ -504,15 +504,19 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     if active_users:
                         # 🚀 Оновлюємо капітал для користувачів
                         for u in active_users:
+                            u_mode = u.get("scanner_mode", "SPREAD")
+                            is_sell_mode = u_mode in ("TAKER_SELL", "MAKER_SELL")
+
                             auto_cap = await merchant_db.get_user_auto_capital(u["user_id"])
                             card_settings = await merchant_db.get_user_card_settings(u["user_id"])
                             card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
 
-                            if u.get("capital_mode") == "auto":
-                                u["capital"] = auto_cap
-                            else:
-                                if card_module_enabled and auto_cap > 0:
-                                    u["capital"] = min(float(u["capital"]), auto_cap)
+                            if not is_sell_mode:
+                                if u.get("capital_mode") == "auto":
+                                    u["capital"] = auto_cap
+                                else:
+                                    if card_module_enabled and auto_cap > 0:
+                                        u["capital"] = min(float(u["capital"]), auto_cap)
                         
                         current_capital = max(float(u["capital"]) for u in active_users) if active_users else settings.working_capital_uah
                         current_spread  = min(float(u["min_spread"]) for u in active_users)
@@ -733,7 +737,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                 "bankCodes": getattr(buy_o, "bank_codes", []),
                                 "riskScore": getattr(buy_o, "risk_score", 0),
                                 "riskFlag": getattr(buy_o, "risk_flag", "OK"),
-                                "isVerified": getattr(buy_o, "is_verified", False)
+                                "isVerified": getattr(buy_o, "is_verified", False),
+                                "lastOnlineMins": getattr(buy_o, "last_online_mins", None)
                             },
                             "sellOrder": {
                                 "id": getattr(sell_o, "id", "s1"),
@@ -763,7 +768,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                 "bankCodes": getattr(sell_o, "bank_codes", []),
                                 "riskScore": getattr(sell_o, "risk_score", 0),
                                 "riskFlag": getattr(sell_o, "risk_flag", "OK"),
-                                "isVerified": getattr(sell_o, "is_verified", False)
+                                "isVerified": getattr(sell_o, "is_verified", False),
+                                "lastOnlineMins": getattr(sell_o, "last_online_mins", None)
                             },
                             "netSpread": safe_float(opp.get("net_spread_pct", 0)),
                             "dealAmount": safe_float(
@@ -803,20 +809,21 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         sent_count += 1
 
                         # 🚀 Зберігаємо пропозицію ПІСЛЯ всіх фільтрів (dedup, stability, BLOCK)
-                        _was_sent = not is_muted()
-                        asyncio.create_task(merchant_db.save_proposal(
-                            buy_exchange=buy_o.exchange,
-                            sell_exchange=sell_o.exchange,
-                            buy_merchant=buy_o.merchant_name,
-                            sell_merchant=sell_o.merchant_name,
-                            spread_pct=opp["net_spread_pct"],
-                            profit_uah=opp["net_profit"],
-                            deal_amount=opp["actual_entry_uah"],
-                            route_type=opp.get("route_type", "UNKNOWN"),
-                            buy_bank=opp.get("buy_bank", ""),
-                            sell_bank=opp.get("sell_bank", ""),
-                            was_sent=_was_sent,
-                        ))
+                        # (Пропозиції тепер зберігаються персонально для кожного юзера в AlertDispatcher.dispatch)
+                        # _was_sent = not is_muted()
+                        # asyncio.create_task(merchant_db.save_proposal(
+                        #     buy_exchange=buy_o.exchange,
+                        #     sell_exchange=sell_o.exchange,
+                        #     buy_merchant=buy_o.merchant_name,
+                        #     sell_merchant=sell_o.merchant_name,
+                        #     spread_pct=opp["net_spread_pct"],
+                        #     profit_uah=opp["net_profit"],
+                        #     deal_amount=opp["actual_entry_uah"],
+                        #     route_type=opp.get("route_type", "UNKNOWN"),
+                        #     buy_bank=opp.get("buy_bank", ""),
+                        #     sell_bank=opp.get("sell_bank", ""),
+                        #     was_sent=_was_sent,
+                        # ))
 
                         if not is_muted():
                             if runtime_config.get("show_spread_logs", "true") == "true":

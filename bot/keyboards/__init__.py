@@ -26,7 +26,10 @@ from bot.keyboards.cards import (
     bank_limits_bank_kb, bank_limits_fields_kb, card_limits_fields_kb,
     LIMIT_FIELD_LABELS
 )
-from bot.keyboards.monitoring import stats_overview_kb, stats_source_kb, stats_metrics_kb, monitoring_menu_kb
+from bot.keyboards.monitoring import (
+    stats_overview_kb, stats_source_kb, stats_metrics_kb, monitoring_menu_kb,
+    stats_period_kb, stats_mode_kb, stats_daily_with_details_kb
+)
 
 __all__ = [
     "back_to_main_kb",
@@ -67,6 +70,9 @@ __all__ = [
     "stats_overview_kb",
     "stats_source_kb",
     "stats_metrics_kb",
+    "stats_period_kb",
+    "stats_mode_kb",
+    "stats_daily_with_details_kb",
     "monitoring_menu_kb",
     "exchanges_menu_kb",
     "filters_menu_kb",

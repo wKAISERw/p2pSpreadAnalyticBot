@@ -203,6 +203,74 @@ class TelegramNotifier:
                     display = item["display_settings"]
                     is_sniper = item["is_sniper_match"]
                     
+                    if alert_dict.get("is_taker", False):
+                        # Reconstruct Taker order
+                        order_dict = alert_dict["order"]
+                        taker_mode = alert_dict["taker_mode"]
+                        
+                        # Convert required fields to Decimal
+                        for field in ("price", "available_amount", "min_limit", "max_limit"):
+                            if field in order_dict:
+                                order_dict[field] = Decimal(str(order_dict[field]))
+
+                        order_dict["month_order_count"] = int(float(order_dict.get("month_order_count", 0)))
+                        order_dict["finish_rate_pct"] = float(order_dict.get("finish_rate_pct", 100.0))
+                        order_dict["is_verified"] = str(order_dict.get("is_verified", "False")) in ("True", "1", "true")
+                        order_dict["account_age_days"] = int(float(order_dict.get("account_age_days", 0)))
+                        order_dict["composite_score"] = int(float(order_dict.get("composite_score", 0)))
+                        order_dict["review_score"] = int(float(order_dict.get("review_score", 0)))
+                        order_dict["review_neg_pct"] = float(order_dict.get("review_neg_pct", 0.0))
+                        order_dict["review_fetched"] = str(order_dict.get("review_fetched", "False")) in ("True", "1", "true")
+                        order_dict["positive_rate"] = float(order_dict.get("positive_rate", 0.0))
+
+                        # Normalize regex_warn_flags
+                        raw_warn = order_dict.get("regex_warn_flags")
+                        if isinstance(raw_warn, str):
+                            order_dict["regex_warn_flags"] = []
+                        elif isinstance(raw_warn, list):
+                            normalized = []
+                            for item_warn in raw_warn:
+                                if isinstance(item_warn, (list, tuple)) and len(item_warn) >= 2:
+                                    normalized.append((str(item_warn[0]), str(item_warn[1])))
+                                elif isinstance(item_warn, str):
+                                    normalized.append((item_warn, ""))
+                            order_dict["regex_warn_flags"] = normalized
+                        else:
+                            order_dict["regex_warn_flags"] = []
+
+                        import inspect
+                        valid_fields = set(inspect.signature(Order).parameters.keys())
+                        order_obj = Order(**{k: v for k, v in order_dict.items() if k in valid_fields})
+                        for k, v in order_dict.items():
+                            if k not in valid_fields:
+                                setattr(order_obj, k, v)
+
+                        from bot.taker_builder import send_taker_single
+                        await send_taker_single(
+                            self,
+                            order_obj,
+                            taker_mode,
+                            chat_id=chat_id,
+                            display_settings=display,
+                            edit_message_ids=message_ids
+                        )
+                        
+                        # Update serialization in DB to match latest state
+                        updated_dict = {
+                            "is_taker": True,
+                            "taker_mode": taker_mode,
+                            "order": self._serialize_order(order_obj),
+                        }
+                        await self._db.update_sent_alert_dict(chat_id, message_ids, updated_dict)
+
+                        # 📈 Prometheus
+                        try:
+                            from core.analytics.metrics import alerts_redrawn_total
+                            alerts_redrawn_total.labels(exchange=exchange).inc()
+                        except Exception:
+                            pass
+                        continue
+                    
                     # Reconstruct order objects from raw dict
                     buy_dict = alert_dict["buy_order"]
                     sell_dict = alert_dict["sell_order"]

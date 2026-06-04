@@ -9,6 +9,7 @@ stats_engine.py — Аналітика торгівлі.
   - get_summary: загальна статистика
 """
 import logging
+import time
 from typing import Optional
 from core.storage.merchant_db import MerchantDB
 
@@ -19,7 +20,7 @@ class StatsEngine:
     def __init__(self, db: MerchantDB):
         self._db = db
 
-    async def get_profit_by_day(self, period_days: int = 30, owner_user_id: int = 0) -> list[dict]:
+    async def get_profit_by_day(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """
         Прибуток по днях за останній період.
         → [{"date": "2026-04-01", "profit": 125.50, "trades": 3}]
@@ -34,17 +35,27 @@ class StatsEngine:
                 FROM trade_sessions ts
                 WHERE ts.session_status = 'COMPLETED'
                   AND ts.completed_at >= datetime('now', ?)
-                GROUP BY DATE(ts.completed_at)
-                ORDER BY date DESC
             """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += """ AND EXISTS (
+                    SELECT 1 FROM active_trades at 
+                    WHERE at.session_id = ts.id AND at.owner_user_id = ?
+                )"""
+                params.append(owner_user_id)
+            if mode != "ALL":
+                query += " AND ts.route_type = ?"
+                params.append(mode)
+            query += " GROUP BY DATE(ts.completed_at) ORDER BY date DESC"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
             return [{"date": r["date"], "profit": r["profit"] or 0, "trades": r["trades"]} for r in rows]
         except Exception as e:
             logger.error("get_profit_by_day: %s", e)
             return []
 
-    async def get_top_exchanges(self, period_days: int = 30) -> list[dict]:
+    async def get_top_exchanges(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """
         Топ бірж за об'ємом та кількістю.
         → [{"exchange": "Bybit", "volume_uah": 50000, "trades": 12}]
@@ -59,17 +70,27 @@ class StatsEngine:
                 FROM active_trades at
                 WHERE at.status = 'COMPLETED'
                   AND at.created_at >= datetime('now', ?)
-                GROUP BY at.exchange
-                ORDER BY volume_uah DESC
             """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += " AND at.owner_user_id = ?"
+                params.append(owner_user_id)
+            if mode != "ALL":
+                query += """ AND EXISTS (
+                    SELECT 1 FROM trade_sessions ts 
+                    WHERE ts.id = at.session_id AND ts.route_type = ?
+                )"""
+                params.append(mode)
+            query += " GROUP BY at.exchange ORDER BY volume_uah DESC"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
             return [{"exchange": r["exchange"], "volume_uah": r["volume_uah"] or 0, "trades": r["trades"]} for r in rows]
         except Exception as e:
             logger.error("get_top_exchanges: %s", e)
             return []
 
-    async def get_hourly_heatmap(self, period_days: int = 14) -> dict[str, dict[str, int]]:
+    async def get_hourly_heatmap(self, period_days: int = 14, owner_user_id: int = 0, mode: str = "ALL") -> dict[str, dict[str, int]]:
         """
         Теплова карта: у які години яких днів тижня найбільше угод.
         → {"Mon": {"09": 3, "10": 5, ...}, "Tue": {...}}
@@ -89,10 +110,20 @@ class StatsEngine:
                 FROM trade_sessions ts
                 WHERE ts.session_status = 'COMPLETED'
                   AND ts.created_at >= datetime('now', ?)
-                GROUP BY day_of_week, hour
-                ORDER BY day_of_week, hour
             """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += """ AND EXISTS (
+                    SELECT 1 FROM active_trades at 
+                    WHERE at.session_id = ts.id AND at.owner_user_id = ?
+                )"""
+                params.append(owner_user_id)
+            if mode != "ALL":
+                query += " AND ts.route_type = ?"
+                params.append(mode)
+            query += " GROUP BY day_of_week, hour ORDER BY day_of_week, hour"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
 
             heatmap: dict[str, dict[str, int]] = {}
@@ -107,7 +138,7 @@ class StatsEngine:
             logger.error("get_hourly_heatmap: %s", e)
             return {}
 
-    async def get_weekly_comparison(self, period_days: int = 30) -> dict:
+    async def get_weekly_comparison(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> dict:
         """
         Будні vs вихідні: середній спред, кількість угод.
         → {"weekday": {"avg_profit": 45.2, "trades": 20}, "weekend": {"avg_profit": 62.1, "trades": 8}}
@@ -126,9 +157,20 @@ class StatsEngine:
                 FROM trade_sessions ts
                 WHERE ts.session_status = 'COMPLETED'
                   AND ts.completed_at >= datetime('now', ?)
-                GROUP BY period
             """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += """ AND EXISTS (
+                    SELECT 1 FROM active_trades at 
+                    WHERE at.session_id = ts.id AND at.owner_user_id = ?
+                )"""
+                params.append(owner_user_id)
+            if mode != "ALL":
+                query += " AND ts.route_type = ?"
+                params.append(mode)
+            query += " GROUP BY period"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
 
             result = {}
@@ -143,28 +185,46 @@ class StatsEngine:
             logger.error("get_weekly_comparison: %s", e)
             return {}
 
-    async def get_summary(self, period_days: int = 30) -> dict:
+    async def get_summary(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> dict:
         """Особиста статистика (Мої угоди)."""
         if not getattr(self._db, "_db", None): return {}
 
-        async with self._db._db.execute(
-                """SELECT COUNT(*), SUM(gross_profit), AVG(gross_profit)
-                   FROM trade_sessions
-                   WHERE session_status = 'COMPLETED'
-                     AND completed_at >= datetime('now', ?)""",
-                (f"-{period_days} days",)
-        ) as cur:
+        query1 = """SELECT COUNT(*), SUM(gross_profit), AVG(gross_profit)
+                    FROM trade_sessions ts
+                    WHERE session_status = 'COMPLETED'
+                      AND completed_at >= datetime('now', ?)"""
+        params1 = [f"-{period_days} days"]
+        if owner_user_id:
+            query1 += """ AND EXISTS (
+                SELECT 1 FROM active_trades at 
+                WHERE at.session_id = ts.id AND at.owner_user_id = ?
+            )"""
+            params1.append(owner_user_id)
+        if mode != "ALL":
+            query1 += " AND ts.route_type = ?"
+            params1.append(mode)
+
+        async with self._db._db.execute(query1, tuple(params1)) as cur:
             row = await cur.fetchone()
 
         # Найкращий день
-        async with self._db._db.execute(
-                """SELECT DATE (completed_at) as d, SUM (gross_profit) as p
-                   FROM trade_sessions
-                   WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)
-                   GROUP BY d
-                   ORDER BY p DESC LIMIT 1""",
-                (f"-{period_days} days",)
-        ) as cur:
+        query2 = """SELECT DATE (completed_at) as d, SUM (gross_profit) as p
+                    FROM trade_sessions ts
+                    WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)"""
+        params2 = [f"-{period_days} days"]
+        if owner_user_id:
+            query2 += """ AND EXISTS (
+                SELECT 1 FROM active_trades at 
+                WHERE at.session_id = ts.id AND at.owner_user_id = ?
+            )"""
+            params2.append(owner_user_id)
+        if mode != "ALL":
+            query2 += " AND ts.route_type = ?"
+            params2.append(mode)
+            
+        query2 += " GROUP BY d ORDER BY p DESC LIMIT 1"
+
+        async with self._db._db.execute(query2, tuple(params2)) as cur:
             best_day = await cur.fetchone()
 
         return {
@@ -174,49 +234,13 @@ class StatsEngine:
             "best_day": best_day[0] if best_day else "N/A"
         }
 
-    async def get_proposals_summary(self, period_days: int = 7) -> dict:
+    async def get_proposals_summary(self, period_days: int = 7, user_id: int = 0, mode: str = "ALL") -> dict:
         """Статистика знайдених сканером спредів (Аналітика ринку)."""
-        if not getattr(self._db, "_db", None): return {}
-
-        try:
-            # Якщо є колонка was_sent, рахуємо її теж
-            query = """
-                    SELECT COUNT(*)                                      as total,
-                           SUM(CASE WHEN was_sent = 1 THEN 1 ELSE 0 END) as sent,
-                           AVG(spread_pct)                               as avg_spread,
-                           MAX(spread_pct)                               as max_spread
-                    FROM scanner_proposals
-                    WHERE created_at >= datetime('now', ?) \
-                    """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
-                row = await cur.fetchone()
-                return {
-                    "total": row[0] if row else 0,
-                    "sent": row[1] if row else 0,
-                    "avg_spread": row[2] if row and row[2] else 0.0,
-                    "max_spread": row[3] if row and row[3] else 0.0
-                }
-        except Exception:
-            # Fallback, якщо колонки was_sent ще немає в таблиці
-            query = """
-                    SELECT COUNT(*)        as total,
-                           AVG(spread_pct) as avg_spread,
-                           MAX(spread_pct) as max_spread
-                    FROM scanner_proposals
-                    WHERE created_at >= datetime('now', ?) \
-                    """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
-                row = await cur.fetchone()
-                return {
-                    "total": row[0] if row else 0,
-                    "sent": 0,
-                    "avg_spread": row[1] if row and row[1] else 0.0,
-                    "max_spread": row[2] if row and row[2] else 0.0
-                }
+        return await self._db.get_proposals_summary(period_days, user_id=user_id, mode=mode)
 
     # ─── Форматування для Telegram ──────────────────────────────────────
 
-    async def get_top_banks(self, period_days: int = 30) -> list[dict]:
+    async def get_top_banks(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """
         Топ банків за кількістю угод.
         → [{"bank": "Monobank", "trades": 15, "volume_uah": 75000}]
@@ -233,11 +257,20 @@ class StatsEngine:
                   AND at.payment_method IS NOT NULL
                   AND at.payment_method != ''
                   AND at.created_at >= datetime('now', ?)
-                GROUP BY at.payment_method
-                ORDER BY trades DESC
-                LIMIT 10
             """
-            async with self._db._db.execute(query, (f"-{period_days} days",)) as cur:
+            params = [f"-{period_days} days"]
+            if owner_user_id:
+                query += " AND at.owner_user_id = ?"
+                params.append(owner_user_id)
+            if mode != "ALL":
+                query += """ AND EXISTS (
+                    SELECT 1 FROM trade_sessions ts 
+                    WHERE ts.id = at.session_id AND ts.route_type = ?
+                )"""
+                params.append(mode)
+            query += " GROUP BY at.payment_method ORDER BY trades DESC LIMIT 10"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
                 rows = await cur.fetchall()
             return [
                 {"bank": r["bank"], "trades": r["trades"], "volume_uah": r["volume_uah"] or 0}
@@ -301,9 +334,9 @@ class StatsEngine:
 
     # ─── Детальні звіти для drill-down ────────────────────────────────────
 
-    async def format_daily_report(self, period_days: int = 30) -> str:
+    async def format_daily_report(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> str:
         """Детальний звіт по днях."""
-        days = await self.get_profit_by_day(period_days)
+        days = await self.get_profit_by_day(period_days, owner_user_id=owner_user_id, mode=mode)
         if not days:
             return "📅 <b>Прибуток по днях</b>\n\nДаних немає — жодної завершеної угоди."
 
@@ -315,6 +348,7 @@ class StatsEngine:
 
         lines = [
             f"📅 <b>Прибуток по днях ({period_days}д)</b>",
+            f"🎯 Режим: <b>{mode}</b>",
             "",
             f"📊 Всього днів з угодами: <b>{len(days)}</b>",
             f"💰 Загалом: <b>{total_profit:.2f} ₴</b> ({total_trades} угод)",
@@ -344,9 +378,9 @@ class StatsEngine:
 
         return "\n".join(lines)
 
-    async def format_exchanges_report(self, period_days: int = 30) -> str:
+    async def format_exchanges_report(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> str:
         """Детальний звіт по біржах."""
-        exchanges = await self.get_top_exchanges(period_days)
+        exchanges = await self.get_top_exchanges(period_days, owner_user_id=owner_user_id, mode=mode)
         if not exchanges:
             return "🏛 <b>Статистика по біржах</b>\n\nДаних немає."
 
@@ -357,6 +391,7 @@ class StatsEngine:
 
         lines = [
             f"🏛 <b>Статистика по біржах ({period_days}д)</b>",
+            f"🎯 Режим: <b>{mode}</b>",
             "",
             f"💱 Загальний оборот: <b>{total_vol:,.0f} ₴</b>",
             f"📈 Всього угод: <b>{total_trades}</b>",
@@ -380,9 +415,9 @@ class StatsEngine:
 
         return "\n".join(lines)
 
-    async def format_banks_report(self, period_days: int = 30) -> str:
+    async def format_banks_report(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> str:
         """Детальний звіт по банках."""
-        banks = await self.get_top_banks(period_days)
+        banks = await self.get_top_banks(period_days, owner_user_id=owner_user_id, mode=mode)
         if not banks:
             return "🏦 <b>Статистика по банках</b>\n\nДаних немає — payment_method не зберігався."
 
@@ -396,6 +431,7 @@ class StatsEngine:
 
         lines = [
             f"🏦 <b>Статистика по банках ({period_days}д)</b>",
+            f"🎯 Режим: <b>{mode}</b>",
             "",
             f"💳 Всього методів оплати: <b>{len(banks)}</b>",
             f"📊 Всього угод: <b>{total_trades}</b>",
@@ -581,16 +617,71 @@ class StatsEngine:
 
     # ─── Пропозиції сканера (детальні звіти) ──────────────────────────────
 
-    async def format_proposals_report(self, period_days: int = 7) -> str:
+    async def get_proposals_by_volume(self, period_days: int = 7, user_id: int = 0, mode: str = "ALL") -> list[dict]:
+        """Групує пропозиції за об'ємом для аналізу спредової хмари."""
+        if not getattr(self._db, "_db", None):
+            return []
+        try:
+            since = time.time() - period_days * 86400
+            query = """
+                SELECT 
+                    CASE 
+                        WHEN deal_amount < 5000 THEN 1
+                        WHEN deal_amount >= 5000 AND deal_amount < 15000 THEN 2
+                        WHEN deal_amount >= 15000 AND deal_amount < 30000 THEN 3
+                        WHEN deal_amount >= 30000 AND deal_amount < 50000 THEN 4
+                        ELSE 5
+                    END as range_id,
+                    COUNT(*) as cnt,
+                    AVG(spread_pct) as avg_spread,
+                    MAX(spread_pct) as max_spread
+                FROM scanner_proposals
+                WHERE created_at >= ?
+            """
+            params = [since]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND route_type = ?"
+                params.append(mode)
+            query += " GROUP BY range_id ORDER BY range_id ASC"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
+                rows = await cur.fetchall()
+            
+            range_names = {
+                1: "< 5k ₴   ",
+                2: "5k-15k ₴ ",
+                3: "15k-30k ₴",
+                4: "30k-50k ₴",
+                5: "50k+ ₴   "
+            }
+            res = []
+            for r in rows:
+                r_id = r["range_id"]
+                res.append({
+                    "range_name": range_names.get(r_id, "Unknown"),
+                    "count": r["cnt"],
+                    "avg_spread": round(r["avg_spread"] or 0, 2),
+                    "max_spread": round(r["max_spread"] or 0, 2)
+                })
+            return res
+        except Exception as e:
+            logger.error("get_proposals_by_volume: %s", e)
+            return []
+
+    async def format_proposals_report(self, period_days: int = 7, user_id: int = 0, mode: str = "ALL") -> str:
         """Детальний звіт по пропозиціях сканера по днях."""
-        summary = await self._db.get_proposals_summary(period_days)
-        days = await self._db.get_proposals_by_day(period_days)
+        summary = await self._db.get_proposals_summary(period_days, user_id=user_id, mode=mode)
+        days = await self._db.get_proposals_by_day(period_days, user_id=user_id, mode=mode)
 
         if not summary or summary.get("total", 0) == 0:
             return "📡 <b>Пропозиції сканера</b>\n\nЗа цей період пропозицій не знайдено."
 
         lines = [
             f"📡 <b>Пропозиції сканера ({period_days}д)</b>",
+            f"🎯 Режим: <b>{mode}</b>",
             "",
             f"📊 Всього знайдено: <b>{summary['total']}</b> спредів",
             f"📤 Надіслано алертів: <b>{summary.get('sent', 0)}</b>",
@@ -612,11 +703,25 @@ class StatsEngine:
                     f"<code>{short_date}</code> {bar} <b>{d['total']:>4}</b> ({d['sent']} відправл.) avg {d['avg_spread']:.2f}%"
                 )
 
+        # Додаємо аналіз спредової хмари (агрегація за об'ємом)
+        vol_data = await self.get_proposals_by_volume(period_days, user_id=user_id, mode=mode)
+        if vol_data:
+            lines.append("")
+            lines.append("<code>───────────────────────────</code>")
+            lines.append("📊 <b>Розподіл спреду за об'ємом:</b>")
+            max_avg = max((v["avg_spread"] for v in vol_data), default=1.0)
+            for v in vol_data:
+                bar_len = int((v["avg_spread"] / max_avg) * 6) if max_avg > 0 else 0
+                bar = "█" * max(bar_len, 1) if v["count"] > 0 else "░"
+                lines.append(
+                    f"  <code>{v['range_name']}</code>: {bar} avg <b>{v['avg_spread']:.2f}%</b> (max {v['max_spread']:.2f}%) [x{v['count']}]"
+                )
+
         return "\n".join(lines)
 
-    async def format_proposals_routes(self, period_days: int = 7) -> str:
+    async def format_proposals_routes(self, period_days: int = 7, user_id: int = 0, mode: str = "ALL") -> str:
         """Топ маршрутів сканера."""
-        routes = await self._db.get_proposals_by_route(period_days)
+        routes = await self._db.get_proposals_by_route(period_days, user_id=user_id, mode=mode)
         if not routes:
             return "🗺 <b>Маршрути сканера</b>\n\nДаних немає."
 
@@ -624,6 +729,7 @@ class StatsEngine:
 
         lines = [
             f"🗺 <b>Топ маршрутів сканера ({period_days}д)</b>",
+            f"🎯 Режим: <b>{mode}</b>",
             "",
         ]
 
@@ -640,57 +746,171 @@ class StatsEngine:
 
         return "\n".join(lines)
 
-    async def get_proposals_top_exchanges(self, period_days: int = 14) -> list[dict]:
+    async def get_proposals_top_exchanges(self, period_days: int = 14, user_id: int = 0, mode: str = "ALL") -> list[dict]:
         """Топ бірж, які сканер знаходив найчастіше."""
         if not getattr(self._db, "_db", None): return []
-        async with self._db._db.execute(
-                """
-                SELECT buy_exchange as exchange, COUNT(*) as count, AVG(spread_pct) as avg_spread
-                FROM scanner_proposals
-                WHERE created_at >= datetime('now', ?)
-                GROUP BY buy_exchange
-                ORDER BY count DESC LIMIT 5
-                """, (f"-{period_days} days",)
-        ) as cur:
+        since = time.time() - period_days * 86400
+        query = """
+            SELECT buy_exchange as exchange, COUNT(*) as count, AVG(spread_pct) as avg_spread
+            FROM scanner_proposals
+            WHERE created_at >= ?
+        """
+        params = [since]
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if mode != "ALL":
+            query += " AND route_type = ?"
+            params.append(mode)
+        query += " GROUP BY buy_exchange ORDER BY count DESC LIMIT 5"
+        async with self._db._db.execute(query, tuple(params)) as cur:
             rows = await cur.fetchall()
             return [{"exchange": r[0], "count": r[1], "avg_spread": r[2]} for r in rows]
 
-    async def get_proposals_hourly_heatmap(self, period_days: int = 14) -> dict:
+    async def get_proposals_hourly_heatmap(self, period_days: int = 14, user_id: int = 0, mode: str = "ALL") -> dict:
         """Теплова карта активності ринку (коли з'являються спреди)."""
         if not getattr(self._db, "_db", None): return {}
-        async with self._db._db.execute(
-                """
-                SELECT strftime('%w', created_at) as weekday,
-                       strftime('%H', created_at) as hour,
+        since = time.time() - period_days * 86400
+        query = """
+            SELECT strftime('%w', created_at, 'unixepoch', 'localtime') as weekday,
+                   strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
                    COUNT(*) as count
-                FROM scanner_proposals
-                WHERE created_at >= datetime('now', ?)
-                GROUP BY weekday, hour
-                """, (f"-{period_days} days",)
-        ) as cur:
+            FROM scanner_proposals
+            WHERE created_at >= ?
+        """
+        params = [since]
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if mode != "ALL":
+            query += " AND route_type = ?"
+            params.append(mode)
+        query += " GROUP BY weekday, hour"
+        async with self._db._db.execute(query, tuple(params)) as cur:
             rows = await cur.fetchall()
 
         heatmap = {str(d): {f"{h:02d}": 0 for h in range(24)} for d in range(7)}
         for r in rows:
-            heatmap[r[0]][r[1]] = r[2]
+            if r[0] is not None and r[1] is not None:
+                heatmap[r[0]][r[1]] = r[2]
         return heatmap
 
-    async def get_my_hourly_heatmap(self, period_days: int = 30) -> dict:
+    async def get_my_hourly_heatmap(self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL") -> dict:
         """Теплова карта МОЇХ успішних угод."""
         if not getattr(self._db, "_db", None): return {}
-        async with self._db._db.execute(
-                """
-                SELECT strftime('%w', completed_at) as weekday,
-                       strftime('%H', completed_at) as hour,
-                   COUNT(*) as count
-                FROM trade_sessions
-                WHERE session_status = 'COMPLETED' AND completed_at >= datetime('now', ?)
-                GROUP BY weekday, hour
-                """, (f"-{period_days} days",)
-        ) as cur:
+        query = """
+            SELECT strftime('%w', completed_at) as weekday,
+                   strftime('%H', completed_at) as hour,
+                   COUNT(DISTINCT ts.id) as count
+            FROM trade_sessions ts
+            JOIN active_trades at ON ts.id = at.session_id
+            WHERE ts.session_status = 'COMPLETED' AND ts.completed_at >= datetime('now', ?)
+        """
+        params = [f"-{period_days} days"]
+        if owner_user_id:
+            query += " AND at.owner_user_id = ?"
+            params.append(owner_user_id)
+        if mode != "ALL":
+            query += " AND ts.route_type = ?"
+            params.append(mode)
+        query += " GROUP BY weekday, hour"
+        async with self._db._db.execute(query, tuple(params)) as cur:
             rows = await cur.fetchall()
 
         heatmap = {str(d): {f"{h:02d}": 0 for h in range(24)} for d in range(7)}
         for r in rows:
             heatmap[r[0]][r[1]] = r[2]
         return heatmap
+
+    async def format_day_detail_report(self, date_str: str, user_id: int = 0, mode: str = "ALL", source: str = "my") -> str:
+        """Детальний звіт за конкретний день з погодинним розписом."""
+        if not getattr(self._db, "_db", None):
+            return "❌ База даних недоступна."
+
+        if source == "my":
+            query = """
+                SELECT strftime('%H', ts.completed_at) as hour,
+                       COUNT(DISTINCT ts.id) as count,
+                       SUM(ts.gross_profit) as profit,
+                       MAX(ts.gross_profit) as max_profit
+                FROM trade_sessions ts
+                JOIN active_trades at ON ts.id = at.session_id
+                WHERE ts.session_status = 'COMPLETED'
+                  AND DATE(ts.completed_at) = ?
+            """
+            params = [date_str]
+            if user_id:
+                query += " AND at.owner_user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND ts.route_type = ?"
+                params.append(mode)
+            query += " GROUP BY hour ORDER BY hour ASC"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
+                rows = await cur.fetchall()
+            
+            if not rows:
+                return f"📅 <b>Деталі за {date_str} (Мої угоди)</b>\n\nНемає завершених угод за цей день."
+
+            total_profit = sum(r["profit"] for r in rows)
+            total_trades = sum(r["count"] for r in rows)
+            
+            lines = [
+                f"📅 <b>Деталі за {date_str} (Мої угоди)</b>",
+                f"🎯 Режим: <b>{mode}</b>",
+                "",
+                f"💰 Всього профіту: <b>{total_profit:.2f} UAH</b>",
+                f"📈 Кількість угод: <b>{total_trades}</b>",
+                "",
+                "⏰ <b>Погодинна активність:</b>",
+            ]
+            for r in rows:
+                lines.append(
+                    f"  • <code>{r['hour']}:00</code>: <b>{r['count']}</b> угод, "
+                    f"профіт +<b>{r['profit']:.0f} ₴</b> (макс +<b>{r['max_profit']:.0f} ₴</b>)"
+                )
+        else:
+            query = """
+                SELECT strftime('%H', created_at, 'unixepoch', 'localtime') as hour,
+                       COUNT(*) as count,
+                       MAX(spread_pct) as max_spread,
+                       AVG(spread_pct) as avg_spread,
+                       SUM(profit_uah) as total_profit
+                FROM scanner_proposals
+                WHERE DATE(created_at, 'unixepoch', 'localtime') = ?
+            """
+            params = [date_str]
+            if user_id:
+                query += " AND user_id = ?"
+                params.append(user_id)
+            if mode != "ALL":
+                query += " AND route_type = ?"
+                params.append(mode)
+            query += " GROUP BY hour ORDER BY hour ASC"
+            
+            async with self._db._db.execute(query, tuple(params)) as cur:
+                rows = await cur.fetchall()
+                
+            if not rows:
+                return f"📅 <b>Деталі за {date_str} (Сканер)</b>\n\nНемає знайдених спредів за цей день."
+
+            total_count = sum(r["count"] for r in rows)
+            max_spread = max(r["max_spread"] for r in rows)
+            
+            lines = [
+                f"📅 <b>Деталі за {date_str} (Аналітика сканера)</b>",
+                f"🎯 Режим: <b>{mode}</b>",
+                "",
+                f"📡 Всього спредів: <b>{total_count}</b>",
+                f"🔝 Максимальний спред: <b>{max_spread:.2f}%</b>",
+                "",
+                "⏰ <b>Погодинна активність:</b>",
+            ]
+            for r in rows:
+                lines.append(
+                    f"  • <code>{r['hour']}:00</code>: <b>{r['count']}</b> спредів, "
+                    f"avg <b>{r['avg_spread']:.2f}%</b> (max <b>{r['max_spread']:.2f}%</b>)"
+                )
+        
+        return "\n".join(lines)

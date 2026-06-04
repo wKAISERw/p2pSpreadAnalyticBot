@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
 from core.engine.network_fee_engine import NetworkFeeEngine
-from core.analytics.merchant_profile import build_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -59,6 +59,16 @@ class SpreadAlert:
     def __post_init__(self):
         if self.timestamp is None:
             self.timestamp = datetime.now()
+
+
+def _online_badge(order: Order) -> str:
+    last_online = getattr(order, "last_online_mins", None)
+    if last_online is None:
+        return ""
+    if last_online <= 2:
+        return f" (🟢 {last_online}m)" if last_online > 0 else " (🟢 online)"
+    else:
+        return f" (🟡 {last_online}m)"
 
 
 async def send_single(
@@ -174,11 +184,13 @@ async def send_single(
         alert.buy_order.exchange,
         alert.buy_order.merchant_id,
         alert.buy_order.merchant_name,
+        side="buy",
     )
     sell_name = _profile_link(
         alert.sell_order.exchange,
         alert.sell_order.merchant_id,
         alert.sell_order.merchant_name,
+        side="sell",
     )
 
     buy_risk = _risk_badge(alert.buy_order)
@@ -200,8 +212,10 @@ async def send_single(
     buy_warn = _regex_warn_block(alert.buy_order)
     sell_warn = _regex_warn_block(alert.sell_order)
 
-    buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}"
-    sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}"
+    buy_online = _online_badge(alert.buy_order)
+    sell_online = _online_badge(alert.sell_order)
+    buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}{buy_online}"
+    sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}{sell_online}"
 
     # 🧠 LLM Verdict блоки (конфігуровані per-user)
     if ds.get("show_llm_summary", True):
@@ -242,10 +256,18 @@ async def send_single(
             f"Інвентар: +{asym['inventory_usdt']:.2f} USDT)</i>"
         )
 
+    buy_rate = float(alert.buy_order.price) if float(alert.buy_order.price) > 0 else 1.0
+    sell_rate = float(alert.sell_order.price) if float(alert.sell_order.price) > 0 else 1.0
+    buy_deal_usdt = alert.deal_amount_uah / buy_rate
+    buy_min_usdt = float(alert.buy_order.min_limit) / buy_rate
+    buy_max_usdt = float(alert.buy_order.max_limit) / buy_rate
+    sell_min_usdt = float(alert.sell_order.min_limit) / sell_rate
+    sell_max_usdt = float(alert.sell_order.max_limit) / sell_rate
+
     text = (
         f"{title}\n\n"
         f"💰 Профіт: <b>+{alert.profit_uah:.2f} ₴</b>   "
-        f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b>{asym_str}\n"  # ← Інжектовано деталі фічі
+        f"💼 Угода: <b>{alert.deal_amount_uah:.0f} ₴</b> <i>(~{buy_deal_usdt:.1f} USDT)</i>{asym_str}\n"  # ← Інжектовано деталі фічі
         f"🔄 Маршрут: {route_marker} | "
         f"{b_icon}{escape(alert.buy_order.exchange)} → "
         f"{s_icon}{escape(alert.sell_order.exchange)}\n"
@@ -273,8 +295,8 @@ async def send_single(
         f"Курс: <code>{escape(str(alert.buy_order.price))}</code>\n"
         f"Мерчант: {buy_name_str} "
         f"({alert.buy_order.finish_rate_pct:.1f}% | {alert.buy_order.month_order_count} угод)\n"
-        f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code>"
-        f"  💎 <code>{float(alert.buy_order.available_amount):.0f} USDT</code> в ордері\n"
+        f"Ліміти: <code>{escape(str(alert.buy_order.min_limit))}–{escape(str(alert.buy_order.max_limit))} ₴</code> <i>(~{buy_min_usdt:.1f}–{buy_max_usdt:.1f} USDT)</i>"
+        f"  💎 <code>{float(alert.buy_order.available_amount):.2f} USDT</code> в ордері\n"
         f"{buy_risk if buy_risk else ''}"
         f"{buy_warn if buy_warn else ''}"
     )
@@ -295,8 +317,8 @@ async def send_single(
         f"Курс: <code>{escape(str(alert.sell_order.price))}</code>\n"
         f"Мерчант: {sell_name_str} "
         f"({alert.sell_order.finish_rate_pct:.1f}% | {alert.sell_order.month_order_count} угод)\n"
-        f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code>"
-        f"  💎 <code>{float(alert.sell_order.available_amount):.0f} USDT</code> в ордері\n"
+        f"Ліміти: <code>{escape(str(alert.sell_order.min_limit))}–{escape(str(alert.sell_order.max_limit))} ₴</code> <i>(~{sell_min_usdt:.1f}–{sell_max_usdt:.1f} USDT)</i>"
+        f"  💎 <code>{float(alert.sell_order.available_amount):.2f} USDT</code> в ордері\n"
         f"{sell_risk if sell_risk else ''}"
         f"{sell_warn if sell_warn else ''}"
     )
@@ -373,13 +395,13 @@ async def send_single(
     if single_leg_row:
         kb.append(single_leg_row)
 
-    url_row = []
     buy_url = getattr(alert.buy_order, "link", "") or build_profile_url(
         alert.buy_order.exchange, alert.buy_order.merchant_id
     )
     sell_url = getattr(alert.sell_order, "link", "") or build_profile_url(
         alert.sell_order.exchange, alert.sell_order.merchant_id
     )
+    url_row = []
     if buy_url:
         url_row.append(InlineKeyboardButton(text="🔗 Buy на біржі", url=buy_url))
     if sell_url:
@@ -593,8 +615,21 @@ async def send_batch(notifier, batch: list[SpreadAlert]) -> None:
         warns = _regex_warn_block(a.buy_order, short=True) + _regex_warn_block(a.sell_order, short=True)
         chips = (risks + warns).strip()
 
-        b_nick = _profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name)
-        s_nick = _profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name)
+        b_online = _online_badge(a.buy_order)
+        s_online = _online_badge(a.sell_order)
+        b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy')}{b_online}"
+        s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell')}{s_online}"
+
+        buy_app_url = build_app_profile_url(a.buy_order.exchange, a.buy_order.merchant_id)
+        sell_app_url = build_app_profile_url(a.sell_order.exchange, a.sell_order.merchant_id)
+
+        buy_links = f"<a href='{a.buy_order.link}'>Купити</a>"
+        if buy_app_url:
+            buy_links += f" (<a href='{buy_app_url}'>📱 App</a>)"
+
+        sell_links = f"<a href='{a.sell_order.link}'>Продати</a>"
+        if sell_app_url:
+            sell_links += f" (<a href='{sell_app_url}'>📱 App</a>)"
 
         lines.append(
             f"{medals[i]} <b>{a.spread_pct:.2f}%</b>  "
@@ -604,8 +639,8 @@ async def send_batch(notifier, batch: list[SpreadAlert]) -> None:
             f"  {s_icon} {s_nick} <code>{a.sell_order.price}</code> {s_short}\n"
             f"  📐 <code>{a.buy_order.min_limit}–{a.buy_order.max_limit}</code> "
             f"→ <code>{a.sell_order.min_limit}–{a.sell_order.max_limit} ₴</code>\n"
-            f"  <a href='{a.buy_order.link}'>Купити</a>  ·  "
-            f"<a href='{a.sell_order.link}'>Продати</a>\n"
+            f"  {buy_links}  ·  "
+            f"{sell_links}\n"
             f"<code>{'─' * 28}</code>\n"
         )
 

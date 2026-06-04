@@ -46,7 +46,8 @@ class AppState:
             "banks": ["43", "14"],  # 43 - Mono, 14 - Privat
             "merchant_filters": {
                 "min_orders": 50,
-                "min_rate": 95.0
+                "min_rate": 95.0,
+                "max_offline_mins": 0
             },
             "auto_trade": {
                 "enabled": False,

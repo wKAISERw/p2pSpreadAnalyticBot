@@ -105,6 +105,9 @@ class MerchantDB:
         try:
             await self._db.execute("ALTER TABLE cards ADD COLUMN is_warmed_up INTEGER DEFAULT 0")
         except Exception: pass
+        try:
+            await self._db.execute("ALTER TABLE scanner_proposals ADD COLUMN user_id INTEGER DEFAULT 0")
+        except Exception: pass
         await self._db.commit()
         await self._db.execute("""
                                CREATE TABLE IF NOT EXISTS user_features
@@ -390,6 +393,8 @@ class MerchantDB:
                                          telegram_chat_id INTEGER NOT NULL,
                                          working_capital  REAL DEFAULT 5100.0,
                                          min_spread_pct   REAL DEFAULT 0.5,
+                                         max_spread_pct   REAL DEFAULT 0.0,
+                                         spread_strategy  TEXT DEFAULT 'min',
                                          bank_codes       TEXT DEFAULT '43,14,64',
                                          is_active        INTEGER DEFAULT 1,
                                          created_at       REAL DEFAULT 0
@@ -460,6 +465,7 @@ class MerchantDB:
                                          buy_bank        TEXT,
                                          sell_bank       TEXT,
                                          was_sent        INTEGER DEFAULT 0,
+                                         user_id         INTEGER DEFAULT 0,
                                          created_at      REAL NOT NULL
                                      );
                                       CREATE INDEX IF NOT EXISTS idx_proposals_ts
@@ -644,6 +650,8 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "taker_buy_price_from", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "taker_sell_price_strategy", "TEXT DEFAULT 'roi'")
         await self._ensure_column("scanner_users", "taker_sell_price_to", "REAL DEFAULT 0.0")
+        await self._ensure_column("scanner_users", "spread_strategy", "TEXT DEFAULT 'min'")
+        await self._ensure_column("scanner_users", "max_spread_pct", "REAL DEFAULT 0.0")
         # 🚀 SNIPER: правила снайпер-моду (JSON масив)
         await self._ensure_column("scanner_users", "sniper_rules", "TEXT DEFAULT '[]'")
         try:

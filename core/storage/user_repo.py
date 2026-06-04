@@ -272,7 +272,9 @@ class UserRepo:
                               working_capital,
                               COALESCE(capital_mode, 'manual')              as capital_mode,
                               COALESCE(min_amount_uah, 0.0)                  as min_amount_uah,
-                              min_spread_pct,
+                               min_spread_pct,
+                               COALESCE(spread_strategy, 'min')              as spread_strategy,
+                               COALESCE(max_spread_pct, 0.0)                  as max_spread_pct,
                               bank_codes,
                               COALESCE(buy_bank_codes, '')                   as buy_bank_codes,
                               COALESCE(sell_bank_codes, '')                  as sell_bank_codes,
@@ -308,14 +310,16 @@ class UserRepo:
             ) as cur:
                 rows = await cur.fetchall()
             import json as _json
+            from config.banks import BANK_NAMES
+            valid_keys = set(BANK_NAMES.keys())
             result = []
             for row in rows:
-                general_banks = row["bank_codes"].split(",") if row["bank_codes"] else []
+                general_banks = [c for c in (row["bank_codes"].split(",") if row["bank_codes"] else []) if c in valid_keys]
                 buy_codes_raw = row["buy_bank_codes"].strip()
                 sell_codes_raw = row["sell_bank_codes"].strip()
                 # Fallback: якщо buy/sell порожні — використовуємо загальні
-                buy_banks = buy_codes_raw.split(",") if buy_codes_raw else general_banks
-                sell_banks = sell_codes_raw.split(",") if sell_codes_raw else general_banks
+                buy_banks = [c for c in (buy_codes_raw.split(",") if buy_codes_raw else general_banks) if c in valid_keys]
+                sell_banks = [c for c in (sell_codes_raw.split(",") if sell_codes_raw else general_banks) if c in valid_keys]
                 result.append({
                     "user_id": row["user_id"],
                     "chat_id": row["telegram_chat_id"],
@@ -323,6 +327,8 @@ class UserRepo:
                     "capital_mode": row["capital_mode"] or "manual",
                     "min_amount": float(row["min_amount_uah"]),
                     "min_spread": float(row["min_spread_pct"]),
+                    "max_spread": float(row["max_spread_pct"]),
+                    "spread_strategy": row["spread_strategy"] or "min",
                     "bank_codes": general_banks,
                     "buy_bank_codes": buy_banks,
                     "sell_bank_codes": sell_banks,

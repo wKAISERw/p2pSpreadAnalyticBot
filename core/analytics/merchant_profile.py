@@ -4,7 +4,7 @@ merchant_profile.py — Генерація URL профілів мерчанті
 """
 
 
-def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
+def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "", side: str = "") -> str:
     """
     Повертає URL профілю/оголошень мерчанта на відповідній біржі.
 
@@ -16,13 +16,16 @@ def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") 
     _URLS = {
         "Binance": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={id}",
         "Bybit":   "https://www.bybit.com/uk-UA/p2p/profile/{id}/USDT/UAH/item",
-        "OKX":     "https://www.okx.com/p2p/ads-merchant?publicUserId={id}",
+        "OKX":     "https://www.okx.com/ua/p2p/ads-merchant?publicUserId={id}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT",
         "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/merchant?id={id}",
     }
     template = _URLS.get(exchange)
     if not template:
         return ""
-    return template.format(id=merchant_id, name=merchant_name)
+    url = template.format(id=merchant_id, name=merchant_name)
+    if exchange == "OKX" and side:
+        url += f"&side={side}"
+    return url
 
 
 def build_order_url(exchange: str, order_id: str) -> str:
@@ -37,6 +40,39 @@ def build_order_url(exchange: str, order_id: str) -> str:
         "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/order/{id}",
     }
     template = _ORDER_URLS.get(exchange)
+    if not template or not order_id:
+        return ""
+    return template.format(id=order_id)
+
+
+def build_app_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
+    """
+    Повертає URL-схему (deep link) для мобільного додатку, що дозволяє відкрити
+    профіль мерчанта безпосередньо в додатку (без логіну в браузері).
+    """
+    _APP_URLS = {
+        "Binance": "binance://app/advertiserDetail?advertiserNo={id}",
+        "Bybit":   "bybit://app/p2p",  # Bybit не має прямого лінку на профіль мерчанта, відкриваємо P2P
+        "OKX":     "okx://app/p2p",
+        "MEXC":    "mexc://app/p2p",
+    }
+    template = _APP_URLS.get(exchange)
+    if not template or not merchant_id:
+        return ""
+    return template.format(id=merchant_id, name=merchant_name)
+
+
+def build_app_order_url(exchange: str, order_id: str) -> str:
+    """
+    Повертає URL-схему (deep link) для мобільного додатку для прямого переходу до ордера.
+    """
+    _APP_ORDER_URLS = {
+        "Binance": "binance://app/orderDetail?orderNo={id}",
+        "Bybit":   "bybit://app/p2p",
+        "OKX":     "okx://app/p2p",
+        "MEXC":    "mexc://app/p2p",
+    }
+    template = _APP_ORDER_URLS.get(exchange)
     if not template or not order_id:
         return ""
     return template.format(id=order_id)

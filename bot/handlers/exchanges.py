@@ -160,21 +160,26 @@ async def on_disconnect(call: CallbackQuery) -> None:
 # ── ЛОГІКА БАЛАНСУ ─────────────────────────────────────────────────────────
 async def _generate_balance_text(user_id: int) -> str:
     """
-    Баланс з акаунт-клієнтів що вже підключені в scanner.py.
-    Не створює нових клієнтів — використовує існуючі сесії.
+    Баланси з акаунт-клієнтів конкретного користувача (user_id).
+    Ініціалізує сесії клієнтів динамічно та гарантовано закриває їх для запобігання витоку ресурсів.
     """
-    if not _account_clients:
-        return "❌ Акаунт клієнти не ініціалізовані"
+    if not _db:
+        return "❌ База даних не ініціалізована"
+
+    from core.engine.credentials import load_credentials
+    user_clients = await load_credentials(_db, user_id)
+    clients_dict = user_clients.as_dict()
 
     lines = ["💰 <b>Баланси на біржах</b>\n"]
     found_any = False
 
-    for exchange, client in _account_clients.items():
+    for exchange, client in clients_dict.items():
         if not getattr(client, "is_authenticated", False):
             lines.append(f"⚪ <b>{exchange}</b>: не підключено (<code>/connect {exchange}</code>)")
             continue
         try:
-            balances = await client.get_balance()
+            async with client:
+                balances = await client.get_balance()
             if not balances:
                 lines.append(f"📭 <b>{exchange}</b>: порожньо або 0")
                 continue
@@ -546,15 +551,69 @@ async def on_min_amount_input(message: Message, state: FSMContext) -> None:
         await state.clear()
 
 
+def _spread_strategy_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬆️ Не менше ніж...", callback_data="spread_strategy:min")],
+        [InlineKeyboardButton(text="⬇️ Не більше ніж...", callback_data="spread_strategy:max")],
+        [InlineKeyboardButton(text="↔️ Ціновий діапазон (від-до)", callback_data="spread_strategy:range")],
+        [InlineKeyboardButton(text="🎯 Точно спред", callback_data="spread_strategy:exact")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:filters")]
+    ])
+
+
 @router.callback_query(F.data == "set:spread")
 async def on_set_spread(call: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(SettingStates.waiting_spread)
+    await state.clear()
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "📉 <b>Введи мінімальний персональний спред (%)</b>\n\n"
-            "<i>Можеш писати з комою або з крапкою (напр. 0,5 або 0.5)</i>",
-            reply_markup=back_to_main_kb()
+            "📉 <b>Персональний спред сканування (%)</b>\n\n"
+            "Оберіть тип фільтра для пошуку спредів:",
+            reply_markup=_spread_strategy_kb()
         )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("spread_strategy:"))
+async def on_spread_strategy_choice(call: CallbackQuery, state: FSMContext) -> None:
+    strategy = call.data.split(":")[1]
+    await state.update_data(spread_strategy=strategy)
+    
+    if strategy == "range":
+        await state.set_state(SettingStates.waiting_spread_min)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "↔️ <b>Ціновий діапазон — нижня межа</b>\n\n"
+                "Введи мінімальний спред (%):\n"
+                "<i>Наприклад: 0.5</i>",
+                reply_markup=back_to_main_kb()
+            )
+    elif strategy == "max":
+        await state.set_state(SettingStates.waiting_spread)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "⬇️ <b>Максимальний спред</b>\n\n"
+                "Введи максимальний спред (%):\n"
+                "<i>Наприклад: 1.5</i>",
+                reply_markup=back_to_main_kb()
+            )
+    elif strategy == "exact":
+        await state.set_state(SettingStates.waiting_spread)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "🎯 <b>Точний спред</b>\n\n"
+                "Введи точний спред (%):\n"
+                "<i>Наприклад: 0.8</i>",
+                reply_markup=back_to_main_kb()
+            )
+    else:  # min
+        await state.set_state(SettingStates.waiting_spread)
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                "⬆️ <b>Мінімальний спред</b>\n\n"
+                "Введи мінімальний спред (%):\n"
+                "<i>Наприклад: 0.5</i>",
+                reply_markup=back_to_main_kb()
+            )
     await call.answer()
 
 
@@ -562,14 +621,74 @@ async def on_set_spread(call: CallbackQuery, state: FSMContext) -> None:
 async def on_spread_input(message: Message, state: FSMContext) -> None:
     try:
         val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+        
+        data = await state.get_data()
+        strategy = data.get("spread_strategy", "min")
+        
         if _db:
             conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-            await conn.execute("UPDATE scanner_users SET min_spread_pct = ? WHERE user_id = ?",
-                               (val, message.from_user.id))
+            if strategy == "max":
+                await conn.execute(
+                    "UPDATE scanner_users SET max_spread_pct = ?, spread_strategy = ? WHERE user_id = ?",
+                    (val, strategy, message.from_user.id)
+                )
+            else:
+                await conn.execute(
+                    "UPDATE scanner_users SET min_spread_pct = ?, spread_strategy = ? WHERE user_id = ?",
+                    (val, strategy, message.from_user.id)
+                )
             await conn.commit()
-        await message.answer(f"✅ Персональний мін. спред оновлено: <b>{val:.2f}%</b>", reply_markup=back_to_main_kb())
+            
+        labels = {"min": f"≥ {val:.2f}%", "max": f"≤ {val:.2f}%", "exact": f"≈ {val:.2f}%"}
+        await message.answer(
+            f"✅ Персональний спред оновлено: <b>{labels.get(strategy, f'{val:.2f}%')}</b>",
+            reply_markup=back_to_main_kb()
+        )
     except ValueError:
         await message.answer("❌ Формат невірний. Введи число (наприклад: 0.5 або 1.2)")
+    finally:
+        await state.clear()
+
+
+@router.message(SettingStates.waiting_spread_min)
+async def on_spread_min_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+        await state.update_data(spread_min=val)
+        await state.set_state(SettingStates.waiting_spread_max)
+        await message.answer(f"✅ Мін: <b>{val:.2f}%</b>\n\nТепер введи <b>максимальний</b> спред (%):")
+    except ValueError:
+        await message.answer("❌ Введи число (наприклад: 0.5)")
+
+
+@router.message(SettingStates.waiting_spread_max)
+async def on_spread_max_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+        data = await state.get_data()
+        spread_min = data.get("spread_min", 0.0)
+        if val <= spread_min:
+            return await message.answer(f"❌ Максимум ({val}%) повинен бути більше мінімального ({spread_min}%). Спробуй ще раз:")
+            
+        if _db:
+            conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+            await conn.execute(
+                "UPDATE scanner_users SET min_spread_pct = ?, max_spread_pct = ?, spread_strategy = 'range' WHERE user_id = ?",
+                (spread_min, val, message.from_user.id)
+            )
+            await conn.commit()
+        await message.answer(
+            f"✅ Персональний спред оновлено: <b>{spread_min:.2f}% – {val:.2f}%</b>",
+            reply_markup=back_to_main_kb()
+        )
+    except ValueError:
+        await message.answer("❌ Введи число (наприклад: 1.5)")
     finally:
         await state.clear()
 
@@ -1006,15 +1125,17 @@ async def on_stats_menu(call: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("stats:"))
 async def on_stats_callback(call: CallbackQuery):
     """Універсальний роутер для всіх кнопок статистики."""
-    # Відповідаємо Telegram ПЕРШИМ — без цього кнопка вічно крутиться незалежно від результату
     await call.answer()
 
     if not _db:
         return
 
     parts = call.data.split(":")
-    action = parts[1]  # main | menu | daily | exchanges | heatmap | routes
+    action = parts[1]  # main | menu | daily | exchanges | heatmap | routes | daydetail | pick_period | change_period | pick_mode | change_mode
     source = parts[2] if len(parts) > 2 else "my"  # my | scanner
+    period = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 30
+    mode = parts[4] if len(parts) > 4 else "ALL"
+    extra = parts[5] if len(parts) > 5 else None
 
     from core.analytics.stats_engine import StatsEngine
     engine = StatsEngine(_db)
@@ -1024,79 +1145,110 @@ async def on_stats_callback(call: CallbackQuery):
             text = "📊 <b>Аналітичний центр Arbix Quantum</b>\n\nОберіть джерело даних:"
             await call.message.edit_text(text, reply_markup=keyboards.stats_source_kb(), parse_mode="HTML")
 
-        elif action == "menu":
+        elif action == "pick_period":
+            await call.message.edit_text(
+                f"⏱ <b>Оберіть період для статистики:</b>",
+                reply_markup=keyboards.stats_period_kb(source, period, mode),
+                parse_mode="HTML"
+            )
+
+        elif action == "change_period":
+            action = "menu"
+
+        elif action == "pick_mode":
+            await call.message.edit_text(
+                f"🎯 <b>Оберіть режим для статистики:</b>",
+                reply_markup=keyboards.stats_mode_kb(source, period, mode),
+                parse_mode="HTML"
+            )
+
+        elif action == "change_mode":
+            action = "menu"
+
+        if action == "menu":
             if source == "my":
-                summary = await engine.get_summary(30)
+                summary = await engine.get_summary(period, owner_user_id=call.from_user.id, mode=mode)
                 text = (
-                    f"💼 <b>Моя статистика (За 30 днів)</b>\n\n"
+                    f"💼 <b>Моя статистика ({period}д)</b>\n"
+                    f"🎯 Режим: <b>{mode}</b>\n\n"
                     f"📈 Успішних угод: <b>{summary.get('total_trades', 0)}</b>\n"
                     f"💰 Зароблено: <b>{summary.get('total_profit', 0):.2f} ₴</b>\n"
                     f"📉 Середній профіт: <b>{summary.get('avg_profit', 0):.2f} ₴</b>\n"
                     f"🏆 Найкращий день: <b>{summary.get('best_day', 'N/A')}</b>"
                 )
             else:
-                props = await engine.get_proposals_summary(7)
+                props = await engine.get_proposals_summary(period, user_id=call.from_user.id, mode=mode)
                 text = (
-                    f"📡 <b>Аналітика ринку (За 7 днів)</b>\n\n"
+                    f"📡 <b>Аналітика ринку ({period}д)</b>\n"
+                    f"🎯 Режим: <b>{mode}</b>\n\n"
                     f"🎯 Знайдено спредів: <b>{props.get('total', 0)}</b>\n"
                     f"📤 Надіслано алертів: <b>{props.get('sent', 0)}</b>\n"
                     f"📈 Середній спред: <b>{props.get('avg_spread', 0):.2f}%</b>\n"
                     f"🔝 Макс. спред: <b>{props.get('max_spread', 0):.2f}%</b>"
                 )
-            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source, period, mode), parse_mode="HTML")
 
         elif action == "daily":
             if source == "my":
-                data = await engine.get_profit_by_day(14)
-                body = "\n".join(
-                    f"▫️ {d['date']}: <b>+{d['profit']:.0f} ₴</b> ({d['trades']} угод)"
-                    for d in data
-                ) if data else "Немає даних."
-                text = "📅 <b>Мій профіт по днях (14д):</b>\n\n" + body
+                text = await engine.format_daily_report(period, owner_user_id=call.from_user.id, mode=mode)
+                data = await engine.get_profit_by_day(period, owner_user_id=call.from_user.id, mode=mode)
+                dates = [d["date"] for d in data[:5] if d["date"]]
             else:
-                text = await engine.format_proposals_report(14)
-            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
+                text = await engine.format_proposals_report(period, user_id=call.from_user.id, mode=mode)
+                days_data = await engine._db.get_proposals_by_day(period, user_id=call.from_user.id, mode=mode)
+                dates = [d["date"] for d in days_data[:5] if d["date"]]
+
+            await call.message.edit_text(text, reply_markup=keyboards.stats_daily_with_details_kb(source, period, mode, dates), parse_mode="HTML")
+
+        elif action == "daydetail":
+            date_str = extra
+            if not date_str:
+                return await call.answer("Не вказано дату.", show_alert=True)
+            text = await engine.format_day_detail_report(date_str, user_id=call.from_user.id, mode=mode, source=source)
+            builder = InlineKeyboardBuilder()
+            builder.row(InlineKeyboardButton(text="🔙 Назад до списку днів", callback_data=f"stats:daily:{source}:{period}:{mode}"))
+            await call.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="HTML")
 
         elif action == "exchanges":
             if source == "my":
-                data = await engine.get_top_exchanges(30)
+                data = await engine.get_top_exchanges(period, owner_user_id=call.from_user.id, mode=mode)
                 body = "\n".join(
                     f"🥇 {d.get('exchange', '?')}: <b>{d.get('volume_uah', 0):.0f} ₴</b> ({d.get('trades', 0)} угод)"
                     for d in data
                 ) if data else "Немає даних."
-                text = "🏦 <b>Мої топ біржі (За 30д):</b>\n\n" + body
+                text = f"🏦 <b>Мої топ біржі ({period}д):</b>\n🎯 Режим: <b>{mode}</b>\n\n" + body
             else:
-                data = await engine.get_proposals_top_exchanges(14)
+                data = await engine.get_proposals_top_exchanges(period, user_id=call.from_user.id, mode=mode)
                 body = "\n".join(
                     f"🔸 {d['exchange']}: <b>{d['count']} спредів</b> (avg {d['avg_spread']:.2f}%)"
                     for d in data
                 ) if data else "Немає даних."
-                text = "🏦 <b>Топ бірж сканера (За 14д):</b>\n\n" + body
-            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
+                text = f"🏦 <b>Топ бірж сканера ({period}д):</b>\n🎯 Режим: <b>{mode}</b>\n\n" + body
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source, period, mode), parse_mode="HTML")
 
         elif action == "heatmap":
             heatmap_data = (
-                await engine.get_my_hourly_heatmap(30)
+                await engine.get_my_hourly_heatmap(period, owner_user_id=call.from_user.id, mode=mode)
                 if source == "my"
-                else await engine.get_proposals_hourly_heatmap(14)
+                else await engine.get_proposals_hourly_heatmap(period, user_id=call.from_user.id, mode=mode)
             )
             DAYS = {"1": "Пн", "2": "Вт", "3": "Ср", "4": "Чт", "5": "Пт", "6": "Сб", "0": "Нд"}
             title = "Мої угоди" if source == "my" else "Ринок"
-            lines = [f"🔥 <b>Теплова карта ({title}):</b>\n"]
+            lines = [f"🔥 <b>Теплова карта ({title}):</b>\n🎯 Режим: <b>{mode}</b>\n"]
             for d_idx, d_name in DAYS.items():
                 hours = heatmap_data.get(d_idx, {})
                 active = [f"{h}:00({c})" for h, c in sorted(hours.items()) if c > 0]
                 if active:
                     lines.append(f"📅 <b>{d_name}:</b> " + ", ".join(active[:4]) + ("..." if len(active) > 4 else ""))
-            text = "\n".join(lines) if len(lines) > 1 else "📭 Недостатньо даних для теплової карти."
-            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
+            text = "\n".join(lines) if len(lines) > 2 else "📭 Недостатньо даних для теплової карти."
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source, period, mode), parse_mode="HTML")
 
         elif action == "routes":
             if source == "my":
                 text = "🗺 <b>Мої маршрути:</b>\n\n<i>Функція в розробці. Для маршрутів сканера — оберіть «Аналітику ринку».</i>"
             else:
-                text = await engine.format_proposals_routes(14)
-            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source), parse_mode="HTML")
+                text = await engine.format_proposals_routes(period, user_id=call.from_user.id, mode=mode)
+            await call.message.edit_text(text, reply_markup=keyboards.stats_metrics_kb(source, period, mode), parse_mode="HTML")
 
     except TelegramBadRequest:
         pass  # Повідомлення не змінилось — ігноруємо
@@ -1233,6 +1385,15 @@ async def on_session_qr_login(call: CallbackQuery, state: FSMContext) -> None:
         await call.answer("❌ SessionManager не підключено!", show_alert=True)
         return
         
+    session_key = f"{exchange}:{call.from_user.id}"
+    import time
+    if session_key in _session_manager._active_qr_sessions:
+        existing = _session_manager._active_qr_sessions[session_key]
+        created_at = existing.get("created_at", 0.0)
+        if time.time() - created_at < 20:
+            await call.answer("⚠️ QR-код вже генерується! Будь ласка, зачекайте.", show_alert=True)
+            return
+
     await call.answer(f"🔑 Запуск QR-входу для {exchange}...")
     await _session_manager.trigger_qr_capture(exchange, call.from_user.id, call.message, state)
 

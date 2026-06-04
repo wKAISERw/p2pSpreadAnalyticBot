@@ -38,6 +38,8 @@ class Order:
     positive_rate: float = 0.0
     # Сторона ордера: "buy" (мерчант купує USDT) або "sell" (мерчант продає USDT)
     side: str = ""
+    # Останній онлайн статус мерчанта в хвилинах від теперішнього часу (None якщо невідомо, 0 якщо онлайн)
+    last_online_mins: int | None = None
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""
