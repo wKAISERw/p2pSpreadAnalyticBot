@@ -59,7 +59,7 @@ def settings_menu_kb(scanner_mode: str = "SPREAD", is_admin: bool = False) -> In
 def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
     """
     Меню налаштувань виводу повідомлень (per-user).
-    current: dict з bool-ключами show_ai_terms_summary, show_full_terms, show_ai_logic, show_bank_details, show_llm_summary
+    current: dict з ключами відображення, alert_cooldown, group_active_alerts
     """
     builder = InlineKeyboardBuilder()
 
@@ -86,12 +86,73 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         text=f"{_icon('show_llm_summary')} Вердикт AI в алерті",
         callback_data="disp:toggle:show_llm_summary",
     ))
-    # Допиши у функцію display_settings_kb у keyboards.py:
+
+    # Налаштування затримки
+    cooldown_val = current.get("alert_cooldown", -1.0)
+    if cooldown_val < 0.0:
+        cooldown_label = "АВТО ⚡️"
+    elif cooldown_val == 0.0:
+        cooldown_label = "ВИМК 🚫"
+    else:
+        cooldown_label = f"{cooldown_val} сек"
+        
+    builder.row(InlineKeyboardButton(
+        text=f"⏱ Затримка алертів: {cooldown_label}",
+        callback_data="disp:toggle:alert_cooldown",
+    ))
+    
+    # Кнопка переходу в меню тонкого налаштування авто-затримки
+    if cooldown_val < 0.0:
+        builder.row(InlineKeyboardButton(
+            text="⚙️ Налаштувати авто-затримку →",
+            callback_data="set:auto_cooldown_menu",
+        ))
+
+    # Налаштування групування active
+    group_active = current.get("group_active_alerts", True)
+    group_active_icon = "✅" if group_active else "❌"
+    builder.row(InlineKeyboardButton(
+        text=f"{group_active_icon} Групувати /active в 1 повідомлення",
+        callback_data="disp:toggle:group_active_alerts",
+    ))
+
     builder.row(InlineKeyboardButton(
         text="💳 Налаштування карткового модуля →",
         callback_data="set:card_display_menu",
     ))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))
+    return builder.as_markup()
+
+
+def auto_cooldown_settings_kb(config: dict) -> InlineKeyboardMarkup:
+    """Генерує меню тонкого налаштування авто-затримки."""
+    builder = InlineKeyboardBuilder()
+    
+    window = config.get("window_seconds", 5.0)
+    tiers = config.get("tiers", [])
+    
+    builder.row(InlineKeyboardButton(
+        text=f"⏱ Вікно аналізу: {window} сек",
+        callback_data="auto_cd:set_window",
+    ))
+    
+    # Відображаємо кнопки для кожного порогу (threshold) та його затримки (delay)
+    # tiers: [0: t1 (0.0s), 1: t2 (0.3s), 2: t3 (0.8s), 3: t4 (1.5s)]
+    t1 = tiers[0].get("threshold", 10) if len(tiers) > 0 else 10
+    t2 = tiers[1].get("threshold", 15) if len(tiers) > 1 else 15
+    t3 = tiers[2].get("threshold", 20) if len(tiers) > 2 else 20
+    max_delay = tiers[3].get("delay", 1.5) if len(tiers) > 3 else 1.5
+    
+    builder.row(
+        InlineKeyboardButton(text=f"📊 Поріг 1 (0.0s): < {t1} пов.", callback_data="auto_cd:set_t1"),
+        InlineKeyboardButton(text=f"📊 Поріг 2 (0.3s): < {t2} пов.", callback_data="auto_cd:set_t2"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"📊 Поріг 3 (0.8s): < {t3} пов.", callback_data="auto_cd:set_t3"),
+        InlineKeyboardButton(text=f"⏳ Макс затримка: {max_delay} сек", callback_data="auto_cd:set_max_delay"),
+    )
+    
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="set:display_menu"))
     return builder.as_markup()
 
 

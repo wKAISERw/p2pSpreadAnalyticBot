@@ -28,20 +28,139 @@ async def send_taker_to_user(
     notifier, chat_id: int, orders: list[Order], mode: str,
 ) -> None:
     """
-    Відправляє тейкер-алерти юзеру — КОЖЕН ордер як окреме повідомлення
-    в тому ж дизайні що й spread-алерт, але з однією стороною.
+    Відправляє тейкер-алерти юзеру.
+    Якщо ордер один — відправляє його детально.
+    Якщо ордерів кілька — відправляє їх об'єднаним компактним списком, щоб уникнути флуду.
     mode: TAKER_BUY або TAKER_SELL
     """
     if not orders:
         return
     ds = await notifier._get_display_settings(chat_id)
-    for i, order in enumerate(orders[:10]):
+    if len(orders) == 1:
         try:
-            await send_taker_single(notifier, order, mode, chat_id=chat_id, display_settings=ds)
-            if i < len(orders) - 1:
-                await asyncio.sleep(0.8)
+            await send_taker_single(notifier, orders[0], mode, chat_id=chat_id, display_settings=ds)
         except Exception as e:
-            logger.error("send_taker_to_user [%d] order #%d: %s", chat_id, i, e)
+            logger.error("send_taker_to_user [%d] single order error: %s", chat_id, e)
+    else:
+        try:
+            await send_taker_combined(notifier, chat_id, orders, mode, display_settings=ds)
+        except Exception as e:
+            logger.error("send_taker_to_user [%d] combined orders error: %s", chat_id, e)
+
+
+async def send_taker_combined(
+    notifier, chat_id: int, orders: list[Order], mode: str, display_settings: dict,
+) -> None:
+    """
+    Відправляє список тейкер-ордерів одним компактним повідомленням.
+    Це запобігає флуду та обмеженням Telegram (Too Many Requests).
+    """
+    is_buy = mode == "TAKER_BUY"
+    side_title = "📡 <b>АКТИВНІ ОРДЕРИ: КУПІВЛЯ (Taker)</b>" if is_buy else "📡 <b>АКТИВНІ ОРДЕРИ: ПРОДАЖ (Taker)</b>"
+    
+    total = len(orders)
+    top_count = min(total, 5)  # покажемо топ-5 для компактності
+    
+    now = datetime.now()
+    text = (
+        f"{side_title}\n"
+        f"⏱ {now.strftime('%H:%M:%S')} | Всього знайдено: <b>{total}</b> шт.\n"
+        f"Показано топ-{top_count} найвигідніших:\n\n"
+    )
+    
+    kb: list[list[InlineKeyboardButton]] = []
+    
+    for idx, order in enumerate(orders[:top_count], start=1):
+        icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
+        
+        # ── Refresh LLM verdict from DB ──
+        llm_rec = "PENDING"
+        llm_reason = ""
+        if notifier._db:
+            try:
+                rec, _, reason, _, _ = await notifier._db.get_trade_recommendation_full(
+                    order.exchange, order.merchant_id,
+                )
+                llm_rec = rec
+                llm_reason = reason
+            except Exception:
+                pass
+                
+        # Badge для вердикту
+        rec_str = rec_badge(llm_rec)
+        
+        # Форматуємо банки
+        banks = _format_bank_list(order.bank_codes)
+        
+        # Посилання на мерчанта
+        merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name, side="buy" if is_buy else "sell")
+        verified = _verified_badge(order)
+        
+        text += (
+            f"<b>{idx}. {icon} {order.exchange}</b> | <b>{escape(str(order.price))} ₴</b>\n"
+            f"   👤 {rec_str} {merchant_link}{verified} ({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
+            f"   🏦 Банки: <code>{banks}</code>\n"
+            f"   💵 Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code> ({float(order.available_amount):.1f} USDT)\n"
+        )
+        if llm_reason and display_settings.get("show_ai_logic", True):
+            reason_short = llm_reason[:120] + "..." if len(llm_reason) > 120 else llm_reason
+            text += f"   🧠 <i>{escape(reason_short)}</i>\n"
+        text += "\n"
+        
+        # Кнопки для взяття цього ордеру
+        ad_id = getattr(order, "ad_id", getattr(order, "order_id", order.id))
+        if ad_id and llm_rec != "REJECT":
+            if hasattr(notifier, "_taker_cache") and notifier._taker_cache is not None:
+                cache_key = f"tk_{ad_id[:12]}_{int(time.time()) % 10000}_{idx}"
+                notifier._taker_cache.set(cache_key, {
+                    "ad_id": str(ad_id),
+                    "exchange": order.exchange,
+                    "price": float(order.price),
+                    "merchant_id": order.merchant_id,
+                    "min_limit": float(order.min_limit),
+                    "max_limit": float(order.max_limit),
+                    "bank": (order.bank_codes[0] if order.bank_codes else ""),
+                    "direction": "b" if is_buy else "s",
+                    "action": "BUY" if is_buy else "SELL",
+                    "ts": time.time(),
+                })
+                action_label = "Купити" if is_buy else "Продати"
+                kb.append([InlineKeyboardButton(
+                    text=f"⚡ {idx}. {action_label} ({order.exchange} {order.price})",
+                    callback_data=f"taker:take:{cache_key}",
+                )])
+                
+    # ── Додаємо картковий блок для топ-1 ордера ──
+    card_text_combined = ""
+    if display_settings.get("show_card_recommendation", True) and getattr(notifier, "card_notifier", None):
+        card_settings = await notifier._db.get_user_card_settings(chat_id) or {}
+        if card_settings.get("enable_in_single_modes") and orders:
+            best_order = orders[0]
+            bank_code = best_order.bank_codes[0] if best_order.bank_codes else ""
+            card_bank = _bank_code_to_db(bank_code)
+            card_direction = "buy" if is_buy else "sell"
+            best_ad_id = getattr(best_order, "ad_id", getattr(best_order, "order_id", best_order.id))
+            card_text, _, _ = await notifier.card_notifier.get_card_block(
+                chat_id=chat_id,
+                target_amount=float(best_order.min_limit),
+                direction=card_direction,
+                bank=card_bank,
+                order_id=str(best_ad_id) if best_ad_id else "",
+            )
+            if card_text:
+                card_text_combined = card_text
+                
+    if card_text_combined:
+        text += (
+            f"💳 <b>Рекомендована картка під топ-1 ордер:</b>\n"
+            f"{card_text_combined}"
+        )
+        
+    await notifier._send_with_retry(
+        text,
+        keyboard=InlineKeyboardMarkup(inline_keyboard=kb) if kb else None,
+        chat_id=chat_id,
+    )
 
 
 async def send_taker_single(
@@ -255,12 +374,11 @@ async def send_taker_single(
             edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
             if edited_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_msg_id,
                         text=chunk,
-                        reply_markup=main_keyboard if i == 0 else None,
-                        disable_web_page_preview=True,
+                        keyboard=main_keyboard if i == 0 else None,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_msg_id)
                     if i == 0:
@@ -286,12 +404,11 @@ async def send_taker_single(
             edited_reply_msg_id = edit_message_ids[len(main_chunks)] if edit_message_ids and len(main_chunks) < len(edit_message_ids) else None
             if edited_reply_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_reply_msg_id,
                         text=reply_text,
-                        reply_markup=card_keyboard,
-                        disable_web_page_preview=True,
+                        keyboard=card_keyboard,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_reply_msg_id)
                 except Exception as ex:
@@ -314,12 +431,11 @@ async def send_taker_single(
             edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
             if edited_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_msg_id,
                         text=chunk,
-                        reply_markup=keyboard if i == 0 else None,
-                        disable_web_page_preview=True,
+                        keyboard=keyboard if i == 0 else None,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_msg_id)
                 except Exception as ex:

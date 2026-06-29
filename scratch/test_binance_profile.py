@@ -24,7 +24,7 @@ async def main():
     
     payload = {"advertiserNo": m_id, "page": 1, "rows": 1}
     
-    url = "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/user/profile-and-ads"
+    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads"
     
     async with AsyncSession(impersonate="chrome124") as session:
         print(f"Requesting Binance profile URL: {url}")

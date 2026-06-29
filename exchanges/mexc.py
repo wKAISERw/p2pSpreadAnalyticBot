@@ -75,7 +75,7 @@ class MexcExchange(BaseExchange):
             exchange="MEXC",
             link=f"https://www.mexc.com/uk-UA/buy-crypto/merchant?id={user_id}",
             bank_codes=[bank_code],
-            trade_terms=str(item.get("remark", "") or "").strip().lower(),
+            trade_terms=str(item.get("tradeTerms") or item.get("remark") or "").strip().lower(),
             is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),
             last_online_mins=last_online_mins,
         )

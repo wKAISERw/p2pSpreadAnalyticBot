@@ -616,6 +616,9 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")  # Деталі банків (спойлер)
         await self._ensure_column("scanner_users", "is_hybrid_routes_enabled",
                                   "INTEGER DEFAULT 0")  # Підтримка кнопок T-M та M-T
+        await self._ensure_column("scanner_users", "alert_cooldown", "REAL DEFAULT -1.0")  # Затримка алертів (AUTO = -1.0)
+        await self._ensure_column("scanner_users", "group_active_alerts", "INTEGER DEFAULT 1")  # Групування команди /active
+        await self._ensure_column("scanner_users", "auto_cooldown_json", "TEXT DEFAULT '{}'")  # Налаштування автоматичного кд (JSON)
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")

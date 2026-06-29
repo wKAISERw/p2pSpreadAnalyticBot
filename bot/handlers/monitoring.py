@@ -299,8 +299,21 @@ async def cmd_trades(message: Message) -> None:
 
 
 # ── /active (ПОКАЗАТИ ВСІ ПОТОЧНІ СПРЕДИ) ──────────────────────────────────
+_active_cooldowns: dict[int, float] = {}
+
 @router.message(Command("active"))
 async def cmd_active(message: Message) -> None:
+    import time
+    now_ts = time.time()
+    user_id = message.from_user.id
+    last_ts = _active_cooldowns.get(user_id, 0.0)
+    if now_ts - last_ts < 5.0:
+        await message.answer(
+            "⏳ <b>Занадто часто!</b> Будь ласка, зачекайте 5 секунд перед наступним викликом /active."
+        )
+        return
+    _active_cooldowns[user_id] = now_ts
+
     from state import state as app_state
     from copy import copy
     from config.defaults import MIN_ORDERS as _DEF_ORDERS, MIN_COMPLETION as _DEF_RATE
@@ -370,6 +383,39 @@ async def cmd_active(message: Message) -> None:
         if user:
             mode = user.get("scanner_mode", "SPREAD")
 
+    if mode in ("TAKER_BUY", "TAKER_SELL"):
+        if not _notifier:
+            return await message.answer("❌ Нотифікатор не ініціалізований.")
+        last_buy = getattr(app_state, "last_buy_grouped", {})
+        last_sell = getattr(app_state, "last_sell_grouped", {})
+        if not last_buy and not last_sell:
+            return await message.answer(
+                "📭 <b>Сканер ще не зібрав дані стаканів.</b>\n\nЗачекайте кілька секунд і спробуйте знову."
+            )
+
+        from core.engine.taker_scanner import TakerScanner
+        user_full = await _db.get_user_by_id(message.from_user.id)
+        if not user_full:
+            return await message.answer("❌ Не вдалося завантажити ваші налаштування з БД.")
+
+        taker_scanner = TakerScanner(_db)
+        t_orders = await taker_scanner.find_orders_for_user(user_full, last_buy, last_sell)
+        
+        if not t_orders:
+            return await message.answer(
+                f"📭 <b>Немає активних ордерів для режиму {mode}</b>\n\n"
+                "Сканер працює, але наразі немає пропозицій, що відповідають вашим фільтрам (сума, банки, ціна тощо)."
+            )
+
+        count = min(len(t_orders), 10)
+        await message.answer(
+            f"📡 <b>АКТИВНІ ОРДЕРИ ({mode}): {len(t_orders)} шт.</b>\n"
+            f"Відправляю топ-{count}..."
+        )
+
+        await _notifier.send_taker_to_user(message.chat.id, t_orders, mode)
+        return
+
     if mode != "SPREAD":
         return await message.answer(
             f"🔄 <b>Твій поточний режим: {mode}</b>\n\n"
@@ -401,9 +447,12 @@ async def cmd_active(message: Message) -> None:
     )
 
     sent = 0
-    for a in sorted_alerts[:count]:
-        try:
-            # 🔄 Re-fetch LLM verdicts from DB (можуть бути оновлені після створення алерту)
+    display_settings = await _db.get_user_display_settings(chat_id) if _db else {}
+    group_active = display_settings.get("group_active_alerts", True)
+
+    if group_active and len(sorted_alerts) > 1:
+        batch_to_send = []
+        for a in sorted_alerts[:count]:
             fresh = copy(a)
             if _db:
                 b_rec, _, b_reason, _, _ = await _db.get_trade_recommendation_full(
@@ -417,17 +466,47 @@ async def cmd_active(message: Message) -> None:
                 fresh.buy_reason = b_reason
                 fresh.sell_reason = s_reason
 
-            if user and _db:
                 from core.engine.alert_dispatcher import AlertDispatcher
                 chosen_buy, chosen_sell = await AlertDispatcher.adapt_alert_for_user(_db, user, fresh)
                 fresh.buy_bank = chosen_buy
                 fresh.sell_bank = chosen_sell
+            batch_to_send.append(fresh)
 
-            await _notifier.send_to_user(chat_id, fresh)
-            sent += 1
+        try:
+            await _notifier.send_batch_to_user(chat_id, batch_to_send)
+            sent = len(batch_to_send)
         except Exception as e:
-            logger.error("cmd_active send error: %s", e)
-            break
+            logger.error("cmd_active send_batch error: %s", e)
+            await message.answer("⚠️ Помилка при відправці списку активних спредів.")
+            return
+    else:
+        for a in sorted_alerts[:count]:
+            try:
+                # 🔄 Re-fetch LLM verdicts from DB (можуть бути оновлені після створення алерту)
+                fresh = copy(a)
+                if _db:
+                    b_rec, _, b_reason, _, _ = await _db.get_trade_recommendation_full(
+                        a.buy_order.exchange, a.buy_order.merchant_id
+                    )
+                    s_rec, _, s_reason, _, _ = await _db.get_trade_recommendation_full(
+                        a.sell_order.exchange, a.sell_order.merchant_id
+                    )
+                    fresh.buy_rec = b_rec
+                    fresh.sell_rec = s_rec
+                    fresh.buy_reason = b_reason
+                    fresh.sell_reason = s_reason
+
+                if user and _db:
+                    from core.engine.alert_dispatcher import AlertDispatcher
+                    chosen_buy, chosen_sell = await AlertDispatcher.adapt_alert_for_user(_db, user, fresh)
+                    fresh.buy_bank = chosen_buy
+                    fresh.sell_bank = chosen_sell
+
+                await _notifier.send_to_user(chat_id, fresh)
+                sent += 1
+            except Exception as e:
+                logger.error("cmd_active send error: %s", e)
+                break
 
     if sent < count:
         await message.answer(f"⚠️ Відправлено {sent}/{count} (помилка при відправці)")

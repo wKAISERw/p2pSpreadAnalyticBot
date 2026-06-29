@@ -39,6 +39,15 @@ class TelegramNotifier:
         self._router = Router()
         self._dp.include_router(self._router)
         self._dp.include_router(bot_commands.router)
+
+        # Register global error handler to suppress rate limit tracebacks
+        @self._dp.errors()
+        async def global_error_handler(event):
+            if isinstance(event.exception, TelegramRetryAfter):
+                logger.warning("Telegram rate limit hit: %s. Suppressing traceback.", event.exception)
+                return True
+            return False
+
         self._db: MerchantDB | None = None
 
         # Single-user: глобальний chat_id з settings
@@ -51,6 +60,10 @@ class TelegramNotifier:
         self._worker_task: asyncio.Task | None = None
         self._polling_task: asyncio.Task | None = None
         self._redraw_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._last_send_time: dict[int, float] = {}
+        self._sent_timestamps: dict[int, list[float]] = {}
+        self._last_flood_warning_time: dict[int, float] = {}
+        self._display_settings_cache: dict[int, tuple[dict, float]] = {}
 
     def bind_db(self, db: MerchantDB):
         """Зв'язує нотифікатор з базою даних для обробки ручних скарг."""
@@ -63,19 +76,42 @@ class TelegramNotifier:
         self._taker_cache = bot_commands._taker_order_cache
 
     async def _get_display_settings(self, chat_id: int) -> dict:
+        now = asyncio.get_event_loop().time()
+        if chat_id in self._display_settings_cache:
+            cached_val, cached_time = self._display_settings_cache[chat_id]
+            if now - cached_time < 5.0:  # Кеш на 5 секунд
+                return cached_val
+
+        default_auto_cooldown = {
+            "window_seconds": 5.0,
+            "tiers": [
+                {"threshold": 10, "delay": 0.0},
+                {"threshold": 15, "delay": 0.3},
+                {"threshold": 20, "delay": 0.8},
+                {"threshold": 9999, "delay": 1.5}
+            ]
+        }
+        defaults = {
+            "show_ai_terms_summary": True, "show_full_terms": True,
+            "show_ai_logic": True, "show_bank_details": True,
+            "show_llm_summary": True, "show_card_recommendation": True,
+            "alert_cooldown": -1.0, "group_active_alerts": True,
+            "auto_cooldown_json": default_auto_cooldown
+        }
+
         if not self._db:
-            return {
-                "show_ai_terms_summary": True, "show_full_terms": True,
-                "show_ai_logic": True, "show_bank_details": True,
-                "show_llm_summary": True, "show_card_recommendation": True
-            }
+            return defaults
+        
         settings_dict = await self._db.get_user_display_settings(chat_id)
         if not settings_dict:
-            return {
-                "show_ai_terms_summary": True, "show_full_terms": True,
-                "show_ai_logic": True, "show_bank_details": True,
-                "show_llm_summary": True, "show_card_recommendation": True
-            }
+            settings_dict = defaults
+        else:
+            # Переконуємось, що всі нові ключі існують
+            for k, v in defaults.items():
+                if k not in settings_dict:
+                    settings_dict[k] = v
+        
+        self._display_settings_cache[chat_id] = (settings_dict, now)
         return settings_dict
 
     @staticmethod
@@ -491,6 +527,72 @@ class TelegramNotifier:
                 break
         return batch
 
+    async def _apply_throttling(self, chat_id: int) -> None:
+        """
+        Застосовує затримку (cooldown) перед відправкою повідомлення користувачу.
+        У режимі AUTO розраховує динамічний кд за 5-секундним ковзним вікном.
+        """
+        if not chat_id:
+            return
+        
+        display = await self._get_display_settings(chat_id)
+        alert_cooldown = float(display.get("alert_cooldown", -1.0))
+        
+        now = asyncio.get_event_loop().time()
+        
+        # Визначаємо затримку
+        if alert_cooldown < 0.0:  # АВТО режим
+            auto_config = display.get("auto_cooldown_json") or {}
+            window_sec = float(auto_config.get("window_seconds", 5.0))
+            tiers = auto_config.get("tiers", [])
+            
+            # Очищуємо старі таймстемпи
+            timestamps = self._sent_timestamps.setdefault(chat_id, [])
+            while timestamps and now - timestamps[0] > window_sec:
+                timestamps.pop(0)
+            
+            sent_count = len(timestamps)
+            
+            # Визначаємо затримку відповідно до порогів
+            cooldown = 0.0
+            if tiers:
+                # tiers сортовані за зростанням threshold
+                sorted_tiers = sorted(tiers, key=lambda t: t.get("threshold", 9999))
+                for t in sorted_tiers:
+                    if sent_count < t.get("threshold", 9999):
+                        cooldown = float(t.get("delay", 0.0))
+                        break
+            else:
+                # Дефолтна логіка: <10 -> 0.0, 10-15 -> 0.3, 15-20 -> 0.8, >=20 -> 1.5
+                if sent_count < 10:
+                    cooldown = 0.0
+                elif sent_count < 15:
+                    cooldown = 0.3
+                elif sent_count < 20:
+                    cooldown = 0.8
+                else:
+                    cooldown = 1.5
+        else:
+            cooldown = alert_cooldown
+            
+        if cooldown > 0.0:
+            last_time = self._last_send_time.get(chat_id, 0.0)
+            elapsed = now - last_time
+            if elapsed < cooldown:
+                await asyncio.sleep(cooldown - elapsed)
+
+    def _record_sent_timestamp(self, chat_id: int) -> None:
+        if not chat_id:
+            return
+        now = asyncio.get_event_loop().time()
+        self._last_send_time[chat_id] = now
+        self._sent_timestamps.setdefault(chat_id, []).append(now)
+
+    async def send_batch_to_user(self, chat_id: int, batch: list[SpreadAlert]) -> None:
+        """Відправляє батч алертів конкретному користувачу."""
+        from bot.alert_builder import send_batch
+        await send_batch(self, batch, chat_id=chat_id)
+
     async def _send_with_retry(
             self,
             text: str,
@@ -503,6 +605,7 @@ class TelegramNotifier:
         target_chat = chat_id or self._chat_id
         for attempt in range(max_attempts):
             try:
+                await self._apply_throttling(target_chat)
                 msg = await self._bot.send_message(
                     chat_id=target_chat,
                     text=text,
@@ -512,11 +615,81 @@ class TelegramNotifier:
                     reply_to_message_id=reply_to_message_id,
                 )
                 logger.debug("✅ TG sent → chat_id=%s (len=%d)", target_chat, len(text))
+                self._record_sent_timestamp(target_chat)
                 return msg
             except TelegramRetryAfter as e:
+                logger.warning("⚠️ TG Send Flood. Sleeping for %.1fs", e.retry_after)
                 await asyncio.sleep(e.retry_after + 0.5)
+                self._last_send_time[target_chat] = asyncio.get_event_loop().time()
+                
+                # Сповіщення про флуд-ліміт (не частіше раз на хвилину)
+                now = asyncio.get_event_loop().time()
+                last_warn = self._last_flood_warning_time.get(target_chat, 0.0)
+                if now - last_warn > 60.0:
+                    self._last_flood_warning_time[target_chat] = now
+                    try:
+                        warning_text = (
+                            f"⚠️ <b>Увага! Бот отримав обмеження флуду від Telegram (429).</b>\n\n"
+                            f"Через занадто різкий пік повідомлень відправку призупинено на <b>{e.retry_after:.1f} сек</b>.\n\n"
+                            f"💡 <b>Порада:</b> Ви можете скоригувати параметри авто-затримки:\n"
+                            f"⚙️ <code>/settings</code> ➔ 🎛 <b>Фільтри</b> ➔ 🖥 <b>Налаштування виводу</b> ➔ ⏱ <b>Авто-затримка</b>"
+                        )
+                        await self._bot.send_message(chat_id=target_chat, text=warning_text)
+                    except Exception as warn_err:
+                        logger.error("Failed to send flood warning message: %s", warn_err)
             except Exception as e:
                 logger.error("Помилка відправки в Telegram: %s", e)
+                if attempt == max_attempts - 1:
+                    raise
+                await asyncio.sleep(2.0)
+
+    async def _edit_with_retry(
+            self,
+            message_id: int,
+            text: str,
+            keyboard: InlineKeyboardMarkup | None = None,
+            max_attempts: int = 3,
+            chat_id: int | None = None,
+    ):
+        target_chat = chat_id or self._chat_id
+        for attempt in range(max_attempts):
+            try:
+                await self._apply_throttling(target_chat)
+                msg = await self._bot.edit_message_text(
+                    chat_id=target_chat,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True,
+                )
+                logger.debug("✅ TG edited → chat_id=%s msg_id=%d", target_chat, message_id)
+                self._record_sent_timestamp(target_chat)
+                return msg
+            except TelegramRetryAfter as e:
+                logger.warning("⚠️ TG Edit Flood. Sleeping for %.1fs", e.retry_after)
+                await asyncio.sleep(e.retry_after + 0.5)
+                self._last_send_time[target_chat] = asyncio.get_event_loop().time()
+                
+                # Сповіщення про флуд-ліміт (не частіше раз на хвилину)
+                now = asyncio.get_event_loop().time()
+                last_warn = self._last_flood_warning_time.get(target_chat, 0.0)
+                if now - last_warn > 60.0:
+                    self._last_flood_warning_time[target_chat] = now
+                    try:
+                        warning_text = (
+                            f"⚠️ <b>Увага! Бот отримав обмеження флуду від Telegram (429).</b>\n\n"
+                            f"Через занадто різкий пік повідомлень відправку призупинено на <b>{e.retry_after:.1f} сек</b>.\n\n"
+                            f"💡 <b>Порада:</b> Ви можете скоригувати параметри авто-затримки:\n"
+                            f"⚙️ <code>/settings</code> ➔ 🎛 <b>Фільтри</b> ➔ 🖥 <b>Налаштування виводу</b> ➔ ⏱ <b>Авто-затримка</b>"
+                        )
+                        await self._bot.send_message(chat_id=target_chat, text=warning_text)
+                    except Exception as warn_err:
+                        logger.error("Failed to send flood warning message: %s", warn_err)
+            except Exception as e:
+                if "message is not modified" in str(e):
+                    logger.debug("ℹ️ TG Edit: Message is not modified. Ignoring.")
+                    return None
+                logger.error("Помилка редагування в Telegram (attempt %d): %s", attempt, e)
                 if attempt == max_attempts - 1:
                     raise
                 await asyncio.sleep(2.0)

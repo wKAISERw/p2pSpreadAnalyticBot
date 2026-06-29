@@ -175,17 +175,32 @@ class SessionManager:
                         context = await p.chromium.launch_persistent_context(
                             user_data_dir=str(user_data_dir),
                             headless=headless,
+                            channel="chrome",
+                            ignore_default_args=["--enable-automation"],
                             args=[
                                 "--disable-blink-features=AutomationControlled",
                                 "--disable-http2",
                                 "--window-size=1280,720",
                             ],
                         )
-                    except Exception as launch_err:
-                        if not headless:
-                            logger.error(f"Failed to launch headed browser: {launch_err}")
-                            raise Exception("Відсутній графічний дисплей на сервері (VPS). Будь ласка, скористайтеся Bookmarklet-скриптом для оновлення сесії з телефона/ПК.")
-                        raise launch_err
+                    except Exception as chrome_err:
+                        logger.info(f"Failed to launch Chrome channel: {chrome_err}. Falling back to default Chromium.")
+                        try:
+                            context = await p.chromium.launch_persistent_context(
+                                user_data_dir=str(user_data_dir),
+                                headless=headless,
+                                ignore_default_args=["--enable-automation"],
+                                args=[
+                                    "--disable-blink-features=AutomationControlled",
+                                    "--disable-http2",
+                                    "--window-size=1280,720",
+                                ],
+                            )
+                        except Exception as launch_err:
+                            if not headless:
+                                logger.error(f"Failed to launch headed browser: {launch_err}")
+                                raise Exception("Відсутній графічний дисплей на сервері (VPS). Будь ласка, скористайтеся Bookmarklet-скриптом для оновлення сесії з телефона/ПК.")
+                            raise launch_err
 
                     stealth_plugin = Stealth()
                     await stealth_plugin.apply_stealth_async(context)
@@ -284,8 +299,25 @@ class SessionManager:
                             # 🚀 ДОДАНО: Даємо сторінці (SPA) час на стабілізацію та рендер JS
                             if exchange == "Binance":
                                 await page.wait_for_timeout(7000)
+                                # 🚀 ДОДАНО: Примусово тригеримо fetch() у контексті сторінки для миттєвого перехоплення
+                                await page.evaluate('''() => {
+                                    fetch('https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ userNo: 's95b25fd3a5113bb0a054393e4289a471', rating: 3, page: 1, rows: 10 })
+                                    }).catch(() => {});
+                                }''')
                             else:
                                 await page.wait_for_timeout(6000)  # Даємо 6 секунд на рендер JS (до 4 сек на OKX)
+                                if exchange == "OKX":
+                                    # 🚀 ДОДАНО: Примусово тригеримо fetch() у контексті сторінки для миттєвого перехоплення
+                                    await page.evaluate('''() => {
+                                        fetch('https://www.okx.com/v3/c2c/review/history', {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ currentPage: 1, hasComment: false, pageSize: 10, reviewFromBuyer: true, reviewScoreType: "", pubUserId: "0e37a42aca" })
+                                        }).catch(() => {});
+                                    }''')
 
                             # Щоб уникнути кліків по хлібних крихтах чи неробочих 'Span' –
                             # інжектимо JS, який знаходить УСІ елементи зі словом Відгуки/Отзывы і клікає їх
@@ -702,6 +734,8 @@ class SessionManager:
                         browser_context = await p.chromium.launch_persistent_context(
                             user_data_dir=str(user_data_dir),
                             headless=headless,
+                            channel="chrome",
+                            ignore_default_args=["--enable-automation"],
                             args=[
                                 "--disable-blink-features=AutomationControlled",
                                 "--disable-http2",
@@ -710,19 +744,43 @@ class SessionManager:
                         )
                     except Exception as launch_err:
                         if not headless:
-                            logger.info(f"Failed to launch headed context for {exchange}: {launch_err}. Retrying in headless mode...")
-                            headless = True
+                            logger.info(f"Failed to launch headed context with Chrome: {launch_err}. Retrying with Chromium...")
+                            try:
+                                browser_context = await p.chromium.launch_persistent_context(
+                                    user_data_dir=str(user_data_dir),
+                                    headless=headless,
+                                    ignore_default_args=["--enable-automation"],
+                                    args=[
+                                        "--disable-blink-features=AutomationControlled",
+                                        "--disable-http2",
+                                        "--window-size=1280,800",
+                                    ]
+                                )
+                            except Exception as fallback_err:
+                                logger.info(f"Failed to launch Chromium headed: {fallback_err}. Retrying in headless mode...")
+                                headless = True
+                                browser_context = await p.chromium.launch_persistent_context(
+                                    user_data_dir=str(user_data_dir),
+                                    headless=headless,
+                                    ignore_default_args=["--enable-automation"],
+                                    args=[
+                                        "--disable-blink-features=AutomationControlled",
+                                        "--disable-http2",
+                                        "--window-size=1280,800",
+                                    ]
+                                )
+                        else:
+                            logger.info(f"Failed headless Chrome launch: {launch_err}. Retrying headless Chromium...")
                             browser_context = await p.chromium.launch_persistent_context(
                                 user_data_dir=str(user_data_dir),
                                 headless=headless,
+                                ignore_default_args=["--enable-automation"],
                                 args=[
                                     "--disable-blink-features=AutomationControlled",
                                     "--disable-http2",
                                     "--window-size=1280,800",
                                 ]
                             )
-                        else:
-                            raise launch_err
                     
                     # Записуємо контекст в сесію для можливості примусового закриття
                     if session_key in self._active_qr_sessions:
@@ -1249,8 +1307,25 @@ class SessionManager:
                         # Даємо сторінці час на стабілізацію та рендер JS (не для Bybit — там вже чекали вище)
                         if exchange == "Binance":
                             await page.wait_for_timeout(7000)
+                            # 🚀 ДОДАНО: Примусово тригеримо fetch() у контексті сторінки для миттєвого перехоплення
+                            await page.evaluate('''() => {
+                                fetch('https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/review/list-by-page', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ userNo: 's95b25fd3a5113bb0a054393e4289a471', rating: 3, page: 1, rows: 10 })
+                                }).catch(() => {});
+                            }''')
                         elif exchange != "Bybit":
                             await page.wait_for_timeout(6000)
+                            if exchange == "OKX":
+                                # 🚀 ДОДАНО: Примусово тригеримо fetch() у контексті сторінки для миттєвого перехоплення
+                                await page.evaluate('''() => {
+                                    fetch('https://www.okx.com/v3/c2c/review/history', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ currentPage: 1, hasComment: false, pageSize: 10, reviewFromBuyer: true, reviewScoreType: "", pubUserId: "0e37a42aca" })
+                                    }).catch(() => {});
+                                }''')
                             
                         # Очікуємо перехоплення API-запиту (до 25 сек) з періодичним кліком по відгуках та перевіркою редиректів
                         logger.info(f"Waiting for request capture on P2P profile for {exchange}...")

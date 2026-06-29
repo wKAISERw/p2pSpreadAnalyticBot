@@ -29,6 +29,7 @@ async def process_taker_path(
     taker_scanner,
     taker_dedup,
     notifier,
+    risk_engine=None,
 ) -> None:
     """Тейкер-шлях: алерти для TAKER_BUY / TAKER_SELL юзерів."""
     if not active_users or is_muted():
@@ -54,6 +55,12 @@ async def process_taker_path(
                     taker_dedup.mark(dk)
                     fresh.append(o)
             if fresh:
+                if risk_engine:
+                    try:
+                        await risk_engine.analyze_batch_async(fresh)
+                    except Exception as re_err:
+                        logger.error("Error analyzing Taker orders in RiskEngine: %s", re_err)
+
                 logger.info(
                     "📤 Taker dispatch → user %s | %s | %d ордерів",
                     t_user["user_id"], t_mode, len(fresh),

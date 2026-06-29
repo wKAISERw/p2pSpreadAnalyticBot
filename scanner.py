@@ -317,8 +317,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     dispatcher = AlertDispatcher(merchant_db, notifier)
     taker_scanner = TakerScanner(merchant_db)
     taker_dedup = TTLCache(
-        ttl_seconds=getattr(settings, "taker_dedup_ttl", 90.0),
-        max_size=500,
+        ttl_seconds=getattr(settings, "taker_dedup_ttl", 43200.0),  # 12 hours default to prevent flood
+        max_size=1000,
     )
     maker_dedup = TTLCache(
         ttl_seconds=getattr(settings, "maker_dedup_ttl", 300.0),  # 5 хвилин
@@ -662,6 +662,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     if _to_analyze:
                         await risk_engine.analyze_for_spread(_to_analyze)
 
+                    alerts_to_dispatch = []
                     for opp in opportunities:
                         buy_o = opp["buy_order"]
                         sell_o = opp["sell_order"]
@@ -827,18 +828,22 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         if not is_muted():
                             if runtime_config.get("show_spread_logs", "true") == "true":
-                                logger.info("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
+                                logger.info("📤 Додано в dispatch-батч алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
                             else:
-                                logger.debug("📤 Dispatch алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
-                            # Fire-and-forget з логуванням помилок
-                            task = asyncio.create_task(dispatcher.dispatch(alert, opp))
-                            task.add_done_callback(
-                                lambda t: logger.error("💥 dispatch task error: %s", t.exception()) if t.exception() else None
-                            )
+                                logger.debug("📤 Додано в dispatch-батч алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
+                            alerts_to_dispatch.append((alert, opp))
                         else:
                             logger.debug("⏭ Скіп: muted")
+                    
+                    if alerts_to_dispatch:
+                        task = asyncio.create_task(dispatcher.dispatch_batch(alerts_to_dispatch))
+                        task.add_done_callback(
+                            lambda t: logger.error("💥 dispatch_batch task error: %s", t.exception()) if t.exception() else None
+                        )
                     state.opportunities = current_frontend_opps[:50]
                     state.current_alerts = current_cycle_alerts[:50]
+                    state.last_buy_grouped = buy_grouped
+                    state.last_sell_grouped = sell_grouped
 
                     # ── Тейкер-шлях: алерти для TAKER_BUY / TAKER_SELL юзерів ──
                     await process_taker_path(
@@ -848,6 +853,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         taker_scanner,
                         taker_dedup,
                         notifier,
+                        risk_engine=risk_engine,
                     )
 
                     # ── Мейкер-шлях: підказки для MAKER_BUY / MAKER_SELL юзерів ──

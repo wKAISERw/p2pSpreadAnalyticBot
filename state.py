@@ -25,6 +25,8 @@ class AppState:
 
         self.opportunities = []
         self.current_alerts = []      # SpreadAlert objects for /active command
+        self.last_buy_grouped = {}
+        self.last_sell_grouped = {}
         self.logs = []
         self.blacklist = []
 

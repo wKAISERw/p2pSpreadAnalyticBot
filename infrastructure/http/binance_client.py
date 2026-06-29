@@ -61,6 +61,37 @@ class BinanceClient(BaseHttpClient):
         params["signature"] = signature
         return params
 
+    async def _get(self, url: str, **kwargs) -> Any:
+        """🚀 ВЛАСНА БРОНЯ BINANCE: Захист від зміни форматів та перевірка токенів для GET."""
+        try:
+            data = await super()._get(url, **kwargs)
+
+            # Якщо повернув голий масив
+            if isinstance(data, list):
+                return data
+            if not isinstance(data, dict):
+                return {}
+
+            # Перевірка на помилки сесії Binance
+            code = str(data.get("code", ""))
+            if code in ("000004", "000008", "401") or "Unauthorized" in str(data):
+                raise RuntimeError(f"AuthError: Token expired. {data}")
+            if code and code not in ("000000", "0"):
+                raise RuntimeError(f"ApiError: code={code}, message={data.get('message', '')}")
+
+            # Розумне розгортання "data"
+            result = data.get("data")
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, list):
+                return result
+            return {}
+
+        except Exception as e:
+            if "AuthError" in str(e):
+                raise  # Прокидаємо вище для SessionManager/ReviewFetcher
+            raise RuntimeError(f"ApiError: {e}")
+
     async def _post(self, url: str, **kwargs) -> Any:
         """🚀 ВЛАСНА БРОНЯ BINANCE: Захист від зміни форматів та перевірка токенів."""
         try:
@@ -129,24 +160,20 @@ class BinanceClient(BaseHttpClient):
         logger.debug("All Binance fetch endpoints failed. Last error: %s", last_exc)
         return {"code": "000000", "data": []}
 
-    async def fetch_merchant_profile(self, merchant_id: str) -> dict:
-        """Повний профіль мерчанта + 🚀 ФОЛБЕК."""
-        if not self.is_authenticated:
-            return {}
-
-        payload = {"advertiserNo": merchant_id, "page": 1, "rows": 1}
-        endpoints = [
-            "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads",
-            "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/user/profile-and-ads"
-        ]
-
-        for url in endpoints:
-            try:
-                data = await self._post(url, json=payload)
-                if isinstance(data, dict) and data:
-                    return data
-            except Exception as e:
-                logger.debug("fetch_merchant_profile URL %s [%s]: %s", url, merchant_id, e)
+    async def fetch_merchant_profile(self, merchant_id: str, session_headers: dict = None,
+                                     session_cookies: dict = None) -> dict:
+        """Повний профіль мерчанта (ads list)."""
+        url = f"https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/user/profile-and-ads-list?userNo={merchant_id}"
+        req_headers = dict(session_headers) if session_headers else {}
+        if req_headers:
+            req_headers.pop("Content-Length", None)
+            req_headers.pop("Accept-Encoding", None)
+        try:
+            data = await self._get(url, headers=req_headers if req_headers else None, cookies=session_cookies)
+            if isinstance(data, dict) and data:
+                return data
+        except Exception as e:
+            logger.debug("fetch_merchant_profile URL %s [%s]: %s", url, merchant_id, e)
         return {}
 
     async def fetch_negative_reviews(self, merchant_id: str, rows: int = 10, session_headers: dict = None,

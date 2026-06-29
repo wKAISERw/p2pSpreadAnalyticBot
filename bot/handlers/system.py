@@ -365,8 +365,8 @@ async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
     exchange = call.data.split(":")[1]
     user_id = call.from_user.id
 
-    # Визначаємо хост. Поки бекенд без домену, використовуємо ngrok або локалку.
-    domain = "http://192.168.1.100:8000"  # TODO: replace with config domain or env bot IP
+    # Визначаємо хост. Використовуємо public_url з .env, або override з БД, або локалку.
+    domain = getattr(settings, "public_url", None) or "http://192.168.1.100:8000"
     domain = runtime_config.get("api_domain", domain)
 
     js_code = f"""javascript:(function(){{

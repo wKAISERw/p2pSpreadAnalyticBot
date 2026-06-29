@@ -178,6 +178,10 @@ class QRStates(StatesGroup):
     waiting_for_code = State()
 
 
+class SessionStates(StatesGroup):
+    waiting_for_cookies = State()
+
+
 class SettingStates(StatesGroup):
     waiting_capital = State()
     waiting_min_amount = State()

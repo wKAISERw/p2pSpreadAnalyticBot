@@ -362,12 +362,122 @@ class UserRepo:
             logger.error("get_active_users: %s", e)
             return []
 
+    async def get_user_by_id(self, user_id: int) -> dict | None:
+        """Повертає параметри конкретного підписника за його user_id."""
+        if not self._db:
+            return None
+        try:
+            async with self._db.execute(
+                    """SELECT user_id,
+                              telegram_chat_id,
+                              working_capital,
+                              COALESCE(capital_mode, 'manual')              as capital_mode,
+                              COALESCE(min_amount_uah, 0.0)                  as min_amount_uah,
+                               min_spread_pct,
+                               COALESCE(spread_strategy, 'min')              as spread_strategy,
+                               COALESCE(max_spread_pct, 0.0)                  as max_spread_pct,
+                              bank_codes,
+                              COALESCE(buy_bank_codes, '')                   as buy_bank_codes,
+                              COALESCE(sell_bank_codes, '')                  as sell_bank_codes,
+                              COALESCE(merchant_filters_json, '{}')          as merchant_filters_json,
+                              COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
+                              COALESCE(is_alerts_active, 1)                  as is_alerts_active,
+                              COALESCE(scanner_mode, 'SPREAD')               as scanner_mode,
+                              COALESCE(price_range_json, '{}')               as price_range_json,
+                              COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
+                              COALESCE(target_margin, 0.005)                 as target_margin,
+                              COALESCE(sniper_rules, '[]')                   as sniper_rules,
+                              COALESCE(sniper_rules, '')             AS sniper_rules,
+                            -- ── TAKER SELL ────────────────────────────────────────
+                              COALESCE(taker_sell_amount, 0.0)       AS taker_sell_amount,
+                              COALESCE(taker_sell_price, 0.0)        AS taker_sell_price,
+                              COALESCE(taker_sell_exchange, '')      AS taker_sell_exchange,
+                              COALESCE(taker_sell_profit, 0.0)       AS taker_sell_profit,
+                              COALESCE(taker_sell_min_price, 0.0)    AS taker_sell_min_price,
+                              COALESCE(taker_sell_speed, 'ANY')      AS taker_sell_speed,
+                              COALESCE(taker_sell_price_strategy, 'roi') AS taker_sell_price_strategy,
+                              COALESCE(taker_sell_price_to, 0.0)     AS taker_sell_price_to,
+                             -- ── TAKER BUY ─────────────────────────────────────────
+                              COALESCE(taker_buy_amount, 0.0)        AS taker_buy_amount,
+                              COALESCE(taker_buy_max_price, 0.0)     AS taker_buy_max_price,
+                              COALESCE(taker_buy_limit_min, 0.0)     AS taker_buy_limit_min,
+                              COALESCE(taker_buy_limit_max, 0.0)     AS taker_buy_limit_max,
+                              COALESCE(taker_buy_speed, 'ANY')       AS taker_buy_speed,
+                              COALESCE(taker_buy_price_strategy, 'any') AS taker_buy_price_strategy,
+                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from
+                       FROM scanner_users
+                       WHERE user_id = ?""",
+                    (user_id,),
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return None
+            import json as _json
+            from config.banks import BANK_NAMES
+            valid_keys = set(BANK_NAMES.keys())
+            general_banks = [c for c in (row["bank_codes"].split(",") if row["bank_codes"] else []) if c in valid_keys]
+            buy_codes_raw = row["buy_bank_codes"].strip()
+            sell_codes_raw = row["sell_bank_codes"].strip()
+            # Fallback
+            buy_banks = [c for c in (buy_codes_raw.split(",") if buy_codes_raw else general_banks) if c in valid_keys]
+            sell_banks = [c for c in (sell_codes_raw.split(",") if sell_codes_raw else general_banks) if c in valid_keys]
+            return {
+                "user_id": row["user_id"],
+                "chat_id": row["telegram_chat_id"],
+                "capital": float(row["working_capital"]),
+                "capital_mode": row["capital_mode"] or "manual",
+                "min_amount": float(row["min_amount_uah"]),
+                "min_spread": float(row["min_spread_pct"]),
+                "max_spread": float(row["max_spread_pct"]),
+                "spread_strategy": row["spread_strategy"] or "min",
+                "bank_codes": general_banks,
+                "buy_bank_codes": buy_banks,
+                "sell_bank_codes": sell_banks,
+                "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
+                "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
+                "scanner_mode": row["scanner_mode"] or "SPREAD",
+                "price_range": _json.loads(row["price_range_json"] or "{}"),
+                "maker_buy_price": float(row["maker_buy_price"]),
+                "target_margin": float(row["target_margin"]),
+                "sniper_rules": _json.loads(row["sniper_rules"] or "[]"),
+                # ── TAKER SELL ────────────────────────────────────
+                "taker_sell_amount": float(row["taker_sell_amount"]),
+                "taker_sell_price": float(row["taker_sell_price"]),
+                "taker_sell_exchange": row["taker_sell_exchange"],
+                "taker_sell_profit": float(row["taker_sell_profit"]),
+                "taker_sell_min_price": float(row["taker_sell_min_price"]),
+                "taker_sell_speed": row["taker_sell_speed"],
+                "taker_sell_price_strategy": row["taker_sell_price_strategy"],
+                "taker_sell_price_to": float(row["taker_sell_price_to"]),
+                # ── TAKER BUY ─────────────────────────────────────
+                "taker_buy_amount": float(row["taker_buy_amount"]),
+                "taker_buy_max_price": float(row["taker_buy_max_price"]),
+                "taker_buy_limit_min": float(row["taker_buy_limit_min"]),
+                "taker_buy_limit_max": float(row["taker_buy_limit_max"]),
+                "taker_buy_speed": row["taker_buy_speed"],
+                "taker_buy_price_strategy": row["taker_buy_price_strategy"],
+                "taker_buy_price_from": float(row["taker_buy_price_from"]),
+            }
+        except Exception as e:
+            logger.error("get_user_by_id [%d]: %s", user_id, e)
+            return None
+
     async def get_user_display_settings(self, chat_id: int) -> dict:
         """
         Повертає per-user налаштування виводу повідомлень.
         Ключі: show_ai_terms_summary, show_full_terms, show_ai_logic,
-               show_bank_details, show_llm_summary
+               show_bank_details, show_llm_summary, alert_cooldown, group_active_alerts, auto_cooldown_json
         """
+        import json
+        default_auto_cooldown = {
+            "window_seconds": 5.0,
+            "tiers": [
+                {"threshold": 10, "delay": 0.0},
+                {"threshold": 15, "delay": 0.3},
+                {"threshold": 20, "delay": 0.8},
+                {"threshold": 9999, "delay": 1.5}
+            ]
+        }
         defaults = {
             "show_ai_terms_summary": True,
             "show_full_terms": True,
@@ -375,6 +485,9 @@ class UserRepo:
             "show_bank_details": True,
             "show_llm_summary": True,
             "is_hybrid_routes_enabled": False,
+            "alert_cooldown": -1.0,
+            "group_active_alerts": True,
+            "auto_cooldown_json": default_auto_cooldown,
         }
         if not self._db:
             return defaults
@@ -385,7 +498,10 @@ class UserRepo:
                               COALESCE(show_ai_logic, 1)            as show_ai_logic,
                               COALESCE(show_bank_details, 1)        as show_bank_details,
                               COALESCE(show_llm_summary, 1)         as show_llm_summary,
-                              COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled
+                              COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled,
+                              COALESCE(alert_cooldown, -1.0)        as alert_cooldown,
+                              COALESCE(group_active_alerts, 1)      as group_active_alerts,
+                              COALESCE(auto_cooldown_json, '{}')    as auto_cooldown_json
                        FROM scanner_users
                        WHERE telegram_chat_id = ?""",
                     (chat_id,),
@@ -393,9 +509,81 @@ class UserRepo:
                 row = await cur.fetchone()
             if not row:
                 return defaults
-            return {k: bool(row[k]) for k in defaults}
+
+            # Parse auto_cooldown_json
+            raw_json = row["auto_cooldown_json"]
+            try:
+                auto_cooldown = json.loads(raw_json) if raw_json and raw_json != "{}" else default_auto_cooldown
+                if not isinstance(auto_cooldown, dict) or "tiers" not in auto_cooldown:
+                    auto_cooldown = default_auto_cooldown
+            except Exception:
+                auto_cooldown = default_auto_cooldown
+
+            return {
+                "show_ai_terms_summary": bool(row["show_ai_terms_summary"]),
+                "show_full_terms": bool(row["show_full_terms"]),
+                "show_ai_logic": bool(row["show_ai_logic"]),
+                "show_bank_details": bool(row["show_bank_details"]),
+                "show_llm_summary": bool(row["show_llm_summary"]),
+                "is_hybrid_routes_enabled": bool(row["is_hybrid_routes_enabled"]),
+                "alert_cooldown": float(row["alert_cooldown"]),
+                "group_active_alerts": bool(row["group_active_alerts"]),
+                "auto_cooldown_json": auto_cooldown,
+            }
         except Exception:
             return defaults
+
+    async def update_user_display_settings(self, chat_id: int, settings_dict: dict) -> None:
+        """Оновлює per-user налаштування виводу повідомлень."""
+        if not self._db:
+            return
+        
+        show_ai_terms_summary = 1 if settings_dict.get("show_ai_terms_summary", True) else 0
+        show_full_terms = 1 if settings_dict.get("show_full_terms", True) else 0
+        show_ai_logic = 1 if settings_dict.get("show_ai_logic", True) else 0
+        show_bank_details = 1 if settings_dict.get("show_bank_details", True) else 0
+        show_llm_summary = 1 if settings_dict.get("show_llm_summary", True) else 0
+        is_hybrid_routes_enabled = 1 if settings_dict.get("is_hybrid_routes_enabled", False) else 0
+        alert_cooldown = float(settings_dict.get("alert_cooldown", -1.0))
+        group_active_alerts = 1 if settings_dict.get("group_active_alerts", True) else 0
+
+        await self._db.execute(
+            """UPDATE scanner_users
+               SET show_ai_terms_summary = ?,
+                   show_full_terms = ?,
+                   show_ai_logic = ?,
+                   show_bank_details = ?,
+                   show_llm_summary = ?,
+                   is_hybrid_routes_enabled = ?,
+                   alert_cooldown = ?,
+                   group_active_alerts = ?
+               WHERE telegram_chat_id = ?""",
+            (
+                show_ai_terms_summary,
+                show_full_terms,
+                show_ai_logic,
+                show_bank_details,
+                show_llm_summary,
+                is_hybrid_routes_enabled,
+                alert_cooldown,
+                group_active_alerts,
+                chat_id,
+            ),
+        )
+        await self._db.commit()
+
+    async def update_user_auto_cooldown_json(self, chat_id: int, config: dict) -> None:
+        """Оновлює auto_cooldown_json для користувача."""
+        if not self._db:
+            return
+        import json
+        json_str = json.dumps(config)
+        await self._db.execute(
+            "UPDATE scanner_users SET auto_cooldown_json = ? WHERE telegram_chat_id = ?",
+            (json_str, chat_id),
+        )
+        await self._db.commit()
+
 
     async def find_digital_twins(self, merchant_name: str, exclude_exchange: str, minutes: int = 15) -> list[dict]:
         """Шукає унікальні стани лімітів двійників за короткий час (дедуплікація на рівні бази)."""

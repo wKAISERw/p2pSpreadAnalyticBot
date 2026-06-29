@@ -422,6 +422,51 @@ class RiskEngine:
             exchange  = order.exchange
             mid       = order.merchant_id
             terms     = getattr(order, "trade_terms", "") or ""
+
+            # ── Динамічне підтягування умов ордеру ────────────────
+            if not terms:
+                if exchange == "Binance" and mid and self._review_fetcher and getattr(self._review_fetcher, "_binance", None):
+                    try:
+                        # Отримуємо сесію Binance з БД для обходу Cloudflare
+                        headers, cookies, _ = await self._db.get_auth_session("Binance")
+                        profile = await self._review_fetcher._binance.fetch_merchant_profile(
+                            mid, session_headers=headers, session_cookies=cookies
+                        )
+                        if profile:
+                            # Шукаємо наш ордер за advNo (вилучаємо з order.id)
+                            adv_no = order.id.replace("bn_", "") if order.id else ""
+                            all_ads = profile.get("sellList", []) + profile.get("buyList", [])
+                            found_remarks = ""
+                            for ad in all_ads:
+                                if str(ad.get("advNo", "")) == adv_no:
+                                    found_remarks = ad.get("remarks") or ""
+                                    break
+                            # Fallback на перші непусті умови будь-якого активного оголошення
+                            if not found_remarks:
+                                for ad in all_ads:
+                                    rem = ad.get("remarks") or ""
+                                    if rem.strip():
+                                        found_remarks = rem
+                                        break
+                            if found_remarks:
+                                order.trade_terms = found_remarks.strip().lower()
+                                terms = order.trade_terms
+                                logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                    except Exception as pe:
+                        logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
+
+                elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
+                    try:
+                        ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
+                        if ad_data:
+                            desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
+                            if desc:
+                                order.trade_terms = desc.strip().lower()
+                                terms = order.trade_terms
+                                logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                    except Exception as pe:
+                        logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
+
             cache_key = (exchange, mid)
 
             need_snapshots = self._b_cache.get(cache_key) is None

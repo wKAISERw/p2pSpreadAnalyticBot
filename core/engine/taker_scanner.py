@@ -180,12 +180,15 @@ class TakerScanner:
                     if t_limit_max > 0 and order_min > t_limit_max:
                         continue
 
-                    # ── Швидкість (FAST = вимагаємо перекриття об'єму) ─────
-                    if t_speed == "FAST":
-                        t_amount = float(user.get("taker_buy_amount", 0))
-                        if t_amount > 0:
-                            fiat_needed = t_amount * order_price
-                            if order_max < fiat_needed:
+                    # ── Об'єм ─────────────────────────────────────────────
+                    t_amount = float(user.get("taker_buy_amount", 0))
+                    if t_amount > 0:
+                        fiat_needed = t_amount * order_price
+                        if t_speed == "FAST":
+                            if order_max < fiat_needed or order_min > fiat_needed:
+                                continue
+                        else:
+                            if order_min > fiat_needed:
                                 continue
 
                 if not self._merchant_ok(order, mf, emf):

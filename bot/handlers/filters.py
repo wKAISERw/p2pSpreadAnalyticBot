@@ -11,6 +11,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot import keyboards
@@ -220,7 +221,29 @@ async def cb_unified_display_toggle(call: CallbackQuery):
         else:
             # Твоя класична логіка для звичайних display_settings алертів
             current_display = await _db.get_user_display_settings(chat_id) or {}
-            current_display[field] = not current_display.get(field, True)
+            
+            if field == "alert_cooldown":
+                cooldown_levels = [-1.0, 0.0, 0.2, 0.5, 1.0, 2.0]
+                current_val = float(current_display.get("alert_cooldown", -1.0))
+                try:
+                    idx = cooldown_levels.index(current_val)
+                    next_val = cooldown_levels[(idx + 1) % len(cooldown_levels)]
+                except ValueError:
+                    next_val = -1.0
+                current_display["alert_cooldown"] = next_val
+                
+                # Скидаємо кеш нотифікатора при зміні затримки
+                if _notifier:
+                    _notifier._display_settings_cache.pop(chat_id, None)
+            elif field == "group_active_alerts":
+                current_display["group_active_alerts"] = not current_display.get("group_active_alerts", True)
+                if _notifier:
+                    _notifier._display_settings_cache.pop(chat_id, None)
+            else:
+                current_display[field] = not current_display.get(field, True)
+                if _notifier:
+                    _notifier._display_settings_cache.pop(chat_id, None)
+                
             await _db.update_user_display_settings(chat_id, current_display)
 
             from bot.keyboards import display_settings_kb
@@ -866,7 +889,12 @@ async def _save_taker_sell_db(user_id: int, d: dict, roi: dict) -> None:
     conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
     strategy = d.get("price_strategy", "roi")
     # min_sell_price — або ROI-розрахунок, або ручний ввід
-    min_price = roi["min_sell_price"] if strategy == "roi" else d.get("price_input", 0.0)
+    if strategy == "roi":
+        min_price = roi.get("min_sell_price", 0.0)
+    elif strategy == "range":
+        min_price = d.get("price_from", 0.0)
+    else:
+        min_price = d.get("price_input", 0.0)
     price_to = d.get("price_to", 0.0)  # для range
 
     await conn.execute(
@@ -1939,4 +1967,230 @@ async def on_feedback(call: CallbackQuery):
     except Exception as e:
         logger.error("Помилка обробки кнопки: %s", e)
         await call.answer("Помилка БД при блокуванні", show_alert=True)
+
+
+# ── Auto Cooldown FSM Handlers ──
+
+class AutoCooldownStates(StatesGroup):
+    waiting_for_window = State()
+    waiting_for_tier1 = State()
+    waiting_for_tier2 = State()
+    waiting_for_tier3 = State()
+    waiting_for_max_delay = State()
+
+
+@router.callback_query(F.data == "set:auto_cooldown_menu")
+async def on_auto_cooldown_menu(call: CallbackQuery, state: FSMContext) -> None:
+    """Показує меню налаштування авто-затримки."""
+    await state.clear()
+    if not _db:
+        return await call.answer("БД не підключена", show_alert=True)
+    display = await _db.get_user_display_settings(call.message.chat.id)
+    config = display.get("auto_cooldown_json") or {}
+    
+    from bot.keyboards.filters import auto_cooldown_settings_kb
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(
+            "⏱ <b>Налаштування адаптивної авто-затримки</b>\n\n"
+            "Тут ви можете налаштувати чутливість авто-затримки повідомлень.\n"
+            "Бот аналізує к-ть повідомлень за вказане вікно та застосовує кд:\n"
+            f"├ Вікно аналізу: <b>{config.get('window_seconds', 5.0)} сек</b>\n"
+            f"├ Поріг 1 (кд 0.0s): < <b>{config.get('tiers', [{}])[0].get('threshold', 10) if config.get('tiers') else 10} пов.</b>\n"
+            f"├ Поріг 2 (кд 0.3s): < <b>{config.get('tiers', [{}, {}])[1].get('threshold', 15) if len(config.get('tiers', [])) > 1 else 15} пов.</b>\n"
+            f"├ Поріг 3 (кд 0.8s): < <b>{config.get('tiers', [{}, {}, {}])[2].get('threshold', 20) if len(config.get('tiers', [])) > 2 else 20} пов.</b>\n"
+            f"└ Максимальний кд: <b>{config.get('tiers', [{}, {}, {}, {}])[3].get('delay', 1.5) if len(config.get('tiers', [])) > 3 else 1.5} сек</b>\n\n"
+            "<i>Оберіть параметр для зміни:</i>",
+            reply_markup=auto_cooldown_settings_kb(config),
+        )
+    await call.answer()
+
+
+async def _get_auto_cooldown_config(chat_id: int) -> dict:
+    display = await _db.get_user_display_settings(chat_id)
+    return display.get("auto_cooldown_json") or {
+        "window_seconds": 5.0,
+        "tiers": [
+            {"threshold": 10, "delay": 0.0},
+            {"threshold": 15, "delay": 0.3},
+            {"threshold": 20, "delay": 0.8},
+            {"threshold": 9999, "delay": 1.5}
+        ]
+    }
+
+
+@router.callback_query(F.data == "auto_cd:set_window")
+async def on_set_window_click(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AutoCooldownStates.waiting_for_window)
+    await call.message.answer(
+        "⏱ <b>Вікно аналізу авто-затримки</b>\n\n"
+        "Введіть розмір вікна аналізу в секундах (наприклад: <code>5.0</code>):",
+        reply_markup=back_to_main_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AutoCooldownStates.waiting_for_window)
+async def on_window_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введіть додатне число.")
+    
+    config = await _get_auto_cooldown_config(message.chat.id)
+    config["window_seconds"] = val
+    await _db.update_user_auto_cooldown_json(message.chat.id, config)
+    
+    # Скидаємо кеш нотифікатора
+    if _notifier:
+        _notifier._display_settings_cache.pop(message.chat.id, None)
+
+    await state.clear()
+    await message.answer(
+        f"✅ Вікно аналізу змінено на: <b>{val} сек</b>\n\nПовертаюсь до меню...",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
+
+
+@router.callback_query(F.data == "auto_cd:set_t1")
+async def on_set_t1_click(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AutoCooldownStates.waiting_for_tier1)
+    await call.message.answer(
+        "📊 <b>Поріг 1 (кд 0.0s)</b>\n\n"
+        "Введіть кількість повідомлень за вікно, при якій затримка буде відсутня (0.0s). Наприклад, <code>10</code>:",
+        reply_markup=back_to_main_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AutoCooldownStates.waiting_for_tier1)
+async def on_t1_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(message.text.strip())
+        if val < 1:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введіть ціле число більше нуля.")
+    
+    config = await _get_auto_cooldown_config(message.chat.id)
+    config["tiers"][0]["threshold"] = val
+    await _db.update_user_auto_cooldown_json(message.chat.id, config)
+    
+    if _notifier:
+        _notifier._display_settings_cache.pop(message.chat.id, None)
+
+    await state.clear()
+    await message.answer(
+        f"✅ Поріг 1 змінено на: <b>{val} пов.</b>\n\nПовертаюсь до меню...",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
+
+
+@router.callback_query(F.data == "auto_cd:set_t2")
+async def on_set_t2_click(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AutoCooldownStates.waiting_for_tier2)
+    await call.message.answer(
+        "📊 <b>Поріг 2 (кд 0.3s)</b>\n\n"
+        "Введіть кількість повідомлень за вікно, при якій затримка буде до 0.3s. Наприклад, <code>15</code>:",
+        reply_markup=back_to_main_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AutoCooldownStates.waiting_for_tier2)
+async def on_t2_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(message.text.strip())
+        if val < 1:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введіть ціле число більше нуля.")
+    
+    config = await _get_auto_cooldown_config(message.chat.id)
+    while len(config["tiers"]) < 2:
+        config["tiers"].append({"threshold": 15, "delay": 0.3})
+    config["tiers"][1]["threshold"] = val
+    await _db.update_user_auto_cooldown_json(message.chat.id, config)
+    
+    if _notifier:
+        _notifier._display_settings_cache.pop(message.chat.id, None)
+
+    await state.clear()
+    await message.answer(
+        f"✅ Поріг 2 змінено на: <b>{val} пов.</b>\n\nПовертаюсь до меню...",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
+
+
+@router.callback_query(F.data == "auto_cd:set_t3")
+async def on_set_t3_click(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AutoCooldownStates.waiting_for_tier3)
+    await call.message.answer(
+        "📊 <b>Поріг 3 (кд 0.8s)</b>\n\n"
+        "Введіть кількість повідомлень за вікно, при якій затримка буде до 0.8s. Наприклад, <code>20</code>:",
+        reply_markup=back_to_main_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AutoCooldownStates.waiting_for_tier3)
+async def on_t3_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = int(message.text.strip())
+        if val < 1:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введіть ціле число більше нуля.")
+    
+    config = await _get_auto_cooldown_config(message.chat.id)
+    while len(config["tiers"]) < 3:
+        config["tiers"].append({"threshold": 20, "delay": 0.8})
+    config["tiers"][2]["threshold"] = val
+    await _db.update_user_auto_cooldown_json(message.chat.id, config)
+    
+    if _notifier:
+        _notifier._display_settings_cache.pop(message.chat.id, None)
+
+    await state.clear()
+    await message.answer(
+        f"✅ Поріг 3 змінено на: <b>{val} пов.</b>\n\nПовертаюсь до меню...",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
+
+
+@router.callback_query(F.data == "auto_cd:set_max_delay")
+async def on_set_max_delay_click(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AutoCooldownStates.waiting_for_max_delay)
+    await call.message.answer(
+        "⏳ <b>Максимальна затримка</b>\n\n"
+        "Введіть максимальну затримку в секундах, яка застосовується при перевищенні порогу 3. Наприклад, <code>1.5</code>:",
+        reply_markup=back_to_main_kb(),
+    )
+    await call.answer()
+
+
+@router.message(AutoCooldownStates.waiting_for_max_delay)
+async def on_max_delay_input(message: Message, state: FSMContext) -> None:
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Введіть додатне число або 0.")
+    
+    config = await _get_auto_cooldown_config(message.chat.id)
+    while len(config["tiers"]) < 4:
+        config["tiers"].append({"threshold": 9999, "delay": 1.5})
+    config["tiers"][3]["delay"] = val
+    await _db.update_user_auto_cooldown_json(message.chat.id, config)
+    
+    if _notifier:
+        _notifier._display_settings_cache.pop(message.chat.id, None)
+
+    await state.clear()
+    await message.answer(
+        f"✅ Максимальну затримку змінено на: <b>{val} сек</b>\n\nПовертаюсь до меню...",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
 

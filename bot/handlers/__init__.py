@@ -58,6 +58,14 @@ def get_router() -> Router:
                 logger.error(f"Помилка примусового рендеру меню: {e}")
 
         # Дефолтна відповідь для інших непідключених кнопок
+        if any(data.startswith(p) for p in ["tsell_", "tbuy_", "ad:", "mkord:", "sl:", "fb:"]):
+            await call.answer(
+                "⚠️ Запит застарів (або бот був перезапущений).\n"
+                "Будь ласка, відкрийте налаштування або алерт заново.",
+                show_alert=True
+            )
+            return
+
         await call.answer(f"⚠️ Кнопка '{data}' ще в процесі редизайну Фази 3", show_alert=True)
 
     @fallback_router.message()

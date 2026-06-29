@@ -19,7 +19,7 @@ from bot.handlers.core import (
     _trade_worker, _single_leg_executor, is_muted, update_stats,
     _generate_dashboard_text,
     ConnectStates, ExchangeCooldownStates, SETTING_DESCRIPTIONS, _mute_until, _scanner_stats, _KEY_LABELS,
-    GlobalSettingStates, SettingStates, _session_manager, QRStates
+    GlobalSettingStates, SettingStates, _session_manager, QRStates, SessionStates
 )
 from bot.keyboards import exchanges_status_kb, global_settings_kb, back_to_settings_kb, back_to_main_kb, \
     exchange_cooldown_kb, main_menu_kb, exchange_toggle_kb, exchange_connect_kb, banks_selection_kb, exchange_down_kb, \
@@ -1311,20 +1311,32 @@ async def on_sessions_button(call: CallbackQuery) -> None:
     builder.row(InlineKeyboardButton(text=toggle_text, callback_data="session:toggle_require"))
     
     # Кнопки входу та Bookmarklet для кожної біржі
+    # Binance
     builder.row(
         InlineKeyboardButton(text="🖥 Binance (ПК)", callback_data="session:login:Binance"),
-        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Binance"),
-        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:Binance")
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Binance")
     )
+    builder.row(
+        InlineKeyboardButton(text="📲 Скрипт-закладка", callback_data="intercept:Binance"),
+        InlineKeyboardButton(text="📥 Вставити Cookies", callback_data="session:manual:Binance")
+    )
+    # Bybit
     builder.row(
         InlineKeyboardButton(text="🖥 Bybit (ПК)", callback_data="session:login:Bybit"),
-        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Bybit"),
-        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:Bybit")
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:Bybit")
     )
     builder.row(
+        InlineKeyboardButton(text="📲 Скрипт-закладка", callback_data="intercept:Bybit"),
+        InlineKeyboardButton(text="📥 Вставити Cookies", callback_data="session:manual:Bybit")
+    )
+    # OKX
+    builder.row(
         InlineKeyboardButton(text="🖥 OKX (ПК)", callback_data="session:login:OKX"),
-        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:OKX"),
-        InlineKeyboardButton(text="📲 Скрипт", callback_data="intercept:OKX")
+        InlineKeyboardButton(text="🔐 QR-код", callback_data="session:qr:OKX")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📲 Скрипт-закладка", callback_data="intercept:OKX"),
+        InlineKeyboardButton(text="📥 Вставити Cookies", callback_data="session:manual:OKX")
     )
     
     # Кнопки повернення
@@ -1434,6 +1446,74 @@ async def on_qr_code_received(message: Message, state: FSMContext) -> None:
             
     await state.clear()
     await message.answer("❌ Активну сесію QR-входу не знайдено або термін її дії закінчився.")
+
+
+@router.callback_query(F.data.startswith("session:manual:"))
+async def on_session_manual_cookies(call: CallbackQuery, state: FSMContext) -> None:
+    exchange = call.data.split(":")[-1]
+    await state.set_state(SessionStates.waiting_for_cookies)
+    await state.update_data(exchange=exchange)
+    
+    instruction_text = (
+        f"📥 <b>Ручне оновлення сесії {exchange} через Cookies</b>\n\n"
+        f"Цей спосіб на 100% обходить будь-які блокування Google або Binance QR, оскільки ви копіюєте кукіси безпосередньо зі свого робочого браузера.\n\n"
+        f"📋 <b>Покрокова інструкція:</b>\n"
+        f"1️⃣ Відкрийте сайт <b>{exchange}</b> у звичайній вкладці вашого браузера (на ПК) та увійдіть у свій акаунт.\n"
+        f"2️⃣ Перейдіть на сторінку P2P (наприклад, для Binance: <code>https://c2c.binance.com/uk-UA</code>).\n"
+        f"3️⃣ Відкрийте консоль розробника:\n"
+        f"   • Windows/Linux: <code>F12</code> або <code>Ctrl + Shift + I</code>\n"
+        f"   • Mac: <code>Cmd + Option + I</code>\n"
+        f"4️⃣ Перейдіть на вкладку <b>Console</b> (Консоль), вставте наступний код і натисніть <code>Enter</code>:\n\n"
+        f"<code>copy(document.cookie)</code>\n\n"
+        f"<i>(Це автоматично скопіює кукіси в буфер обміну. Якщо не спрацювало, введіть <code>document.cookie</code> та скопіюйте вихідний текст вручну).</i>\n\n"
+        f"5️⃣ <b>Просто вставте скопійовані кукіси (текстовий рядок) сюди в чат і надішліть боту.</b>"
+    )
+    
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="❌ Скасувати", callback_data="menu:sessions"))
+    
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(instruction_text, reply_markup=builder.as_markup())
+    await call.answer()
+
+
+@router.message(SessionStates.waiting_for_cookies)
+async def on_cookies_received(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    exchange = data.get("exchange")
+    cookies_str = message.text.strip()
+    
+    if not cookies_str or "=" not in cookies_str:
+        await message.answer("❌ Надісланий текст не схожий на кукіси. Спробуйте ще раз або натисніть «Скасувати» в меню:")
+        return
+        
+    await state.clear()
+    
+    # Парсимо кукіси
+    cookies_dict = {}
+    for chunk in cookies_str.split(';'):
+        if '=' in chunk:
+            k, v = chunk.split('=', 1)
+            cookies_dict[k.strip()] = v.strip()
+            
+    # Заголовки за замовчуванням
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*"
+    }
+    
+    success = await _db.save_auth_session(
+        exchange=exchange,
+        headers_dict=headers,
+        cookies_dict=cookies_dict,
+        user_id=message.from_user.id
+    )
+    
+    if success:
+        logger.info(f"✅ Успішно оновлено сесію {exchange} від користувача {message.from_user.id} вручну")
+        await message.answer(f"✅ <b>Сесію {exchange} успішно оновлено вручну!</b>\n\nБот тепер може перевіряти ваші P2P ордери та відгуки.")
+    else:
+        await message.answer(f"❌ <b>Помилка збереження сесії {exchange}</b> в базу даних. Спробуйте ще раз.")
 
 
 @router.callback_query(F.data == "keys:connect")

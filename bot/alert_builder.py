@@ -510,12 +510,11 @@ async def send_single(
             edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
             if edited_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_msg_id,
                         text=chunk,
-                        reply_markup=main_keyboard if i == 0 else None,
-                        disable_web_page_preview=True,
+                        keyboard=main_keyboard if i == 0 else None,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_msg_id)
                     if i == 0:
@@ -544,12 +543,11 @@ async def send_single(
             edited_reply_msg_id = edit_message_ids[len(main_chunks)] if edit_message_ids and len(main_chunks) < len(edit_message_ids) else None
             if edited_reply_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_reply_msg_id,
                         text=reply_chunk,
-                        reply_markup=card_keyboard,
-                        disable_web_page_preview=True,
+                        keyboard=card_keyboard,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_reply_msg_id)
                 except Exception as ex:
@@ -573,12 +571,11 @@ async def send_single(
             edited_msg_id = edit_message_ids[i] if edit_message_ids and i < len(edit_message_ids) else None
             if edited_msg_id:
                 try:
-                    await notifier._bot.edit_message_text(
-                        chat_id=chat_id or notifier._chat_id,
+                    await notifier._edit_with_retry(
                         message_id=edited_msg_id,
                         text=chunk,
-                        reply_markup=keyboard if i == 0 else None,
-                        disable_web_page_preview=True,
+                        keyboard=keyboard if i == 0 else None,
+                        chat_id=chat_id,
                     )
                     sent_message_ids.append(edited_msg_id)
                 except Exception as ex:
@@ -596,16 +593,16 @@ async def send_single(
     return sent_message_ids
 
 
-async def send_batch(notifier, batch: list[SpreadAlert]) -> None:
+async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = None) -> None:
     """Підсумок усіх знайдених маршрутів за цикл."""
-    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+    medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     lines = [
         f"📋 <b>ПІДСУМОК: АКТУАЛЬНІ МАРШРУТИ</b>  "
         f"<code>[{batch[0].timestamp.strftime('%H:%M:%S')}]</code>\n"
         f"<code>{'─' * 28}</code>\n"
     ]
 
-    for i, a in enumerate(batch[:5]):
+    for i, a in enumerate(batch[:10]):
         b_icon = EXCHANGE_ICONS.get(a.buy_order.exchange, "◽️")
         s_icon = EXCHANGE_ICONS.get(a.sell_order.exchange, "◽️")
         b_short = BANKS_SHORT.get(a.buy_bank, a.buy_bank)
@@ -646,4 +643,4 @@ async def send_batch(notifier, batch: list[SpreadAlert]) -> None:
 
     text = "".join(lines)
     for chunk in notifier._split_message(text):
-        await notifier._send_with_retry(chunk)
+        await notifier._send_with_retry(chunk, chat_id=chat_id)

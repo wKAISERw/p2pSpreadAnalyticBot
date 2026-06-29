@@ -735,8 +735,8 @@ class ReviewFetcher:
                 if isinstance(resp_seller, Exception):
                     raise resp_seller
 
-                if resp_buyer.status_code == 401 or resp_seller.status_code == 401:
-                    raise RuntimeError("AuthError: OKX session expired (HTTP 401)")
+                if resp_buyer.status_code in (401, 403) or resp_seller.status_code in (401, 403):
+                    raise RuntimeError(f"AuthError: OKX session expired (HTTP {resp_buyer.status_code}/{resp_seller.status_code})")
 
                 pos_buyer, neg_buyer = 0, 0
                 pos_seller, neg_seller = 0, 0
@@ -834,7 +834,12 @@ class ReviewFetcher:
                 )
                 return pos, neg, neutral, bad_texts
 
-        except RuntimeError:
+        except RuntimeError as re:
+            re_str = str(re)
+            if "AuthError" in re_str:
+                logger.error("🚨 OKX session burnout detected! %s", re)
+                asyncio.create_task(self._db.invalidate_auth_session("OKX", user_id=0))
+                self._send_burnout_alert("OKX")
             raise
         except Exception as e:
             logger.debug("OKX fetch error %s: %s", merchant_id, e)
@@ -873,8 +878,8 @@ class ReviewFetcher:
                     url, json=payload,
                     headers=req_headers, cookies=cookies_dict, timeout=10
                 )
-                if resp.status_code == 401:
-                    raise RuntimeError("AuthError: OKX session expired (HTTP 401)")
+                if resp.status_code in (401, 403):
+                    raise RuntimeError(f"AuthError: OKX session expired (HTTP {resp.status_code})")
                 if resp.status_code != 200:
                     logger.debug("OKX review pages %s page=%d: status %d", merchant_id, page, resp.status_code)
                     break
@@ -897,6 +902,44 @@ class ReviewFetcher:
                 break
 
         return all_items
+
+    async def fetch_okx_ad_detail(self, ad_id: str) -> dict:
+        """Отримує умови ордеру OKX, використовуючи активну сесію з БД."""
+        import time
+        from curl_cffi.requests import AsyncSession as CurlSession
+
+        headers_dict, cookies_dict, _ = await self._db.get_auth_session("OKX")
+        if not headers_dict:
+            return {}
+
+        req_headers: dict[str, str] = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "app-type": "web",
+            "x-locale": "uk_UA",
+        }
+        for key in ("authorization", "devid", "x-id-group", "x-site-info",
+                    "user-agent", "x-client-signature", "x-client-signature-version"):
+            val = headers_dict.get(key)
+            if val:
+                req_headers[key] = val
+
+        if "authorization" not in req_headers:
+            return {}
+
+        ts = int(time.time() * 1000)
+        url = f"https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdDetail?publicTradingOrderId={ad_id}&t={ts}"
+
+        try:
+            async with CurlSession(impersonate="chrome124") as session:
+                resp = await session.get(url, headers=req_headers, cookies=cookies_dict, timeout=10)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, dict) and data.get("code") == 0:
+                        return data.get("data", {}) or {}
+        except Exception as e:
+            logger.debug("Failed to fetch OKX ad detail for %s: %s", ad_id, e)
+        return {}
 
     async def _fetch_mexc(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         client = self._mexc

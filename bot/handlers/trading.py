@@ -1152,7 +1152,7 @@ async def on_tsell_profit(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.callback_query(TakerSellSettingsStates.waiting_profit, F.data.startswith("tsell_speed:"))
+@router.callback_query(F.data.startswith("tsell_speed:"))
 async def on_tsell_speed(call: CallbackQuery, state: FSMContext) -> None:
     speed = call.data.split(":")[1]
     data = await state.get_data()
@@ -1297,6 +1297,7 @@ async def on_tsell_edit(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(is_edit=True, pending_mode="TAKER_SELL", edit_param=param)
     
     if param == "amount":
+        await state.set_state(TakerSellSettingsStates.waiting_amount_type)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="💵 USDT (крипта)", callback_data="tsell_type:USDT"),
