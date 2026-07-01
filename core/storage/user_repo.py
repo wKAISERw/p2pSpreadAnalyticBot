@@ -487,6 +487,9 @@ class UserRepo:
             "is_hybrid_routes_enabled": False,
             "alert_cooldown": -1.0,
             "group_active_alerts": True,
+            "group_scanner_alerts": True,
+            "filter_fop_tov": "hide",
+            "filter_banka_jar": "hide",
             "auto_cooldown_json": default_auto_cooldown,
         }
         if not self._db:
@@ -501,6 +504,9 @@ class UserRepo:
                               COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled,
                               COALESCE(alert_cooldown, -1.0)        as alert_cooldown,
                               COALESCE(group_active_alerts, 1)      as group_active_alerts,
+                              COALESCE(group_scanner_alerts, 1)     as group_scanner_alerts,
+                              COALESCE(filter_fop_tov, 'hide')      as filter_fop_tov,
+                              COALESCE(filter_banka_jar, 'hide')    as filter_banka_jar,
                               COALESCE(auto_cooldown_json, '{}')    as auto_cooldown_json
                        FROM scanner_users
                        WHERE telegram_chat_id = ?""",
@@ -528,6 +534,9 @@ class UserRepo:
                 "is_hybrid_routes_enabled": bool(row["is_hybrid_routes_enabled"]),
                 "alert_cooldown": float(row["alert_cooldown"]),
                 "group_active_alerts": bool(row["group_active_alerts"]),
+                "group_scanner_alerts": bool(row["group_scanner_alerts"]),
+                "filter_fop_tov": str(row["filter_fop_tov"]),
+                "filter_banka_jar": str(row["filter_banka_jar"]),
                 "auto_cooldown_json": auto_cooldown,
             }
         except Exception:
@@ -546,6 +555,9 @@ class UserRepo:
         is_hybrid_routes_enabled = 1 if settings_dict.get("is_hybrid_routes_enabled", False) else 0
         alert_cooldown = float(settings_dict.get("alert_cooldown", -1.0))
         group_active_alerts = 1 if settings_dict.get("group_active_alerts", True) else 0
+        group_scanner_alerts = 1 if settings_dict.get("group_scanner_alerts", True) else 0
+        filter_fop_tov = str(settings_dict.get("filter_fop_tov", "hide"))
+        filter_banka_jar = str(settings_dict.get("filter_banka_jar", "hide"))
 
         await self._db.execute(
             """UPDATE scanner_users
@@ -556,7 +568,10 @@ class UserRepo:
                    show_llm_summary = ?,
                    is_hybrid_routes_enabled = ?,
                    alert_cooldown = ?,
-                   group_active_alerts = ?
+                   group_active_alerts = ?,
+                   group_scanner_alerts = ?,
+                   filter_fop_tov = ?,
+                   filter_banka_jar = ?
                WHERE telegram_chat_id = ?""",
             (
                 show_ai_terms_summary,
@@ -567,6 +582,9 @@ class UserRepo:
                 is_hybrid_routes_enabled,
                 alert_cooldown,
                 group_active_alerts,
+                group_scanner_alerts,
+                filter_fop_tov,
+                filter_banka_jar,
                 chat_id,
             ),
         )

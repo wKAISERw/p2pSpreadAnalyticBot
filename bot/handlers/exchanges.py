@@ -217,6 +217,14 @@ def _generate_settings_text() -> str:
     for key, desc in SETTING_DESCRIPTIONS.items():
         val = runtime_config.get(key, getattr(settings, key, "—"))
         lines.append(f"▫️ <b>{desc}</b>\n  └ <code>{key}</code>: <b>{val}</b>\n")
+        
+    # Boolean settings
+    require_sessions = runtime_config.get("require_sessions", "true") == "true"
+    show_spread_logs = runtime_config.get("show_spread_logs", "true") == "true"
+    
+    lines.append(f"▫️ <b>Вимога сесій:</b> {'🟢 Валідувати' if require_sessions else '⚪ Ігнорувати'}")
+    lines.append(f"▫️ <b>Логи спредів:</b> {'🟢 Показувати' if show_spread_logs else '⚪ Приховувати'}\n")
+    
     lines.append("👇 <i>Обери параметр для зміни:</i>")
     return "\n".join(lines)
 

@@ -416,6 +416,20 @@ class RiskEngine:
     async def _async_analyze(self, order: Order, behavior_flags: list[str]) -> None:
         async with self._db_sem:
             await self._async_analyze_inner(order, behavior_flags)
+            
+            # ── Custom configurable blocks (FOP/TOV and Banka/Jar) ─────────
+            # Runs on-the-fly to append metadata flags for per-user filters
+            from core.analysis.regex_analyzer import check_custom_blocks_metadata
+            custom_flags = check_custom_blocks_metadata(order.trade_terms)
+            if custom_flags:
+                existing = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
+                unique = []
+                for f in existing + custom_flags:
+                    if f not in unique:
+                        if f in ("OK", "PENDING"):
+                            continue
+                        unique.append(f)
+                order.risk_flag = ",".join(unique) if unique else "OK"
 
     async def _async_analyze_inner(self, order: Order, behavior_flags: list[str]) -> None:
         try:
@@ -424,48 +438,48 @@ class RiskEngine:
             terms     = getattr(order, "trade_terms", "") or ""
 
             # ── Динамічне підтягування умов ордеру ────────────────
-            if not terms:
-                if exchange == "Binance" and mid and self._review_fetcher and getattr(self._review_fetcher, "_binance", None):
-                    try:
-                        # Отримуємо сесію Binance з БД для обходу Cloudflare
-                        headers, cookies, _ = await self._db.get_auth_session("Binance")
-                        profile = await self._review_fetcher._binance.fetch_merchant_profile(
-                            mid, session_headers=headers, session_cookies=cookies
-                        )
-                        if profile:
-                            # Шукаємо наш ордер за advNo (вилучаємо з order.id)
-                            adv_no = order.id.replace("bn_", "") if order.id else ""
-                            all_ads = profile.get("sellList", []) + profile.get("buyList", [])
-                            found_remarks = ""
+            # Завжди намагаємось підтягнути ПОВНІ умови для спреду, оскільки в пошуковій видачі вони обрізані або застарілі.
+            if exchange == "Binance" and mid and self._review_fetcher and getattr(self._review_fetcher, "_binance", None):
+                try:
+                    # Отримуємо сесію Binance з БД для обходу Cloudflare
+                    headers, cookies, _ = await self._db.get_auth_session("Binance")
+                    profile = await self._review_fetcher._binance.fetch_merchant_profile(
+                        mid, session_headers=headers, session_cookies=cookies
+                    )
+                    if profile:
+                        # Шукаємо наш ордер за advNo (вилучаємо з order.id)
+                        adv_no = order.id.replace("bn_", "") if order.id else ""
+                        all_ads = profile.get("sellList", []) + profile.get("buyList", [])
+                        found_remarks = ""
+                        for ad in all_ads:
+                            if str(ad.get("advNo", "")) == adv_no:
+                                found_remarks = ad.get("remarks") or ""
+                                break
+                        # Fallback на перші непусті умови будь-якого активного оголошення
+                        if not found_remarks:
                             for ad in all_ads:
-                                if str(ad.get("advNo", "")) == adv_no:
-                                    found_remarks = ad.get("remarks") or ""
+                                rem = ad.get("remarks") or ""
+                                if rem.strip():
+                                    found_remarks = rem
                                     break
-                            # Fallback на перші непусті умови будь-якого активного оголошення
-                            if not found_remarks:
-                                for ad in all_ads:
-                                    rem = ad.get("remarks") or ""
-                                    if rem.strip():
-                                        found_remarks = rem
-                                        break
-                            if found_remarks:
-                                order.trade_terms = found_remarks.strip().lower()
-                                terms = order.trade_terms
-                                logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                    except Exception as pe:
-                        logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
+                        if found_remarks:
+                            order.trade_terms = found_remarks.strip().lower()
+                            terms = order.trade_terms
+                            logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                except Exception as pe:
+                    logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
 
-                elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
-                    try:
-                        ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
-                        if ad_data:
-                            desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
-                            if desc:
-                                order.trade_terms = desc.strip().lower()
-                                terms = order.trade_terms
-                                logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                    except Exception as pe:
-                        logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
+            elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
+                try:
+                    ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
+                    if ad_data:
+                        desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
+                        if desc:
+                            order.trade_terms = desc.strip().lower()
+                            terms = order.trade_terms
+                            logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                except Exception as pe:
+                    logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
 
             cache_key = (exchange, mid)
 
@@ -1071,6 +1085,20 @@ class RiskEngine:
             for exc in results:
                 if isinstance(exc, Exception):
                     logger.error("analyze_for_spread помилка: %s", exc, exc_info=False)
+
+        # ── Custom configurable blocks (FOP/TOV and Banka/Jar) ─────────
+        from core.analysis.regex_analyzer import check_custom_blocks_metadata
+        for order in orders:
+            custom_flags = check_custom_blocks_metadata(order.trade_terms)
+            if custom_flags:
+                existing = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
+                unique = []
+                for f in existing + custom_flags:
+                    if f not in unique:
+                        if f in ("OK", "PENDING"):
+                            continue
+                        unique.append(f)
+                order.risk_flag = ",".join(unique) if unique else "OK"
 
     async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
         """

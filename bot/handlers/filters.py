@@ -235,8 +235,14 @@ async def cb_unified_display_toggle(call: CallbackQuery):
                 # Скидаємо кеш нотифікатора при зміні затримки
                 if _notifier:
                     _notifier._display_settings_cache.pop(chat_id, None)
-            elif field == "group_active_alerts":
-                current_display["group_active_alerts"] = not current_display.get("group_active_alerts", True)
+            elif field in ("filter_fop_tov", "filter_banka_jar"):
+                modes = ["hide", "warn", "show"]
+                current_val = current_display.get(field, "hide")
+                if current_val not in modes:
+                    current_val = "hide"
+                idx = modes.index(current_val)
+                next_val = modes[(idx + 1) % len(modes)]
+                current_display[field] = next_val
                 if _notifier:
                     _notifier._display_settings_cache.pop(chat_id, None)
             else:

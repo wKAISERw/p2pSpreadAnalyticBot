@@ -37,6 +37,86 @@ LLM_SCORE_THRESHOLD    = 30   # мінімум для ескалації в LLM
 MIN_MULTI_SIGNAL_SCORE = 20   # поріг при >= 2 різних категоріях
 
 
+# Custom patterns for user-configurable blocks
+FOP_TOV_PATTERN = re.compile(
+    r"\b(?:фоп[ауие]?|тов[ау]?|ооо|іп[ау]?|флп[ау]?|юр\.?\s*особ[аиуї]?|підприєм[еацїік]{2,6})\b|"
+    r"(?:бізнес[\s-]рахун)|(?:юридичн[аої]\s*особ)",
+    re.IGNORECASE
+)
+
+BANKA_JAR_PATTERN = re.compile(
+    r"(?:send\.monobank\.ua)|"
+    r"\bбань?к[ауи]\s+(?:моно|mono)\b|"
+    r"\b(?:моно|mono|monobank|монобанк)\s+бань?к[ауи]\b|"
+    r"\b(?:на|через|в|into|to|through|via)\s+['\"«`]?бань?к[ауи]\b|"
+    r"\b(?:посилання|посиланням|лінк|link|ссылк[аиоу]|ссылкой)\s+(?:на\s+)?['\"«`]?бань?к[ауи]\b|"
+    r"\bбань?к[ауи]\s+(?:по|за|в)\s+(?:ссылк[еиау]|посиланн\w*|чат|лс)\b|"
+    r"\b(?:створ|созда|откри|відкри)\w{0,8}\s+бань?к[ауи]\b|"
+    r"\b(?:на|через|в|посилання|посиланням|лінк|link|ссылк[аиоу]|ссылкой)\s+(?:на\s+)?(?:копилк[ау]|сейф[ау]?|конверт[ау]?)\b|"
+    r"\bконверт[ауи]?\s+(?:приват|privat)\b|"
+    r"\b(?:моно|mono|monobank|монобанк)\s+(?:\w+\s+){0,3}(?:посиланн\w*|ссылк\w*)\b|"
+    r"\b(?:посиланн\w*|ссылк\w*)\s+(?:\w+\s+){0,3}(?:моно|mono|monobank|монобанк)\b",
+    re.IGNORECASE
+)
+
+NEGATION_PREFIX_PATTERN = re.compile(
+    r"\b(?:не|ні|нет|без|not|no|немає?|запрещен[ыоа]?|заборонен[оиаї]?|виключен[оиаї]?)\b\s*\w*\s*$",
+    re.IGNORECASE
+)
+NEGATION_SUFFIX_PATTERN = re.compile(
+    r"^\s*\w*\s*\b(?:не|ні|нет|без|not|no|немає?|запрещен[ыоа]?|заборонен[оиаї]?|виключен[оиаї]?)\b",
+    re.IGNORECASE
+)
+
+
+def _is_negated(text: str, start: int, end: int) -> bool:
+    prefix_start = max(0, start - 35)
+    prefix = text[prefix_start:start]
+    suffix_end = min(len(text), end + 25)
+    suffix = text[end:suffix_end]
+
+    last_clause_boundary = max(
+        prefix.rfind('.'), prefix.rfind('!'), prefix.rfind('?'),
+        prefix.rfind(';'), prefix.rfind('\n')
+    )
+    if last_clause_boundary != -1:
+        prefix = prefix[last_clause_boundary + 1:]
+
+    first_clause_boundary = min(
+        [suffix.find(c) for c in ('.', '!', '?', ';', '\n') if suffix.find(c) != -1] or [len(suffix)]
+    )
+    suffix = suffix[:first_clause_boundary]
+
+    if NEGATION_PREFIX_PATTERN.search(prefix):
+        return True
+    if NEGATION_SUFFIX_PATTERN.search(suffix):
+        return True
+
+    return False
+
+
+def check_custom_blocks_metadata(terms: str) -> list[str]:
+    if not terms or not str(terms).strip():
+        return []
+    raw_text = _clean_text(terms)
+    fuzzy = _fuzzy_text(raw_text)
+
+    flags = []
+    m_fop = FOP_TOV_PATTERN.search(raw_text) or FOP_TOV_PATTERN.search(fuzzy)
+    if m_fop:
+        start, end = m_fop.span()
+        if not _is_negated(raw_text, start, end):
+            flags.append("FOP_TOV_BLOCKED")
+
+    m_jar = BANKA_JAR_PATTERN.search(raw_text) or BANKA_JAR_PATTERN.search(fuzzy)
+    if m_jar:
+        start, end = m_jar.span()
+        if not _is_negated(raw_text, start, end):
+            flags.append("BANKA_JAR_BLOCKED")
+
+    return flags
+
+
 @dataclass(slots=True)
 class RegexMatch:
     rule_id:  str

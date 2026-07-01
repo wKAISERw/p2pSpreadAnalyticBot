@@ -618,6 +618,9 @@ class MerchantDB:
                                   "INTEGER DEFAULT 0")  # Підтримка кнопок T-M та M-T
         await self._ensure_column("scanner_users", "alert_cooldown", "REAL DEFAULT -1.0")  # Затримка алертів (AUTO = -1.0)
         await self._ensure_column("scanner_users", "group_active_alerts", "INTEGER DEFAULT 1")  # Групування команди /active
+        await self._ensure_column("scanner_users", "group_scanner_alerts", "INTEGER DEFAULT 1")  # Групування авто-алертів сканера
+        await self._ensure_column("scanner_users", "filter_fop_tov", "TEXT DEFAULT 'hide'")  # Фільтр ФОП/ТОВ (hide/warn/show)
+        await self._ensure_column("scanner_users", "filter_banka_jar", "TEXT DEFAULT 'hide'")  # Фільтр Банка/Сейф (hide/warn/show)
         await self._ensure_column("scanner_users", "auto_cooldown_json", "TEXT DEFAULT '{}'")  # Налаштування автоматичного кд (JSON)
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")

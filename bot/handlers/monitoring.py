@@ -354,7 +354,20 @@ async def cmd_active(message: Message) -> None:
         if not buy_order or not sell_order:
             return False, "missing orders"
 
+        if "BLOCK" in (getattr(buy_order, "risk_flag", "") or ""):
+            return False, "buy order blocked"
+        if "BLOCK" in (getattr(sell_order, "risk_flag", "") or ""):
+            return False, "sell order blocked"
+
+        filter_fop = user_row.get("filter_fop_tov", "hide")
+        filter_banka = user_row.get("filter_banka_jar", "hide")
+
         for order_obj in (buy_order, sell_order):
+            risk_flags = getattr(order_obj, "risk_flag", "") or ""
+            if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                return False, "FOP_TOV blocked for user"
+            if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+                return False, "Banka/Jar blocked for user"
             ex_name = getattr(order_obj, "exchange", "")
             side_label = "buy" if order_obj is buy_order else "sell"
             ex_filters = ex_merchant_filters.get(ex_name, {})
@@ -400,7 +413,31 @@ async def cmd_active(message: Message) -> None:
 
         taker_scanner = TakerScanner(_db)
         t_orders = await taker_scanner.find_orders_for_user(user_full, last_buy, last_sell)
-        
+
+        if t_orders:
+            from bot.handlers.core import _maker_monitor_impl
+            if _maker_monitor_impl and _maker_monitor_impl._risk_engine:
+                try:
+                    await _maker_monitor_impl._risk_engine.analyze_for_spread(t_orders)
+                except Exception as re_err:
+                    logger.error("Error analyzing manual Taker orders in RiskEngine: %s", re_err)
+
+            # Фільтруємо ордери після аналізу відповідно до особистих налаштувань
+            filter_fop = user_full.get("filter_fop_tov", "hide")
+            filter_banka = user_full.get("filter_banka_jar", "hide")
+            
+            filtered = []
+            for o in t_orders:
+                risk_flags = getattr(o, "risk_flag", "") or ""
+                if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                    continue
+                if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+                    continue
+                if "BLOCK" in risk_flags:
+                    continue
+                filtered.append(o)
+            t_orders = filtered
+
         if not t_orders:
             return await message.answer(
                 f"📭 <b>Немає активних ордерів для режиму {mode}</b>\n\n"

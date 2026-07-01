@@ -87,6 +87,22 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         callback_data="disp:toggle:show_llm_summary",
     ))
 
+    # Фільтрація ФОП/ТОВ
+    fop_val = current.get("filter_fop_tov", "hide")
+    fop_label = "Приховати 🚫" if fop_val == "hide" else ("Попередити ⚠️" if fop_val == "warn" else "Ігнорувати 🟢")
+    builder.row(InlineKeyboardButton(
+        text=f"🏢 ФОП / ТОВ: {fop_label}",
+        callback_data="disp:toggle:filter_fop_tov",
+    ))
+
+    # Фільтрація Банка/Сейф
+    banka_val = current.get("filter_banka_jar", "hide")
+    banka_label = "Приховати 🚫" if banka_val == "hide" else ("Попередити ⚠️" if banka_val == "warn" else "Ігнорувати 🟢")
+    builder.row(InlineKeyboardButton(
+        text=f"🍯 Банка / Сейф: {banka_label}",
+        callback_data="disp:toggle:filter_banka_jar",
+    ))
+
     # Налаштування затримки
     cooldown_val = current.get("alert_cooldown", -1.0)
     if cooldown_val < 0.0:
@@ -114,6 +130,14 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(
         text=f"{group_active_icon} Групувати /active в 1 повідомлення",
         callback_data="disp:toggle:group_active_alerts",
+    ))
+
+    # Налаштування групування сканера
+    group_scanner = current.get("group_scanner_alerts", True)
+    group_scanner_icon = "✅" if group_scanner else "❌"
+    builder.row(InlineKeyboardButton(
+        text=f"{group_scanner_icon} Групувати алерти в 1 повідомлення",
+        callback_data="disp:toggle:group_scanner_alerts",
     ))
 
     builder.row(InlineKeyboardButton(

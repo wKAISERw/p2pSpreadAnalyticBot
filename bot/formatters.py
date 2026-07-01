@@ -347,6 +347,10 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         "BLACKLIST": "⛔ BLACKLIST\n" if not short else "⛔",
         "HIGH_RISK_SCORE": "📛 HIGH RISK SCORE\n" if not short else "📛",
         "BLOCK": "⛔ BLOCK\n" if not short else "⛔",
+        "FOP_TOV_WARN": "⚠️ УВАГА: Оплата на ФОП/ТОВ\n" if not short else "⚠️🏢",
+        "BANKA_JAR_WARN": "⚠️ УВАГА: Оплата на банку/сейф\n" if not short else "⚠️🍯",
+        "FOP_TOV_BLOCKED": "🏢 ФОП / ТОВ (приховано)\n" if not short else "🏢",
+        "BANKA_JAR_BLOCKED": "🍯 БАНКА / СЕЙФ (приховано)\n" if not short else "🍯",
     }
  
     # Людські назви типів ризику (для LLM_PENDING / REGEX_WEAK)

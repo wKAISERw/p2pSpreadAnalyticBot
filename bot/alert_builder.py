@@ -167,7 +167,27 @@ async def send_single(
                 for f in flags:
                     if f not in unique_flags:
                         unique_flags.append(f)
-                order.risk_flag = ",".join(unique_flags) if unique_flags else "OK"
+                
+                # 4. Припасовуємо прапори під персональні налаштування відображення юзера (hide/warn/show)
+                filter_fop_tov = ds.get("filter_fop_tov", "hide")
+                filter_banka_jar = ds.get("filter_banka_jar", "hide")
+                
+                final_flags = []
+                for f in unique_flags:
+                    if "FOP_TOV_BLOCKED" in f:
+                        if filter_fop_tov == "hide":
+                            final_flags.append("BLOCK:FOP_TOV_BLOCKED")
+                        elif filter_fop_tov == "warn":
+                            final_flags.append("FOP_TOV_WARN")
+                    elif "BANKA_JAR_BLOCKED" in f:
+                        if filter_banka_jar == "hide":
+                            final_flags.append("BLOCK:BANKA_JAR_BLOCKED")
+                        elif filter_banka_jar == "warn":
+                            final_flags.append("BANKA_JAR_WARN")
+                    else:
+                        final_flags.append(f)
+                
+                order.risk_flag = ",".join(final_flags) if final_flags else "OK"
 
         except Exception as e:
             logger.error("Error refreshing LLM verdicts inside send_single: %s", e)

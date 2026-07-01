@@ -780,17 +780,17 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             "sellBank": opp.get("sell_bank", ""),
                             "routeType": opp.get("route_type", "UNKNOWN")
                         }
-                        current_frontend_opps.append(frontend_opp)
-                        current_cycle_alerts.append(alert)
-                        if sent_count >= current_max_alerts:
-                            logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)
-                            continue
-
                         if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
                             logger.debug("⏭ Скіп: buy BLOCK [%s]", buy_o.merchant_name)
                             continue
                         if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
                             logger.debug("⏭ Скіп: sell BLOCK [%s]", sell_o.merchant_name)
+                            continue
+
+                        current_frontend_opps.append(frontend_opp)
+                        current_cycle_alerts.append(alert)
+                        if sent_count >= current_max_alerts:
+                            logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)
                             continue
 
                         dedup_key = f"spread:{matcher._merge_key(opp)}"

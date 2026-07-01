@@ -53,8 +53,6 @@ class MerchantFilter:
         if self.risk_mode == "WARNING":
             return True
 
-        risk_flag = (order.risk_flag or "").strip()
-
         if not risk_flag or risk_flag in SAFE_FLAGS:
             return True
 

@@ -167,10 +167,23 @@ class AlertDispatcher:
     def _user_wants(self, user: dict, opp: dict) -> tuple[bool, str, float]:
         """Персональний фільтр юзера. Повертає (True, "", scaled_amount) або (False, причина, entry)."""
         mode = user.get("scanner_mode", "SPREAD")
-        if mode != "SPREAD":
-            return False, f"mode={mode}", float(opp["actual_entry_uah"])
-
         entry = float(opp["actual_entry_uah"])
+        if mode != "SPREAD":
+            return False, f"mode={mode}", entry
+
+        # 0. Перевірка FOP та Banka/Jar блокування (per-user)
+        filter_fop = user.get("filter_fop_tov", "hide")
+        filter_banka = user.get("filter_banka_jar", "hide")
+        buy_o = opp["buy_order"]
+        sell_o = opp["sell_order"]
+
+        for order_obj in (buy_o, sell_o):
+            risk_flags = getattr(order_obj, "risk_flag", "") or ""
+            if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                return False, "FOP_TOV blocked for user", entry
+            if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+                return False, "Banka/Jar blocked for user", entry
+
         user_capital = float(user["capital"])
 
         # 1. Капітальний коридор з динамічним зменшенням суми (down-scaling)
@@ -461,31 +474,35 @@ class AlertDispatcher:
             # Сортуємо за спредом (найбільший спочатку)
             user_matches.sort(key=lambda x: x[0].spread_pct, reverse=True)
 
-            if len(user_matches) == 1:
-                local_alert, opp, is_sniper = user_matches[0]
-                match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
-                try:
-                    await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
-                    import asyncio
-                    asyncio.create_task(self._db.save_proposal(
-                        buy_exchange=local_alert.buy_order.exchange,
-                        sell_exchange=local_alert.sell_order.exchange,
-                        buy_merchant=local_alert.buy_order.merchant_name,
-                        sell_merchant=local_alert.sell_order.merchant_name,
-                        spread_pct=local_alert.spread_pct,
-                        profit_uah=local_alert.profit_uah,
-                        deal_amount=local_alert.deal_amount_uah,
-                        route_type=opp.get("route_type", "SPREAD"),
-                        buy_bank=local_alert.buy_bank,
-                        sell_bank=local_alert.sell_bank,
-                        was_sent=True,
-                        user_id=uid,
-                    ))
-                    if show_logs:
-                        logger.info("  └─ %s ВІДПРАВЛЕНО (Одиночний) → Юзер: %s", match_type, uid)
-                except Exception as e:
-                    logger.warning("  └─ ❌ Помилка відправки одиночного алерта юзеру %s: %s", uid, e)
+            group_scanner = user.get("group_scanner_alerts", True)
+
+            if len(user_matches) == 1 or not group_scanner:
+                # Відправляємо окремими повідомленнями
+                for local_alert, opp, is_sniper in user_matches:
+                    match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
+                    try:
+                        await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
+                        import asyncio
+                        asyncio.create_task(self._db.save_proposal(
+                            buy_exchange=local_alert.buy_order.exchange,
+                            sell_exchange=local_alert.sell_order.exchange,
+                            buy_merchant=local_alert.buy_order.merchant_name,
+                            sell_merchant=local_alert.sell_order.merchant_name,
+                            spread_pct=local_alert.spread_pct,
+                            profit_uah=local_alert.profit_uah,
+                            deal_amount=local_alert.deal_amount_uah,
+                            route_type=opp.get("route_type", "SPREAD"),
+                            buy_bank=local_alert.buy_bank,
+                            sell_bank=local_alert.sell_bank,
+                            was_sent=True,
+                            user_id=uid,
+                        ))
+                        if show_logs:
+                            logger.info("  └─ %s ВІДПРАВЛЕНО (Одиночний) → Юзер: %s", match_type, uid)
+                    except Exception as e:
+                        logger.warning("  └─ ❌ Помилка відправки одиночного алерта юзеру %s: %s", uid, e)
             else:
+                # Відправляємо груповим батчем
                 batch_alerts = [m[0] for m in user_matches]
                 try:
                     await self._notifier.send_batch_to_user(chat_id, batch_alerts)

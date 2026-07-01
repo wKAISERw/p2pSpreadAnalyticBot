@@ -24,6 +24,8 @@ ALLOWED_KEYS = frozenset({
     "min_spread_pct",
     "safety_buffer_pct",
     "show_spread_logs",
+    "block_fop_tov",
+    "block_banka_jar",
     "W_REGEX",
     "W_BEHAVIOR",
     "W_REVIEWS_PCT",

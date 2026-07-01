@@ -61,6 +61,23 @@ async def process_taker_path(
                     except Exception as re_err:
                         logger.error("Error analyzing Taker orders in RiskEngine: %s", re_err)
 
+                # Фільтруємо ордери відповідно до особистих налаштувань користувача
+                filter_fop = t_user.get("filter_fop_tov", "hide")
+                filter_banka = t_user.get("filter_banka_jar", "hide")
+                
+                filtered = []
+                for o in fresh:
+                    risk_flags = getattr(o, "risk_flag", "") or ""
+                    if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                        continue
+                    if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+                        continue
+                    if "BLOCK" in risk_flags:
+                        continue
+                    filtered.append(o)
+                fresh = filtered
+
+            if fresh:
                 logger.info(
                     "📤 Taker dispatch → user %s | %s | %d ордерів",
                     t_user["user_id"], t_mode, len(fresh),
