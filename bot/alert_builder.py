@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
 from core.engine.network_fee_engine import NetworkFeeEngine
-from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url, build_android_intent_profile_url
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -637,16 +637,18 @@ async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = N
         b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy')}{b_online}"
         s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell')}{s_online}"
 
-        buy_app_url = build_app_profile_url(a.buy_order.exchange, a.buy_order.merchant_id)
-        sell_app_url = build_app_profile_url(a.sell_order.exchange, a.sell_order.merchant_id)
-
+        buy_ios_url = build_app_profile_url(a.buy_order.exchange, a.buy_order.merchant_id)
+        buy_android_url = build_android_intent_profile_url(a.buy_order.exchange, a.buy_order.merchant_id, side="buy")
+        sell_ios_url = build_app_profile_url(a.sell_order.exchange, a.sell_order.merchant_id)
+        sell_android_url = build_android_intent_profile_url(a.sell_order.exchange, a.sell_order.merchant_id, side="sell")
+ 
         buy_links = f"<a href='{a.buy_order.link}'>Купити</a>"
-        if buy_app_url:
-            buy_links += f" (<a href='{buy_app_url}'>📱 App</a>)"
-
+        if buy_ios_url and buy_android_url:
+            buy_links += f" (<a href='{buy_ios_url}'>📱 iOS</a> | <a href='{buy_android_url}'>🤖 Android</a>)"
+ 
         sell_links = f"<a href='{a.sell_order.link}'>Продати</a>"
-        if sell_app_url:
-            sell_links += f" (<a href='{sell_app_url}'>📱 App</a>)"
+        if sell_ios_url and sell_android_url:
+            sell_links += f" (<a href='{sell_ios_url}'>📱 iOS</a> | <a href='{sell_android_url}'>🤖 Android</a>)"
 
         lines.append(
             f"{medals[i]} <b>{a.spread_pct:.2f}%</b>  "
