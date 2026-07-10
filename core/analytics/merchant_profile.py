@@ -16,7 +16,7 @@ def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "", 
     _URLS = {
         "Binance": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={id}",
         "Bybit":   "https://www.bybit.com/uk-UA/p2p/profile/{id}/USDT/UAH/item",
-        "OKX":     "https://www.okx.com/ua/p2p/ads-merchant?publicUserId={id}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT",
+        "OKX":     "https://www.okx.com/p2p/ads-merchant?publicUserId={id}",
         "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/merchant?id={id}",
     }
     template = _URLS.get(exchange)
@@ -95,7 +95,7 @@ def build_android_intent_profile_url(exchange: str, merchant_id: str, merchant_n
     _SCHEMES = {
         "Binance": ("binance", "app/advertiserDetail?advertiserNo={id}", "com.binance.merchant"),
         "Bybit":   ("bybit",   "app/p2p",                               "com.bybit.app"),
-        "OKX":     ("okx",     "app/p2p",                               "com.okinc.okex.google"),
+        "OKX":     ("okx",     "app/p2p",                               "com.okinc.okex.gp"),
         "MEXC":    ("mexc",    "app/p2p",                               "com.mexcpro.client"),
     }
     
@@ -123,7 +123,7 @@ def build_android_intent_order_url(exchange: str, order_id: str) -> str:
     _SCHEMES = {
         "Binance": ("binance", "app/orderDetail?orderNo={id}", "com.binance.merchant"),
         "Bybit":   ("bybit",   "app/p2p",                      "com.bybit.app"),
-        "OKX":     ("okx",     "app/p2p",                      "com.okinc.okex.google"),
+        "OKX":     ("okx",     "app/p2p",                      "com.okinc.okex.gp"),
         "MEXC":    ("mexc",    "app/p2p",                      "com.mexcpro.client"),
     }
     
