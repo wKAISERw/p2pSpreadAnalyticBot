@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arbix Quantum Redirector</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #0f0f12;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border-left-color: #3b82f6;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        a {
+            color: #3b82f6;
+            text-decoration: none;
+            font-weight: bold;
+        }
+        p {
+            color: #9ca3af;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="spinner"></div>
+    <h2>Відкриваємо додаток...</h2>
+    <p>Якщо перенаправлення не відбулося автоматично, <a id="fallback-link" href="#">натисніть тут для переходу в браузер</a>.</p>
+
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const exchange = params.get('ex');
+        const merchantId = params.get('id');
+        const side = params.get('side') || '';
+
+        if (exchange && merchantId) {
+            // Web URLs
+            const webUrls = {
+                "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
+                "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
+                "OKX": `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT` + (side ? `&side=${side}` : ''),
+                "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
+            };
+
+            // App Schemes
+            const appSchemes = {
+                "Binance": `binance://app/advertiserDetail?advertiserNo=${merchantId}`,
+                "Bybit": `bybit://app/p2p`,
+                "OKX": `okx://app/p2p`,
+                "MEXC": `mexc://app/p2p`
+            };
+
+            const webUrl = webUrls[exchange] || 'https://google.com';
+            const appScheme = appSchemes[exchange];
+
+            document.getElementById('fallback-link').href = webUrl;
+
+            if (appScheme) {
+                // Спроба відкрити додаток
+                window.location.href = appScheme;
+            }
+
+            // Фоллбек на веб-версію через 1.5 сек
+            setTimeout(() => {
+                window.location.href = webUrl;
+            }, 1500);
+        } else {
+            document.body.innerHTML = "<h2>Невірні параметри перенаправлення</h2>";
+        }
+    </script>
+</body>
+</html>

@@ -308,12 +308,20 @@ async def send_taker_single(
             callback_data=f"sl:{direction}:{sl_key}",
         )])
 
-    # URL-кнопка
+    # URL-кнопки (Web + Redirect App)
     url = getattr(order, "link", "") or build_profile_url(
         order.exchange, order.merchant_id
     )
+    url_row = []
     if url:
-        kb.append([InlineKeyboardButton(text="🔗 На біржі", url=url)])
+        url_row.append(InlineKeyboardButton(text="🔗 На біржі", url=url))
+        
+    if order.merchant_id:
+        redirect_url = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={order.exchange}&id={order.merchant_id}&side={'buy' if is_buy else 'sell'}"
+        url_row.append(InlineKeyboardButton(text="📱 Відкрити в App", url=redirect_url))
+        
+    if url_row:
+        kb.append(url_row)
 
     # Blacklist кнопки
     mid = order.merchant_id
