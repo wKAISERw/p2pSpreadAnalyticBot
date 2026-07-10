@@ -311,6 +311,32 @@
             document.getElementById('loading-view').style.display = 'none';
             document.getElementById('debug-view').style.display = 'block';
         } else {
+            // OKX custom scheme redirects
+            if (exchange === "OKX") {
+                if (orderId && orderId !== '20260711123456789') {
+                    if (isAndroid()) {
+                        window.location.href = `intent://p2p/order?orderId=${orderId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/order/' + orderId)};end`;
+                    } else {
+                        window.location.href = `okex://p2p/order?orderId=${orderId}`;
+                        setTimeout(() => {
+                            window.location.href = `https://www.okx.com/p2p/order/${orderId}`;
+                        }, 2000);
+                    }
+                    return;
+                }
+                if (qrCode && qrCode !== 'dplke0165b33e26b47ed89aac2a9f51bcf58') {
+                    if (isAndroid()) {
+                        window.location.href = `intent://merchanthome.com?shareCode=${qrCode}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
+                    } else {
+                        window.location.href = `okex://merchanthome.com?shareCode=${qrCode}`;
+                        setTimeout(() => {
+                            window.location.href = `https://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}`;
+                        }, 2000);
+                    }
+                    return;
+                }
+            }
+
             // Build fallback logic for instant redirects
             const webUrls = {
                 "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
