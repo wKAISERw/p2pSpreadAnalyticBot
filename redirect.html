@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Arbix Quantum Redirector</title>
+    <title>Arbix Quantum Redirector (Debug Mode)</title>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -12,9 +12,7 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
-            height: 100vh;
-            margin: 0;
+            padding: 20px;
             text-align: center;
         }
         .spinner {
@@ -30,52 +28,128 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        a {
+        .btn {
+            background-color: #1e1e24;
             color: #3b82f6;
+            border: 1px solid #3b82f6;
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin: 8px;
+            cursor: pointer;
             text-decoration: none;
+            display: inline-block;
             font-weight: bold;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        .btn:hover {
+            background-color: #3b82f6;
+            color: #ffffff;
+        }
+        h2 {
+            margin-bottom: 10px;
         }
         p {
             color: #9ca3af;
+            max-width: 500px;
             font-size: 14px;
+            margin-bottom: 20px;
+        }
+        .debug-section {
+            background-color: #16161a;
+            border-radius: 12px;
+            padding: 15px;
+            margin-top: 20px;
+            max-width: 600px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .debug-title {
+            color: #f59e0b;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 15px;
         }
     </style>
 </head>
 <body>
-    <div class="spinner"></div>
-    <h2>Відкриваємо додаток...</h2>
-    <p>Якщо перенаправлення не відбулося автоматично, <a id="fallback-link" href="#">натисніть тут для переходу в браузер</a>.</p>
+    <div id="loading-view">
+        <div class="spinner" style="margin: 0 auto 20px;"></div>
+        <h2>Відкриваємо додаток...</h2>
+        <p>Якщо перенаправлення не відбулося автоматично, <a id="fallback-link" href="#" style="color: #3b82f6; font-weight: bold;">натисніть тут для переходу в браузер</a>.</p>
+    </div>
+
+    <div class="debug-section" id="debug-view" style="display: none;">
+        <div class="debug-title">⚙️ ДІАГНОСТИКА: СХЕМИ ДЛЯ BINANCE ТА BYBIT</div>
+        <p>Натискайте кнопки нижче, щоб перевірити, яка саме посилальна схема успішно відкриє додаток на вашому пристрої:</p>
+        
+        <div style="font-weight: bold; margin-top: 15px; text-align: left; color: #3b82f6;">🟡 BINANCE:</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="bin-1" class="btn" href="#">Binance 1: binance://app/advertiserDetail</a>
+            <a id="bin-2" class="btn" href="#">Binance 2: binance://c2c/advertiserDetail</a>
+            <a id="bin-3" class="btn" href="#">Binance 3: binance://app/p2p</a>
+            <a id="bin-4" class="btn" href="#">Binance 4: https://app.binance.com/...</a>
+            <a id="bin-5" class="btn" href="#">Binance 5: https://p2p.binance.com/...</a>
+        </div>
+
+        <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #10b981;">🟢 BYBIT:</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="byb-1" class="btn" href="#">Bybit 1: bybit://app/p2p</a>
+            <a id="byb-2" class="btn" href="#">Bybit 2: bybit://p2p</a>
+            <a id="byb-3" class="btn" href="#">Bybit 3: bybitapp://p2p</a>
+            <a id="byb-4" class="btn" href="#">Bybit 4: bybitapp://app/p2p</a>
+            <a id="byb-5" class="btn" href="#">Bybit 5: bybitapp://open/p2p</a>
+            <a id="byb-6" class="btn" href="#">Bybit 6: bybitapp://otc</a>
+        </div>
+    </div>
 
     <script>
         const params = new URLSearchParams(window.location.search);
         const exchange = params.get('ex');
-        const merchantId = params.get('id');
+        const merchantId = params.get('id') || 's82d673bde69d3b09aa8c2140270e9778';
         const side = params.get('side') || '';
+        const debug = params.get('debug') === '1';
 
-        if (exchange && merchantId) {
-            // Web URLs
-            const webUrls = {
-                "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
-                "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
-                "OKX": `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT` + (side ? `&side=${side}` : ''),
-                "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
-            };
+        // Web URLs
+        const webUrls = {
+            "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
+            "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
+            "OKX": `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT` + (side ? `&side=${side}` : ''),
+            "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
+        };
 
-            // App Schemes
-            const appSchemes = {
-                "Binance": `binance://app/advertiserDetail?advertiserNo=${merchantId}`,
-                "Bybit": `bybit://app/p2p`,
-                "OKX": `okx://app/p2p`,
-                "MEXC": `mexc://app/p2p`
-            };
+        // App Schemes
+        const appSchemes = {
+            "Binance": `binance://app/advertiserDetail?advertiserNo=${merchantId}`,
+            "Bybit": `bybit://app/p2p`,
+            "OKX": `okx://app/p2p`,
+            "MEXC": `mexc://app/p2p`
+        };
 
-            const webUrl = webUrls[exchange] || 'https://google.com';
-            const appScheme = appSchemes[exchange];
+        const webUrl = webUrls[exchange] || webUrls["Binance"];
+        const appScheme = appSchemes[exchange];
 
+        // Налаштування діагностичних кнопок
+        document.getElementById('bin-1').href = `binance://app/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bin-2').href = `binance://c2c/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bin-3').href = `binance://app/p2p`;
+        document.getElementById('bin-4').href = `https://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bin-5').href = `https://p2p.binance.com/en/advertiserDetail?advertiserNo=${merchantId}`;
+
+        document.getElementById('byb-1').href = `bybit://app/p2p`;
+        document.getElementById('byb-2').href = `bybit://p2p`;
+        document.getElementById('byb-3').href = `bybitapp://p2p`;
+        document.getElementById('byb-4').href = `bybitapp://app/p2p`;
+        document.getElementById('byb-5').href = `bybitapp://open/p2p`;
+        document.getElementById('byb-6').href = `bybitapp://otc`;
+
+        if (debug) {
+            document.getElementById('loading-view').style.display = 'none';
+            document.getElementById('debug-view').style.display = 'block';
+        } else {
             document.getElementById('fallback-link').href = webUrl;
 
             if (appScheme) {
-                // Спроба відкрити додаток
                 window.location.href = appScheme;
             }
 
@@ -83,8 +157,6 @@
             setTimeout(() => {
                 window.location.href = webUrl;
             }, 1500);
-        } else {
-            document.body.innerHTML = "<h2>Невірні параметри перенаправлення</h2>";
         }
     </script>
 </body>
