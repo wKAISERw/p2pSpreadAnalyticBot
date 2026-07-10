@@ -80,7 +80,24 @@
     </div>
 
     <div class="debug-section" id="debug-view" style="display: none;">
-        <div class="debug-title">⚙️ ДІАГНОСТИКА: СХЕМИ ДЛЯ BINANCE ТА BYBIT</div>
+        <div class="debug-title">⚙️ ДІАГНОСТИКА СХЕМ ТА ДЕБАГ</div>
+        
+        <div style="background-color: #1a1a20; padding: 15px; border-radius: 8px; margin-bottom: 20px; text-align: left; box-sizing: border-box;">
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #9ca3af; display: block; margin-bottom: 4px; font-weight: bold;">Merchant ID (Binance/Bybit/OKX/MEXC):</label>
+                <input id="input-merchant-id" type="text" style="background: #2a2a35; border: 1px solid #3b82f6; color: white; padding: 8px 10px; border-radius: 6px; width: 100%; box-sizing: border-box; font-size: 14px;" value="">
+            </div>
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #9ca3af; display: block; margin-bottom: 4px; font-weight: bold;">QR Code / DPLK ID (Binance):</label>
+                <input id="input-qr-code" type="text" style="background: #2a2a35; border: 1px solid #3b82f6; color: white; padding: 8px 10px; border-radius: 6px; width: 100%; box-sizing: border-box; font-size: 14px;" value="">
+            </div>
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #9ca3af; display: block; margin-bottom: 4px; font-weight: bold;">Order ID (OKX/Binance/Bybit):</label>
+                <input id="input-order-id" type="text" style="background: #2a2a35; border: 1px solid #3b82f6; color: white; padding: 8px 10px; border-radius: 6px; width: 100%; box-sizing: border-box; font-size: 14px;" value="20260711123456789">
+            </div>
+            <button onclick="updateUrls()" style="background-color: #3b82f6; color: white; border: none; padding: 10px 15px; border-radius: 6px; font-weight: bold; cursor: pointer; width: 100%; font-size: 14px; transition: background 0.2s;">Apply & Update All Links</button>
+        </div>
+
         <p>Натискайте кнопки нижче, щоб перевірити, яка саме посилальна схема успішно відкриє додаток на вашому пристрої:</p>
         
         <div style="font-weight: bold; margin-top: 15px; text-align: left; color: #3b82f6;">🟡 BINANCE:</div>
@@ -149,6 +166,23 @@
             <a id="mexc-2" class="btn" href="#">MEXC 2: mexc://app/buy-crypto/merchant</a>
             <a id="mexc-3" class="btn" href="#">MEXC 3: mexc Universal Link</a>
         </div>
+
+        <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #f59e0b;">📦 OKX P2P ORDER DETAILS (ДЛЯ ТЕСТУВАННЯ):</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="ord-web" class="btn" href="#" style="background-color: #3b82f6; color: white;">Order Web: Web link</a>
+            <a id="ord-intent" class="btn" href="#" style="background-color: #3b82f6; color: white;">Order Intent: Android Intent</a>
+            <a id="ord-1" class="btn" href="#">Order 1: okex://p2p/order?orderId=...</a>
+            <a id="ord-2" class="btn" href="#">Order 2: okex://p2p/order-detail?orderId=...</a>
+            <a id="ord-3" class="btn" href="#">Order 3: okex://p2p/orderDetail?orderId=...</a>
+            <a id="ord-4" class="btn" href="#">Order 4: okex://c2c/orderDetail?orderId=...</a>
+            <a id="ord-5" class="btn" href="#">Order 5: okex://c2c/order?orderId=...</a>
+            <a id="ord-6" class="btn" href="#">Order 6: okex://c2c/order-detail?orderId=...</a>
+            <a id="ord-7" class="btn" href="#">Order 7: okex://orderdetail?orderId=...</a>
+            <a id="ord-8" class="btn" href="#">Order 8: okex://orderDetail?orderId=...</a>
+            <a id="ord-9" class="btn" href="#">Order 9: okex://order?orderId=...</a>
+            <a id="ord-10" class="btn" href="#">Order 10: okex://p2p/orderDetail?id=...</a>
+            <a id="ord-11" class="btn" href="#">Order 11: okex://c2c/orderDetail?id=...</a>
+        </div>
     </div>
 
     <script>
@@ -156,18 +190,16 @@
         const exchange = params.get('ex');
         const merchantId = params.get('id') || 's82d673bde69d3b09aa8c2140270e9778';
         const qrCode = params.get('qr') || 'dplke0165b33e26b47ed89aac2a9f51bcf58';
+        const orderId = params.get('order') || '20260711123456789';
         const side = params.get('side') || '';
         const debug = params.get('debug') === '1';
 
-        // Web URLs (профіль мерчанта — працює завжди у браузері)
-        const webUrls = {
-            "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
-            "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
-            "OKX": `https://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}`,
-            "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
-        };
+        // Populate inputs initially
+        document.getElementById('input-merchant-id').value = merchantId;
+        document.getElementById('input-qr-code').value = qrCode;
+        document.getElementById('input-order-id').value = orderId;
 
-        // Android package names (ідентифікатори додатків у Google Play)
+        // Android package names
         const androidPackages = {
             "Binance": "com.binance.dev",
             "Bybit": "com.bybit.app",
@@ -175,7 +207,7 @@
             "MEXC": "com.mexc.pro"
         };
 
-        // iOS custom schemes (для fallback, якщо intent не підтримується)
+        // iOS custom schemes
         const iosSchemes = {
             "Binance": `binance://`,
             "Bybit": `bybitapp://open/p2p`,
@@ -183,104 +215,122 @@
             "MEXC": `mexc://`
         };
 
-        const webUrl = webUrls[exchange] || webUrls["Binance"];
-
         function isAndroid() { return /Android/i.test(navigator.userAgent); }
         function isIOS() { return /iPhone|iPad|iPod/i.test(navigator.userAgent); }
 
-        /**
-         * 🔑 КЛЮЧОВА ІДЕЯ: Android Intent URL
-         * Формат: intent://{host+path}#Intent;scheme=https;package={app_package};S.browser_fallback_url={fallback};end
-         * 
-         * Це каже Android: "Візьми цей HTTPS URL і відкрий його САМЕ в додатку з цим package name.
-         * Якщо додаток не встановлений або не може обробити — відкрий fallback URL у браузері."
-         * 
-         * Різниця від звичайного custom scheme (binance://):
-         * - Custom scheme просто запускає додаток на головному екрані
-         * - Intent URL передає КОНКРЕТНИЙ веб-шлях додатку, і додаток відкриває потрібну сторінку
-         */
-        function buildIntentUrl(exchange) {
-            const pkg = androidPackages[exchange];
-            const url = webUrls[exchange];
-            if (!pkg || !url) return null;
-            
-            // Видаляємо scheme (https://) з URL для intent формату
-            const urlWithoutScheme = url.replace('https://', '');
-            const fallback = encodeURIComponent(url);
-            
-            return `intent://${urlWithoutScheme}#Intent;scheme=https;package=${pkg};S.browser_fallback_url=${fallback};end`;
+        function updateUrls() {
+            const mId = document.getElementById('input-merchant-id').value.trim();
+            const qr = document.getElementById('input-qr-code').value.trim();
+            const oId = document.getElementById('input-order-id').value.trim();
+
+            // Web URLs (for fallbacks)
+            const webUrls = {
+                "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${mId}`,
+                "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${mId.startsWith('s') ? mId : 's' + mId}/USDT/UAH/item`,
+                "OKX": `https://www.okx.com/p2p/ads-merchant?publicUserId=${mId}`,
+                "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${mId}`
+            };
+
+            // Re-bind all merchant URLs
+            document.getElementById('bin-1').href = `binance://app/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bin-2').href = `binance://c2c/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bin-3').href = `binance://app/p2p`;
+            document.getElementById('bin-4').href = `https://app.binance.com/c2c/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bin-5').href = `https://p2p.binance.com/en/advertiserDetail?advertiserNo=${mId}`;
+
+            document.getElementById('bnc-1').href = `bnc://app.binance.com/c2c/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-2').href = `bnc://app/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-3').href = `bnc://c2c/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-4').href = `bnc://advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-5').href = `bnc://app.binance.com/c2c/profile?advertiserNo=${mId}`;
+            document.getElementById('bnc-6').href = `bnc://app/c2c/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-7').href = `bnc://app/p2p?advertiserNo=${mId}`;
+            document.getElementById('bnc-8').href = `bnc://app.binance.com/p2p/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-9').href = `bnc://app.binance.com/en/advertiserDetail?advertiserNo=${mId}`;
+            document.getElementById('bnc-10').href = `bnc://app.binance.com/c2c/user/profile-and-ads-list?userNo=${mId}`;
+            document.getElementById('bnc-11').href = `bnc://app.binance.com/friendly/c2c/user/profile-and-ads-list?userNo=${mId}`;
+            document.getElementById('bnc-12').href = `bnc://friendly/c2c/user/profile-and-ads-list?userNo=${mId}`;
+
+            // Re-bind DPLK URLs
+            document.getElementById('dplk-1').href = `https://www.binance.com/uk-UA/qr/${qr}`;
+            document.getElementById('dplk-2').href = `intent://www.binance.com/uk-UA/qr/${qr}#Intent;scheme=https;package=com.binance.dev;S.browser_fallback_url=${encodeURIComponent('https://www.binance.com/uk-UA/qr/' + qr)};end`;
+            document.getElementById('dplk-3').href = `bnc://app.binance.com/qr/${qr}`;
+            document.getElementById('dplk-4').href = `bnc://app/qr/${qr}`;
+            document.getElementById('dplk-5').href = `bnc://qr/${qr}`;
+            document.getElementById('dplk-6').href = `binance://app/qr/${qr}`;
+            document.getElementById('dplk-7').href = `binance://qr/${qr}`;
+
+            // Re-bind Bybit URLs
+            document.getElementById('byb-1').href = `bybit://app/p2p`;
+            document.getElementById('byb-2').href = `bybit://p2p`;
+            document.getElementById('byb-3').href = `bybitapp://p2p`;
+            document.getElementById('byb-4').href = `bybitapp://app/p2p`;
+            document.getElementById('byb-5').href = `bybitapp://open/p2p`;
+            document.getElementById('byb-6').href = `bybitapp://otc`;
+            document.getElementById('byb-7').href = `bybitapp://open/p2p/profile/${mId}`;
+            document.getElementById('byb-8').href = `https://www.bybit.com/fiat/trade/otc/?actionType=0&token=USDT&fiat=UAH&paymentMethod=`;
+
+            // Re-bind OKX Merchant URLs
+            document.getElementById('okx-1').href = `okx://app/p2p`;
+            document.getElementById('okx-2').href = `okx://app/p2p/ads-merchant?publicUserId=${mId}`;
+            document.getElementById('okx-3').href = `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${mId}&fiatCurrency=UAH`;
+            document.getElementById('okx-4').href = `https://www.okx.com/p2p/ads-merchant?publicUserId=${mId}`;
+            document.getElementById('okx-5').href = `intent://www.okx.com/p2p/ads-merchant?publicUserId=${mId}#Intent;scheme=https;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + mId)};end`;
+            document.getElementById('okx-6').href = `okex://merchanthome.com?publicUserId=${mId}`;
+            document.getElementById('okx-7').href = `okex://merchanthome.com?userId=${mId}`;
+            document.getElementById('okx-8').href = `okex://merchanthome.com?merchantId=${mId}`;
+            document.getElementById('okx-9').href = `okex://merchanthome.com?shareCode=JVryMxRCHg9Tp`;
+            document.getElementById('okx-10').href = `intent://merchanthome.com?publicUserId=${mId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + mId)};end`;
+            document.getElementById('okx-11').href = `intent://merchanthome.com?userId=${mId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + mId)};end`;
+
+            // Re-bind MEXC URLs
+            document.getElementById('mexc-1').href = `mexc://app/p2p`;
+            document.getElementById('mexc-2').href = `mexc://app/buy-crypto/merchant?id=${mId}`;
+            document.getElementById('mexc-3').href = `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${mId}`;
+
+            // Re-bind OKX Order URLs
+            document.getElementById('ord-web').href = `https://www.okx.com/p2p/order/${oId}`;
+            document.getElementById('ord-intent').href = `intent://www.okx.com/p2p/order/${oId}#Intent;scheme=https;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/order/' + oId)};end`;
+            document.getElementById('ord-1').href = `okex://p2p/order?orderId=${oId}`;
+            document.getElementById('ord-2').href = `okex://p2p/order-detail?orderId=${oId}`;
+            document.getElementById('ord-3').href = `okex://p2p/orderDetail?orderId=${oId}`;
+            document.getElementById('ord-4').href = `okex://c2c/orderDetail?orderId=${oId}`;
+            document.getElementById('ord-5').href = `okex://c2c/order?orderId=${oId}`;
+            document.getElementById('ord-6').href = `okex://c2c/order-detail?orderId=${oId}`;
+            document.getElementById('ord-7').href = `okex://orderdetail?orderId=${oId}`;
+            document.getElementById('ord-8').href = `okex://orderDetail?orderId=${oId}`;
+            document.getElementById('ord-9').href = `okex://order?orderId=${oId}`;
+            document.getElementById('ord-10').href = `okex://p2p/orderDetail?id=${oId}`;
+            document.getElementById('ord-11').href = `okex://c2c/orderDetail?id=${oId}`;
         }
 
-        // Налаштування діагностичних кнопок
-        document.getElementById('bin-1').href = `binance://app/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bin-2').href = `binance://c2c/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bin-3').href = `binance://app/p2p`;
-        document.getElementById('bin-4').href = `https://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bin-5').href = `https://p2p.binance.com/en/advertiserDetail?advertiserNo=${merchantId}`;
-
-        document.getElementById('bnc-1').href = `bnc://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-2').href = `bnc://app/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-3').href = `bnc://c2c/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-4').href = `bnc://advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-5').href = `bnc://app.binance.com/c2c/profile?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-6').href = `bnc://app/c2c/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-7').href = `bnc://app/p2p?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-8').href = `bnc://app.binance.com/p2p/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-9').href = `bnc://app.binance.com/en/advertiserDetail?advertiserNo=${merchantId}`;
-        document.getElementById('bnc-10').href = `bnc://app.binance.com/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
-        document.getElementById('bnc-11').href = `bnc://app.binance.com/friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
-        document.getElementById('bnc-12').href = `bnc://friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
-
-        // Налаштування DPLK кнопок
-        document.getElementById('dplk-1').href = `https://www.binance.com/uk-UA/qr/${qrCode}`;
-        document.getElementById('dplk-2').href = `intent://www.binance.com/uk-UA/qr/${qrCode}#Intent;scheme=https;package=com.binance.dev;S.browser_fallback_url=${encodeURIComponent('https://www.binance.com/uk-UA/qr/' + qrCode)};end`;
-        document.getElementById('dplk-3').href = `bnc://app.binance.com/qr/${qrCode}`;
-        document.getElementById('dplk-4').href = `bnc://app/qr/${qrCode}`;
-        document.getElementById('dplk-5').href = `bnc://qr/${qrCode}`;
-        document.getElementById('dplk-6').href = `binance://app/qr/${qrCode}`;
-        document.getElementById('dplk-7').href = `binance://qr/${qrCode}`;
-
-        document.getElementById('byb-1').href = `bybit://app/p2p`;
-        document.getElementById('byb-2').href = `bybit://p2p`;
-        document.getElementById('byb-3').href = `bybitapp://p2p`;
-        document.getElementById('byb-4').href = `bybitapp://app/p2p`;
-        document.getElementById('byb-5').href = `bybitapp://open/p2p`;
-        document.getElementById('byb-6').href = `bybitapp://otc`;
-        document.getElementById('byb-7').href = `bybitapp://open/p2p/profile/${merchantId}`;
-        document.getElementById('byb-8').href = `https://www.bybit.com/fiat/trade/otc/?actionType=0&token=USDT&fiat=UAH&paymentMethod=`;
-
-        document.getElementById('okx-1').href = `okx://app/p2p`;
-        document.getElementById('okx-2').href = `okx://app/p2p/ads-merchant?publicUserId=${merchantId}`;
-        document.getElementById('okx-3').href = `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH`;
-        document.getElementById('okx-4').href = `https://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}`;
-        document.getElementById('okx-5').href = `intent://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}#Intent;scheme=https;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
-        document.getElementById('okx-6').href = `okex://merchanthome.com?publicUserId=${merchantId}`;
-        document.getElementById('okx-7').href = `okex://merchanthome.com?userId=${merchantId}`;
-        document.getElementById('okx-8').href = `okex://merchanthome.com?merchantId=${merchantId}`;
-        document.getElementById('okx-9').href = `okex://merchanthome.com?shareCode=JVryMxRCHg9Tp`;
-        document.getElementById('okx-10').href = `intent://merchanthome.com?publicUserId=${merchantId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
-        document.getElementById('okx-11').href = `intent://merchanthome.com?userId=${merchantId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
-
-        document.getElementById('mexc-1').href = `mexc://app/p2p`;
-        document.getElementById('mexc-2').href = `mexc://app/buy-crypto/merchant?id=${merchantId}`;
-        document.getElementById('mexc-3').href = `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`;
+        // Initialize URLs
+        updateUrls();
 
         if (debug) {
             document.getElementById('loading-view').style.display = 'none';
             document.getElementById('debug-view').style.display = 'block';
         } else {
+            // Build fallback logic for instant redirects
+            const webUrls = {
+                "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
+                "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
+                "OKX": `https://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}`,
+                "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
+            };
+            const webUrl = webUrls[exchange] || webUrls["Binance"];
             document.getElementById('fallback-link').href = webUrl;
 
             if (isAndroid()) {
-                // 🤖 Android: Intent URL — примусово відкриваємо веб-URL профілю всередині додатку
-                const intentUrl = buildIntentUrl(exchange);
-                if (intentUrl) {
-                    window.location.href = intentUrl;
+                const pkg = androidPackages[exchange];
+                if (pkg && webUrls[exchange]) {
+                    const urlWithoutScheme = webUrls[exchange].replace('https://', '');
+                    const fallback = encodeURIComponent(webUrl);
+                    window.location.href = `intent://${urlWithoutScheme}#Intent;scheme=https;package=${pkg};S.browser_fallback_url=${fallback};end`;
                 } else {
                     window.location.href = webUrl;
                 }
             } else if (isIOS()) {
-                // 📱 iOS: Спроба custom scheme → fallback на веб
                 const iosScheme = iosSchemes[exchange];
                 if (iosScheme) {
                     window.location.href = iosScheme;
@@ -289,7 +339,6 @@
                     window.location.href = webUrl;
                 }
             } else {
-                // 💻 Desktop: Просто відкриваємо веб-профіль
                 window.location.href = webUrl;
             }
         }
