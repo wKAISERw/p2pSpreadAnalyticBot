@@ -100,6 +100,22 @@
             <a id="byb-4" class="btn" href="#">Bybit 4: bybitapp://app/p2p</a>
             <a id="byb-5" class="btn" href="#">Bybit 5: bybitapp://open/p2p</a>
             <a id="byb-6" class="btn" href="#">Bybit 6: bybitapp://otc</a>
+            <a id="byb-7" class="btn" href="#">Bybit 7: bybitapp://open/p2p/profile</a>
+            <a id="byb-8" class="btn" href="#">Bybit 8: bybit Universal Link</a>
+        </div>
+
+        <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #3b82f6;">🔵 OKX:</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="okx-1" class="btn" href="#">OKX 1: okx://app/p2p</a>
+            <a id="okx-2" class="btn" href="#">OKX 2: okx://app/p2p/ads-merchant</a>
+            <a id="okx-3" class="btn" href="#">OKX 3: okx Universal Link</a>
+        </div>
+
+        <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #10b981;">🟢 MEXC:</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="mexc-1" class="btn" href="#">MEXC 1: mexc://app/p2p</a>
+            <a id="mexc-2" class="btn" href="#">MEXC 2: mexc://app/buy-crypto/merchant</a>
+            <a id="mexc-3" class="btn" href="#">MEXC 3: mexc Universal Link</a>
         </div>
     </div>
 
@@ -142,6 +158,16 @@
         document.getElementById('byb-4').href = `bybitapp://app/p2p`;
         document.getElementById('byb-5').href = `bybitapp://open/p2p`;
         document.getElementById('byb-6').href = `bybitapp://otc`;
+        document.getElementById('byb-7').href = `bybitapp://open/p2p/profile/${merchantId}`;
+        document.getElementById('byb-8').href = `https://www.bybit.com/fiat/trade/otc/?actionType=0&token=USDT&fiat=UAH&paymentMethod=`;
+
+        document.getElementById('okx-1').href = `okx://app/p2p`;
+        document.getElementById('okx-2').href = `okx://app/p2p/ads-merchant?publicUserId=${merchantId}`;
+        document.getElementById('okx-3').href = `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH`;
+
+        document.getElementById('mexc-1').href = `mexc://app/p2p`;
+        document.getElementById('mexc-2').href = `mexc://app/buy-crypto/merchant?id=${merchantId}`;
+        document.getElementById('mexc-3').href = `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`;
 
         if (debug) {
             document.getElementById('loading-view').style.display = 'none';
