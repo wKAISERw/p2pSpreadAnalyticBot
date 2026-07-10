@@ -8,7 +8,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
 from core.engine.network_fee_engine import NetworkFeeEngine
-from core.analytics.merchant_profile import build_profile_url, build_app_profile_url, build_android_intent_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -429,26 +429,6 @@ async def send_single(
     if url_row:
         kb.append(url_row)
 
-    # 📱 Додаємо окремі кнопки переходу в додатки для Buy і Sell
-    buy_ios = build_app_profile_url(alert.buy_order.exchange, alert.buy_order.merchant_id)
-    buy_android = build_android_intent_profile_url(alert.buy_order.exchange, alert.buy_order.merchant_id, side="buy")
-    buy_app_row = []
-    if buy_ios:
-        buy_app_row.append(InlineKeyboardButton(text="📱 Buy iOS App", url=buy_ios))
-    if buy_android:
-        buy_app_row.append(InlineKeyboardButton(text="🤖 Buy Android App", url=buy_android))
-    if buy_app_row:
-        kb.append(buy_app_row)
-
-    sell_ios = build_app_profile_url(alert.sell_order.exchange, alert.sell_order.merchant_id)
-    sell_android = build_android_intent_profile_url(alert.sell_order.exchange, alert.sell_order.merchant_id, side="sell")
-    sell_app_row = []
-    if sell_ios:
-        sell_app_row.append(InlineKeyboardButton(text="📱 Sell iOS App", url=sell_ios))
-    if sell_android:
-        sell_app_row.append(InlineKeyboardButton(text="🤖 Sell Android App", url=sell_android))
-    if sell_app_row:
-        kb.append(sell_app_row)
 
     b_mid = alert.buy_order.merchant_id
     if b_mid:

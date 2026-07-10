@@ -6,7 +6,7 @@ from __future__ import annotations
 from html import escape
 import time
 from exchanges.base import Order
-from core.analytics.merchant_profile import build_profile_url, build_app_profile_url, build_android_intent_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 
 # ── Бейджі ризику ──────────────────────────────────────────────────────
 RISK_BADGES = {

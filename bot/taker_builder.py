@@ -6,7 +6,7 @@ from html import escape
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
-from core.analytics.merchant_profile import build_profile_url, build_app_profile_url, build_android_intent_profile_url
+from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -308,24 +308,12 @@ async def send_taker_single(
             callback_data=f"sl:{direction}:{sl_key}",
         )])
 
-    # URL-кнопки (Web + iOS App + Android App)
+    # URL-кнопка
     url = getattr(order, "link", "") or build_profile_url(
         order.exchange, order.merchant_id
     )
-    url_row = []
     if url:
-        url_row.append(InlineKeyboardButton(text="🔗 На біржі", url=url))
-        
-    ios_url = build_app_profile_url(order.exchange, order.merchant_id)
-    android_url = build_android_intent_profile_url(order.exchange, order.merchant_id, side="buy" if is_buy else "sell")
-    
-    if ios_url:
-        url_row.append(InlineKeyboardButton(text="📱 iOS App", url=ios_url))
-    if android_url:
-        url_row.append(InlineKeyboardButton(text="🤖 Android App", url=android_url))
-        
-    if url_row:
-        kb.append(url_row)
+        kb.append([InlineKeyboardButton(text="🔗 На біржі", url=url)])
 
     # Blacklist кнопки
     mid = order.merchant_id
