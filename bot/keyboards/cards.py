@@ -41,6 +41,11 @@ def card_display_settings_kb(current: dict) -> InlineKeyboardMarkup:
     stt_text = "💡 Поради щодо лімітів: ✅ Увімк" if stt else "💡 Поради щодо лімітів: ❌ Вимк"
     builder.row(InlineKeyboardButton(text=stt_text, callback_data="disp:toggle:show_transfer_tips"))
 
+    # 7. Ліміт непрогрітих карт
+    ccl = current.get("cold_card_limit", 2000.0)
+    ccl_text = f"🌱 Ліміт непрогрітих: {ccl:.0f} ₴" if ccl > 0 else "🌱 Ліміт непрогрітих: Вимкнено"
+    builder.row(InlineKeyboardButton(text=ccl_text, callback_data="disp:set:cold_card_limit"))
+
     builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="set:display_menu"))
     return builder.as_markup()
 

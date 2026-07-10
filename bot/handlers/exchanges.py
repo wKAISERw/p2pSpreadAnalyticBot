@@ -485,10 +485,14 @@ async def on_capital_auto(call: CallbackQuery) -> None:
         await conn.execute("UPDATE scanner_users SET capital_mode = 'auto' WHERE user_id = ?", (call.from_user.id,))
         await conn.commit()
         auto_cap = await _db.get_user_auto_capital(call.from_user.id)
+        cards = await _db.get_cards(call.from_user.id, status="active")
+        total_balance = sum(float(c.get("balance", 0.0)) for c in cards)
         with suppress(TelegramBadRequest):
             await call.message.edit_text(
                 f"✅ <b>Встановлено авто-капітал!</b>\n\n"
-                f"Поточна сума на активних картках: <b>{auto_cap:.1f} ₴</b>\n"
+                f"Загальний баланс активних карт: <b>{total_balance:.1f} ₴</b>\n"
+                f"Розрахований авто-капітал: <b>{auto_cap:.1f} ₴</b>\n"
+                f"<i>(Система обмежує внесок кожної картки відповідно до її лімітів та рівня прогріву)</i>\n\n"
                 f"Сканер буде автоматично підлаштовуватись під баланси ваших живих карт.",
                 reply_markup=back_to_filters_kb()
             )
@@ -1464,17 +1468,20 @@ async def on_session_manual_cookies(call: CallbackQuery, state: FSMContext) -> N
     
     instruction_text = (
         f"📥 <b>Ручне оновлення сесії {exchange} через Cookies</b>\n\n"
-        f"Цей спосіб на 100% обходить будь-які блокування Google або Binance QR, оскільки ви копіюєте кукіси безпосередньо зі свого робочого браузера.\n\n"
+        f"Цей спосіб на 100% обходить будь-які блокування Google або QR-кодів, оскільки ви копіюєте кукіси безпосередньо зі свого робочого браузера.\n\n"
         f"📋 <b>Покрокова інструкція:</b>\n"
         f"1️⃣ Відкрийте сайт <b>{exchange}</b> у звичайній вкладці вашого браузера (на ПК) та увійдіть у свій акаунт.\n"
-        f"2️⃣ Перейдіть на сторінку P2P (наприклад, для Binance: <code>https://c2c.binance.com/uk-UA</code>).\n"
-        f"3️⃣ Відкрийте консоль розробника:\n"
+        f"2️⃣ Перейдіть на сторінку P2P.\n"
+        f"3️⃣ Відкрийте інструменти розробника:\n"
         f"   • Windows/Linux: <code>F12</code> або <code>Ctrl + Shift + I</code>\n"
         f"   • Mac: <code>Cmd + Option + I</code>\n"
-        f"4️⃣ Перейдіть на вкладку <b>Console</b> (Консоль), вставте наступний код і натисніть <code>Enter</code>:\n\n"
-        f"<code>copy(document.cookie)</code>\n\n"
-        f"<i>(Це автоматично скопіює кукіси в буфер обміну. Якщо не спрацювало, введіть <code>document.cookie</code> та скопіюйте вихідний текст вручну).</i>\n\n"
-        f"5️⃣ <b>Просто вставте скопійовані кукіси (текстовий рядок) сюди в чат і надішліть боту.</b>"
+        f"4️⃣ Перейдіть на вкладку <b>Network (Мережа)</b>:\n"
+        f"   • Оновіть сторінку P2P.\n"
+        f"   • Оберіть будь-який запит (наприклад, <code>appraiseList</code> або <code>list</code> для Bybit, або <code>advertiserDetail</code> для Binance).\n"
+        f"   • У вкладці <b>Headers (Заголовки)</b> знайдіть блок <b>Request Headers (Заголовки запиту)</b>.\n"
+        f"   • Знайдіть заголовок <b>Cookie</b> (або <b>cookie</b>), натисніть на його значення правою кнопкою миші та оберіть <b>Copy value</b> (Копіювати значення).\n\n"
+        f"<i>⚠️ Увага: використання <code>document.cookie</code> у вкладці Console НЕ підходить, оскільки воно не копіює захищені HttpOnly кукіси авторизації.</i>\n\n"
+        f"5️⃣ <b>Просто вставте скопійоване значення Cookie сюди в чат і надішліть боту.</b>"
     )
     
     builder = InlineKeyboardBuilder()
@@ -1489,30 +1496,56 @@ async def on_session_manual_cookies(call: CallbackQuery, state: FSMContext) -> N
 async def on_cookies_received(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     exchange = data.get("exchange")
-    cookies_str = message.text.strip()
+    input_str = message.text.strip()
     
-    if not cookies_str or "=" not in cookies_str:
-        await message.answer("❌ Надісланий текст не схожий на кукіси. Спробуйте ще раз або натисніть «Скасувати» в меню:")
+    if not input_str:
+        await message.answer("❌ Надісланий текст порожній. Спробуйте ще раз або натисніть «Скасувати» в меню:")
         return
         
     await state.clear()
     
-    # Парсимо кукіси
     cookies_dict = {}
-    for chunk in cookies_str.split(';'):
-        if '=' in chunk:
-            k, v = chunk.split('=', 1)
-            cookies_dict[k.strip()] = v.strip()
-            
-    # Заголовки за замовчуванням
-    headers = {
+    headers_dict = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "*/*"
     }
+
+    # Визначаємо, чи це формат копіювання HTTP-заголовків з Chrome Developer Tools (Network)
+    lines = [line.strip() for line in input_str.split("\n") if line.strip()]
+    colons_count = sum(1 for line in lines if ":" in line)
     
+    if colons_count >= 2:
+        # Парсимо як HTTP Request Headers
+        for line in lines:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                k_clean = k.strip().lower()
+                v_clean = v.strip()
+                if k_clean == "cookie":
+                    for chunk in v_clean.split(';'):
+                        if '=' in chunk:
+                            ck, cv = chunk.split('=', 1)
+                            cookies_dict[ck.strip()] = cv.strip()
+                else:
+                    headers_dict[k.strip()] = v_clean
+    else:
+        # Стандартний формат — просто рядок кук
+        for chunk in input_str.split(';'):
+            if '=' in chunk:
+                k, v = chunk.split('=', 1)
+                cookies_dict[k.strip()] = v.strip()
+
+    # 🚀 ФІКС: Якщо це OKX і ми не знайшли Authorization в заголовках, але знайшли token в куках
+    if exchange == "OKX":
+        headers_lower = {k.lower(): v for k, v in headers_dict.items()}
+        if "authorization" not in headers_lower:
+            token_val = cookies_dict.get("token")
+            if token_val:
+                headers_dict["Authorization"] = f"Bearer {token_val}"
+
     success = await _db.save_auth_session(
         exchange=exchange,
-        headers_dict=headers,
+        headers_dict=headers_dict,
         cookies_dict=cookies_dict,
         user_id=message.from_user.id
     )

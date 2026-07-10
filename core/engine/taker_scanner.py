@@ -55,6 +55,20 @@ class TakerScanner:
         emf = user.get("exchange_merchant_filters") or {}
 
         # ── Smart Card Pre-filtering Setup ──
+        def _normalize_bank(name: str) -> str:
+            if not name:
+                return ""
+            name_low = str(name).strip().lower()
+            name_map = {
+                "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
+                "14": "privatbank", "pb": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
+                "64": "pumb", "pumb": "pumb", "пумб": "pumb",
+                "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
+                "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
+                "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
+            }
+            return name_map.get(name_low, name_low)
+
         card_matching_active = False
         user_cards_by_bank = {}
         if self.card_engine and self.db:
@@ -68,7 +82,7 @@ class TakerScanner:
                     for c in raw_cards:
                         if float(c.get("cooldown_until", 0.0)) > now_epoch:
                             continue
-                        b_name = str(c.get("bank_name", "")).lower()
+                        b_name = _normalize_bank(c.get("bank_name", ""))
                         if b_name not in user_cards_by_bank:
                             user_cards_by_bank[b_name] = []
                         user_cards_by_bank[b_name].append(c)
@@ -98,7 +112,7 @@ class TakerScanner:
                 # ── In-Memory Card Pre-filtering ──
                 if card_matching_active:
                     from bot.formatters import _bank_code_to_db
-                    card_bank_db = _bank_code_to_db(bank_code)
+                    card_bank_db = _normalize_bank(_bank_code_to_db(bank_code))
                     if not card_bank_db or card_bank_db not in user_cards_by_bank:
                         continue
                     
@@ -115,7 +129,23 @@ class TakerScanner:
 
                     # For TAKER_BUY we need enough total UAH balance across active cards
                     if mode == "TAKER_BUY":
-                        total_bal = sum(float(c.get("balance", 0.0)) for c in user_cards_by_bank[card_bank_db])
+                        total_bal = 0.0
+                        for c in user_cards_by_bank[card_bank_db]:
+                            card_id = c["id"]
+                            pending_out = 0.0
+                            async with self.db._db.execute(
+                                """
+                                SELECT SUM(l.amount) as total
+                                FROM card_order_legs l
+                                JOIN card_orders o ON l.order_id = o.id
+                                WHERE l.card_id = ? AND l.leg_status = 'pending' AND o.direction = 'out'
+                                """,
+                                (card_id,)
+                            ) as cur:
+                                row = await cur.fetchone()
+                                if row and row["total"]:
+                                    pending_out = float(row["total"])
+                            total_bal += max(0.0, float(c.get("balance", 0.0)) - pending_out)
                         if total_bal < target_uah:
                             continue
 

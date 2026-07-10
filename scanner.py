@@ -372,11 +372,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
-                session_name="cryptobot_session",
+                session_name="data/cryptobot_session",
                 update_interval=getattr(settings, "cb_userbot_interval", 45.0),
                 banks=list(target_banks.keys()),
             )
             await cb_userbot.start()
+            w_client.set_userbot(cb_userbot)
 
             async def safe_fetch(cfg: dict, amounts: list, banks: list):
                 name = cfg["name"]
@@ -386,15 +387,20 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     return ([], [])
 
                 timeout = 3.0 if name == "Wallet" else 7.0
+                f_start = time.monotonic()
                 try:
                     result = await asyncio.wait_for(
                         cfg["cb"].call(cfg["instance"].fetch_both_multi(amounts=amounts, banks=banks)),
                         timeout=timeout,
                     )
+                    f_duration = time.monotonic() - f_start
+                    if f_duration > 1.0:
+                        logger.warning("🐌 %s фетч зайняв %.2fs!", name, f_duration)
                     exchange_manager.reset_failures(name)
                     return result
                 except asyncio.TimeoutError:
-                    logger.warning("🐌 %s занадто довго відповідає!", name)
+                    f_duration = time.monotonic() - f_start
+                    logger.warning("🐌 %s занадто довго відповідає! (Timeout після %.2fs)", name, f_duration)
                     cfg["cb"].record_failure()
                     raise
                 except Exception as e:

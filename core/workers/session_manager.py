@@ -543,6 +543,8 @@ class SessionManager:
             if not headers_dict or not cookies_dict:
                 return False
 
+            headers_dict = {k.lower(): v for k, v in headers_dict.items()}
+
             auth = headers_dict.get("authorization", "")
             if not auth:
                 return False
@@ -567,7 +569,10 @@ class SessionManager:
                 "pubUserId": "0e37a42aca",  # тестовий публічний мерчант
             }
 
-            async with CurlSession(impersonate="chrome124") as session:
+            from config import settings
+            proxies = {"http": settings.proxy_url, "https": settings.proxy_url} if settings.proxy_url else None
+
+            async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
                 resp = await session.post(url, json=payload,
                                          headers=req_headers, cookies=cookies_dict,
                                          timeout=8)
@@ -601,6 +606,8 @@ class SessionManager:
             if not headers_dict or not cookies_dict:
                 return False
 
+            headers_dict = {k.lower(): v for k, v in headers_dict.items()}
+
             # Перевіряємо через публічний endpoint — якщо cookies протухли, отримаємо redirect
             req_headers = {
                 "accept": "application/json",
@@ -610,12 +617,15 @@ class SessionManager:
             }
             # Копіюємо Csrftoken та інші важливі заголовки
             for k in ("csrftoken", "bnc-uuid", "fvideo-id", "fvideo-token"):
-                v = headers_dict.get(k) or headers_dict.get(k.upper())
+                v = headers_dict.get(k)
                 if v:
                     req_headers[k] = v
 
             url = "https://c2c.binance.com/bapi/c2c/v1/friendly/c2c/user/get-profile"
-            async with CurlSession(impersonate="chrome124") as session:
+            from config import settings
+            proxies = {"http": settings.proxy_url, "https": settings.proxy_url} if settings.proxy_url else None
+
+            async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
                 resp = await session.get(url, headers=req_headers,
                                          cookies=cookies_dict, timeout=8)
 

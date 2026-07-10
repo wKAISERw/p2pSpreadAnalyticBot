@@ -49,10 +49,10 @@ class TestUXMenus(unittest.TestCase):
         self.assertIn("⚙️ Система", buttons)
         self.assertIn("ℹ️ Допомога", buttons)
 
-        # Normal user menu (no System button)
+        # Normal user menu (System button is now always present)
         kb_user = main_menu_kb(is_admin=False)
         buttons_user = [btn.text for row in kb_user.inline_keyboard for btn in row]
-        self.assertNotIn("⚙️ Система", buttons_user)
+        self.assertIn("⚙️ Система", buttons_user)
 
     def test_exchanges_menu_kb(self):
         statuses = [
@@ -120,6 +120,16 @@ class TestUXMenus(unittest.TestCase):
         self.assertIn("🛡️ Антифрод", buttons)
         self.assertIn("👥 Управління юзерами", buttons)
         self.assertIn("🔄 Debug / перезапуск", buttons)
+
+    def test_system_menu_kb_non_admin(self):
+        kb = system_menu_kb(is_scanner_active=True, is_muted=False, is_admin=False)
+        buttons = [btn.text for row in kb.inline_keyboard for btn in row]
+        self.assertNotIn("⏸ Зупинити ядро", buttons)
+        self.assertIn("🔕 Пауза 1г", buttons)
+        self.assertNotIn("🛡️ Антифрод", buttons)
+        self.assertIn("🧪 Експерим. функції", buttons)
+        self.assertNotIn("👥 Управління юзерами", buttons)
+        self.assertNotIn("🔄 Debug / перезапуск", buttons)
 
     def test_back_buttons(self):
         for kb_fn in [back_to_balance_kb, back_to_sessions_kb, back_to_monitoring_kb, back_to_system_kb, back_to_exchanges_kb]:

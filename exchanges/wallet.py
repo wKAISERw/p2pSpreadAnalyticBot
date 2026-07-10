@@ -74,6 +74,23 @@ class WalletExchange(BaseExchange):
                     orders.append(order)
             except Exception as e:
                 logger.warning("Не вдалося розпарсити Wallet ордер: %s", e)
+
+        # 🚀 Паралельно завантажуємо умови для топ-12 ордерів (найвигідніші спреди)
+        top_orders = orders[:12]
+        if top_orders:
+            comments = await asyncio.gather(
+                *[self.client.fetch_offer_comment(int(o.id)) for o in top_orders],
+                return_exceptions=True
+            )
+            for order, comment in zip(top_orders, comments):
+                if isinstance(comment, Exception):
+                    logger.warning("⚠️ Не вдалося завантажити умови Wallet оффера %s через виняток: %s", order.id, comment)
+                elif comment is None:
+                    logger.warning("⚠️ Не вдалося достукатися до умов Wallet оффера %s (помилка авторизації або мережі)", order.id)
+                else:
+                    # Успішно отримали умови (можуть бути порожніми "" або містити текст)
+                    order.trade_terms = comment.lower()
+
         return orders
 
 

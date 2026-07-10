@@ -148,6 +148,14 @@ class UserRepo:
         """Зберігає перехоплені браузерні заголовки та кукіси."""
         if not self._db:
             return False
+
+        # 🚀 ФІКС: Не зберігаємо сесію OKX, якщо в ній відсутній обов'язковий заголовок authorization
+        if exchange == "OKX":
+            headers_lower = {k.lower(): v for k, v in headers_dict.items()}
+            if "authorization" not in headers_lower or not headers_lower["authorization"]:
+                logger.warning("save_auth_session: Пропуск збереження сесії OKX через відсутність authorization header")
+                return False
+
         import json
         import time
         try:

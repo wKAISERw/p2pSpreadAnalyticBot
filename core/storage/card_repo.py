@@ -34,21 +34,23 @@ class CardRepo:
         enable_in_single_modes = 1 if settings_dict.get("enable_in_single_modes", False) else 0
         show_balances_breakdown = 1 if settings_dict.get("show_balances_breakdown", True) else 0
         show_transfer_tips = 1 if settings_dict.get("show_transfer_tips", True) else 0
+        cold_card_limit = float(settings_dict.get("cold_card_limit", 2000.0))
 
         await self._db.execute(
             """
             INSERT INTO user_card_settings (user_id, card_output_mode, enable_smart_spoiler, card_detail_level,
-                                            enable_in_single_modes, show_balances_breakdown, show_transfer_tips)
-            VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
+                                            enable_in_single_modes, show_balances_breakdown, show_transfer_tips, cold_card_limit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
             UPDATE SET
                 card_output_mode = EXCLUDED.card_output_mode,
                 enable_smart_spoiler = EXCLUDED.enable_smart_spoiler,
                 card_detail_level = EXCLUDED.card_detail_level,
                 enable_in_single_modes = EXCLUDED.enable_in_single_modes,
                 show_balances_breakdown = EXCLUDED.show_balances_breakdown,
-                show_transfer_tips = EXCLUDED.show_transfer_tips
+                show_transfer_tips = EXCLUDED.show_transfer_tips,
+                cold_card_limit = EXCLUDED.cold_card_limit
             """,
-            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level, enable_in_single_modes, show_balances_breakdown, show_transfer_tips)
+            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level, enable_in_single_modes, show_balances_breakdown, show_transfer_tips, cold_card_limit)
         )
         await self._db.commit()
 
@@ -480,16 +482,7 @@ class CardRepo:
             row = await cur.fetchone()
             return dict(row) if row else None
 
-    async def get_rolling_used(self, card_id: str, direction: str, hours: int = 24) -> float:
-        if not self._db:
-            return 0.0
-        cutoff = time.time() - (hours * 3600)
-        async with self._db.execute(
-            "SELECT SUM(amount) as total FROM card_transactions WHERE card_id=? AND direction=? AND timestamp > ?",
-            (card_id, direction, cutoff)
-        ) as cur:
-            row = await cur.fetchone()
-            return float(row["total"]) if row and row["total"] else 0.0
+
 
     async def get_card_report_stats(self, card_id: str) -> dict:
         if not self._db:
@@ -622,7 +615,7 @@ class CardRepo:
         # Normalization map for banks
         name_map = {
             "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
-            "14": "privatbank", "pb": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
+            "14": "privatbank", "pb": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
             "64": "pumb", "pumb": "pumb", "пумб": "pumb",
             "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
             "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
@@ -640,6 +633,10 @@ class CardRepo:
         else:
             allowed_banks_norm = None
             
+        # Get user settings for card warmup limit
+        settings = await self.get_user_card_settings(user_id)
+        cold_card_limit = float(settings.get("cold_card_limit", 2000.0)) if settings else 2000.0
+
         bank_capitals = {}  # bank_norm -> float
         now = time.time()
         
@@ -679,10 +676,27 @@ class CardRepo:
                 avail_monthly
             )
             
+            # Get pending out amount for this card
+            pending_out = 0.0
+            async with self._db.execute(
+                """
+                SELECT SUM(l.amount) as total
+                FROM card_order_legs l
+                JOIN card_orders o ON l.order_id = o.id
+                WHERE l.card_id = ? AND l.leg_status = 'pending' AND o.direction = 'out'
+                """,
+                (card_id,)
+            ) as cur:
+                row = await cur.fetchone()
+                if row and row["total"]:
+                    pending_out = float(row["total"])
+                    
+            card_avail = max(0.0, card_avail - pending_out)
+            
             if card_avail > 0:
                 # Check warmup limits
                 tx_count_total, last_tx_ts = await self.get_card_warmth_stats(card_id)
-                warmup_limit = self.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now)
+                warmup_limit = self.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now, cold_card_limit)
                 if warmup_limit is not None:
                     card_avail = min(card_avail, warmup_limit)
 
@@ -712,7 +726,7 @@ class CardRepo:
                 return cnt, last_ts
         return 0, 0.0
 
-    def get_card_warmup_limit(self, card: dict, tx_count_total: int, last_tx_ts: float, now: float) -> float | None:
+    def get_card_warmup_limit(self, card: dict, tx_count_total: int, last_tx_ts: float, now: float, cold_card_limit: float = 2000.0) -> float | None:
         """
         Returns the warmup limit for a card if it is not warm, or None if it is warm.
         """
@@ -720,17 +734,20 @@ class CardRepo:
         if is_warm:
             return None
 
+        if cold_card_limit <= 0:
+            return None
+
         # Auto-warmup rule: 10+ transactions and active within last 30 days
         if tx_count_total >= 10 and (now - last_tx_ts) <= 30 * 86400:
             return None
 
-        # Determine warmup limits
+        # Determine warmup limits scaled proportionally to base limit
         if tx_count_total <= 2:
-            return 2000.0
+            return cold_card_limit
         elif tx_count_total <= 5:
-            return 5000.0
+            return 2.5 * cold_card_limit
         elif tx_count_total <= 9:
-            return 10000.0
+            return 5.0 * cold_card_limit
         else:
             # tx_count_total >= 10 but dormant (>30 days inactive)
-            return 5000.0
+            return 2.5 * cold_card_limit

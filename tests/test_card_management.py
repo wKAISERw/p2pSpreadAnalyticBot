@@ -576,3 +576,42 @@ async def test_disabled_limits_ignored_by_engine(db):
     result_success = await engine.run(TEST_USER_ID, "monobank", 10000.0, "buy")
     assert result_success.status == "success"
     assert result_success.best_card["id"] == card_id
+
+
+@pytest.mark.asyncio
+async def test_custom_cold_card_limit_and_pending_orders(db):
+    # Setup card: Monobank balance=15000 (cold card)
+    c1 = await _setup_user_and_card(db, balance=15000.0, bank="monobank", last_four="1111")
+    await db.update_card(c1, {"is_warmed_up": 0})
+    
+    # 1. Default cold_card_limit = 2000.0.
+    # Total auto-capital should be min(15000, 2000) = 2000.0.
+    cap = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap == pytest.approx(2000.0)
+
+    # 2. Update cold_card_limit to 5000.0
+    await db.update_user_card_settings(TEST_USER_ID, {"cold_card_limit": 5000.0})
+    cap2 = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap2 == pytest.approx(5000.0)
+
+    # 3. Disable cold_card_limit by setting it to 0.0
+    await db.update_user_card_settings(TEST_USER_ID, {"cold_card_limit": 0.0})
+    cap3 = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap3 == pytest.approx(15000.0)
+
+    # 4. Reserve order leg on c1.
+    order_id = "test-order-123"
+    await db.reserve_card_amount(
+        order_id=order_id,
+        owner_id=TEST_USER_ID,
+        target_bank="monobank",
+        direction="out",
+        total_amount=4000.0,
+        expected_window_minutes=15,
+        split_strategy=[{"card_id": c1, "amount": 4000.0}]
+    )
+
+    # Now auto-capital should be balance (15000) - pending (4000) = 11000.0
+    cap4 = await db.get_user_auto_capital(TEST_USER_ID)
+    assert cap4 == pytest.approx(11000.0)
+

@@ -691,6 +691,20 @@ async def cmd_debugfilters(message: Message) -> None:
         uid = u.get("user_id") or u.get("userid") or "?"
         mode = u.get("scanner_mode", "SPREAD")
         capital = float(u.get("capital", 0))
+        cap_mode = u.get("capital_mode", "manual")
+        card_settings = await _db.get_user_card_settings(u["user_id"])
+        card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
+        auto_cap = await _db.get_user_auto_capital(u["user_id"])
+        
+        if cap_mode == "auto":
+            capital = auto_cap
+            capital_str = f"{capital:.0f} (Авто)"
+        else:
+            if card_module_enabled and auto_cap > 0 and auto_cap < capital:
+                capital = auto_cap
+                capital_str = f"{capital:.0f} (Обмеж. карт.)"
+            else:
+                capital_str = f"{capital:.0f}"
         minamount = float(u.get("min_amount", 0))
         minspread = float(u.get("min_spread", 0))
         is_active = bool(u.get("is_alerts_active", 1))
@@ -706,7 +720,7 @@ async def cmd_debugfilters(message: Message) -> None:
 
         lines.append(f"👤 <code>{uid}</code>  {'✅' if is_active else '🔕 ВИМКНЕНО'}")
         lines.append(f"  режим:      <b>{mode}</b>")
-        lines.append(f"  капітал:    <b>{capital:.0f} ₴</b>")
+        lines.append(f"  капітал:    <b>{capital_str} ₴</b>")
         lines.append(f"  мін.сума:   <b>{minamount:.0f} ₴</b>" if minamount > 0 else "  мін.сума:   вимкнено")
         lines.append(f"  мін.спред:  <b>{minspread:.2f}%</b>")
         lines.append(f"  buy банки:  {', '.join(buy_bank_names) if buy_bank_names else '⚠️ ПОРОЖНЬО'}")

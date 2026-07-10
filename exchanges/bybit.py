@@ -35,6 +35,8 @@ class BybitExchange(BaseExchange):
                     last_online_mins = None
             else:
                 last_online_mins = None
+        raw_pid = str(item.get("userMaskId") or item.get("userId") or "").strip()
+        profile_id = raw_pid if raw_pid.startswith("s") else (f"s{raw_pid}" if raw_pid else "")
 
         return Order(
             id=str(item.get("id", "")),
@@ -47,7 +49,7 @@ class BybitExchange(BaseExchange):
             month_order_count=int(item.get("recentOrderNum", 0)),
             finish_rate_pct=float(item.get("recentExecuteRate", 0.0)),
             exchange="Bybit",
-            link=f"https://www.bybit.com/uk-UA/p2p/profile/{item.get('userMaskId', item.get('userId', ''))}/USDT/UAH/item",
+            link=f"https://www.bybit.com/uk-UA/p2p/profile/{profile_id}/USDT/UAH/item" if profile_id else "",
             bank_codes=parsed_banks,
             trade_terms=str(item.get("remark", "") or "").strip().lower(),
             is_verified=bool(item.get("authTag") or item.get("isVerified")),

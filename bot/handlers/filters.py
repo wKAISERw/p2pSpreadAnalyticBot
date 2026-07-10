@@ -47,12 +47,28 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
     if _db:
         conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
         async with conn.execute(
-            "SELECT working_capital, COALESCE(min_amount_uah, 0.0) as min_amount_uah, min_spread_pct, COALESCE(is_alerts_active, 1) as is_alerts_active, COALESCE(scanner_mode, 'SPREAD') FROM scanner_users WHERE user_id = ?",
+            "SELECT working_capital, COALESCE(min_amount_uah, 0.0) as min_amount_uah, min_spread_pct, COALESCE(is_alerts_active, 1) as is_alerts_active, COALESCE(scanner_mode, 'SPREAD'), COALESCE(capital_mode, 'manual') FROM scanner_users WHERE user_id = ?",
             (call.from_user.id,)
         ) as cur:
             row = await cur.fetchone()
         if row:
-            user_capital = f"{row[0]:.1f}"
+            cap_mode = row[5]
+            card_settings = await _db.get_user_card_settings(call.from_user.id)
+            card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
+            
+            if cap_mode == "auto":
+                auto_cap = await _db.get_user_auto_capital(call.from_user.id)
+                user_capital = f"{auto_cap:.1f} (Авто)"
+            else:
+                manual_cap = float(row[0])
+                if card_module_enabled:
+                    auto_cap = await _db.get_user_auto_capital(call.from_user.id)
+                    if auto_cap > 0 and auto_cap < manual_cap:
+                        user_capital = f"{manual_cap:.1f} (Обмеж. до {auto_cap:.1f})"
+                    else:
+                        user_capital = f"{manual_cap:.1f}"
+                else:
+                    user_capital = f"{manual_cap:.1f}"
             _min_amt = float(row[1] or 0.0)
             user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
             user_spread = f"{row[2]:.2f}"
@@ -2001,9 +2017,9 @@ async def on_auto_cooldown_menu(call: CallbackQuery, state: FSMContext) -> None:
             "Тут ви можете налаштувати чутливість авто-затримки повідомлень.\n"
             "Бот аналізує к-ть повідомлень за вказане вікно та застосовує кд:\n"
             f"├ Вікно аналізу: <b>{config.get('window_seconds', 5.0)} сек</b>\n"
-            f"├ Поріг 1 (кд 0.0s): < <b>{config.get('tiers', [{}])[0].get('threshold', 10) if config.get('tiers') else 10} пов.</b>\n"
-            f"├ Поріг 2 (кд 0.3s): < <b>{config.get('tiers', [{}, {}])[1].get('threshold', 15) if len(config.get('tiers', [])) > 1 else 15} пов.</b>\n"
-            f"├ Поріг 3 (кд 0.8s): < <b>{config.get('tiers', [{}, {}, {}])[2].get('threshold', 20) if len(config.get('tiers', [])) > 2 else 20} пов.</b>\n"
+            f"├ Поріг 1 (кд 0.0s): &lt; <b>{config.get('tiers', [{}])[0].get('threshold', 10) if config.get('tiers') else 10} пов.</b>\n"
+            f"├ Поріг 2 (кд 0.3s): &lt; <b>{config.get('tiers', [{}, {}])[1].get('threshold', 15) if len(config.get('tiers', [])) > 1 else 15} пов.</b>\n"
+            f"├ Поріг 3 (кд 0.8s): &lt; <b>{config.get('tiers', [{}, {}, {}])[2].get('threshold', 20) if len(config.get('tiers', [])) > 2 else 20} пов.</b>\n"
             f"└ Максимальний кд: <b>{config.get('tiers', [{}, {}, {}, {}])[3].get('delay', 1.5) if len(config.get('tiers', [])) > 3 else 1.5} сек</b>\n\n"
             "<i>Оберіть параметр для зміни:</i>",
             reply_markup=auto_cooldown_settings_kb(config),

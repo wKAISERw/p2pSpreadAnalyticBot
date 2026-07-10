@@ -562,6 +562,23 @@ class RiskEngine:
                 logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
                 return
 
+            # ── 1.1 Regex Direct Block check (always runs to catch absolute stop-words) ──
+            regex_result = regex_analyze(
+                terms,
+                order.finish_rate_pct,
+                order.month_order_count,
+                order.is_verified,
+            )
+            order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
+            order.regex_score      = int(getattr(regex_result, "score", 0) or 0)
+
+            from core.analysis.rules import HARD_DIRECT_BLOCK
+            if regex_result.verdict == "BLOCK" and regex_result.risk_type in HARD_DIRECT_BLOCK:
+                order.risk_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
+                logger.warning("🚫 Regex Direct Fallback Block: %s [%s] — Category=%s, Reason=%s",
+                               order.merchant_name, exchange, regex_result.risk_type, regex_result.reason)
+                return
+
             review_flags = _build_review_flags_from_summary(review_summary_raw)
 
             # ── v2.1: Розрахунок review_neg_pct + review_text_score ──────────
@@ -673,7 +690,7 @@ class RiskEngine:
             # ── v2.1: CompositeScorer ───────────────────────────────────────
             # Рахуємо composite на поточному стані (без LLM — він async)
             composite_score = CompositeScorer.compute(
-                regex_score        = 0,   # буде оновлено після regex
+                regex_score        = order.regex_score,
                 behavior_score     = behavior_score,
                 review_neg_pct     = review_neg_pct,
                 llm_verdict        = "UNKNOWN",
@@ -786,29 +803,8 @@ class RiskEngine:
                 return
 
             # ── 4. Regex аналіз ─────────────────────────────────────────────
-            regex_result = regex_analyze(
-                terms,
-                order.finish_rate_pct,
-                order.month_order_count,
-                order.is_verified,
-            )
-            order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
-            order.regex_score      = int(getattr(regex_result, "score", 0) or 0)
+            # (regex_result вже розраховано на кроці 1.1)
             has_soft_regex         = order.regex_score > 0
-
-            # Оновлюємо composite з реальним regex_score
-            composite_score = CompositeScorer.compute(
-                regex_score           = order.regex_score,
-                behavior_score        = behavior_score,
-                review_neg_pct        = review_neg_pct,
-                llm_verdict           = "UNKNOWN",
-                is_twin               = is_twin,
-                finish_rate           = order.finish_rate_pct,
-                order_count           = order.month_order_count,
-                review_text_score     = review_text_score,
-                review_trend_penalty  = review_trend_penalty,
-            )
-            order.composite_score = composite_score
 
             # Regex BLOCK → NEEDS_LLM з підвищеним пріоритетом
             # Регекс може тільки ПІДОЗРЮВАТИ, фінальне рішення — за LLM

@@ -13,7 +13,7 @@ async def check_bybit():
         "currencyId": "UAH",
         "payment": [],
         "side": "1",
-        "size": "1",
+        "size": "5",
         "page": "1",
         "amount": "",
         "authMaker": False,
@@ -25,12 +25,12 @@ async def check_bybit():
                 data = await resp.json()
                 items = data.get("result", {}).get("items", [])
                 if items:
-                    print("Keys:", list(items[0].keys()))
-                    print("isOnline:", items[0].get("isOnline"))
-                    print("lastLogoutTime:", items[0].get("lastLogoutTime"))
-                    # If we have time_now or similar
-                    server_time = data.get("time_now") or data.get("time") or data.get("retExtInfo", {}).get("time")
-                    print("Server Time:", server_time)
+                    print(f"Found {len(items)} items. First item keys:", list(items[0].keys()))
+                    for idx, item in enumerate(items[:3]):
+                        print(f"Item {idx}:")
+                        print(f"  userId: {item.get('userId')}")
+                        print(f"  userMaskId: {item.get('userMaskId')}")
+                        print(f"  nickName: {item.get('nickName')}")
                 else:
                     print("No items found")
         except Exception as e:

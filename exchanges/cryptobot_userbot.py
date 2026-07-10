@@ -14,7 +14,7 @@ from typing import Optional
 
 from pyrogram import Client
 from pyrogram.raw.functions.contacts import ResolveUsername
-from pyrogram.raw.functions.messages import GetBotCallbackAnswer
+from pyrogram.raw.functions.messages import GetBotCallbackAnswer, RequestWebView
 
 from exchanges.base import Order
 
@@ -189,6 +189,61 @@ class CryptoBotUserbot:
 
     def get_orders(self) -> tuple[list[Order], list[Order]]:
         return self.cache.get()
+
+    async def get_wallet_jwt_token(self) -> str:
+        """
+        Запитує WebView URL для бота '@wallet', вилучає tgWebAppData,
+        та авторизується на серверах Wallet для отримання JWT-токену.
+        """
+        try:
+            logger.info("⏳ Отримання JWT токена для Telegram Wallet...")
+            bot = await self.app.resolve_peer("wallet")
+            res = await self.app.invoke(
+                RequestWebView(
+                    peer=bot,
+                    bot=bot,
+                    platform="android",
+                    url="https://walletbot.me/",
+                    from_bot_menu=False
+                )
+            )
+            webview_url = res.url
+            
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(webview_url)
+            fragment_params = urllib.parse.parse_qs(parsed_url.fragment)
+            tg_web_app_data = fragment_params.get("tgWebAppData", [None])[0]
+            if not tg_web_app_data:
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                tg_web_app_data = query_params.get("tgWebAppData", [None])[0]
+                
+            if not tg_web_app_data:
+                logger.error("❌ tgWebAppData не знайдено в URL WebView Wallet")
+                return ""
+                
+            auth_url = "https://walletbot.me/alectryon/public-api/auth"
+            payload = {
+                "web_view_init_data_raw": tg_web_app_data,
+                "ep": "attach+direct",
+                "ref_code": None,
+                "tg_app_store": None,
+                "device_serial": "c1a37ca8-ea55-48be-9065-14f01810ceb9",
+                "flow": None
+            }
+            
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.post(auth_url, json=payload, timeout=5.0) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        jwt = data.get("jwt")
+                        if jwt:
+                            logger.info("✅ JWT токен Wallet успішно отримано")
+                            return jwt
+                    logger.error("❌ Помилка авторизації Wallet: %s %s", resp.status, await resp.text())
+        except Exception as e:
+            logger.exception("❌ Помилка при отриманні JWT токена Wallet: %s", e)
+        return ""
 
     # ─── Worker Loop ──────────────────────────────────────────────────────
 

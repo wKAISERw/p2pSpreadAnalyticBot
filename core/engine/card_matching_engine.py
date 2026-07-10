@@ -77,6 +77,9 @@ class CardMatchingEngine:
         requires_split_cards = []
         rejections = []
 
+        card_settings = await self.db.get_user_card_settings(user_id)
+        cold_card_limit = float(card_settings.get("cold_card_limit", 2000.0)) if card_settings else 2000.0
+
         for card in all_cards:
             reason = None
             
@@ -95,11 +98,33 @@ class CardMatchingEngine:
             if monthly_max == -1 or monthly_max == -1.0:
                 monthly_max = float('inf')
 
+            # Fetch pending amount for this card in the direction of the order
+            pending_dir = "out" if direction == "buy" else "in"
+            pending_amt = 0.0
+            if self.db._db:
+                async with self.db._db.execute(
+                    """
+                    SELECT SUM(l.amount) as total
+                    FROM card_order_legs l
+                    JOIN card_orders o ON l.order_id = o.id
+                    WHERE l.card_id = ? AND l.leg_status = 'pending' AND o.direction = ?
+                    """,
+                    (card["id"], pending_dir)
+                ) as cur:
+                    row = await cur.fetchone()
+                    if row and row["total"]:
+                        pending_amt = float(row["total"])
+
+            # Adjust card balance for check
+            effective_balance = float(card["balance"])
+            if direction == "buy":
+                effective_balance = max(0.0, effective_balance - pending_amt)
+
             if card["cooldown_until"] > time.time():
                 reason = "Card is on cooldown"
                 
-            if not reason and direction == "buy" and card["balance"] < amount:
-                if card["balance"] > 0:
+            if not reason and direction == "buy" and effective_balance < amount:
+                if effective_balance > 0:
                     pass # Could be used for split
                 else:
                     reason = "Insufficient balance"
@@ -115,7 +140,7 @@ class CardMatchingEngine:
             if not reason:
                 now = time.time()
                 tx_count_total, last_tx_ts = await self.db.get_card_warmth_stats(card["id"])
-                warmup_limit = self.db.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now)
+                warmup_limit = self.db.get_card_warmup_limit(card, tx_count_total, last_tx_ts, now, cold_card_limit)
                 
                 is_warm = (warmup_limit is None)
                 card["_is_warm"] = is_warm
@@ -126,10 +151,14 @@ class CardMatchingEngine:
                 avail_daily = daily_max - used_daily if daily_max != float('inf') else float('inf')
                 avail_monthly = monthly_max - used_monthly if monthly_max != float('inf') else float('inf')
                 
+                # Apply pending amounts to limits
+                avail_daily = max(0.0, avail_daily - pending_amt)
+                avail_monthly = max(0.0, avail_monthly - pending_amt)
+                
                 # Uncapped — без обмеження max_single_tx (для внутрішнього спліту B6)
                 max_avail_uncapped = min(avail_daily, avail_monthly)
                 if direction == "buy":
-                    max_avail_uncapped = min(max_avail_uncapped, card["balance"])
+                    max_avail_uncapped = min(max_avail_uncapped, effective_balance)
                 
                 if warmup_limit is not None:
                     max_avail_uncapped = min(max_avail_uncapped, warmup_limit)

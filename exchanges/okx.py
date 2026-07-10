@@ -93,6 +93,8 @@ class OkxExchange(BaseExchange):
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
         max_amount = max(amounts) if amounts else 1000.0
-        buys = await self.get_buy_orders(max_amount, banks)
-        sells = await self.get_sell_orders(max_amount, banks)
+        buys, sells = await asyncio.gather(
+            self.get_buy_orders(max_amount, banks),
+            self.get_sell_orders(max_amount, banks)
+        )
         return buys, sells

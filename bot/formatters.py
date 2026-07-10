@@ -75,8 +75,8 @@ BANK_CODE_TO_DB_NAME = {
     "43": "monobank",
     "14": "privatbank",
     "64": "pumb",
-    "48": "abank",
-    "61": "abank",
+    "48": "a-bank",
+    "61": "a-bank",
     "80": "pumb",
     "1":  "monobank",
 }

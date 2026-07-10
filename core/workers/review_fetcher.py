@@ -685,6 +685,8 @@ class ReviewFetcher:
         if not headers_dict:
             raise RuntimeError("AuthError: OKX browser session not captured")
 
+        headers_dict = {k.lower(): v for k, v in headers_dict.items()}
+
         # Беремо лише потрібні заголовки з перехопленої сесії
         req_headers: dict[str, str] = {
             "accept": "application/json",
@@ -701,8 +703,11 @@ class ReviewFetcher:
         if "authorization" not in req_headers:
             raise RuntimeError("AuthError: OKX authorization header missing in session")
 
+        from config import settings
+        proxies = {"http": settings.proxy_url, "https": settings.proxy_url} if settings.proxy_url else None
+
         try:
-            async with CurlSession(impersonate="chrome124") as session:
+            async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
                 # 1) Загальна статистика: від покупців та від продавців
                 ts = int(time.time() * 1000)
                 url_all = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
@@ -930,8 +935,11 @@ class ReviewFetcher:
         ts = int(time.time() * 1000)
         url = f"https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdDetail?publicTradingOrderId={ad_id}&t={ts}"
 
+        from config import settings
+        proxies = {"http": settings.proxy_url, "https": settings.proxy_url} if settings.proxy_url else None
+
         try:
-            async with CurlSession(impersonate="chrome124") as session:
+            async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
                 resp = await session.get(url, headers=req_headers, cookies=cookies_dict, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()

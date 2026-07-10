@@ -139,7 +139,8 @@ class MerchantDB:
             ("card_detail_level", "TEXT DEFAULT 'full'"),
             ("enable_in_single_modes", "INTEGER DEFAULT 0"),
             ("show_balances_breakdown", "INTEGER DEFAULT 1"),
-            ("show_transfer_tips", "INTEGER DEFAULT 1")
+            ("show_transfer_tips", "INTEGER DEFAULT 1"),
+            ("cold_card_limit", "REAL DEFAULT 2000.0")
         ]
 
         for col_name, col_type in columns_to_add:
@@ -499,7 +500,8 @@ class MerchantDB:
                                          card_detail_level    TEXT DEFAULT 'full',
                                          enable_in_single_modes INTEGER DEFAULT 0,
                                          show_balances_breakdown INTEGER DEFAULT 1,
-                                         show_transfer_tips   INTEGER DEFAULT 1
+                                         show_transfer_tips   INTEGER DEFAULT 1,
+                                         cold_card_limit      REAL DEFAULT 2000.0
                                      );
 
                                      CREATE TABLE IF NOT EXISTS user_bank_limits (

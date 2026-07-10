@@ -18,7 +18,8 @@ from bot.handlers.core import (
     _is_admin, _db, _bot, _notifier, _account_clients,
     _trade_worker, _single_leg_executor, is_muted, update_stats,
     _generate_dashboard_text,
-    CardAddStates, CardEditStates, CardUpdateStates, MonoStates, BankLimitStates, CardLimitStates
+    CardAddStates, CardEditStates, CardUpdateStates, MonoStates, BankLimitStates, CardLimitStates,
+    SettingStates
 )
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
@@ -84,6 +85,8 @@ async def cb_card_diagnostics(call: CallbackQuery):
         
     user_id = call.from_user.id
     cards = await _db.get_cards(user_id)
+    card_settings = await _db.get_user_card_settings(user_id)
+    cold_card_limit = float(card_settings.get("cold_card_limit", 2000.0)) if card_settings else 2000.0
     
     total = len(cards)
     own = sum(1 for c in cards if c.get("is_own", 1))
@@ -106,6 +109,14 @@ async def cb_card_diagnostics(call: CallbackQuery):
         if bal <= 0:
             warnings.append(f"⚠️ <b>{bank} *{last_four}</b> ({label}): Баланс рівний 0 ₴. Буде пропущено в BUY.")
             
+        if c.get("status") == "active":
+            is_warm = bool(c.get("is_warmed_up", 0))
+            if not is_warm and cold_card_limit > 0:
+                tx_count_total, last_tx_ts = await _db.get_card_warmth_stats(card_id)
+                warmup_limit = _db.get_card_warmup_limit(c, tx_count_total, last_tx_ts, time.time(), cold_card_limit)
+                if warmup_limit is not None:
+                    warnings.append(f"🌱 <b>{bank} *{last_four}</b> ({label}): Непрогріта картка. Внесок в капітал обмежений до <b>{warmup_limit:,.0f} ₴</b> (транзакцій: {tx_count_total}).")
+
         if c["status"] == "frozen_funds":
             warnings.append(f"❄️ <b>{bank} *{last_four}</b> ({label}): Заморожена. Кошти не використовуються.")
             
@@ -1213,3 +1224,65 @@ async def cb_toggle_card_display_fields(call: CallbackQuery):
     except Exception as e:
         logging.getLogger("Commands").error(f"Помилка зміни параметра виводу карт: {e}")
         await call.answer("🔥 Помилка під час збереження змін", show_alert=True)
+
+
+@router.callback_query(F.data == "disp:set:cold_card_limit")
+async def cb_set_cold_card_limit(call: CallbackQuery, state: FSMContext):
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+    await state.set_state(SettingStates.waiting_cold_card_limit)
+    
+    current_settings = await _db.get_user_card_settings(call.message.chat.id) or {}
+    ccl = current_settings.get("cold_card_limit", 2000.0)
+    
+    text = (
+        "🌱 <b>Налаштування ліміту для непрогрітих карт</b>\n\n"
+        "Введіть суму ліміту в ₴, яка буде виділятися для кожної непрогрітої картки (напр. <code>5000</code>).\n"
+        "Введіть <code>0</code>, щоб вимкнути обмеження прогріву повністю.\n\n"
+        f"<i>Поточне значення:</i> <b>{ccl:.0f} ₴</b>"
+    )
+    
+    cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Скасувати", callback_data="set:card_display_menu")]
+    ])
+    
+    await call.message.edit_text(text, reply_markup=cancel_kb)
+    await call.answer()
+
+
+@router.message(SettingStates.waiting_cold_card_limit)
+async def process_cold_card_limit_input(message: Message, state: FSMContext):
+    if not _db:
+        await state.clear()
+        return await message.answer("❌ БД не підключена.")
+        
+    try:
+        val = float(message.text.strip().replace(",", "."))
+        if val < 0:
+            raise ValueError("Limit cannot be negative")
+    except ValueError:
+        return await message.answer("❌ Будь ласка, введіть додатнє число або 0:")
+    
+    chat_id = message.chat.id
+    current_settings = await _db.get_user_card_settings(chat_id) or {}
+    current_settings["cold_card_limit"] = val
+    
+    await _db.update_user_card_settings(chat_id, current_settings)
+    await state.clear()
+    
+    limit_text = f"<b>{val:.0f} ₴</b>" if val > 0 else "<b>вимкнено</b>"
+    await message.answer(f"✅ Ліміт для непрогрітих карт змінено на {limit_text}!")
+    
+    # Повертаємо користувача до меню налаштувань відображення
+    text = (
+        "💳 <b>Налаштування відображення карткового модуля</b>\n\n"
+        "Конфігурація формату та деталізації виводу карток в алертах сканера:\n\n"
+        "• <b>Вивід карт:</b> інтегрувати картки прямо в текст спреду чи надсилати окремою Reply-відповіддю на повідомлення.\n"
+        "• <b>Логіка спойлера:</b> ховати ліміти під спойлер завжди чи автоматично розгортати та підсвічувати 🚨 картку при загрозі фінмоніторингу.\n"
+        "• <b>Деталізація:</b> відображати повний зріз лімітів банку чи компактний вигляд (суто баланси та добовий залишок)."
+    )
+    
+    await message.answer(
+        text=text,
+        reply_markup=card_display_settings_kb(current_settings)
+    )

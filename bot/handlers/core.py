@@ -188,6 +188,7 @@ class SettingStates(StatesGroup):
     waiting_spread = State()
     waiting_spread_min = State()
     waiting_spread_max = State()
+    waiting_cold_card_limit = State()
 
 
 class GlobalSettingStates(StatesGroup):
@@ -392,11 +393,21 @@ async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
         active_users = await _db.get_active_users()
         for u in active_users:
             if u["user_id"] == user_id:
+                card_settings = await _db.get_user_card_settings(user_id)
+                card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
                 if u.get("capital_mode") == "auto":
                     auto_cap = await _db.get_user_auto_capital(user_id)
                     user_capital = f"{auto_cap:.1f} (Авто)"
                 else:
-                    user_capital = f"{u['capital']:.1f}"
+                    manual_cap = float(u['capital'])
+                    if card_module_enabled:
+                        auto_cap = await _db.get_user_auto_capital(user_id)
+                        if auto_cap > 0 and auto_cap < manual_cap:
+                            user_capital = f"{manual_cap:.1f} (Обмеж. до {auto_cap:.1f})"
+                        else:
+                            user_capital = f"{manual_cap:.1f}"
+                    else:
+                        user_capital = f"{manual_cap:.1f}"
                 strategy = u.get("spread_strategy", "min")
                 min_sp = u.get("min_spread", 0.5)
                 max_sp = u.get("max_spread", 0.0)

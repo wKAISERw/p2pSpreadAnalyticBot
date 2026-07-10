@@ -508,27 +508,34 @@ async def process_mt_amount(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "menu:system")
 async def cb_system_menu(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    if not _is_admin(call.from_user.id):
-        return await call.answer("⛔ Доступ дозволено тільки адміну", show_alert=True)
-
+    is_admin = _is_admin(call.from_user.id)
     is_active = runtime_config.get("is_scanner_active", "false") == "true"
     
     # We check if the bot is currently muted
     from bot.handlers.core import is_muted
     muted = is_muted()
     
-    text = (
-        "⚙️ <b>ARBIX QUANTUM | Адміністрування системи</b>\n\n"
-        "Панель управління ядром сканера, лімітами, експериментальними "
-        "функціями, користувачами та системним перезапуском.\n\n"
-        f"├ Стан ядра: <b>{'АКТИВНИЙ 🟢' if is_active else 'ЗУПИНЕНИЙ 🔴'}</b>\n"
-        f"└ Пауза сповіщень: <b>{'АКТИВНА 🔕' if muted else 'НЕАКТИВНА 🔔'}</b>\n\n"
-        "<i>Оберіть потрібну дію:</i>"
-    )
+    if is_admin:
+        text = (
+            "⚙️ <b>ARBIX QUANTUM | Адміністрування системи</b>\n\n"
+            "Панель управління ядром сканера, лімітами, експериментальними "
+            "функціями, користувачами та системним перезапуском.\n\n"
+            f"├ Стан ядра: <b>{'АКТИВНИЙ 🟢' if is_active else 'ЗУПИНЕНИЙ 🔴'}</b>\n"
+            f"└ Пауза сповіщень: <b>{'АКТИВНА 🔕' if muted else 'НЕАКТИВНА 🔔'}</b>\n\n"
+            "<i>Оберіть потрібну дію:</i>"
+        )
+    else:
+        text = (
+            "⚙️ <b>ARBIX QUANTUM | Налаштування системи</b>\n\n"
+            "Панель налаштування паузи сповіщень та експериментальних функцій.\n\n"
+            f"└ Пауза сповіщень: <b>{'АКТИВНА 🔕' if muted else 'НЕАКТИВНА 🔔'}</b>\n\n"
+            "<i>Оберіть потрібну дію:</i>"
+        )
+        
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
             text,
-            reply_markup=keyboards.system_menu_kb(is_scanner_active=is_active, is_muted=muted)
+            reply_markup=keyboards.system_menu_kb(is_scanner_active=is_active, is_muted=muted, is_admin=is_admin)
         )
     await call.answer()
 

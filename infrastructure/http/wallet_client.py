@@ -26,6 +26,66 @@ class WalletClient(BaseHttpClient):
         if token:
             extra_headers["X-API-Key"] = token
         super().__init__(proxy=proxy, extra_headers=extra_headers, timeout=4.0)
+        self.userbot: Any = None
+        self._jwt_token: str = ""
+        self._jwt_fetched_at: float = 0.0
+
+    def set_userbot(self, userbot: Any) -> None:
+        """Зберігає посилання на запущеного юзербота для отримання JWT-токенів."""
+        self.userbot = userbot
+
+    async def get_valid_jwt(self) -> str:
+        """Повертає діючий JWT токен. Кешує його на 8 хвилин (термін дії JWT 10 хв)."""
+        import time
+        # Кешуємо на 8 хвилин (480 сек)
+        if self._jwt_token and (time.monotonic() - self._jwt_fetched_at < 480.0):
+            return self._jwt_token
+
+        if not self.userbot:
+            logger.warning("⚠️ Не встановлено CryptoBotUserbot для оновлення JWT токена Wallet")
+            return ""
+
+        jwt = await self.userbot.get_wallet_jwt_token()
+        if jwt:
+            self._jwt_token = jwt
+            self._jwt_fetched_at = time.monotonic()
+            return jwt
+        return ""
+
+    async def fetch_offer_comment(self, offer_id: int) -> Optional[str]:
+        """
+        Отримує коментар (умови) оффера через внутрішній P2P API.
+        
+        :param offer_id: Ідентифікатор оффера
+        :returns:
+            - str: коментар (умови) мерчанта (може бути порожнім рядоком "")
+            - None: якщо не вдалося завантажити умови через помилку авторизації чи мережі
+        """
+        jwt = await self.get_valid_jwt()
+        if not jwt:
+            logger.error("❌ Немає валідного JWT для отримання умов Wallet оффера %d", offer_id)
+            return None
+
+        url = "https://p2p.walletbot.me/p2p/public-api/v2/offer/get"
+        headers = {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json"
+        }
+        payload = {"offerId": int(offer_id)}
+
+        try:
+            # Використовуємо наш базовий метод _post, але з кастомними заголовками
+            # (оскільки base_client.py дозволяє перевизначати заголовки або робити запити)
+            # Запити йдуть через _post(url, json=payload, headers=headers)
+            res = await self._post(url, json=payload, headers=headers)
+            if res and res.get("status") == "SUCCESS":
+                return str(res.get("data", {}).get("comment", "") or "").strip()
+            
+            logger.warning("⚠️ Wallet offer/get повернув статус: %s", res)
+            return None
+        except Exception as e:
+            logger.error("❌ Помилка при отриманні коментаря Wallet оффера %d: %s", offer_id, e)
+            return None
 
     def set_credentials(self, api_key: str) -> None:
         """Встановлює API ключ з БД (замість .env)."""

@@ -24,23 +24,23 @@ def main_menu_kb(
         InlineKeyboardButton(text="💳 Картки", callback_data="menu:cards"),
         InlineKeyboardButton(text="📊 Моніторинг", callback_data="menu:monitoring"),
     )
-    if is_admin:
-        builder.row(
-            InlineKeyboardButton(text="⚙️ Система", callback_data="menu:system"),
-        )
+    builder.row(
+        InlineKeyboardButton(text="⚙️ Система", callback_data="menu:system"),
+    )
     builder.row(InlineKeyboardButton(text="ℹ️ Допомога", callback_data="menu:help"))
     return builder.as_markup()
 
 
-def system_menu_kb(is_scanner_active: bool = False, is_muted: bool = False) -> InlineKeyboardMarkup:
-    """Системне меню адміна (керування ядром, паузи, антифрод, юзери, дебаг)."""
+def system_menu_kb(is_scanner_active: bool = False, is_muted: bool = False, is_admin: bool = True) -> InlineKeyboardMarkup:
+    """Системне меню (керування ядром, паузи, антифрод, юзери, дебаг)."""
     builder = InlineKeyboardBuilder()
 
-    # 1. Керування ядром сканера
-    if is_scanner_active:
-        builder.row(InlineKeyboardButton(text="⏸ Зупинити ядро", callback_data="scanner:stop"))
-    else:
-        builder.row(InlineKeyboardButton(text="▶️ Запустити ядро", callback_data="scanner:start"))
+    # 1. Керування ядром сканера (hiding for non-admins)
+    if is_admin:
+        if is_scanner_active:
+            builder.row(InlineKeyboardButton(text="⏸ Зупинити ядро", callback_data="scanner:stop"))
+        else:
+            builder.row(InlineKeyboardButton(text="▶️ Запустити ядро", callback_data="scanner:start"))
 
     # 2. Керування паузами алертів
     if is_muted:
@@ -53,16 +53,22 @@ def system_menu_kb(is_scanner_active: bool = False, is_muted: bool = False) -> I
         builder.row(InlineKeyboardButton(text="🔕 Вимк. назавжди (глобально)", callback_data="mute:forever"))
 
     # 3. Налаштування та фічі
-    builder.row(
-        InlineKeyboardButton(text="🛡️ Антифрод", callback_data="menu:global_settings"),
-        InlineKeyboardButton(text="🧪 Експерим. функції", callback_data="feat:main"),
-    )
+    if is_admin:
+        builder.row(
+            InlineKeyboardButton(text="🛡️ Антифрод", callback_data="menu:global_settings"),
+            InlineKeyboardButton(text="🧪 Експерим. функції", callback_data="feat:main"),
+        )
+    else:
+        builder.row(
+            InlineKeyboardButton(text="🧪 Експерим. функції", callback_data="feat:main"),
+        )
 
     # 4. Користувачі та Дебаг
-    builder.row(
-        InlineKeyboardButton(text="👥 Управління юзерами", callback_data="sys:users"),
-        InlineKeyboardButton(text="🔄 Debug / перезапуск", callback_data="sys:debug"),
-    )
+    if is_admin:
+        builder.row(
+            InlineKeyboardButton(text="👥 Управління юзерами", callback_data="sys:users"),
+            InlineKeyboardButton(text="🔄 Debug / перезапуск", callback_data="sys:debug"),
+        )
 
     builder.row(InlineKeyboardButton(text="🔙 В головне меню", callback_data="menu:main"))
     return builder.as_markup()

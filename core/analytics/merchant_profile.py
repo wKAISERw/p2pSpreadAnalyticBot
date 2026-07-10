@@ -22,6 +22,10 @@ def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "", 
     template = _URLS.get(exchange)
     if not template:
         return ""
+    if exchange == "Bybit":
+        merchant_id = str(merchant_id).strip()
+        if merchant_id and not merchant_id.startswith("s"):
+            merchant_id = f"s{merchant_id}"
     url = template.format(id=merchant_id, name=merchant_name)
     if exchange == "OKX" and side:
         url += f"&side={side}"
