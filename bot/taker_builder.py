@@ -308,7 +308,7 @@ async def send_taker_single(
             callback_data=f"sl:{direction}:{sl_key}",
         )])
 
-    # URL-кнопки (Web + Redirect App)
+    # URL-кнопки (Web + Redirect App для Binance)
     url = getattr(order, "link", "") or build_profile_url(
         order.exchange, order.merchant_id
     )
@@ -316,7 +316,8 @@ async def send_taker_single(
     if url:
         url_row.append(InlineKeyboardButton(text="🔗 На біржі", url=url))
         
-    if order.merchant_id:
+    # 📱 App-кнопка лише для Binance (єдина біржа з працюючим deep link на профіль)
+    if order.merchant_id and order.exchange == "Binance":
         redirect_url = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={order.exchange}&id={order.merchant_id}&side={'buy' if is_buy else 'sell'}"
         url_row.append(InlineKeyboardButton(text="📱 Відкрити в App", url=redirect_url))
         

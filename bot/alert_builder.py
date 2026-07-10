@@ -429,12 +429,12 @@ async def send_single(
     if url_row:
         kb.append(url_row)
 
-    # 📱 Додаємо редирект-кнопки для переходу в додаток (працюють через GitHub Pages)
+    # 📱 App-кнопки лише для Binance (єдина біржа з працюючим deep link на профіль)
     app_row = []
-    if alert.buy_order.merchant_id:
+    if alert.buy_order.merchant_id and alert.buy_order.exchange == "Binance":
         buy_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.buy_order.exchange}&id={alert.buy_order.merchant_id}&side=buy"
         app_row.append(InlineKeyboardButton(text="📱 Buy App", url=buy_redirect))
-    if alert.sell_order.merchant_id:
+    if alert.sell_order.merchant_id and alert.sell_order.exchange == "Binance":
         sell_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.sell_order.exchange}&id={alert.sell_order.merchant_id}&side=sell"
         app_row.append(InlineKeyboardButton(text="📱 Sell App", url=sell_redirect))
     if app_row:
