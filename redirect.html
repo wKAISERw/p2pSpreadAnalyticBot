@@ -90,6 +90,19 @@
             <a id="bin-3" class="btn" href="#">Binance 3: binance://app/p2p</a>
             <a id="bin-4" class="btn" href="#">Binance 4: https://app.binance.com/...</a>
             <a id="bin-5" class="btn" href="#">Binance 5: https://p2p.binance.com/...</a>
+            
+            <a id="bnc-1" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 1: bnc://app.binance.com/c2c/advertiserDetail</a>
+            <a id="bnc-2" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 2: bnc://app/advertiserDetail</a>
+            <a id="bnc-3" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 3: bnc://c2c/advertiserDetail</a>
+            <a id="bnc-4" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 4: bnc://advertiserDetail</a>
+            <a id="bnc-5" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 5: bnc://app.binance.com/c2c/profile</a>
+            <a id="bnc-6" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 6: bnc://app/c2c/advertiserDetail</a>
+            <a id="bnc-7" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 7: bnc://app/p2p</a>
+            <a id="bnc-8" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 8: bnc://app.binance.com/p2p/advertiserDetail</a>
+            <a id="bnc-9" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 9: bnc://app.binance.com/en/advertiserDetail</a>
+            <a id="bnc-10" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 10: bnc://app.binance.com/c2c/user/profile-and-ads-list</a>
+            <a id="bnc-11" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 11: bnc://app.binance.com/friendly/c2c/user/profile-and-ads-list</a>
+            <a id="bnc-12" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 12: bnc://friendly/c2c/user/profile-and-ads-list</a>
         </div>
 
         <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #10b981;">🟢 BYBIT:</div>
@@ -126,7 +139,7 @@
         const side = params.get('side') || '';
         const debug = params.get('debug') === '1';
 
-        // Web URLs
+        // Web URLs (профіль мерчанта — працює завжди у браузері)
         const webUrls = {
             "Binance": `https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo=${merchantId}`,
             "Bybit": `https://www.bybit.com/uk-UA/p2p/profile/${merchantId.startsWith('s') ? merchantId : 's' + merchantId}/USDT/UAH/item`,
@@ -134,13 +147,49 @@
             "MEXC": `https://www.mexc.com/uk-UA/buy-crypto/merchant?id=${merchantId}`
         };
 
-        // App Schemes — тільки ті біржі, які реально відкривають профіль мерчанта в додатку
-        const appSchemes = {
-            "Binance": `https://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`
+        // Android package names (ідентифікатори додатків у Google Play)
+        const androidPackages = {
+            "Binance": "com.binance.dev",
+            "Bybit": "com.bybit.app",
+            "OKX": "com.okinc.okex.gp",
+            "MEXC": "com.mexc.pro"
+        };
+
+        // iOS custom schemes (для fallback, якщо intent не підтримується)
+        const iosSchemes = {
+            "Binance": `binance://`,
+            "Bybit": `bybitapp://open/p2p`,
+            "OKX": `okx://`,
+            "MEXC": `mexc://`
         };
 
         const webUrl = webUrls[exchange] || webUrls["Binance"];
-        const appScheme = appSchemes[exchange];
+
+        function isAndroid() { return /Android/i.test(navigator.userAgent); }
+        function isIOS() { return /iPhone|iPad|iPod/i.test(navigator.userAgent); }
+
+        /**
+         * 🔑 КЛЮЧОВА ІДЕЯ: Android Intent URL
+         * Формат: intent://{host+path}#Intent;scheme=https;package={app_package};S.browser_fallback_url={fallback};end
+         * 
+         * Це каже Android: "Візьми цей HTTPS URL і відкрий його САМЕ в додатку з цим package name.
+         * Якщо додаток не встановлений або не може обробити — відкрий fallback URL у браузері."
+         * 
+         * Різниця від звичайного custom scheme (binance://):
+         * - Custom scheme просто запускає додаток на головному екрані
+         * - Intent URL передає КОНКРЕТНИЙ веб-шлях додатку, і додаток відкриває потрібну сторінку
+         */
+        function buildIntentUrl(exchange) {
+            const pkg = androidPackages[exchange];
+            const url = webUrls[exchange];
+            if (!pkg || !url) return null;
+            
+            // Видаляємо scheme (https://) з URL для intent формату
+            const urlWithoutScheme = url.replace('https://', '');
+            const fallback = encodeURIComponent(url);
+            
+            return `intent://${urlWithoutScheme}#Intent;scheme=https;package=${pkg};S.browser_fallback_url=${fallback};end`;
+        }
 
         // Налаштування діагностичних кнопок
         document.getElementById('bin-1').href = `binance://app/advertiserDetail?advertiserNo=${merchantId}`;
@@ -148,6 +197,19 @@
         document.getElementById('bin-3').href = `binance://app/p2p`;
         document.getElementById('bin-4').href = `https://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`;
         document.getElementById('bin-5').href = `https://p2p.binance.com/en/advertiserDetail?advertiserNo=${merchantId}`;
+
+        document.getElementById('bnc-1').href = `bnc://app.binance.com/c2c/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-2').href = `bnc://app/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-3').href = `bnc://c2c/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-4').href = `bnc://advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-5').href = `bnc://app.binance.com/c2c/profile?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-6').href = `bnc://app/c2c/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-7').href = `bnc://app/p2p?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-8').href = `bnc://app.binance.com/p2p/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-9').href = `bnc://app.binance.com/en/advertiserDetail?advertiserNo=${merchantId}`;
+        document.getElementById('bnc-10').href = `bnc://app.binance.com/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
+        document.getElementById('bnc-11').href = `bnc://app.binance.com/friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
+        document.getElementById('bnc-12').href = `bnc://friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
 
         document.getElementById('byb-1').href = `bybit://app/p2p`;
         document.getElementById('byb-2').href = `bybit://p2p`;
@@ -172,15 +234,29 @@
         } else {
             document.getElementById('fallback-link').href = webUrl;
 
-            if (appScheme) {
-                window.location.href = appScheme;
-            }
-
-            // Фоллбек на веб-версію через 1.5 сек
-            setTimeout(() => {
+            if (isAndroid()) {
+                // 🤖 Android: Intent URL — примусово відкриваємо веб-URL профілю всередині додатку
+                const intentUrl = buildIntentUrl(exchange);
+                if (intentUrl) {
+                    window.location.href = intentUrl;
+                } else {
+                    window.location.href = webUrl;
+                }
+            } else if (isIOS()) {
+                // 📱 iOS: Спроба custom scheme → fallback на веб
+                const iosScheme = iosSchemes[exchange];
+                if (iosScheme) {
+                    window.location.href = iosScheme;
+                    setTimeout(() => { window.location.href = webUrl; }, 1500);
+                } else {
+                    window.location.href = webUrl;
+                }
+            } else {
+                // 💻 Desktop: Просто відкриваємо веб-профіль
                 window.location.href = webUrl;
-            }, 1500);
+            }
         }
     </script>
 </body>
 </html>
+
