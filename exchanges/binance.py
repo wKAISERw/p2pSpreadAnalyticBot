@@ -56,7 +56,7 @@ class BinanceExchange(BaseExchange):
 
     async def _fetch_orders(self, side: str, banks: List[str]) -> List[Order]:
         orders: List[Order] = []
-        sem = asyncio.Semaphore(2)
+        sem = asyncio.Semaphore(4)
 
         async def fetch_one(bank_code: str) -> List[Order]:
             binance_pay = BankRegistry.get_exchange_code(bank_code, "Binance")
@@ -89,12 +89,10 @@ class BinanceExchange(BaseExchange):
                     else:
                         logger.error("Binance fetch помилка [%s]: невірний формат", bank_code)
 
-                    await asyncio.sleep(0.15)
                     return parsed
 
                 except Exception as e:
                     logger.error("Помилка запиту Binance [%s]: %s", bank_code, e)
-                    await asyncio.sleep(0.25)
                     return []
 
         chunks = await asyncio.gather(*(fetch_one(bank) for bank in banks), return_exceptions=True)
