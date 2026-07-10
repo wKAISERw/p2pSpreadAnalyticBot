@@ -105,6 +105,17 @@
             <a id="bnc-12" class="btn" href="#" style="background-color: #f59e0b; color: black;">Bnc 12: bnc://friendly/c2c/user/profile-and-ads-list</a>
         </div>
 
+        <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #f59e0b;">🧡 BINANCE SHARE DPLK (НОВЕ):</div>
+        <div style="display: flex; flex-direction: column; align-items: stretch;">
+            <a id="dplk-1" class="btn" href="#" style="background-color: #3b82f6; color: white;">Dplk 1: https://www.binance.com/uk-UA/qr/dplk... (Universal Link)</a>
+            <a id="dplk-2" class="btn" href="#" style="background-color: #3b82f6; color: white;">Dplk 2: intent://www.binance.com/uk-UA/qr/dplk... (Android Intent)</a>
+            <a id="dplk-3" class="btn" href="#" style="background-color: #f59e0b; color: black;">Dplk 3: bnc://app.binance.com/qr/dplk...</a>
+            <a id="dplk-4" class="btn" href="#" style="background-color: #f59e0b; color: black;">Dplk 4: bnc://app/qr/dplk...</a>
+            <a id="dplk-5" class="btn" href="#" style="background-color: #f59e0b; color: black;">Dplk 5: bnc://qr/dplk...</a>
+            <a id="dplk-6" class="btn" href="#" style="background-color: #10b981; color: white;">Dplk 6: binance://app/qr/dplk...</a>
+            <a id="dplk-7" class="btn" href="#" style="background-color: #10b981; color: white;">Dplk 7: binance://qr/dplk...</a>
+        </div>
+
         <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #10b981;">🟢 BYBIT:</div>
         <div style="display: flex; flex-direction: column; align-items: stretch;">
             <a id="byb-1" class="btn" href="#">Bybit 1: bybit://app/p2p</a>
@@ -136,6 +147,7 @@
         const params = new URLSearchParams(window.location.search);
         const exchange = params.get('ex');
         const merchantId = params.get('id') || 's82d673bde69d3b09aa8c2140270e9778';
+        const qrCode = params.get('qr') || 'dplke0165b33e26b47ed89aac2a9f51bcf58';
         const side = params.get('side') || '';
         const debug = params.get('debug') === '1';
 
@@ -210,6 +222,15 @@
         document.getElementById('bnc-10').href = `bnc://app.binance.com/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
         document.getElementById('bnc-11').href = `bnc://app.binance.com/friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
         document.getElementById('bnc-12').href = `bnc://friendly/c2c/user/profile-and-ads-list?userNo=${merchantId}`;
+
+        // Налаштування DPLK кнопок
+        document.getElementById('dplk-1').href = `https://www.binance.com/uk-UA/qr/${qrCode}`;
+        document.getElementById('dplk-2').href = `intent://www.binance.com/uk-UA/qr/${qrCode}#Intent;scheme=https;package=com.binance.dev;S.browser_fallback_url=${encodeURIComponent('https://www.binance.com/uk-UA/qr/' + qrCode)};end`;
+        document.getElementById('dplk-3').href = `bnc://app.binance.com/qr/${qrCode}`;
+        document.getElementById('dplk-4').href = `bnc://app/qr/${qrCode}`;
+        document.getElementById('dplk-5').href = `bnc://qr/${qrCode}`;
+        document.getElementById('dplk-6').href = `binance://app/qr/${qrCode}`;
+        document.getElementById('dplk-7').href = `binance://qr/${qrCode}`;
 
         document.getElementById('byb-1').href = `bybit://app/p2p`;
         document.getElementById('byb-2').href = `bybit://p2p`;
