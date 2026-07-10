@@ -135,6 +135,12 @@
             <a id="okx-3" class="btn" href="#">OKX 3: okx Universal Link (old long UAH link)</a>
             <a id="okx-4" class="btn" href="#" style="background-color: #3b82f6; color: white;">OKX 4: https://www.okx.com/p2p/ads-merchant?publicUserId=... (Clean Universal Link)</a>
             <a id="okx-5" class="btn" href="#" style="background-color: #3b82f6; color: white;">OKX 5: intent://www.okx.com/p2p/ads-merchant?publicUserId=... (Android Intent with Clean Link)</a>
+            <a id="okx-6" class="btn" href="#" style="background-color: #10b981; color: white;">OKX 6: okex://merchanthome.com?publicUserId=...</a>
+            <a id="okx-7" class="btn" href="#" style="background-color: #10b981; color: white;">OKX 7: okex://merchanthome.com?userId=...</a>
+            <a id="okx-8" class="btn" href="#" style="background-color: #10b981; color: white;">OKX 8: okex://merchanthome.com?merchantId=...</a>
+            <a id="okx-9" class="btn" href="#" style="background-color: #f59e0b; color: black;">OKX 9: okex://merchanthome.com?shareCode=JVryMxRCHg9Tp (Test Share Code)</a>
+            <a id="okx-10" class="btn" href="#" style="background-color: #10b981; color: white;">OKX 10: intent://merchanthome.com?publicUserId=... (Intent via okex://)</a>
+            <a id="okx-11" class="btn" href="#" style="background-color: #10b981; color: white;">OKX 11: intent://merchanthome.com?userId=... (Intent via okex://)</a>
         </div>
 
         <div style="font-weight: bold; margin-top: 20px; text-align: left; color: #10b981;">🟢 MEXC:</div>
@@ -248,6 +254,12 @@
         document.getElementById('okx-3').href = `https://www.okx.com/ua/p2p/ads-merchant?publicUserId=${merchantId}&fiatCurrency=UAH`;
         document.getElementById('okx-4').href = `https://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}`;
         document.getElementById('okx-5').href = `intent://www.okx.com/p2p/ads-merchant?publicUserId=${merchantId}#Intent;scheme=https;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
+        document.getElementById('okx-6').href = `okex://merchanthome.com?publicUserId=${merchantId}`;
+        document.getElementById('okx-7').href = `okex://merchanthome.com?userId=${merchantId}`;
+        document.getElementById('okx-8').href = `okex://merchanthome.com?merchantId=${merchantId}`;
+        document.getElementById('okx-9').href = `okex://merchanthome.com?shareCode=JVryMxRCHg9Tp`;
+        document.getElementById('okx-10').href = `intent://merchanthome.com?publicUserId=${merchantId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
+        document.getElementById('okx-11').href = `intent://merchanthome.com?userId=${merchantId}#Intent;scheme=okex;package=com.okinc.okex.gp;S.browser_fallback_url=${encodeURIComponent('https://www.okx.com/p2p/ads-merchant?publicUserId=' + merchantId)};end`;
 
         document.getElementById('mexc-1').href = `mexc://app/p2p`;
         document.getElementById('mexc-2').href = `mexc://app/buy-crypto/merchant?id=${merchantId}`;
