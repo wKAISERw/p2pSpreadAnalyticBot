@@ -256,18 +256,13 @@ def _format_route_variants(routes: list[str] | None, limit: int = 6) -> str:
 
 
 def _profile_link(exchange: str, merchant_id: str, merchant_name: str, side: str = "") -> str:
-    """Генерує клікабельне ім'я мерчанта (синій лінк у Telegram → профіль на біржі + 📱 лінки на мобільний додаток для iOS та Android)."""
+    """Генерує клікабельне ім'я мерчанта (синій лінк у Telegram → профіль на біржі)."""
     safe_name = escape(str(merchant_name or "Unknown"))
     if not merchant_id:
         return safe_name
  
     web_url = build_profile_url(exchange, merchant_id, merchant_name, side=side)
-    ios_url = build_app_profile_url(exchange, merchant_id, merchant_name)
-    android_url = build_android_intent_profile_url(exchange, merchant_id, merchant_name, side=side)
-    
-    if web_url and ios_url and android_url:
-        return f'<a href="{escape(web_url, quote=True)}">{safe_name}</a> (<a href="{escape(ios_url, quote=True)}">📱 iOS</a> | <a href="{escape(android_url, quote=True)}">🤖 Android</a>)'
-    elif web_url:
+    if web_url:
         return f'<a href="{escape(web_url, quote=True)}">{safe_name}</a>'
     return f"<b>{safe_name}</b>"
 

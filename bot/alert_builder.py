@@ -429,6 +429,27 @@ async def send_single(
     if url_row:
         kb.append(url_row)
 
+    # 📱 Додаємо окремі кнопки переходу в додатки для Buy і Sell
+    buy_ios = build_app_profile_url(alert.buy_order.exchange, alert.buy_order.merchant_id)
+    buy_android = build_android_intent_profile_url(alert.buy_order.exchange, alert.buy_order.merchant_id, side="buy")
+    buy_app_row = []
+    if buy_ios:
+        buy_app_row.append(InlineKeyboardButton(text="📱 Buy iOS App", url=buy_ios))
+    if buy_android:
+        buy_app_row.append(InlineKeyboardButton(text="🤖 Buy Android App", url=buy_android))
+    if buy_app_row:
+        kb.append(buy_app_row)
+
+    sell_ios = build_app_profile_url(alert.sell_order.exchange, alert.sell_order.merchant_id)
+    sell_android = build_android_intent_profile_url(alert.sell_order.exchange, alert.sell_order.merchant_id, side="sell")
+    sell_app_row = []
+    if sell_ios:
+        sell_app_row.append(InlineKeyboardButton(text="📱 Sell iOS App", url=sell_ios))
+    if sell_android:
+        sell_app_row.append(InlineKeyboardButton(text="🤖 Sell Android App", url=sell_android))
+    if sell_app_row:
+        kb.append(sell_app_row)
+
     b_mid = alert.buy_order.merchant_id
     if b_mid:
         kb.append([
@@ -637,18 +658,8 @@ async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = N
         b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy')}{b_online}"
         s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell')}{s_online}"
 
-        buy_ios_url = build_app_profile_url(a.buy_order.exchange, a.buy_order.merchant_id)
-        buy_android_url = build_android_intent_profile_url(a.buy_order.exchange, a.buy_order.merchant_id, side="buy")
-        sell_ios_url = build_app_profile_url(a.sell_order.exchange, a.sell_order.merchant_id)
-        sell_android_url = build_android_intent_profile_url(a.sell_order.exchange, a.sell_order.merchant_id, side="sell")
- 
         buy_links = f"<a href='{a.buy_order.link}'>Купити</a>"
-        if buy_ios_url and buy_android_url:
-            buy_links += f" (<a href='{buy_ios_url}'>📱 iOS</a> | <a href='{buy_android_url}'>🤖 Android</a>)"
- 
         sell_links = f"<a href='{a.sell_order.link}'>Продати</a>"
-        if sell_ios_url and sell_android_url:
-            sell_links += f" (<a href='{sell_ios_url}'>📱 iOS</a> | <a href='{sell_android_url}'>🤖 Android</a>)"
 
         lines.append(
             f"{medals[i]} <b>{a.spread_pct:.2f}%</b>  "
