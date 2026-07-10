@@ -29,6 +29,8 @@ class WalletClient(BaseHttpClient):
         self.userbot: Any = None
         self._jwt_token: str = ""
         self._jwt_fetched_at: float = 0.0
+        import asyncio
+        self._jwt_lock = asyncio.Lock()
 
     def set_userbot(self, userbot: Any) -> None:
         """Зберігає посилання на запущеного юзербота для отримання JWT-токенів."""
@@ -37,20 +39,25 @@ class WalletClient(BaseHttpClient):
     async def get_valid_jwt(self) -> str:
         """Повертає діючий JWT токен. Кешує його на 8 хвилин (термін дії JWT 10 хв)."""
         import time
-        # Кешуємо на 8 хвилин (480 сек)
+        # Швидка перевірка без блокування для гарячого кешу
         if self._jwt_token and (time.monotonic() - self._jwt_fetched_at < 480.0):
             return self._jwt_token
 
-        if not self.userbot:
-            logger.warning("⚠️ Не встановлено CryptoBotUserbot для оновлення JWT токена Wallet")
-            return ""
+        async with self._jwt_lock:
+            # Повторна перевірка під локом (якщо інший таск вже оновив токен, поки ми чекали)
+            if self._jwt_token and (time.monotonic() - self._jwt_fetched_at < 480.0):
+                return self._jwt_token
 
-        jwt = await self.userbot.get_wallet_jwt_token()
-        if jwt:
-            self._jwt_token = jwt
-            self._jwt_fetched_at = time.monotonic()
-            return jwt
-        return ""
+            if not self.userbot:
+                logger.warning("⚠️ Не встановлено CryptoBotUserbot для оновлення JWT токена Wallet")
+                return ""
+
+            jwt = await self.userbot.get_wallet_jwt_token()
+            if jwt:
+                self._jwt_token = jwt
+                self._jwt_fetched_at = time.monotonic()
+                return jwt
+            return ""
 
     async def fetch_offer_comment(self, offer_id: int) -> Optional[str]:
         """
