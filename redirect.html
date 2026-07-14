@@ -357,13 +357,10 @@
                     window.location.href = webUrl;
                 }
             } else if (isIOS()) {
-                const iosScheme = iosSchemes[exchange];
-                if (iosScheme) {
-                    window.location.href = iosScheme;
-                    setTimeout(() => { window.location.href = webUrl; }, 1500);
-                } else {
-                    window.location.href = webUrl;
-                }
+                // Для iOS стандартні HTTPS посилання Bybit/OKX/Binance працюють як Universal Links.
+                // Перехід по них напряму запускає додаток, якщо він встановлений, або відкриває веб-версію,
+                // запобігаючи зависанню перенаправлення у веб-в'ю Telegram.
+                window.location.href = webUrl;
             } else {
                 window.location.href = webUrl;
             }

@@ -67,11 +67,17 @@ class OkxClient(BaseHttpClient):
             "OK-ACCESS-PASSPHRASE": self._passphrase,
         }
 
-    async def fetch(self, url: str, payload: dict = None, method: str = "GET") -> Any:
-        """Сканування P2P ринку (анонімний)."""
+    async def fetch(self, url: str, payload: dict = None, method: str = "GET", headers: dict = None, cookies: dict = None) -> Any:
+        """Сканування P2P ринку."""
+        kwargs = {}
+        if headers:
+            kwargs["headers"] = headers
+        if cookies:
+            kwargs["cookies"] = cookies
+            
         if method.upper() == "GET":
-            return await self._get(url, params=payload)
-        return await self._post(url, json=payload)
+            return await self._get(url, params=payload, **kwargs)
+        return await self._post(url, json=payload, **kwargs)
 
     async def fetch_merchant_profile(self, merchant_id: str) -> dict:
         """

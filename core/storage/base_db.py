@@ -586,6 +586,15 @@ class MerchantDB:
                                          FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE CASCADE
                                      );
                                      CREATE INDEX IF NOT EXISTS idx_card_txs_time ON card_transactions(card_id, timestamp);
+
+                                     CREATE TABLE IF NOT EXISTS used_subsidies (
+                                         id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                                         user_id       INTEGER NOT NULL,
+                                         exchange      TEXT NOT NULL,
+                                         subsidy_type  TEXT NOT NULL DEFAULT 'new_user',
+                                         used_at       REAL NOT NULL,
+                                         UNIQUE(user_id, exchange, subsidy_type)
+                                     );
                                      """)
 
         await self._db.commit()

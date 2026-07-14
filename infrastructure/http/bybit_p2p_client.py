@@ -76,10 +76,17 @@ class BybitP2PClient(BaseHttpClient):
             "traceparent": f"00-{trace_id}-{span_id}-01",
         }
 
-    async def fetch(self, url: str, payload: dict) -> Any:
-        """Сканування P2P ринку (анонімний)."""
-        headers = self._build_dynamic_headers()
-        data = await self._post(url, json=payload, headers=headers)
+    async def fetch(self, url: str, payload: dict, headers: dict = None, cookies: dict = None) -> Any:
+        """Сканування P2P ринку."""
+        req_headers = self._build_dynamic_headers()
+        if headers:
+            req_headers.update(headers)
+            
+        kwargs = {}
+        if cookies:
+            kwargs["cookies"] = cookies
+            
+        data = await self._post(url, json=payload, headers=req_headers, **kwargs)
 
         if not data:
             return {}

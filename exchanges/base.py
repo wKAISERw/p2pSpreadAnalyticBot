@@ -40,6 +40,10 @@ class Order:
     side: str = ""
     # Останній онлайн статус мерчанта в хвилинах від теперішнього часу (None якщо невідомо, 0 якщо онлайн)
     last_online_mins: int | None = None
+    # OKX: shareCode для deep link (okex://merchanthome.com?shareCode={share_code})
+    share_code: str = ""
+    # Subsidy/Promo flag (e.g. for new user welcome offers)
+    is_new_user_subsidy: bool = False
 
 class BaseExchange(ABC):
     """Абстрактний клас (Інтерфейс) для всіх бірж."""

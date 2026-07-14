@@ -29,7 +29,7 @@ def keys_menu_kb(has_keys: bool = False) -> InlineKeyboardMarkup:
 def exchange_connect_kb(supported: list[str]) -> InlineKeyboardMarkup:
     """Кнопки вибору біржі для підключення."""
     builder = InlineKeyboardBuilder()
-    icons = {"Binance": "🟡", "Bybit": "🟠", "OKX": "⚫", "MEXC": "🔵", "Wallet": "💎"}
+    icons = {"Binance": "🟡", "Bybit": "🟠", "OKX": "⚫", "MEXC": "🔵", "Wallet": "💎", "BingX": "❇️"}
     for ex in supported:
         builder.button(text=f"{icons.get(ex, '🔌')} {ex}", callback_data=f"connect:{ex}")
     builder.adjust(2)

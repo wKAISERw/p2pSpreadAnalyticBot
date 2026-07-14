@@ -62,6 +62,7 @@ EXCHANGE_ICONS = {
     "MEXC": "🔵",
     "Wallet": "👛",
     "CryptoBot": "🤖",
+    "BingX": "❇️",
 }
 
 BANKS_MAP = {

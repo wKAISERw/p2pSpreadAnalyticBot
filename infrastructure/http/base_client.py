@@ -79,7 +79,7 @@ class BaseHttpClient:
                     await asyncio.sleep(backoff * 3)
                     continue
 
-                if response.status_code in (403, 502, 503, 504):
+                if response.status_code in (502, 503, 504):
                     logger.warning("%s HTTP %d on %s (attempt %d)", self.__class__.__name__, response.status_code, url,
                                    attempt)
                     await asyncio.sleep(backoff)

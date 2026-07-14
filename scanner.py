@@ -34,6 +34,7 @@ from exchanges.cryptobot_userbot import CryptoBotUserbot
 from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
+from exchanges.bingx import BingxExchange
 from filters.merchant_filter import MerchantFilter
 from filters.limit_filter import set_max_capital
 from infrastructure.api.binance_account import BinanceAccountClient
@@ -46,6 +47,7 @@ from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from infrastructure.http.mexc_client import MexcClient
 from infrastructure.http.okx_client import OkxClient
 from infrastructure.http.wallet_client import WalletClient
+from infrastructure.http.bingx_client import BingxClient
 from core.workers.session_manager import SessionManager
 
 # Extracted modules
@@ -350,6 +352,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             WalletClient() as w_client,
             BinanceClient() as bn_client,
             MexcClient() as m_client,
+            BingxClient() as bx_client,
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client, w_client)
@@ -360,13 +363,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             cb_wallet = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_bingx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
             ex_configs = [
-                {"name": "Bybit", "instance": BybitExchange(b_client), "cb": cb_bybit},
-                {"name": "OKX", "instance": OkxExchange(o_client), "cb": cb_okx},
+                {"name": "Bybit", "instance": BybitExchange(b_client, merchant_db), "cb": cb_bybit},
+                {"name": "OKX", "instance": OkxExchange(o_client, merchant_db), "cb": cb_okx},
                 {"name": "Wallet", "instance": WalletExchange(w_client), "cb": cb_wallet},
-                {"name": "Binance", "instance": BinanceExchange(bn_client), "cb": cb_binance},
+                {"name": "Binance", "instance": BinanceExchange(bn_client, merchant_db), "cb": cb_binance},
                 {"name": "MEXC", "instance": MexcExchange(m_client), "cb": cb_mexc},
+                {"name": "BingX", "instance": BingxExchange(bx_client), "cb": cb_bingx},
             ]
 
             cb_userbot = CryptoBotUserbot(

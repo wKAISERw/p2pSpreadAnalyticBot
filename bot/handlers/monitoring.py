@@ -55,7 +55,7 @@ async def cb_health_check_all(call: CallbackQuery):
     await call.message.edit_text("🏥 <b>Health Check API</b>\n\n⏳ Опитую всі підключені біржі...", reply_markup=None)
     
     from core.engine.exchange_manager import exchange_manager
-    exchanges = ["Bybit", "OKX", "MEXC", "Binance", "Wallet"]
+    exchanges = ["Bybit", "OKX", "MEXC", "Binance", "Wallet", "BingX"]
     lines = ["🏥 <b>Health Check API</b>\n"]
     
     tasks = [exchange_manager.health_check(name) for name in exchanges]
@@ -381,6 +381,13 @@ async def cmd_active(message: Message) -> None:
                 or merchant_filters.get("min_rate", 0.0)
                 or _DEF_RATE.get(ex_name, 0.0)
             )
+            # Per-exchange subsidy filter: hide only used subsidies
+            used_subs = user_row.get("_used_subsidies", {})
+            if getattr(order_obj, "is_new_user_subsidy", False):
+                ex_used = used_subs.get(ex_name, [])
+                if "new_user" in ex_used:
+                    return False, f"{side_label} new user subsidy already used on {ex_name}"
+
             if min_orders > 0 and getattr(order_obj, "month_order_count", 0) < min_orders:
                 return False, f"{side_label} merchant orders < {min_orders:.0f}"
             if min_rate > 0 and getattr(order_obj, "finish_rate_pct", 0.0) < min_rate:
@@ -462,6 +469,9 @@ async def cmd_active(message: Message) -> None:
 
     alerts = getattr(app_state, "current_alerts", [])
     if user:
+        # Preload used subsidies for per-exchange filtering
+        if _db:
+            user["_used_subsidies"] = await _db.get_used_subsidies(user.get("user_id", 0))
         alerts = [a for a in alerts if _matches_user_filters(user, a)[0]]
     if not alerts:
         return await message.answer(
@@ -558,7 +568,7 @@ async def cmd_status(message: Message) -> None:
     # 🚀 ФІКС: Перевіряємо ОСОБИСТІ ключі юзера з БД
     my_creds = await _db.get_all_credentials(user_id=message.from_user.id)
     connected = []
-    for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]:
+    for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet", "BingX"]:
         if ex in my_creds:
             connected.append(f"✅ {ex}")
         else:

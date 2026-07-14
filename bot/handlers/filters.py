@@ -276,8 +276,8 @@ async def cb_unified_display_toggle(call: CallbackQuery):
 
 
 # ── Фільтри мерчантів ─────────────────────────────────────────────────────
-_MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet"]
-_MF_EX_ICONS = {"Bybit": "🟠", "OKX": "⚫", "Binance": "🟡", "MEXC": "🔵", "Wallet": "💎"}
+_MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet", "BingX"]
+_MF_EX_ICONS = {"Bybit": "🟠", "OKX": "⚫", "Binance": "🟡", "MEXC": "🔵", "Wallet": "💎", "BingX": "🟢"}
 
 
 async def _load_merchant_filters(user_id: int) -> tuple[dict, dict]:
@@ -323,6 +323,7 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
     builder.button(text=f"📊 Мін. угод: {orders_label}", callback_data="mf:orders")
+    builder.button(text="🎁 Субсидії новачків ›", callback_data="mf:subsidies")
     builder.button(text=f"⭐ Мін. рейтинг: {rate_label}", callback_data="mf:rate")
     builder.button(text=f"🛡 Статус: {verified_label}", callback_data="mf:verified")
     builder.button(text=f"📅 Вік акаунту: {age_label}", callback_data="mf:age")
@@ -404,6 +405,69 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
     with suppress(TelegramBadRequest):
         await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
     await call.answer()
+
+
+_SUBSIDY_EXCHANGES = ["BingX", "MEXC", "Bybit", "OKX", "Binance"]
+_SUBSIDY_EX_ICONS = {"BingX": "❇️", "MEXC": "🔵", "Bybit": "🟠", "OKX": "⚫", "Binance": "🟡"}
+
+
+@router.callback_query(F.data == "mf:subsidies")
+async def on_mf_subsidies(call: CallbackQuery) -> None:
+    """Показує панель управління субсидіями per-exchange."""
+    if not _db:
+        await call.answer("❌ DB не підключена", show_alert=True)
+        return
+
+    used = await _db.get_used_subsidies(call.from_user.id)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    builder = InlineKeyboardBuilder()
+
+    lines = [
+        "🎁 <b>Субсидії для нових користувачів</b>\n",
+        "Деякі біржі дають знижку для першої угоди.",
+        "Позначте біржу як <b>використану</b>, якщо ви вже скористалися акцією — і сканер перестане показувати ці ордери.\n",
+    ]
+
+    for ex in _SUBSIDY_EXCHANGES:
+        icon = _SUBSIDY_EX_ICONS.get(ex, "🔌")
+        ex_used = used.get(ex, [])
+        if "new_user" in ex_used:
+            status = "❌ Використано"
+            btn_text = f"{icon} {ex}: {status} (натисни щоб скасувати)"
+        else:
+            status = "✅ Доступна"
+            btn_text = f"{icon} {ex}: {status} (натисни якщо використав)"
+        lines.append(f"  {icon} {ex}: <b>{status}</b>")
+        builder.button(text=btn_text, callback_data=f"mf:sub_toggle:{ex}")
+
+    builder.adjust(1)
+    builder.row(InlineKeyboardButton(text="🔙 Назад до фільтрів", callback_data="set:merchant_filters"))
+
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("\n".join(lines), reply_markup=builder.as_markup())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("mf:sub_toggle:"))
+async def on_mf_sub_toggle(call: CallbackQuery) -> None:
+    """Перемикає статус субсидії для конкретної біржі."""
+    if not _db:
+        await call.answer("❌ DB не підключена", show_alert=True)
+        return
+
+    exchange = call.data.split(":", 2)[2]
+    uid = call.from_user.id
+    is_used = await _db.is_subsidy_used(uid, exchange, "new_user")
+
+    if is_used:
+        await _db.unmark_subsidy_used(uid, exchange, "new_user")
+        await call.answer(f"✅ {exchange}: субсидія знову доступна!", show_alert=True)
+    else:
+        await _db.mark_subsidy_used(uid, exchange, "new_user")
+        await call.answer(f"❌ {exchange}: субсидію позначено як використану", show_alert=True)
+
+    return await on_mf_subsidies(call)
 
 
 @router.callback_query(F.data == "mf:orders")

@@ -12,9 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class OkxExchange(BaseExchange):
-    def __init__(self, client: OkxClient):
+    def __init__(self, client: OkxClient, db = None):
         self.client = client
-        self.url = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdsPrelogin"
+        self.db = db
+        self.url_prelogin = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAdsPrelogin"
+        self.url_auth = "https://www.okx.com/v3/c2c/tradingOrders/getMarketplaceAds"
 
     def _parse_order(self, item: dict, api_side: str = "") -> Order:
         bank_codes = []
@@ -35,9 +37,7 @@ class OkxExchange(BaseExchange):
         elif api_side == "buy":
             frontend_side = "sell"
 
-        link = f"https://www.okx.com/ua/p2p/ads-merchant?publicUserId={item.get('publicUserId', '')}&fiatCurrency=UAH&fiat=UAH&currency=UAH&cryptoCurrency=USDT&crypto=USDT&token=USDT&ccy=USDT"
-        if frontend_side:
-            link += f"&side={frontend_side}"
+        link = f"https://www.okx.com/p2p/ads-merchant?publicUserId={item.get('publicUserId', '')}"
 
         return Order(
             id=str(item.get("id", "")),
@@ -61,35 +61,58 @@ class OkxExchange(BaseExchange):
         bank_name = BankRegistry.get_exchange_code(bank_code, "OKX") or "all"
 
         params = {
-            "fiatCurrency": "UAH",
-            "cryptoCurrency": "USDT",
-            "paymentMethod": bank_name,
-            "side": side,
-            "userType": "all",
-            "sortType": "price_asc" if side == "sell" else "price_desc",
-            "numberPerPage": "20",
-            "t": str(int(time.time() * 1000)),
+             "fiatCurrency": "UAH",
+             "cryptoCurrency": "USDT",
+             "paymentMethod": bank_name,
+             "side": side,
+             "userType": "all",
+             "sortType": "price_asc" if side == "sell" else "price_desc",
+             "numberPerPage": "50",
+             "t": str(int(time.time() * 1000)),
         }
 
+        # Session loading for user-personalized order book
+        headers = None
+        cookies = None
+        url = self.url_prelogin
+        if self.db:
+            try:
+                headers, cookies, _ = await self.db.get_auth_session("OKX")
+                if headers or cookies:
+                    url = self.url_auth
+            except Exception as e:
+                logger.debug("Failed to retrieve OKX session from DB: %s", e)
+
         try:
-            data = await self.client.fetch(self.url, params, method="GET")
+            data = await self.client.fetch(url, params, method="GET", headers=headers, cookies=cookies)
             if not isinstance(data, dict) or data.get("code") != 0:
                 return []
             items = data.get("data", {}).get(side, [])
             return [self._parse_order(item, side) for item in items]
         except Exception as e:
             logger.error("❌ OKX Fetch Error: %s", e)
+            if "Unexpected Status 403" in str(e) and self.db:
+                logger.warning("OKX Fetch got 403! Invalidating session in DB.")
+                asyncio.create_task(self.db.invalidate_auth_session("OKX"))
             return []
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        tasks = [self._fetch_orders(amount, b, "sell") for b in banks]
-        results = await asyncio.gather(*tasks)
-        return self.dedup([o for res in results for o in res])
+        orders = await self._fetch_orders(amount, "all", "sell")
+        target_banks = set(banks)
+        filtered = []
+        for o in orders:
+            if any(b in target_banks for b in o.bank_codes):
+                filtered.append(o)
+        return filtered
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        tasks = [self._fetch_orders(amount, b, "buy") for b in banks]
-        results = await asyncio.gather(*tasks)
-        return self.dedup([o for res in results for o in res])
+        orders = await self._fetch_orders(amount, "all", "buy")
+        target_banks = set(banks)
+        filtered = []
+        for o in orders:
+            if any(b in target_banks for b in o.bank_codes):
+                filtered.append(o)
+        return filtered
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
         max_amount = max(amounts) if amounts else 1000.0

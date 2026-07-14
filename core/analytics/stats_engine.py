@@ -387,7 +387,7 @@ class StatsEngine:
         total_vol = sum(e["volume_uah"] for e in exchanges)
         total_trades = sum(e["trades"] for e in exchanges)
 
-        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛"}
+        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛", "BingX": "❇️"}
 
         lines = [
             f"🏛 <b>Статистика по біржах ({period_days}д)</b>",
@@ -558,7 +558,7 @@ class StatsEngine:
         if not trades:
             return "📋 <b>Історія угод</b>\n\nНемає завершених угод."
 
-        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛"}
+        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛", "BingX": "❇️"}
         lines = [
             f"📋 <b>Останні {min(limit, len(trades))} угод</b>",
             "",
@@ -725,7 +725,7 @@ class StatsEngine:
         if not routes:
             return "🗺 <b>Маршрути сканера</b>\n\nДаних немає."
 
-        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛"}
+        ICONS = {"Binance": "🟡", "Bybit": "🟣", "OKX": "🟢", "MEXC": "🔵", "Wallet": "👛", "BingX": "❇️"}
 
         lines = [
             f"🗺 <b>Топ маршрутів сканера ({period_days}д)</b>",

@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 
 class BinanceExchange(BaseExchange):
-    def __init__(self, client: BinanceClient):
+    def __init__(self, client: BinanceClient, db = None):
         self.client = client
+        self.db = db
 
     def _parse_order(self, item: dict, bank_code: str) -> Order:
         adv = item.get("adv", {})
@@ -79,8 +80,16 @@ class BinanceExchange(BaseExchange):
             "tradeType": side,
         }
 
+        headers = None
+        cookies = None
+        if self.db:
+            try:
+                headers, cookies, _ = await self.db.get_auth_session("Binance")
+            except Exception as e:
+                logger.debug("Failed to retrieve Binance session from DB: %s", e)
+
         try:
-            result = await self.client.fetch(payload)
+            result = await self.client.fetch(payload, headers=headers, cookies=cookies)
             parsed: List[Order] = []
 
             if isinstance(result, dict) and "data" in result:

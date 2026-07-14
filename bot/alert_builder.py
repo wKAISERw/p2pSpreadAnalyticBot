@@ -234,8 +234,10 @@ async def send_single(
 
     buy_online = _online_badge(alert.buy_order)
     sell_online = _online_badge(alert.sell_order)
-    buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}{buy_online}"
-    sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}{sell_online}"
+    buy_subs = " 🎁" if getattr(alert.buy_order, "is_new_user_subsidy", False) else ""
+    sell_subs = " 🎁" if getattr(alert.sell_order, "is_new_user_subsidy", False) else ""
+    buy_name_str = f"{rec_badge(alert.buy_rec)} {buy_name}{_verified_badge(alert.buy_order)}{buy_online}{buy_subs}"
+    sell_name_str = f"{rec_badge(alert.sell_rec)} {sell_name}{_verified_badge(alert.sell_order)}{sell_online}{sell_subs}"
 
     # 🧠 LLM Verdict блоки (конфігуровані per-user)
     if ds.get("show_llm_summary", True):
@@ -433,9 +435,13 @@ async def send_single(
     app_row = []
     if alert.buy_order.merchant_id:
         buy_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.buy_order.exchange}&id={alert.buy_order.merchant_id}&side=buy"
+        if getattr(alert.buy_order, "share_code", ""):
+            buy_redirect += f"&qr={alert.buy_order.share_code}"
         app_row.append(InlineKeyboardButton(text="📱 Buy App", url=buy_redirect))
     if alert.sell_order.merchant_id:
         sell_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.sell_order.exchange}&id={alert.sell_order.merchant_id}&side=sell"
+        if getattr(alert.sell_order, "share_code", ""):
+            sell_redirect += f"&qr={alert.sell_order.share_code}"
         app_row.append(InlineKeyboardButton(text="📱 Sell App", url=sell_redirect))
     if app_row:
         kb.append(app_row)

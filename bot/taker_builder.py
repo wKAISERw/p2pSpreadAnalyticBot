@@ -95,10 +95,11 @@ async def send_taker_combined(
         # Посилання на мерчанта
         merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name, side="buy" if is_buy else "sell")
         verified = _verified_badge(order)
+        subs_badge = " 🎁" if getattr(order, "is_new_user_subsidy", False) else ""
         
         text += (
             f"<b>{idx}. {icon} {order.exchange}</b> | <b>{escape(str(order.price))} ₴</b>\n"
-            f"   👤 {rec_str} {merchant_link}{verified} ({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
+            f"   👤 {rec_str} {merchant_link}{verified}{subs_badge} ({order.finish_rate_pct:.1f}% | {order.month_order_count} угод)\n"
             f"   🏦 Банки: <code>{banks}</code>\n"
             f"   💵 Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code> ({float(order.available_amount):.1f} USDT)\n"
         )
@@ -308,7 +309,7 @@ async def send_taker_single(
             callback_data=f"sl:{direction}:{sl_key}",
         )])
 
-    # URL-кнопки (Web + Redirect App для Binance)
+    # URL-кнопки (Web + Redirect App)
     url = getattr(order, "link", "") or build_profile_url(
         order.exchange, order.merchant_id
     )
@@ -316,9 +317,11 @@ async def send_taker_single(
     if url:
         url_row.append(InlineKeyboardButton(text="🔗 На біржі", url=url))
         
-    # 📱 App-кнопка лише для Binance (єдина біржа з працюючим deep link на профіль)
-    if order.merchant_id and order.exchange == "Binance":
+    # 📱 App-кнопка — через redirect page з Android Intent / iOS scheme
+    if order.merchant_id:
         redirect_url = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={order.exchange}&id={order.merchant_id}&side={'buy' if is_buy else 'sell'}"
+        if getattr(order, "share_code", ""):
+            redirect_url += f"&qr={order.share_code}"
         url_row.append(InlineKeyboardButton(text="📱 Відкрити в App", url=redirect_url))
         
     if url_row:

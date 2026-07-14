@@ -53,6 +53,11 @@ class TakerScanner:
         min_amount = float(user.get("min_amount", 0))
         mf = user.get("merchant_filters") or {}
         emf = user.get("exchange_merchant_filters") or {}
+        # Preload used subsidies for per-exchange filtering
+        used_subs: dict[str, list[str]] = {}
+        if self.db:
+            uid = user.get("user_id", 0)
+            used_subs = await self.db.get_used_subsidies(uid) if uid else {}
 
         # ── Smart Card Pre-filtering Setup ──
         def _normalize_bank(name: str) -> str:
@@ -221,7 +226,7 @@ class TakerScanner:
                             if order_min > fiat_needed:
                                 continue
 
-                if not self._merchant_ok(order, mf, emf):
+                if not self._merchant_ok(order, mf, emf, used_subs):
                     continue
                 if "BLOCK" in (getattr(order, "risk_flag", "") or ""):
                     continue
@@ -269,7 +274,7 @@ class TakerScanner:
         return matched[:20]
 
     @staticmethod
-    def _merchant_ok(order: Order, mf: dict, emf: dict) -> bool:
+    def _merchant_ok(order: Order, mf: dict, emf: dict, used_subs: dict[str, list[str]] | None = None) -> bool:
         """Перевіряє фільтри мерчанта (global + per-exchange)."""
         ex_name = order.exchange
         ex_filters = emf.get(ex_name, {})
@@ -281,6 +286,12 @@ class TakerScanner:
             ex_filters.get("min_rate", 0.0) or mf.get("min_rate", 0.0)
             or MIN_COMPLETION.get(ex_name, 0.0)
         )
+        # Per-exchange subsidy filter: hide only used subsidies
+        if getattr(order, "is_new_user_subsidy", False) and used_subs:
+            ex_used = used_subs.get(ex_name, [])
+            if "new_user" in ex_used:
+                return False
+
         if min_orders > 0 and order.month_order_count < min_orders:
             return False
         if min_rate > 0 and order.finish_rate_pct < min_rate:

@@ -51,6 +51,7 @@ BANKS: list[Bank] = [
             "Wallet":    "monobank",
             "MEXC":      "128",
             "CryptoBot": "choose-method-monobank",
+            "BingX":     "113",
         },
     ),
     Bank(
@@ -63,6 +64,7 @@ BANKS: list[Bank] = [
             "Wallet":    "privatbank",
             "MEXC":      "131",
             "CryptoBot": "choose-method-privatbank",
+            "BingX":     "164",
         },
     ),
     Bank(
@@ -75,6 +77,7 @@ BANKS: list[Bank] = [
             "Wallet":    "pumb",
             "MEXC":      "133",
             "CryptoBot": "choose-method-pumb",
+            "BingX":     "114",
         },
     ),
     Bank(
@@ -86,6 +89,7 @@ BANKS: list[Bank] = [
             "OKX":       "A-Bank",
             "Wallet":    "abank",
             "MEXC":      "134",
+            "BingX":     "115",
         },
     ),
     Bank(
@@ -105,6 +109,7 @@ BANKS: list[Bank] = [
             "Bybit":     "380",
             "MEXC":      "132",
             "CryptoBot": "choose-method-raiffeisenua",
+            "BingX":     "235",
         },
     ),
     Bank(
@@ -116,6 +121,7 @@ BANKS: list[Bank] = [
             "OKX":       "Sense SuperApp",
             "MEXC":      "135",
             "CryptoBot": "choose-method-alfabankua",
+            "BingX":     "170",
         },
     ),
     Bank(

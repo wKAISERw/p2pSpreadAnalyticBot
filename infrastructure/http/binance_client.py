@@ -125,17 +125,23 @@ class BinanceClient(BaseHttpClient):
                 raise  # Прокидаємо вище для SessionManager/ReviewFetcher
             raise RuntimeError(f"ApiError: {e}")
 
-    async def fetch(self, payload: dict) -> Any:
-        """Сканування P2P ринку (анонімний) + сумісність з wrapper-ом."""
+    async def fetch(self, payload: dict, headers: dict = None, cookies: dict = None) -> Any:
+        """Сканування P2P ринку."""
         # Для пошуку ордерів v1 вже не існує, залишаємо тільки v2
         endpoints = [
             "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
         ]
 
+        kwargs = {}
+        if headers:
+            kwargs["headers"] = headers
+        if cookies:
+            kwargs["cookies"] = cookies
+
         last_exc = None
         for url in endpoints:
             try:
-                data = await self._post(url, json=payload)
+                data = await self._post(url, json=payload, **kwargs)
 
                 # 🚀 ФІКС: _post тепер віддає чистий list, але твій
                 # файл exchanges/binance.py очікує формат {"data": [...]}.

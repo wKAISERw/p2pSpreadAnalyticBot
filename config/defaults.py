@@ -20,10 +20,12 @@ VELOCITY_SPIKE_PER_HOUR: float = 20.0
 MIN_ORDERS: dict[str, int] = {
     "Binance": 50, "Bybit": 30, "OKX": 30,
     "Wallet": 10, "MEXC": 20, "CryptoBot": 15,
+    "BingX": 10,
 }
 MIN_COMPLETION: dict[str, float] = {
     "Binance": 95.0, "Bybit": 92.0, "OKX": 92.0,
     "Wallet": 88.0, "MEXC": 90.0, "CryptoBot": 85.0,
+    "BingX": 85.0,
 }
 TRUSTED_MIN_ORDERS: int = 500
 TRUSTED_MIN_COMPLETION: float = 95.0

@@ -20,7 +20,7 @@ from typing import Callable, Awaitable, Optional
 logger = logging.getLogger("ExchangeManager")
 
 # Всі відомі біржі (для UI)
-ALL_EXCHANGES = ["Bybit", "OKX", "Wallet", "Binance", "MEXC"]
+ALL_EXCHANGES = ["Bybit", "OKX", "Wallet", "Binance", "MEXC", "BingX"]
 
 
 @dataclass

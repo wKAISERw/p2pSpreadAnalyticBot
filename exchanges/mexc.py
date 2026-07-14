@@ -34,7 +34,7 @@ class MexcExchange(BaseExchange):
             "tradeType": trade_str
         }
 
-    def _parse_order(self, item: dict, bank_code: str, side: str) -> Order:
+    def _parse_order(self, item: dict, bank_code: str = "", side: str = "") -> Order:
         merchant = item.get("merchant", {})
         stats = item.get("merchantStatistics", {})
 
@@ -62,6 +62,20 @@ class MexcExchange(BaseExchange):
         else:
             last_online_mins = None
 
+        raw_methods = item.get("payMethod", "") or ""
+        bank_codes = []
+        if raw_methods:
+            method_ids = [m.strip() for m in str(raw_methods).split(",") if m.strip()]
+            for m_id in method_ids:
+                code = BankRegistry.from_api_code(m_id, "MEXC")
+                if code:
+                    bank_codes.append(code)
+
+        if bank_code and bank_code not in bank_codes:
+            internal_code = BankRegistry.from_api_code(bank_code, "MEXC") or bank_code
+            if internal_code and internal_code not in bank_codes:
+                bank_codes.append(internal_code)
+
         return Order(
             id=f"mx_{adv_no}",
             price=price,
@@ -74,43 +88,30 @@ class MexcExchange(BaseExchange):
             finish_rate_pct=round(finish_rate, 1),
             exchange="MEXC",
             link=f"https://www.mexc.com/uk-UA/buy-crypto/merchant?id={user_id}",
-            bank_codes=[bank_code],
+            bank_codes=bank_codes,
             trade_terms=str(item.get("tradeTerms") or item.get("remark") or "").strip().lower(),
             is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),
             last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, side: int, side_str: str, banks: List[str]) -> List[Order]:
-        tasks = []
-        valid_banks = []
-        for bank_code in banks:
-            mexc_pay = BankRegistry.get_exchange_code(bank_code, "MEXC")
-            if not mexc_pay:
-                continue
-            tasks.append(self.client.fetch(self._build_payload(side, mexc_pay)))
-            valid_banks.append(bank_code)
-
-        if not tasks:
+        payload = self._build_payload(side, "")
+        try:
+            result = await self.client.fetch(payload)
+            items = result.get("data") or []
+        except Exception as e:
+            logger.error("MEXC fetch error: %s", e)
             return []
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
         orders = []
-        for bank_code, result in zip(valid_banks, results):
-            if isinstance(result, Exception):
-                logger.error("MEXC fetch [%s]: %s", bank_code, result)
-                continue
-
-            items = result.get("data") or []
-            if not items:
-                logger.debug("MEXC [%s/%s]: порожня відповідь", bank_code, side_str)
-                continue
-
-            for item in items:
-                try:
-                    orders.append(self._parse_order(item, bank_code, side_str))
-                except Exception as e:
-                    logger.warning("MEXC parse [%s]: %s", bank_code, e)
+        target_banks = set(banks)
+        for item in items:
+            try:
+                order = self._parse_order(item, side=side_str)
+                if any(b in target_banks for b in order.bank_codes):
+                    orders.append(order)
+            except Exception as e:
+                logger.warning("MEXC parse error: %s", e)
 
         return orders
 

@@ -49,7 +49,7 @@ async def cmd_keys(message: Message) -> None:
 
 
 # ── /connect & /disconnect ─────────────────────────────────────────────────
-SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]
+SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC", "Wallet", "BingX"]
 
 
 @router.message(Command("connect"))
@@ -760,7 +760,7 @@ async def _build_status_text(user_id: int) -> str:
     connected = []
     if _db:
         my_creds = await _db.get_all_credentials(user_id=user_id)
-        for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet"]:
+        for ex in ["Binance", "Bybit", "OKX", "MEXC", "Wallet", "BingX"]:
             connected.append(f"✅ {ex}" if ex in my_creds else f"❌ {ex}")
     else:
         connected = ["❌ БД недоступна"]

@@ -46,7 +46,7 @@ def back_to_stats_kb() -> InlineKeyboardMarkup:
 
 EXCHANGE_ICONS = {
     "Bybit": "🟠", "OKX": "⚫", "Wallet": "💎",
-    "Binance": "🟡", "MEXC": "🔵",
+    "Binance": "🟡", "MEXC": "🔵", "BingX": "❇️",
 }
 
 

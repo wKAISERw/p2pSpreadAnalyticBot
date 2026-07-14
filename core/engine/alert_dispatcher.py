@@ -247,6 +247,13 @@ class AlertDispatcher:
             ex_name = getattr(order_obj, "exchange", "")
             side_label = "buy" if order_obj is buy_o else "sell"
             ex_filters = emf.get(ex_name, {})
+            # Per-exchange subsidy filter: hide only used subsidies
+            used_subs = user.get("_used_subsidies", {})
+            if getattr(order_obj, "is_new_user_subsidy", False):
+                ex_used = used_subs.get(ex_name, [])
+                if "new_user" in ex_used:
+                    return False, f"{side_label} new user subsidy already used on {ex_name}", entry
+            
             min_orders = float(ex_filters.get("min_orders", 0) or mf.get("min_orders", 0) or _DEF_ORDERS.get(ex_name, 0))
             min_rate = float(ex_filters.get("min_rate", 0.0) or mf.get("min_rate", 0.0) or _DEF_RATE.get(ex_name, 0.0))
 
@@ -317,6 +324,9 @@ class AlertDispatcher:
                     elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
                         is_sniper = True
                         break
+
+            # Preload used subsidies for per-exchange filtering
+            user["_used_subsidies"] = await self._db.get_used_subsidies(uid) if self._db else {}
 
             wants, skip_reason, scaled_amount = self._user_wants(user, opp)
 
@@ -442,6 +452,9 @@ class AlertDispatcher:
                         elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
                             is_sniper = True
                             break
+
+                # Preload used subsidies for per-exchange filtering
+                local_user["_used_subsidies"] = await self._db.get_used_subsidies(uid) if self._db else {}
 
                 wants, skip_reason, scaled_amount = self._user_wants(local_user, opp)
 

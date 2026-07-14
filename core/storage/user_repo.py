@@ -710,3 +710,79 @@ class UserRepo:
     # ── БЛОК 1.5: ПРОПОЗИЦІЇ СКАНЕРА (PROPOSALS) ──
     # ==========================================
 
+    # ==========================================
+    # ── БЛОК 1.6: ВИКОРИСТАНІ СУБСИДІЇ (USED SUBSIDIES) ──
+    # ==========================================
+
+    async def mark_subsidy_used(
+        self, user_id: int, exchange: str, subsidy_type: str = "new_user"
+    ) -> bool:
+        """Позначає субсидію як використану для user+exchange."""
+        if not self._db:
+            return False
+        try:
+            await self._db.execute(
+                """INSERT OR REPLACE INTO used_subsidies
+                   (user_id, exchange, subsidy_type, used_at)
+                   VALUES (?, ?, ?, ?)""",
+                (user_id, exchange, subsidy_type, time.time()),
+            )
+            await self._db.commit()
+            logger.info("Subsidy marked used: user=%s exchange=%s type=%s", user_id, exchange, subsidy_type)
+            return True
+        except Exception as e:
+            logger.error("mark_subsidy_used error: %s", e)
+            return False
+
+    async def unmark_subsidy_used(
+        self, user_id: int, exchange: str, subsidy_type: str = "new_user"
+    ) -> bool:
+        """Скасовує позначку використаної субсидії (знову стає доступною)."""
+        if not self._db:
+            return False
+        try:
+            await self._db.execute(
+                "DELETE FROM used_subsidies WHERE user_id=? AND exchange=? AND subsidy_type=?",
+                (user_id, exchange, subsidy_type),
+            )
+            await self._db.commit()
+            return True
+        except Exception as e:
+            logger.error("unmark_subsidy_used error: %s", e)
+            return False
+
+    async def get_used_subsidies(self, user_id: int) -> dict[str, list[str]]:
+        """Повертає dict {exchange: [subsidy_type, ...]} використаних субсидій."""
+        if not self._db:
+            return {}
+        try:
+            async with self._db.execute(
+                "SELECT exchange, subsidy_type FROM used_subsidies WHERE user_id=?",
+                (user_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+            result: dict[str, list[str]] = {}
+            for row in rows:
+                ex = row["exchange"] if isinstance(row, aiosqlite.Row) else row[0]
+                st = row["subsidy_type"] if isinstance(row, aiosqlite.Row) else row[1]
+                result.setdefault(ex, []).append(st)
+            return result
+        except Exception as e:
+            logger.error("get_used_subsidies error: %s", e)
+            return {}
+
+    async def is_subsidy_used(
+        self, user_id: int, exchange: str, subsidy_type: str = "new_user"
+    ) -> bool:
+        """Перевіряє чи субсидія вже використана."""
+        if not self._db:
+            return False
+        try:
+            async with self._db.execute(
+                "SELECT 1 FROM used_subsidies WHERE user_id=? AND exchange=? AND subsidy_type=?",
+                (user_id, exchange, subsidy_type),
+            ) as cur:
+                return (await cur.fetchone()) is not None
+        except Exception as e:
+            logger.error("is_subsidy_used error: %s", e)
+            return False

@@ -10,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class BybitExchange(BaseExchange):
-    def __init__(self, client: BybitP2PClient):
+    def __init__(self, client: BybitP2PClient, db = None):
         self.client = client
+        self.db = db
         self.url = "https://api2.bybit.com/fiat/otc/item/online"
 
     def _parse_order(self, item: dict) -> Order:
@@ -44,7 +45,7 @@ class BybitExchange(BaseExchange):
             available_amount=Decimal(str(item.get("lastQuantity", "0"))),
             min_limit=Decimal(str(item.get("minAmount", "0"))),
             max_limit=Decimal(str(item.get("maxAmount", "0"))),
-            merchant_id=str(item.get("userId", "")),
+            merchant_id=profile_id,
             merchant_name=str(item.get("nickName", "Unknown")),
             month_order_count=int(item.get("recentOrderNum", 0)),
             finish_rate_pct=float(item.get("recentExecuteRate", 0.0)),
@@ -57,6 +58,18 @@ class BybitExchange(BaseExchange):
         )
 
     async def _fetch_orders(self, amount: float, banks: List[str], side: str) -> List[Order]:
+        headers = None
+        cookies = None
+        can_trade = False
+
+        if self.db:
+            try:
+                headers, cookies, _ = await self.db.get_auth_session("Bybit")
+                if headers or cookies:
+                    can_trade = True
+            except Exception as e:
+                logger.debug("Failed to retrieve Bybit session from DB: %s", e)
+
         payload = {
             "userId": "",
             "tokenId": "USDT",
@@ -67,10 +80,10 @@ class BybitExchange(BaseExchange):
             "page": "1",
             "amount": str(int(amount)) if amount > 0 else "",
             "authMaker": False,
-            "canTrade": False
+            "canTrade": can_trade
         }
         try:
-            data = await self.client.fetch(self.url, payload)
+            data = await self.client.fetch(self.url, payload, headers=headers, cookies=cookies)
             items = data.get("result", {}).get("items", [])
             return [self._parse_order(item) for item in items]
         except Exception as e:
