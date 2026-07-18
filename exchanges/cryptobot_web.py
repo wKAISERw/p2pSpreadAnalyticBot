@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class CryptoBotWebExchange(BaseExchange):
     def __init__(self, client: CryptoBotWebClient):
         self.client = client
+        self._profile_cache = {}  # merchant_id -> account_age_days
 
     def _parse_order(self, item: dict) -> Order:
         user_dict = item.get("user", {})
@@ -91,13 +92,23 @@ class CryptoBotWebExchange(BaseExchange):
         top_orders = orders[:MAX_DETAIL_FETCH]
 
         if top_orders:
+            needed_profiles = []
+            profile_indices = {}
+            for o in top_orders:
+                if o.merchant_id in self._profile_cache:
+                    o.account_age_days = self._profile_cache[o.merchant_id]
+                else:
+                    if o.merchant_id not in profile_indices:
+                        profile_indices[o.merchant_id] = len(needed_profiles)
+                        needed_profiles.append(o.merchant_id)
+
             details_tasks = [self.client.fetch_offer_details(int(o.id)) for o in top_orders]
-            profiles_tasks = [self.client.fetch_user_profile(int(o.merchant_id)) for o in top_orders]
+            profiles_tasks = [self.client.fetch_user_profile(int(mid)) for mid in needed_profiles]
 
             results = await asyncio.gather(*(details_tasks + profiles_tasks), return_exceptions=True)
 
             details = results[:len(top_orders)]
-            profiles = results[len(top_orders):]
+            profiles_results = results[len(top_orders):]
 
             for i, order in enumerate(top_orders):
                 detail = details[i]
@@ -107,19 +118,27 @@ class CryptoBotWebExchange(BaseExchange):
                 elif detail:
                     order.trade_terms = str(detail.get("description", "") or "").strip().lower()
 
-                profile = profiles[i]
-                if isinstance(profile, Exception):
-                    logger.debug("Не вдалося отримати профіль користувача %s: %s", order.merchant_id, profile)
-                elif profile:
-                    created_at_str = profile.get("created_at")
-                    if created_at_str:
-                        try:
-                            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                            now = datetime.now(timezone.utc)
-                            order.account_age_days = max(0, (now - created_at).days)
-                        except Exception as ex:
-                            logger.warning("Помилка парсингу created_at %s для %s: %s", created_at_str,
-                                           order.merchant_id, ex)
+                # Якщо вік завантажено з кешу — переходимо до наступного
+                if order.merchant_id in self._profile_cache:
+                    continue
+
+                p_idx = profile_indices.get(order.merchant_id)
+                if p_idx is not None and p_idx < len(profiles_results):
+                    profile = profiles_results[p_idx]
+                    if isinstance(profile, Exception):
+                        logger.debug("Не вдалося отримати профіль користувача %s: %s", order.merchant_id, profile)
+                    elif profile:
+                        created_at_str = profile.get("created_at")
+                        if created_at_str:
+                            try:
+                                created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                                now = datetime.now(timezone.utc)
+                                age_days = max(0, (now - created_at).days)
+                                order.account_age_days = age_days
+                                self._profile_cache[order.merchant_id] = age_days
+                            except Exception as ex:
+                                logger.warning("Помилка парсингу created_at %s для %s: %s", created_at_str,
+                                               order.merchant_id, ex)
 
         return orders
 
