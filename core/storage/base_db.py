@@ -633,6 +633,7 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "filter_fop_tov", "TEXT DEFAULT 'hide'")  # Фільтр ФОП/ТОВ (hide/warn/show)
         await self._ensure_column("scanner_users", "filter_banka_jar", "TEXT DEFAULT 'hide'")  # Фільтр Банка/Сейф (hide/warn/show)
         await self._ensure_column("scanner_users", "auto_cooldown_json", "TEXT DEFAULT '{}'")  # Налаштування автоматичного кд (JSON)
+        await self._ensure_column("scanner_users", "cryptobot_profile_mode", "TEXT DEFAULT 'chat'")  # Режим посилань CryptoBot: chat | webapp
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")

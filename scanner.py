@@ -31,6 +31,7 @@ from core.workers.review_fetcher import ReviewFetcher
 from exchanges.binance import BinanceExchange
 from exchanges.bybit import BybitExchange
 from exchanges.cryptobot_userbot import CryptoBotUserbot
+from exchanges.cryptobot_web import CryptoBotWebExchange
 from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
@@ -48,6 +49,7 @@ from infrastructure.http.mexc_client import MexcClient
 from infrastructure.http.okx_client import OkxClient
 from infrastructure.http.wallet_client import WalletClient
 from infrastructure.http.bingx_client import BingxClient
+from infrastructure.http.cryptobot_client import CryptoBotWebClient
 from core.workers.session_manager import SessionManager
 
 # Extracted modules
@@ -353,10 +355,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             BinanceClient() as bn_client,
             MexcClient() as m_client,
             BingxClient() as bx_client,
+            CryptoBotWebClient() as cb_client,
         ):
             # Прив'язуємо credentials до HTTP клієнтів
             _bind_http_credentials(all_creds, b_client, bn_client, o_client, w_client)
-            review_fetcher.bind_clients(binance=bn_client, bybit=b_client, okx=o_client, mexc=m_client)
 
             cb_bybit = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_okx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
@@ -364,6 +366,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
             cb_binance = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_mexc = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
             cb_bingx = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
+            cb_cryptobot = CircuitBreaker(failure_threshold=cb_fails, recovery_timeout=cb_timeout)
 
             ex_configs = [
                 {"name": "Bybit", "instance": BybitExchange(b_client, merchant_db), "cb": cb_bybit},
@@ -374,15 +377,33 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                 {"name": "BingX", "instance": BingxExchange(bx_client), "cb": cb_bingx},
             ]
 
+            if not settings.use_cryptobot_userbot_scraper:
+                ex_configs.append(
+                    {"name": "CryptoBot", "instance": CryptoBotWebExchange(cb_client), "cb": cb_cryptobot}
+                )
+
             cb_userbot = CryptoBotUserbot(
                 api_id=settings.telegram_api_id,
                 api_hash=settings.telegram_api_hash,
                 session_name="data/cryptobot_session",
                 update_interval=getattr(settings, "cb_userbot_interval", 45.0),
                 banks=list(target_banks.keys()),
+                use_scraper=settings.use_cryptobot_userbot_scraper,
             )
             await cb_userbot.start()
+            
+            # Налаштовуємо залежності юзербота
             w_client.set_userbot(cb_userbot)
+            cb_client.set_userbot(cb_userbot)
+            
+            # Прив'язуємо клієнти до review_fetcher
+            review_fetcher.bind_clients(
+                binance=bn_client,
+                bybit=b_client,
+                okx=o_client,
+                mexc=m_client,
+                cryptobot=cb_client
+            )
 
             async def safe_fetch(cfg: dict, amounts: list, banks: list):
                 name = cfg["name"]
@@ -791,14 +812,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             "sellBank": opp.get("sell_bank", ""),
                             "routeType": opp.get("route_type", "UNKNOWN")
                         }
+                        is_blocked = False
                         if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
-                            logger.debug("⏭ Скіп: buy BLOCK [%s]", buy_o.merchant_name)
-                            continue
+                            logger.debug("⏭ Фронт-скіп: buy BLOCK [%s]", buy_o.merchant_name)
+                            is_blocked = True
                         if "BLOCK" in (getattr(sell_o, "risk_flag", "") or ""):
-                            logger.debug("⏭ Скіп: sell BLOCK [%s]", sell_o.merchant_name)
-                            continue
+                            logger.debug("⏭ Фронт-скіп: sell BLOCK [%s]", sell_o.merchant_name)
+                            is_blocked = True
 
-                        current_frontend_opps.append(frontend_opp)
+                        if not is_blocked:
+                            current_frontend_opps.append(frontend_opp)
                         current_cycle_alerts.append(alert)
                         if sent_count >= current_max_alerts:
                             logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)

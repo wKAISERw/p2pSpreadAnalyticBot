@@ -140,6 +140,14 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         callback_data="disp:toggle:group_scanner_alerts",
     ))
 
+    # Налаштування профілю CryptoBot (Chat vs Webapp)
+    cb_links_val = current.get("cryptobot_profile_mode", "chat")
+    cb_links_label = "Чат 💬" if cb_links_val == "chat" else "Mini App 📱"
+    builder.row(InlineKeyboardButton(
+        text=f"🤖 Профіль CryptoBot: {cb_links_label}",
+        callback_data="disp:toggle:cryptobot_profile_mode",
+    ))
+
     builder.row(InlineKeyboardButton(
         text="💳 Налаштування карткового модуля →",
         callback_data="set:card_display_menu",

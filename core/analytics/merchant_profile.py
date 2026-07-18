@@ -4,15 +4,41 @@ merchant_profile.py - Генерація URL профілів мерчантів
 """
 
 
-def build_profile_url(exchange: str, merchant_id: str, merchant_name: str = "", side: str = "") -> str:
+def build_profile_url(
+    exchange: str,
+    merchant_id: str,
+    merchant_name: str = "",
+    side: str = "",
+    profile_mode: str = "chat",
+    offer_id: str = "",
+) -> str:
     """
     Повертає URL профілю/оголошень мерчанта на відповідній біржі.
 
-    Binance - публічний профіль мерчанта (advertiserNo).
-    Bybit   - сторінка оголошень мерчанта USDT/UAH.
-    OKX     - немає публічних P2P профілів.
-    MEXC    - немає публічних P2P профілів.
+    Binance   - публічний профіль мерчанта (advertiserNo).
+    Bybit     - сторінка оголошень мерчанта USDT/UAH.
+    OKX       - оголошення мерчанта (publicUserId).
+    MEXC      - профіль мерчанта.
+    CryptoBot - chat: профіль у чаті (@CryptoBot?start=u-{id})
+                webapp: конкретне оголошення в Mini App (startapp=offer-{offerID})
     """
+    if exchange == "CryptoBot":
+        if profile_mode == "webapp" and offer_id:
+            # Відкриває конкретне оголошення в Mini App (@send)
+            return f"https://t.me/send?startapp=offer-{offer_id}"
+        elif profile_mode == "webapp":
+            # Fallback: відкрити P2P-розділ (якщо немає ID ордера)
+            return "https://t.me/send?startapp=p2p"
+        else:
+            # Чат-режим: профіль мерча через @CryptoBot
+            return f"https://t.me/CryptoBot?start=u-{merchant_id}"
+
+    if exchange == "Wallet":
+        if offer_id and merchant_id:
+            # Пряме посилання на конкретне оголошення Wallet Mini App, яке знайшов сканер
+            return f"https://t.me/wallet?startapp=offerid_{offer_id}_{merchant_id}"
+        return "https://t.me/wallet?startapp=market"
+
     _URLS = {
         "Binance": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={id}",
         "Bybit":   "https://www.bybit.com/uk-UA/p2p/profile/{id}/USDT/UAH/item",

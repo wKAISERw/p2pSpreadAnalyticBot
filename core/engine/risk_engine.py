@@ -443,43 +443,66 @@ class RiskEngine:
                 try:
                     # Отримуємо сесію Binance з БД для обходу Cloudflare
                     headers, cookies, _ = await self._db.get_auth_session("Binance")
-                    profile = await self._review_fetcher._binance.fetch_merchant_profile(
-                        mid, session_headers=headers, session_cookies=cookies
-                    )
-                    if profile:
-                        # Шукаємо наш ордер за advNo (вилучаємо з order.id)
-                        adv_no = order.id.replace("bn_", "") if order.id else ""
-                        all_ads = profile.get("sellList", []) + profile.get("buyList", [])
-                        found_remarks = ""
-                        for ad in all_ads:
-                            if str(ad.get("advNo", "")) == adv_no:
-                                found_remarks = ad.get("remarks") or ""
-                                break
-                        # Fallback на перші непусті умови будь-якого активного оголошення
-                        if not found_remarks:
+                    if not headers or not cookies:
+                        order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
+                        terms = order.trade_terms
+                    else:
+                        profile = await self._review_fetcher._binance.fetch_merchant_profile(
+                            mid, session_headers=headers, session_cookies=cookies
+                        )
+                        if profile:
+                            # Шукаємо наш ордер за advNo (вилучаємо з order.id)
+                            adv_no = order.id.replace("bn_", "") if order.id else ""
+                            all_ads = profile.get("sellList", []) + profile.get("buyList", [])
+                            found_remarks = ""
                             for ad in all_ads:
-                                rem = ad.get("remarks") or ""
-                                if rem.strip():
-                                    found_remarks = rem
+                                if str(ad.get("advNo", "")) == adv_no:
+                                    found_remarks = ad.get("remarks") or ""
                                     break
-                        if found_remarks:
-                            order.trade_terms = found_remarks.strip().lower()
+                            # Fallback на перші непусті умови будь-якого активного оголошення
+                            if not found_remarks:
+                                for ad in all_ads:
+                                    rem = ad.get("remarks") or ""
+                                    if rem.strip():
+                                        found_remarks = rem
+                                        break
+                            if found_remarks:
+                                order.trade_terms = found_remarks.strip().lower()
+                                terms = order.trade_terms
+                                logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                            else:
+                                order.trade_terms = ""
+                        else:
+                            order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
                             terms = order.trade_terms
-                            logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
                 except Exception as pe:
                     logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
+                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
+                    terms = order.trade_terms
 
             elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
                 try:
-                    ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
-                    if ad_data:
-                        desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
-                        if desc:
-                            order.trade_terms = desc.strip().lower()
+                    headers, cookies, _ = await self._db.get_auth_session("OKX")
+                    if not headers or not cookies or "authorization" not in headers:
+                        order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
+                        terms = order.trade_terms
+                    else:
+                        ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
+                        if ad_data:
+                            desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
+                            if desc:
+                                order.trade_terms = desc.strip().lower()
+                                terms = order.trade_terms
+                                logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
+                            else:
+                                order.trade_terms = ""
+                        else:
+                            order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
                             terms = order.trade_terms
-                            logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
                 except Exception as pe:
                     logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
+                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
+                    terms = order.trade_terms
 
             cache_key = (exchange, mid)
 
@@ -487,7 +510,7 @@ class RiskEngine:
             need_twins     = bool(order.merchant_name) and self._id_cache.get(cache_key) is None
 
             coros = [
-                self._db.is_blacklisted(exchange, mid),
+                self._db.is_blacklisted(exchange, mid, order.merchant_name),
                 self._db.get_reviews_summary(exchange, mid),
                 self._db.get_recent_snapshots(exchange, mid, minutes=BEHAVIOR_HISTORY_MINUTES)
                     if need_snapshots else _noop(None),

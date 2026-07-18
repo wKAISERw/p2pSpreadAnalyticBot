@@ -19,7 +19,8 @@ class MerchantRepo:
             row = await cur.fetchone()
         return row["risk_score"] if row else 0
 
-    async def is_blacklisted(self, exchange: str, merchant_id: str) -> tuple[bool, str]:
+    async def is_blacklisted(self, exchange: str, merchant_id: str, merchant_name: str = "") -> tuple[bool, str]:
+        # 1. Спершу шукаємо точний збіг по ID на даній біржі
         async with self._db.execute(
                 "SELECT reason, source FROM global_blacklist WHERE exchange=? AND merchant_id=?",
                 (exchange, merchant_id),
@@ -27,6 +28,42 @@ class MerchantRepo:
             row = await cur.fetchone()
         if row:
             return True, f"[{row['source']}] {row['reason']}"
+
+        # 2. Якщо не знайдено, шукаємо збіг по імені (case-insensitive) на будь-якій біржі
+        if merchant_name:
+            async with self._db.execute(
+                    "SELECT exchange, reason, source FROM global_blacklist WHERE LOWER(merchant_name) = LOWER(?)",
+                    (merchant_name.strip(),),
+            ) as cur:
+                rows = await cur.fetchall()
+            
+            for r in rows:
+                if r["exchange"].lower() == exchange.lower():
+                    return True, f"[{r['source']}] {r['reason']}"
+                else:
+                    return True, f"[{r['source']}] {r['reason']} (blacklist на {r['exchange']})"
+
+            # 3. Якщо все одно не знайдено, робимо розумне очищення від спецсимволів/емодзі (Fuzzy match)
+            async with self._db.execute(
+                    "SELECT exchange, merchant_name, reason, source FROM global_blacklist"
+            ) as cur:
+                all_rows = await cur.fetchall()
+            
+            def clean_name(s: str) -> str:
+                if not s:
+                    return ""
+                return "".join(c for c in s.lower() if c.isalnum())
+            
+            target_cleaned = clean_name(merchant_name)
+            if target_cleaned:
+                for r in all_rows:
+                    db_name = r["merchant_name"]
+                    if db_name and clean_name(db_name) == target_cleaned:
+                        if r["exchange"].lower() == exchange.lower():
+                            return True, f"[{r['source']}] {r['reason']}"
+                        else:
+                            return True, f"[{r['source']}] {r['reason']} (blacklist на {r['exchange']})"
+
         return False, ""
 
     async def add_to_blacklist(
@@ -317,7 +354,7 @@ class MerchantRepo:
             return (time.time() - updated_at) > 600.0
 
         # PENDING / технічні збої: завжди потребує перефетч
-        if status in ("PENDING", "UNAVAILABLE", "API_ERROR", "SESSION_EXPIRED"):
+        if status in ("PENDING", "UNAVAILABLE", "API_ERROR", "SESSION_EXPIRED", "NO_FEEDBACK"):
             return True
 
         ttl_sec = review_ttl_hours * 3600.0

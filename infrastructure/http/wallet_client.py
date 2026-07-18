@@ -59,18 +59,13 @@ class WalletClient(BaseHttpClient):
                 return jwt
             return ""
 
-    async def fetch_offer_comment(self, offer_id: int) -> Optional[str]:
+    async def fetch_offer_details(self, offer_id: int) -> Optional[dict]:
         """
-        Отримує коментар (умови) оффера через внутрішній P2P API.
-        
-        :param offer_id: Ідентифікатор оффера
-        :returns:
-            - str: коментар (умови) мерчанта (може бути порожнім рядоком "")
-            - None: якщо не вдалося завантажити умови через помилку авторизації чи мережі
+        Отримує повний об'єкт деталей оффера (умови, дані користувача, статистика).
         """
         jwt = await self.get_valid_jwt()
         if not jwt:
-            logger.error("❌ Немає валідного JWT для отримання умов Wallet оффера %d", offer_id)
+            logger.error("❌ Немає валідного JWT для отримання деталей Wallet оффера %d", offer_id)
             return None
 
         url = "https://p2p.walletbot.me/p2p/public-api/v2/offer/get"
@@ -81,19 +76,17 @@ class WalletClient(BaseHttpClient):
         payload = {"offerId": int(offer_id)}
 
         try:
-            # Використовуємо наш базовий метод _post, але з кастомними заголовками
-            # (оскільки base_client.py дозволяє перевизначати заголовки або робити запити)
-            # Запити йдуть через _post(url, json=payload, headers=headers)
             res = await self._post(url, json=payload, headers=headers)
             if res and res.get("status") == "SUCCESS":
-                return str(res.get("data", {}).get("comment", "") or "").strip()
-            
+                return res.get("data") or {}
+
             logger.warning("⚠️ Wallet offer/get повернув статус: %s", res)
             return None
         except Exception as e:
-            logger.error("❌ Помилка при отриманні коментаря Wallet оффера %d: %s", offer_id, e)
+            logger.error("❌ Помилка при отриманні деталей Wallet оффера %d: %s", offer_id, e)
             return None
 
+        
     def set_credentials(self, api_key: str) -> None:
         """Встановлює API ключ з БД (замість .env)."""
         if self._session:

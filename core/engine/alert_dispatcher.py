@@ -177,12 +177,21 @@ class AlertDispatcher:
         buy_o = opp["buy_order"]
         sell_o = opp["sell_order"]
 
+        mf = user.get("merchant_filters") or {}
         for order_obj in (buy_o, sell_o):
             risk_flags = getattr(order_obj, "risk_flag", "") or ""
             if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
                 return False, "FOP_TOV blocked for user", entry
             if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
                 return False, "Banka/Jar blocked for user", entry
+            
+            if "BLOCK:BLACKLIST" in risk_flags:
+                bl_mode = mf.get("blacklist_mode", "block").lower()
+                if bl_mode == "block":
+                    return False, f"BLACKLIST merchant {order_obj.merchant_name} blocked for user", entry
+            elif "BLOCK" in risk_flags:
+                # Всі інші BLOCK вердикти (наприклад, LLM_BLOCK) завжди приховуються
+                return False, f"Severe risk BLOCK {order_obj.merchant_name} for user", entry
 
         user_capital = float(user["capital"])
 

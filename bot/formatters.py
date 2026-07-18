@@ -256,13 +256,23 @@ def _format_route_variants(routes: list[str] | None, limit: int = 6) -> str:
     return ", ".join(safe) + suffix
 
 
-def _profile_link(exchange: str, merchant_id: str, merchant_name: str, side: str = "") -> str:
-    """Генерує клікабельне ім'я мерчанта (синій лінк у Telegram → профіль на біржі)."""
+def _profile_link(
+    exchange: str,
+    merchant_id: str,
+    merchant_name: str,
+    side: str = "",
+    profile_mode: str = "chat",
+    offer_id: str = "",
+) -> str:
+    """Генерує клікабельне ім'я мерчанта (синій лінк у Telegram → профіль/ордер на біржі)."""
     safe_name = escape(str(merchant_name or "Unknown"))
     if not merchant_id:
         return safe_name
- 
-    web_url = build_profile_url(exchange, merchant_id, merchant_name, side=side)
+
+    web_url = build_profile_url(
+        exchange, merchant_id, merchant_name,
+        side=side, profile_mode=profile_mode, offer_id=offer_id,
+    )
     if web_url:
         return f'<a href="{escape(web_url, quote=True)}">{safe_name}</a>'
     return f"<b>{safe_name}</b>"

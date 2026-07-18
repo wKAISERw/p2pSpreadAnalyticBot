@@ -228,7 +228,14 @@ class TakerScanner:
 
                 if not self._merchant_ok(order, mf, emf, used_subs):
                     continue
-                if "BLOCK" in (getattr(order, "risk_flag", "") or ""):
+                # Check blacklist setting: if "blacklist_mode" is "warn", we allow BLOCK:BLACKLIST to pass but keep the flag for warning presentation
+                risk_flag = getattr(order, "risk_flag", "") or ""
+                if "BLOCK:BLACKLIST" in risk_flag:
+                    bl_mode = mf.get("blacklist_mode", "block").lower()
+                    if bl_mode == "block":
+                        continue
+                elif "BLOCK" in risk_flag:
+                    # other non-blacklist BLOCK flags (like CACHED blocks) are always skipped
                     continue
                 
                 seen_ids.add(order.id)

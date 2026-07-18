@@ -729,7 +729,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "",
     ]
 
-    _NO_REVIEW_EXCHANGES = {"Wallet", "CryptoBot"}
+    _NO_REVIEW_EXCHANGES = {"Wallet"}
     if rev_status != "OK" or rev_error_reason:
         diag = f"Reviews diagnostics: status={rev_status}"
         if rev_error_reason:

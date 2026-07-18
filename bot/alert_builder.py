@@ -200,17 +200,22 @@ async def send_single(
     b_icon = EXCHANGE_ICONS.get(alert.buy_order.exchange, "◽️")
     s_icon = EXCHANGE_ICONS.get(alert.sell_order.exchange, "◽️")
 
+    profile_mode = ds.get("cryptobot_profile_mode", "chat")
     buy_name = _profile_link(
         alert.buy_order.exchange,
         alert.buy_order.merchant_id,
         alert.buy_order.merchant_name,
         side="buy",
+        profile_mode=profile_mode,
+        offer_id=str(alert.buy_order.id),
     )
     sell_name = _profile_link(
         alert.sell_order.exchange,
         alert.sell_order.merchant_id,
         alert.sell_order.merchant_name,
         side="sell",
+        profile_mode=profile_mode,
+        offer_id=str(alert.sell_order.id),
     )
 
     buy_risk = _risk_badge(alert.buy_order)
@@ -652,8 +657,8 @@ async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = N
 
         b_online = _online_badge(a.buy_order)
         s_online = _online_badge(a.sell_order)
-        b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy')}{b_online}"
-        s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell')}{s_online}"
+        b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy', offer_id=str(a.buy_order.id))}{b_online}"
+        s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell', offer_id=str(a.sell_order.id))}{s_online}"
 
         buy_links = f"<a href='{a.buy_order.link}'>Купити</a>"
         sell_links = f"<a href='{a.sell_order.link}'>Продати</a>"

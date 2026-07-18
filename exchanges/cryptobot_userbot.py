@@ -153,6 +153,7 @@ class CryptoBotUserbot:
         session_name: str = "sessions/cryptobot_twink",
         update_interval: float = 30.0,
         banks: Optional[list[str]] = None,
+        use_scraper: bool = False,
     ):
         self.app = Client(session_name, api_id=api_id, api_hash=api_hash)
         self.interval = update_interval
@@ -161,6 +162,7 @@ class CryptoBotUserbot:
         self._chat_id: Optional[int] = None
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
+        self._use_scraper = use_scraper
 
     # ─── Public API ───────────────────────────────────────────────────────
 
@@ -170,12 +172,14 @@ class CryptoBotUserbot:
         self._chat_id = result.users[0].id
         logger.info("✅ CryptoBotUserbot: chat_id=%d", self._chat_id)
 
-        # Відкриваємо чат і отримуємо меню з кнопками
-        await self.app.send_message(self._chat_id, "/start")
-        await asyncio.sleep(2.0)
-        logger.info("✅ CryptoBotUserbot: ініціалізація завершена")
-
-        self._task = asyncio.create_task(self._worker_loop())
+        # Відкриваємо чат і отримуємо меню з кнопками (тільки якщо увімкнено скрейпер)
+        if self._use_scraper:
+            await self.app.send_message(self._chat_id, "/start")
+            await asyncio.sleep(2.0)
+            logger.info("✅ CryptoBotUserbot: ініціалізація скрейпера завершена")
+            self._task = asyncio.create_task(self._worker_loop())
+        else:
+            logger.info("✅ CryptoBotUserbot: ініціалізація у режимі помічника токенів завершена")
 
     async def stop(self):
         self._stop.set()
@@ -189,6 +193,42 @@ class CryptoBotUserbot:
 
     def get_orders(self) -> tuple[list[Order], list[Order]]:
         return self.cache.get()
+
+    async def get_webapp_init_data(self) -> str:
+        """
+        Запитує WebView URL для CryptoBot (app.send.tg) і вилучає tgWebAppData.
+        """
+        try:
+            logger.info("⏳ Отримання tgWebAppData для CryptoBot...")
+            from pyrogram.raw.types import InputPeerUser
+            
+            res_resolve = await self.app.invoke(ResolveUsername(username=CRYPTOBOT_USERNAME))
+            bot_user = res_resolve.users[0]
+            bot_peer = InputPeerUser(user_id=bot_user.id, access_hash=bot_user.access_hash)
+            
+            res = await self.app.invoke(
+                RequestWebView(
+                    peer=bot_peer,
+                    bot=bot_peer,
+                    platform="android",
+                    url="https://app.send.tg/",
+                    from_bot_menu=False
+                )
+            )
+            webview_url = res.url
+            
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(webview_url)
+            fragment_params = urllib.parse.parse_qs(parsed_url.fragment)
+            tg_web_app_data = fragment_params.get("tgWebAppData", [None])[0]
+            if not tg_web_app_data:
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                tg_web_app_data = query_params.get("tgWebAppData", [None])[0]
+                
+            return tg_web_app_data or ""
+        except Exception as e:
+            logger.error("❌ Помилка отримання tgWebAppData для CryptoBot: %s", e)
+            return ""
 
     async def get_wallet_jwt_token(self) -> str:
         """

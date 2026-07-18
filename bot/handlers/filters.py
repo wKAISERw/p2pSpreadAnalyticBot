@@ -95,26 +95,143 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(Command("ban"))
 async def cmd_ban(message: Message) -> None:
-    parts = message.text.split(maxsplit=3)
+    parts = message.text.split(maxsplit=2)
     if len(parts) < 3:
         return await message.answer(
-            "❌ Формат: <code>/ban [exchange] [merchant_id] [причина]</code>\n"
-            "Приклад: <code>/ban Binance s42ee507f2dc скам</code>"
+            "❌ Формат: <code>/ban [exchange] [name_or_id] : [причина]</code>\n"
+            "Приклад: <code>/ban CryptoBot Unborn Deer : реф</code>\n"
+            "Приклад (без причини): <code>/ban Binance Tether_Poshtuchno</code>"
+        )
+    
+    exchange = parts[1].strip()
+    rest = parts[2].strip()
+    
+    if ":" in rest:
+        merchant_part, reason_part = rest.split(":", 1)
+        merchant_val = merchant_part.strip()
+        reason = reason_part.strip() or "Ручний бан"
+    else:
+        merchant_val = rest
+        reason = "Ручний бан"
+        
+    if not _db:
+        return await message.answer("❌ База даних не ініціалізована")
+        
+    # Якщо назва містить пробіли або є чисто буквеною без цифр, трактуємо як ім'я
+    if " " in merchant_val or not any(c.isdigit() for c in merchant_val):
+        merchant_name = merchant_val
+        merchant_id = f"unk_{merchant_name.lower().replace(' ', '_')}"
+    else:
+        merchant_id = merchant_val
+        merchant_name = "Unknown"
+
+    await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "manual_cmd")
+    await message.answer(
+        f"⛔ <b>Заблоковано в Чорному списку</b>\n"
+        f"Біржа: <code>{exchange}</code>\n"
+        f"Користувач: <code>{merchant_val}</code>\n"
+        f"Причина: {reason}"
+    )
+
+
+
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message) -> None:
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 3:
+        return await message.answer(
+            "❌ Формат: <code>/unban [exchange] [name_or_id]</code>\n"
+            "Приклад: <code>/unban CryptoBot Unborn Deer</code>"
         )
     exchange = parts[1].strip()
-    merchant_id = parts[2].strip()
-    reason = parts[3].strip() if len(parts) > 3 else "Ручний бан"
+    merchant_val = parts[2].strip()
+    
+    if not _db:
+        return await message.answer("❌ База даних не ініціалізована")
+        
+    # Якщо назва містить пробіли або є чисто буквеною без цифр, трактуємо як ім'я
+    if " " in merchant_val or not any(c.isdigit() for c in merchant_val):
+        merchant_name = merchant_val
+        merchant_id = f"unk_{merchant_name.lower().replace(' ', '_')}"
+    else:
+        merchant_id = merchant_val
+        merchant_name = None
+
+    # Видаляємо з БД
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    
+    if merchant_name:
+        async with conn.execute(
+            "DELETE FROM global_blacklist WHERE exchange=? AND (merchant_id=? OR LOWER(merchant_name)=LOWER(?))",
+            (exchange, merchant_id, merchant_name)
+        ):
+            pass
+    else:
+        async with conn.execute(
+            "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
+            (exchange, merchant_id)
+        ):
+            pass
+            
+    await conn.commit()
+    await message.answer(
+        f"✅ <b>Розблоковано (вилучено з Чорного списку)</b>\n"
+        f"Біржа: <code>{exchange}</code>\n"
+        f"Користувач: <code>{merchant_val}</code>"
+    )
+
+
+@router.message(Command("blacklist"))
+async def cmd_blacklist(message: Message) -> None:
+    parts = message.text.split(maxsplit=1)
+    query = parts[1].strip() if len(parts) > 1 else ""
 
     if not _db:
         return await message.answer("❌ База даних не ініціалізована")
+        
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
 
-    await _db.add_to_blacklist(exchange, merchant_id, "Unknown", reason, "manual_cmd")
-    await message.answer(
-        f"⛔ <b>Заблоковано</b>\n"
-        f"Біржа: <code>{exchange}</code>\n"
-        f"ID: <code>{merchant_id}</code>\n"
-        f"Причина: {reason}"
-    )
+    if query:
+        like_query = f"%{query}%"
+        async with conn.execute(
+            "SELECT exchange, merchant_name, reason, source, added_at FROM global_blacklist WHERE merchant_name LIKE ? OR merchant_id LIKE ? ORDER BY added_at DESC",
+            (like_query, like_query)
+        ) as cur:
+            rows = await cur.fetchall()
+            
+        if not rows:
+            return await message.answer(f"🔍 У чорному списку немає мерчантів, що містять «<code>{query}</code>»")
+            
+        lines = [f"🔍 <b>Результати пошуку для «{query}» ({len(rows)}):</b>\n"]
+        for r in rows:
+            lines.append(f"• [{r['exchange']}] <b>{r['merchant_name']}</b> — {r['reason']} ({r['source']})")
+        
+        await message.answer("\n".join(lines))
+    else:
+        async with conn.execute(
+            "SELECT exchange, merchant_name, reason, source FROM global_blacklist ORDER BY added_at DESC LIMIT 25"
+        ) as cur:
+            rows = await cur.fetchall()
+            
+        async with conn.execute("SELECT COUNT(*) FROM global_blacklist") as cur:
+            total_count = (await cur.fetchone())[0]
+
+        lines = [
+            f"⛔ <b>Чорний список мерчантів (Всього: {total_count})</b>\n",
+            "Останні 25 записів:",
+        ]
+        for r in rows:
+            lines.append(f"• [{r['exchange']}] <b>{r['merchant_name']}</b> — {r['reason']}")
+            
+        lines.extend([
+            "\n💡 <b>Управління списком через команди:</b>",
+            "• Додати: <code>/ban [exchange] [name] : [reason]</code>",
+            "• Видалити: <code>/unban [exchange] [name]</code>",
+            "• Пошук: <code>/blacklist [name]</code>",
+        ])
+        await message.answer("\n".join(lines))
 
 
 # ── Пауза алертів ─────────────────────────────────────────────────────────
@@ -261,6 +378,12 @@ async def cb_unified_display_toggle(call: CallbackQuery):
                 current_display[field] = next_val
                 if _notifier:
                     _notifier._display_settings_cache.pop(chat_id, None)
+            elif field == "cryptobot_profile_mode":
+                current_val = current_display.get("cryptobot_profile_mode", "chat")
+                next_val = "webapp" if current_val == "chat" else "chat"
+                current_display["cryptobot_profile_mode"] = next_val
+                if _notifier:
+                    _notifier._display_settings_cache.pop(chat_id, None)
             else:
                 current_display[field] = not current_display.get(field, True)
                 if _notifier:
@@ -276,8 +399,8 @@ async def cb_unified_display_toggle(call: CallbackQuery):
 
 
 # ── Фільтри мерчантів ─────────────────────────────────────────────────────
-_MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet", "BingX"]
-_MF_EX_ICONS = {"Bybit": "🟠", "OKX": "⚫", "Binance": "🟡", "MEXC": "🔵", "Wallet": "💎", "BingX": "🟢"}
+_MF_EXCHANGES = ["Bybit", "OKX", "Binance", "MEXC", "Wallet", "BingX", "CryptoBot"]
+_MF_EX_ICONS = {"Bybit": "🟠", "OKX": "⚫", "Binance": "🟡", "MEXC": "🔵", "Wallet": "💎", "BingX": "🟢", "CryptoBot": "🤖"}
 
 
 async def _load_merchant_filters(user_id: int) -> tuple[dict, dict]:
@@ -309,6 +432,7 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
     min_age = mf.get("min_account_age_days", 0)
     min_pos_rate = mf.get("min_positive_rate", 0.0)
     max_offline = mf.get("max_offline_mins", 0)
+    blacklist_val = mf.get("blacklist_mode", "block")
 
     orders_label = f"{min_orders:.0f}" if min_orders else "без обмежень"
     rate_label = f"{min_rate:.0f}%" if min_rate else "без обмежень"
@@ -319,6 +443,7 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
     age_label = f"{min_age:.0f} дн." if min_age else "без обмежень"
     pos_label = f"{min_pos_rate:.1f}%" if min_pos_rate else "без обмежень"
     offline_label = f"{max_offline:.0f} хв." if max_offline else "без обмежень"
+    blacklist_label = "Приховати 🚫" if blacklist_val == "block" else "Попередити ⚠️"
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     builder = InlineKeyboardBuilder()
@@ -328,7 +453,8 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
     builder.button(text=f"🛡 Статус: {verified_label}", callback_data="mf:verified")
     builder.button(text=f"📅 Вік акаунту: {age_label}", callback_data="mf:age")
     builder.button(text=f"👍 % позитивних: {pos_label}", callback_data="mf:pos_rate")
-    builder.button(text=f"⏳ Макс. офлайн: {offline_label}", callback_data="mf:max_offline")
+    builder.button(text=f"⛔ Чорний список: {blacklist_label}", callback_data="mf:blacklist_mode")
+    builder.button(text="⚙️ Керування Чорним списком", callback_data="blacklist:menu")
     builder.adjust(1)
     
     # Per-exchange кнопки
@@ -375,7 +501,8 @@ async def on_set_merchant_filters(call: CallbackQuery) -> None:
         f"├ Статус: <b>{verified_label}</b>",
         f"├ Вік акаунту: <b>{age_label}</b>",
         f"├ Позитивні відгуки: <b>{pos_label}</b>",
-        f"└ Макс. офлайн: <b>{offline_label}</b>",
+        f"├ Макс. офлайн: <b>{offline_label}</b>",
+        f"└ Чорний список: <b>{blacklist_label}</b>",
     ]
     if emf:
         lines.append("")
@@ -534,6 +661,16 @@ async def on_mf_verified(call: CallbackQuery) -> None:
     next_val = cycle.get(current, "all")
     await _save_merchant_filter(call.from_user.id, "verified_filter", next_val)
     await call.answer(f"Статус змінено на: {next_val}")
+    await on_set_merchant_filters(call)
+
+
+@router.callback_query(F.data == "mf:blacklist_mode")
+async def on_mf_blacklist_mode(call: CallbackQuery) -> None:
+    mf, _ = await _load_merchant_filters(call.from_user.id)
+    current = mf.get("blacklist_mode", "block")
+    next_val = "warn" if current == "block" else "block"
+    await _save_merchant_filter(call.from_user.id, "blacklist_mode", next_val)
+    await call.answer(f"Чорний список: {next_val}")
     await on_set_merchant_filters(call)
 
 
@@ -2278,5 +2415,214 @@ async def on_max_delay_input(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"✅ Максимальну затримку змінено на: <b>{val} сек</b>\n\nПовертаюсь до меню...",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 До меню авто-затримки", callback_data="set:auto_cooldown_menu")]])
+    )
+
+
+# ── Керування Чорним списком (UI) ─────────────────────────────────────────
+
+class BlacklistStates(StatesGroup):
+    waiting_for_search = State()
+    waiting_for_add = State()
+
+
+@router.callback_query(F.data == "blacklist:menu")
+async def on_blacklist_menu(call: CallbackQuery) -> None:
+    text = (
+        "⛔ <b>Керування Чорним списком</b>\n\n"
+        "Тут ви можете шукати, додавати або видаляти мерчантів з чорного списку."
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📋 Останні 15 банів", callback_data="blacklist:list:0")
+    builder.button(text="🔍 Швидкий пошук", callback_data="blacklist:search")
+    builder.button(text="➕ Додати вручну", callback_data="blacklist:add")
+    builder.button(text="🔙 Назад до фільтрів", callback_data="set:merchant_filters")
+    builder.adjust(1)
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("blacklist:list:"))
+async def on_blacklist_list(call: CallbackQuery) -> None:
+    page = int(call.data.split(":")[-1])
+    limit = 15
+    offset = page * limit
+
+    if not _db:
+        return await call.answer("❌ База не ініціалізована", show_alert=True)
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+
+    async with conn.execute(
+        "SELECT exchange, merchant_id, merchant_name, reason FROM global_blacklist ORDER BY added_at DESC LIMIT ? OFFSET ?",
+        (limit, offset)
+    ) as cur:
+        rows = await cur.fetchall()
+
+    async with conn.execute("SELECT COUNT(*) FROM global_blacklist") as cur:
+        total = (await cur.fetchone())[0]
+
+    if not rows:
+        text = "📭 Чорний список порожній."
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔙 Назад", callback_data="blacklist:menu")
+        return await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+    text = f"⛔ <b>Чорний список ({offset + 1}-{min(offset + limit, total)} із {total})</b>\n\n"
+    builder = InlineKeyboardBuilder()
+    for r in rows:
+        ex = r["exchange"]
+        mid = r["merchant_id"]
+        name = r["merchant_name"]
+        reason = r["reason"] or "Без причини"
+        
+        unb_cb = f"bl_u:{ex}:{mid}"
+        if len(unb_cb) > 64:
+            unb_cb = unb_cb[:64]
+        
+        text += f"• [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
+        builder.button(text=f"❌ Вилучити {name[:12]}", callback_data=unb_cb)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"blacklist:list:{page-1}"))
+    if offset + limit < total:
+        nav_row.append(InlineKeyboardButton(text="Далі ▶️", callback_data=f"blacklist:list:{page+1}"))
+    if nav_row:
+        builder.row(*nav_row)
+
+    builder.row(InlineKeyboardButton(text="🔙 До меню блеклісту", callback_data="blacklist:menu"))
+    builder.adjust(1)
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data.startswith("bl_u:"))
+async def on_blacklist_unban_button(call: CallbackQuery) -> None:
+    parts = call.data.split(":", 2)
+    ex = parts[1]
+    mid = parts[2]
+    
+    if not _db:
+        return await call.answer("❌ База не ініціалізована", show_alert=True)
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
+        (ex, mid)
+    ):
+        pass
+    await conn.commit()
+    await call.answer("✅ Мерчанта вилучено з чорного списку")
+    call.data = "blacklist:list:0"
+    await on_blacklist_list(call)
+
+
+@router.callback_query(F.data == "blacklist:search")
+async def on_blacklist_search(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BlacklistStates.waiting_for_search)
+    text = "🔍 <b>Пошук у Чорному списку</b>\n\nВведіть нікнейм або його частину:"
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Скасувати", callback_data="blacklist:menu")
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+
+@router.message(BlacklistStates.waiting_for_search)
+async def on_blacklist_search_input(message: Message, state: FSMContext) -> None:
+    query = message.text.strip()
+    await state.clear()
+    
+    if not _db:
+        return await message.answer("❌ База не ініціалізована")
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+
+    like_query = f"%{query}%"
+    async with conn.execute(
+        "SELECT exchange, merchant_id, merchant_name, reason FROM global_blacklist WHERE merchant_name LIKE ? OR merchant_id LIKE ? LIMIT 15",
+        (like_query, like_query)
+    ) as cur:
+        rows = await cur.fetchall()
+
+    builder = InlineKeyboardBuilder()
+    if not rows:
+        text = f"🔍 За запитом «{query}» нікого не знайдено."
+    else:
+        text = f"🔍 <b>Результати пошуку ({len(rows)} найближчих):</b>\n\n"
+        for r in rows:
+            ex = r["exchange"]
+            mid = r["merchant_id"]
+            name = r["merchant_name"]
+            reason = r["reason"] or "Без причини"
+            text += f"• [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
+            unb_cb = f"bl_u:{ex}:{mid}"
+            if len(unb_cb) > 64:
+                unb_cb = unb_cb[:64]
+            builder.button(text=f"❌ Вилучити {name[:12]}", callback_data=unb_cb)
+    
+    builder.row(InlineKeyboardButton(text="🔙 До меню блеклісту", callback_data="blacklist:menu"))
+    builder.adjust(1)
+    await message.answer(text, reply_markup=builder.as_markup())
+
+
+@router.callback_query(F.data == "blacklist:add")
+async def on_blacklist_add(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BlacklistStates.waiting_for_add)
+    text = (
+        "➕ <b>Додати до Чорного списку</b>\n\n"
+        "Введіть дані у форматі:\n"
+        "<code>[exchange] [name_or_id] : [reason]</code>\n\n"
+        "Приклад: <code>CryptoBot Unborn Deer : реф</code>"
+    )
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 Скасувати", callback_data="blacklist:menu")
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+
+
+@router.message(BlacklistStates.waiting_for_add)
+async def on_blacklist_add_input(message: Message, state: FSMContext) -> None:
+    raw_text = message.text.strip()
+    await state.clear()
+
+    # Очікуємо формат: [exchange] [name_or_id] : [reason]
+    # Наприклад: CryptoBot Spiky Blowfish : реф
+    parts = raw_text.split(maxsplit=1)
+    if len(parts) < 2:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="🔙 Скасувати", callback_data="blacklist:menu")
+        return await message.answer(
+            "❌ Неправильний формат.\n"
+            "Формат має бути: <code>[exchange] [name_or_id] : [reason]</code>\n"
+            "Спробуйте ще раз або виберіть кнопку скасування:",
+            reply_markup=builder.as_markup()
+        )
+
+    exchange = parts[0].strip()
+    rest = parts[1].strip()
+    
+    if ":" in rest:
+        merchant_part, reason_part = rest.split(":", 1)
+        merchant_val = merchant_part.strip()
+        reason = reason_part.strip() or "Ручний бан"
+    else:
+        # Спроба витягнути ім'я та причину, якщо забули роздільник двокрапки
+        # Наприклад, "CryptoBot Spiky Blowfish" (без причини)
+        merchant_val = rest
+        reason = "Ручний бан"
+
+    if " " in merchant_val or not any(c.isdigit() for c in merchant_val):
+        merchant_name = merchant_val
+        merchant_id = f"unk_{merchant_name.lower().replace(' ', '_')}"
+    else:
+        merchant_id = merchant_val
+        merchant_name = "Unknown"
+
+    if not _db:
+        return await message.answer("❌ База не ініціалізована")
+
+    await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "ui_manual")
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔙 До меню блеклісту", callback_data="blacklist:menu")
+    await message.answer(
+        f"⛔ <b>Мерчанта додано до Чорного списку!</b>\n\n"
+        f"• Біржа: <code>{exchange}</code>\n"
+        f"• Ім'я/ID: <code>{merchant_val}</code>\n"
+        f"• Причина: <i>{reason}</i>",
+        reply_markup=builder.as_markup()
     )
 

@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from infrastructure.http.bybit_p2p_client import BybitP2PClient
     from infrastructure.http.okx_client import OkxClient
     from infrastructure.http.mexc_client import MexcClient
-
+    from infrastructure.http.cryptobot_client import CryptoBotWebClient
+    from infrastructure.http.wallet_client import WalletClient
 logger = logging.getLogger("ReviewFetcher")
 
 # Затримки між запитами на біржу (rate limiting)
@@ -32,7 +33,9 @@ RATE_LIMITS = {
     "Binance": 2.0,
     "Bybit": 1.5,
     "OKX": 1.5,
-    "MEXC": 1.5,  # 🚀 ДОДАНО
+    "MEXC": 1.5,
+    "CryptoBot": 1.5,
+    "Wallet": 1.5,
 }
 
 # Пороги для автоматичного флагування
@@ -150,20 +153,23 @@ class ReviewFetcher:
         self._bybit: Optional["BybitP2PClient"] = bybit_client
         self._okx: Optional["OkxClient"] = okx_client
         self._mexc: Optional["MexcClient"] = None  # 🚀 ДОДАНО
-        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0, "MEXC": 0}
-        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0, "MEXC": 0.0}
+        self._wallet: Optional["WalletClient"] = None
+        self._cryptobot: Optional["CryptoBotWebClient"] = None
+        self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0, "MEXC": 0, "CryptoBot": 0}
+        self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0, "MEXC": 0.0,
+                                                     "CryptoBot": 0.0}
 
-    def bind_clients(self, binance=None, bybit=None, okx=None, mexc=None) -> None:
+    def bind_clients(self, binance=None, bybit=None, okx=None, mexc=None, cryptobot=None, wallet=None) -> None:
         if binance is not None: self._binance = binance
         if bybit is not None: self._bybit = bybit
         if okx is not None: self._okx = okx
-        if mexc is not None: self._mexc = mexc # 🚀 ДОДАНО
+        if mexc is not None: self._mexc = mexc
+        if cryptobot is not None: self._cryptobot = cryptobot
+        if wallet is not None: self._wallet = wallet
         logger.info(
-            "ReviewFetcher clients bound: Binance=%s(session) Bybit=%s(session) OKX=%s(session) MEXC=%s(public)",
-            "✅" if self._binance else "❌",
-            "✅" if self._bybit else "❌",
-            "✅" if self._okx else "❌",
-            "✅" if self._mexc else "❌",
+            "ReviewFetcher clients bound: Binance=%s Bybit=%s OKX=%s MEXC=%s CryptoBot=%s Wallet=%s",
+            "✅" if self._binance else "❌", "✅" if self._bybit else "❌", "✅" if self._okx else "❌",
+            "✅" if self._mexc else "❌", "✅" if self._cryptobot else "❌", "✅" if self._wallet else "❌",
         )
 
     def bind_notifier(self, notifier) -> None:
@@ -177,7 +183,7 @@ class ReviewFetcher:
             self._worker_loop(), name="review-fetcher"
         )
         logger.info(
-            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | clients: B=%s By=%s OKX=%s MEXC=%s",
+            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | clients: B=%s By=%s OKX=%s MEXC=%s CB=%s",
             self._review_ttl,
             self._urgent_queue.maxsize,
             self._queue.maxsize,
@@ -185,6 +191,7 @@ class ReviewFetcher:
             "✅" if self._bybit else "❌",
             "✅" if self._okx else "❌",
             "✅" if self._mexc else "❌",
+            "✅" if self._cryptobot else "❌",
         )
 
     async def stop(self) -> None:
@@ -235,10 +242,11 @@ class ReviewFetcher:
             }
 
         if not merchant_id:
-            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN", "error_reason": "empty merchant_id"}
+            return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN",
+                    "error_reason": "empty merchant_id"}
 
         if exchange not in RATE_LIMITS:
-            # Біржа не підтримує API відгуків (Wallet, CryptoBot)
+            # Біржа взагалі не підтримується (не в RATE_LIMITS)
             logger.debug("fetch_now: %s не підтримує API відгуків [%s]", exchange, merchant_id[:12])
             try:
                 await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
@@ -250,10 +258,21 @@ class ReviewFetcher:
             }
 
         # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──────
-        _client_map = {"Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx, "MEXC": self._mexc}
+        _client_map = {
+            "Binance": self._binance, "Bybit": self._bybit, "OKX": self._okx,
+            "MEXC": self._mexc, "CryptoBot": self._cryptobot, "Wallet": self._wallet
+        }
         client = _client_map.get(exchange)
 
-        if exchange == "MEXC":
+        if exchange in ("CryptoBot", "Wallet"):
+            if not client:
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+            if not getattr(client, "userbot", None):
+                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION",
+                                            error_reason=f"{exchange} userbot not set")
+                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_SESSION"}
+
+        elif exchange == "MEXC":
             # MEXC: публічне API — тільки перевіряємо що клієнт є
             if not client:
                 return {
@@ -290,6 +309,7 @@ class ReviewFetcher:
             pass
 
         try:
+            # У блок try-except виклику фетчерів додаємо роут:
             if exchange == "Binance":
                 pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
             elif exchange == "Bybit":
@@ -298,14 +318,19 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
             elif exchange == "MEXC":
                 pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
-            else:
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN"}
+            elif exchange == "CryptoBot":
+                pos, neg, neutral, bad_texts = await self._fetch_cryptobot(merchant_id)
+            elif exchange == "Wallet":
+                pos, neg, neutral, bad_texts = await self._fetch_wallet(merchant_id)
 
-            # Bybit/Binance/OKX: без сесії → NO_SESSION щоб needs_review_fetch
+            # Bybit/Binance/OKX/CryptoBot/Wallet: без сесії → NO_SESSION щоб needs_review_fetch
             # повернув True через 10 хв — як тільки сесія з'явиться, всі перефетчаться
-            if exchange in ("Bybit", "Binance", "OKX"):
-                session_h, _, _ = await self._db.get_auth_session(exchange)
-                save_status = "OK" if session_h else "NO_SESSION"
+            if exchange in ("Bybit", "Binance", "OKX", "CryptoBot", "Wallet"):
+                if exchange in ("CryptoBot", "Wallet"):
+                    save_status = "OK" if getattr(client, "userbot", None) else "NO_SESSION"
+                else:
+                    session_h, _, _ = await self._db.get_auth_session(exchange)
+                    save_status = "OK" if session_h else "NO_SESSION"
             else:
                 save_status = "OK"
 
@@ -424,7 +449,24 @@ class ReviewFetcher:
     async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
         try:
             # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──
-            if exchange == "MEXC":
+            if exchange in ("CryptoBot", "Wallet"):
+                _client = self._cryptobot if exchange == "CryptoBot" else self._wallet
+                if not _client:
+                    logger.debug("_fetch_and_save: %s клієнт не підключений, skip %s", exchange, merchant_id[:12])
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_AUTH", error_reason=f"{exchange} client is not initialized"
+                    )
+                    return
+                if not getattr(_client, "userbot", None):
+                    logger.debug("_fetch_and_save: %s userbot не встановлено, skip %s", exchange, merchant_id[:12])
+                    await self._db.save_reviews(
+                        exchange, merchant_id, 0, 0, 0, [],
+                        status="NO_SESSION", error_reason=f"{exchange} userbot not set"
+                    )
+                    return
+
+            elif exchange == "MEXC":
                 if not self._mexc:
                     logger.debug("_fetch_and_save: MEXC клієнт не підключений, skip %s", merchant_id[:12])
                     await self._db.save_reviews(
@@ -466,6 +508,10 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
             elif exchange == "MEXC":
                 pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
+            elif exchange == "CryptoBot":
+                pos, neg, neutral, bad_texts = await self._fetch_cryptobot(merchant_id)
+            elif exchange == "Wallet":
+                pos, neg, neutral, bad_texts = await self._fetch_wallet(merchant_id)
             else:
                 return
 
@@ -475,10 +521,13 @@ class ReviewFetcher:
 
             self._known_merchants.add((exchange, merchant_id))
 
-            # Bybit/Binance/OKX: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
+            # Bybit/Binance/OKX/CryptoBot/Wallet: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
             if exchange in ("Bybit", "Binance", "OKX"):
                 session_h, _, _ = await self._db.get_auth_session(exchange)
                 save_status = "OK" if session_h else "NO_SESSION"
+            elif exchange in ("CryptoBot", "Wallet"):
+                _client = self._cryptobot if exchange == "CryptoBot" else self._wallet
+                save_status = "OK" if getattr(_client, "userbot", None) else "NO_SESSION"
             else:
                 save_status = "OK"
 
@@ -539,7 +588,7 @@ class ReviewFetcher:
         """Надсилає миттєве Telegram-сповіщення (і пише в лог) про згоряння сесії."""
         msg = f"❌ Ваша сесія <b>{exchange}</b> для парсингу відгуків згоріла.\n👉 Будь ласка, залогіньтесь знову (відскануйте QR-код)."
         logger.error(f"SESSION_BURNOUT:{exchange}: {msg}")
-        
+
         # Відправляємо напряму через Telegram API, щоб не створювати циклічних імпортів з notifier
         try:
             from config import settings
@@ -553,6 +602,7 @@ class ReviewFetcher:
                             await s.post(url, json=payload, timeout=5)
                     except Exception as e:
                         logger.debug("burnout_alert push failed: %s", e)
+
                 asyncio.create_task(_push())
         except Exception:
             pass
@@ -607,7 +657,7 @@ class ReviewFetcher:
         neg = len(raw_neg)
 
         logger.debug("Binance %s: session bad_texts=%d (keyword_flagged=%d)", merchant_id, len(bad_texts),
-                      sum(1 for t in bad_texts if t.get("keyword_flagged")))
+                     sum(1 for t in bad_texts if t.get("keyword_flagged")))
         return 0, neg, 0, bad_texts
 
     async def _fetch_bybit(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
@@ -661,9 +711,8 @@ class ReviewFetcher:
         neg = len(raw_neg) if raw_neg else 0
 
         logger.debug("Bybit %s: session bad_texts=%d (keyword_flagged=%d)", merchant_id, len(bad_texts),
-                      sum(1 for t in bad_texts if t.get("keyword_flagged")))
+                     sum(1 for t in bad_texts if t.get("keyword_flagged")))
         return 0, neg, 0, bad_texts
-
 
     async def _fetch_okx(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
         """
@@ -711,7 +760,7 @@ class ReviewFetcher:
                 # 1) Загальна статистика: від покупців та від продавців
                 ts = int(time.time() * 1000)
                 url_all = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
-                
+
                 payload_buyer = {
                     "currentPage": 1,
                     "hasComment": False,
@@ -728,7 +777,7 @@ class ReviewFetcher:
                     "reviewScoreType": "",
                     "pubUserId": merchant_id,
                 }
-                
+
                 resp_buyer, resp_seller = await asyncio.gather(
                     session.post(url_all, json=payload_buyer, headers=req_headers, cookies=cookies_dict, timeout=10),
                     session.post(url_all, json=payload_seller, headers=req_headers, cookies=cookies_dict, timeout=10),
@@ -741,7 +790,8 @@ class ReviewFetcher:
                     raise resp_seller
 
                 if resp_buyer.status_code in (401, 403) or resp_seller.status_code in (401, 403):
-                    raise RuntimeError(f"AuthError: OKX session expired (HTTP {resp_buyer.status_code}/{resp_seller.status_code})")
+                    raise RuntimeError(
+                        f"AuthError: OKX session expired (HTTP {resp_buyer.status_code}/{resp_seller.status_code})")
 
                 pos_buyer, neg_buyer = 0, 0
                 pos_seller, neg_seller = 0, 0
@@ -756,7 +806,8 @@ class ReviewFetcher:
                         all_buyer = int(item_stats.get("allCount") or 0)
                         neutral_buyer = max(0, all_buyer - pos_buyer - neg_buyer)
                     else:
-                        raise RuntimeError(f"API_ERROR: OKX buyer code={data_buyer.get('code')}, msg={data_buyer.get('msg', '')}")
+                        raise RuntimeError(
+                            f"API_ERROR: OKX buyer code={data_buyer.get('code')}, msg={data_buyer.get('msg', '')}")
                 else:
                     raise RuntimeError(f"API_ERROR: OKX buyer history returned {resp_buyer.status_code}")
 
@@ -769,7 +820,8 @@ class ReviewFetcher:
                         all_seller = int(item_stats.get("allCount") or 0)
                         neutral_seller = max(0, all_seller - pos_seller - neg_seller)
                     else:
-                        raise RuntimeError(f"API_ERROR: OKX seller code={data_seller.get('code')}, msg={data_seller.get('msg', '')}")
+                        raise RuntimeError(
+                            f"API_ERROR: OKX seller code={data_seller.get('code')}, msg={data_seller.get('msg', '')}")
                 else:
                     raise RuntimeError(f"API_ERROR: OKX seller history returned {resp_seller.status_code}")
 
@@ -779,7 +831,7 @@ class ReviewFetcher:
 
                 # 2) Тексти негативних відгуків (reviewScoreType="negative")
                 bad_texts: list[dict] = []
-                
+
                 # Завантаження негативних відгуків покупців
                 if neg_buyer > 0:
                     neg_buyer_items = await self._fetch_okx_review_pages(
@@ -790,16 +842,16 @@ class ReviewFetcher:
                         comment_str = str(rev.get("comment") or "").strip()
                         reply_dict = rev.get("reviewReply") or {}
                         reply_str = str(reply_dict.get("comment") or "").strip() if isinstance(reply_dict, dict) else ""
-                        
+
                         parts = []
                         if comment_str:
                             parts.append(comment_str)
                         else:
                             parts.append("Покупець не залишив коментаря")
-                            
+
                         if reply_str:
                             parts.append(f"Відповідь мейкера: {reply_str}")
-                            
+
                         content = " | ".join(parts)
                         if comment_str or reply_str:
                             enriched = _enrich_bad_text(content)
@@ -816,16 +868,16 @@ class ReviewFetcher:
                         comment_str = str(rev.get("comment") or "").strip()
                         reply_dict = rev.get("reviewReply") or {}
                         reply_str = str(reply_dict.get("comment") or "").strip() if isinstance(reply_dict, dict) else ""
-                        
+
                         parts = []
                         if comment_str:
                             parts.append(comment_str)
                         else:
                             parts.append("Продавець не залишив коментаря")
-                            
+
                         if reply_str:
                             parts.append(f"Відповідь мейкера: {reply_str}")
-                            
+
                         content = " | ".join(parts)
                         if comment_str or reply_str:
                             enriched = _enrich_bad_text(content)
@@ -851,15 +903,15 @@ class ReviewFetcher:
             raise RuntimeError(f"API_ERROR: OKX review history failed: {e}")
 
     async def _fetch_okx_review_pages(
-        self,
-        session,
-        merchant_id: str,
-        req_headers: dict,
-        cookies_dict: dict,
-        score_type: str,
-        from_buyer: bool,
-        max_pages: int = 3,
-        page_size: int = 10,
+            self,
+            session,
+            merchant_id: str,
+            req_headers: dict,
+            cookies_dict: dict,
+            score_type: str,
+            from_buyer: bool,
+            max_pages: int = 3,
+            page_size: int = 10,
     ) -> list[dict]:
         """
         Завантажує відгуки OKX з пагінацією через POST /v3/c2c/review/history.
@@ -977,3 +1029,51 @@ class ReviewFetcher:
         except Exception as e:
             logger.debug("MEXC fetch error %s: %s", merchant_id, e)
             return 0, 0, 0, []
+
+    async def _fetch_cryptobot(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        client = self._cryptobot
+        if not client:
+            return 0, 0, 0, []
+
+        try:
+            user_id = int(merchant_id)
+            stats = await client.fetch_review_stats(user_id)
+            pos = int(stats.get("positive", 0) or 0)
+            neg = int(stats.get("negative", 0) or 0)
+            total = int(stats.get("count", pos + neg) or (pos + neg))
+            neutral = max(0, total - pos - neg)
+
+            bad_texts: list[dict] = []
+            if neg > 0:
+                raw_neg = await client.fetch_negative_reviews(user_id)
+                for item in raw_neg:
+                    content = str(item.get("comment") or "").strip()
+                    if not content:
+                        continue
+                    enriched = _enrich_bad_text(content)
+                    enriched["keyword_flagged"] = _has_bad_keywords(content)
+                    enriched["reviewer"] = item.get("name") or "Користувач"
+                    enriched["payment_method"] = item.get("payment_method") or ""
+                    enriched["date"] = item.get("date", "")
+                    bad_texts.append(enriched)
+
+            logger.debug("CryptoBot %s: pos=%d neg=%d neutral=%d bad_texts=%d",
+                         merchant_id, pos, neg, neutral, len(bad_texts))
+            return pos, neg, neutral, bad_texts
+
+        except Exception as e:
+            logger.debug("CryptoBot fetch error %s: %s", merchant_id, e)
+            emsg = str(e)
+            if "auth failed" in emsg.lower() or "unauthorized" in emsg.lower() or "401" in emsg:
+                raise RuntimeError(f"AuthError: CryptoBot session expired: {e}")
+            raise RuntimeError(f"API_ERROR: CryptoBot review fetch failed: {e}")
+
+    async def _fetch_wallet(self, merchant_id: str) -> tuple[int, int, int, list[dict]]:
+        """
+        Wallet не має публічної текстової книги скарг/відгуків від користувачів.
+        Вся репутація базується на суворому математичному відсотку виконання угод
+        (successPercent), який уже дістається та перевіряється через стакан та
+        детальний запит у RiskEngine.
+        """
+        logger.debug("Wallet %s: text reviews not supported natively, reputation uses completion metrics", merchant_id)
+        return 0, 0, 0, []

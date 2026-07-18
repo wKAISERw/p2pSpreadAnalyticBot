@@ -499,6 +499,7 @@ class UserRepo:
             "filter_fop_tov": "hide",
             "filter_banka_jar": "hide",
             "auto_cooldown_json": default_auto_cooldown,
+            "cryptobot_profile_mode": "chat",
         }
         if not self._db:
             return defaults
@@ -515,7 +516,8 @@ class UserRepo:
                               COALESCE(group_scanner_alerts, 1)     as group_scanner_alerts,
                               COALESCE(filter_fop_tov, 'hide')      as filter_fop_tov,
                               COALESCE(filter_banka_jar, 'hide')    as filter_banka_jar,
-                              COALESCE(auto_cooldown_json, '{}')    as auto_cooldown_json
+                              COALESCE(auto_cooldown_json, '{}')    as auto_cooldown_json,
+                              COALESCE(cryptobot_profile_mode, 'chat') as cryptobot_profile_mode
                        FROM scanner_users
                        WHERE telegram_chat_id = ?""",
                     (chat_id,),
@@ -546,6 +548,7 @@ class UserRepo:
                 "filter_fop_tov": str(row["filter_fop_tov"]),
                 "filter_banka_jar": str(row["filter_banka_jar"]),
                 "auto_cooldown_json": auto_cooldown,
+                "cryptobot_profile_mode": str(row["cryptobot_profile_mode"]),
             }
         except Exception:
             return defaults
@@ -566,6 +569,7 @@ class UserRepo:
         group_scanner_alerts = 1 if settings_dict.get("group_scanner_alerts", True) else 0
         filter_fop_tov = str(settings_dict.get("filter_fop_tov", "hide"))
         filter_banka_jar = str(settings_dict.get("filter_banka_jar", "hide"))
+        cryptobot_profile_mode = str(settings_dict.get("cryptobot_profile_mode", "chat"))
 
         await self._db.execute(
             """UPDATE scanner_users
@@ -579,7 +583,8 @@ class UserRepo:
                    group_active_alerts = ?,
                    group_scanner_alerts = ?,
                    filter_fop_tov = ?,
-                   filter_banka_jar = ?
+                   filter_banka_jar = ?,
+                   cryptobot_profile_mode = ?
                WHERE telegram_chat_id = ?""",
             (
                 show_ai_terms_summary,
@@ -593,6 +598,7 @@ class UserRepo:
                 group_scanner_alerts,
                 filter_fop_tov,
                 filter_banka_jar,
+                cryptobot_profile_mode,
                 chat_id,
             ),
         )

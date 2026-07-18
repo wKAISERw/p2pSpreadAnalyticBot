@@ -93,7 +93,13 @@ async def send_taker_combined(
         banks = _format_bank_list(order.bank_codes)
         
         # Посилання на мерчанта
-        merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name, side="buy" if is_buy else "sell")
+        profile_mode = display_settings.get("cryptobot_profile_mode", "chat")
+        merchant_link = _profile_link(
+            order.exchange, order.merchant_id, order.merchant_name,
+            side="buy" if is_buy else "sell",
+            profile_mode=profile_mode,
+            offer_id=str(order.id),
+        )
         verified = _verified_badge(order)
         subs_badge = " 🎁" if getattr(order, "is_new_user_subsidy", False) else ""
         
@@ -202,7 +208,13 @@ async def send_taker_single(
             pass
 
     icon = EXCHANGE_ICONS.get(order.exchange, "◽️")
-    merchant_link = _profile_link(order.exchange, order.merchant_id, order.merchant_name, side="buy" if is_buy else "sell")
+    profile_mode = ds.get("cryptobot_profile_mode", "chat")
+    merchant_link = _profile_link(
+        order.exchange, order.merchant_id, order.merchant_name,
+        side="buy" if is_buy else "sell",
+        profile_mode=profile_mode,
+        offer_id=str(order.id),
+    )
     name_str = f"{rec_badge(llm_rec)} {merchant_link}{_verified_badge(order)}"
 
     risk_block = _risk_badge(order)

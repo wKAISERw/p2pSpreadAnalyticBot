@@ -76,20 +76,39 @@ class WalletExchange(BaseExchange):
                 logger.warning("Не вдалося розпарсити Wallet ордер: %s", e)
 
         # 🚀 Паралельно завантажуємо умови для топ-12 ордерів (найвигідніші спреди)
+                # 🚀 Паралельно завантажуємо ПОВНІ деталі для топ-12 ордерів (найвигідніші спреди)
         top_orders = orders[:12]
         if top_orders:
-            comments = await asyncio.gather(
-                *[self.client.fetch_offer_comment(int(o.id)) for o in top_orders],
+            details_list = await asyncio.gather(
+                *[self.client.fetch_offer_details(int(o.id)) for o in top_orders],
                 return_exceptions=True
             )
-            for order, comment in zip(top_orders, comments):
-                if isinstance(comment, Exception):
-                    logger.warning("⚠️ Не вдалося завантажити умови Wallet оффера %s через виняток: %s", order.id, comment)
-                elif comment is None:
-                    logger.warning("⚠️ Не вдалося достукатися до умов Wallet оффера %s (помилка авторизації або мережі)", order.id)
+            for order, details in zip(top_orders, details_list):
+                if isinstance(details, Exception):
+                    logger.warning("⚠️ Не вдалося завантажити деталі Wallet оффера %s через виняток: %s",
+                                    order.id, details)
+                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
+                elif not details:
+                    logger.warning(
+                        "⚠️ Не вдалося достукатися до деталей Wallet оффера %s (помилка авторизації або мережі)",
+                        order.id)
+                    order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
                 else:
-                    # Успішно отримали умови (можуть бути порожніми "" або містити текст)
-                    order.trade_terms = comment.lower()
+                    # Успішно отримали умови з поля comment
+                    order.trade_terms = str(details.get("comment", "") or "").strip().lower()
+
+                    # Витягуємо точні та свіжі дані профілю мерчанта з детального запиту
+                    user = details.get("user") or {}
+                    if user:
+                        order.merchant_name = str(user.get("nickname") or order.merchant_name)
+                        order.is_verified = bool(user.get("isVerified", order.is_verified))
+                        order.last_online_mins = int(user.get("lastOnlineMinutesAgo", order.last_online_mins))
+
+                        stats = user.get("statistics") or {}
+                        if stats:
+                            order.month_order_count = int(
+                                stats.get("totalOrdersCount", order.month_order_count))
+                            order.finish_rate_pct = float(stats.get("successPercent", order.finish_rate_pct))
 
         return orders
 
