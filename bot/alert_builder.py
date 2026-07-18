@@ -638,6 +638,14 @@ async def send_single(
 
 async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = None) -> None:
     """Підсумок усіх знайдених маршрутів за цикл."""
+    ds = {}
+    if chat_id and notifier:
+        try:
+            ds = await notifier._get_display_settings(chat_id)
+        except Exception:
+            pass
+
+    profile_mode = ds.get("cryptobot_profile_mode", "chat")
     medals = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     lines = [
         f"📋 <b>ПІДСУМОК: АКТУАЛЬНІ МАРШРУТИ</b>  "
@@ -657,8 +665,8 @@ async def send_batch(notifier, batch: list[SpreadAlert], chat_id: int | None = N
 
         b_online = _online_badge(a.buy_order)
         s_online = _online_badge(a.sell_order)
-        b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy', offer_id=str(a.buy_order.id))}{b_online}"
-        s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell', offer_id=str(a.sell_order.id))}{s_online}"
+        b_nick = f"{_profile_link(a.buy_order.exchange, a.buy_order.merchant_id, a.buy_order.merchant_name, side='buy', profile_mode=profile_mode, offer_id=str(a.buy_order.id))}{b_online}"
+        s_nick = f"{_profile_link(a.sell_order.exchange, a.sell_order.merchant_id, a.sell_order.merchant_name, side='sell', profile_mode=profile_mode, offer_id=str(a.sell_order.id))}{s_online}"
 
         buy_links = f"<a href='{a.buy_order.link}'>Купити</a>"
         sell_links = f"<a href='{a.sell_order.link}'>Продати</a>"
