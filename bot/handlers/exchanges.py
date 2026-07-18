@@ -1108,7 +1108,25 @@ async def on_keys_menu(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu:help")
 async def on_help_menu(call: CallbackQuery) -> None:
-    text = "📖 <b>Довідка</b>\n\nСканер шукає P2P спреди 24/7 і фільтрує шахраїв через ШІ."
+    text = (
+        "📖 <b>Довідка P2P Сканера</b>\n\n"
+        "Сканер у реальному часі шукає спреди між біржами (Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot) "
+        "та використовує <b>RiskEngine</b> для аналізу умов та відгуків мерчантів.\n\n"
+        "📌 <b>Команди управління:</b>\n"
+        "• <b>/start</b> — Запуск сканування та алерів.\n"
+        "• <b>/stop</b> — Тимчасово зупинити алерти.\n"
+        "• <b>/status</b> — Перевірити стан сканера.\n"
+        "• <b>/settings</b> — Панель налаштувань.\n"
+        "• <b>/mode</b> — Перемикання режимів роботи.\n\n"
+        "⛔ <b>Чорний список (Blacklist):</b>\n"
+        "Ви можете керувати списком шахраїв кнопкою <code>⚙️ Керування Чорним списком</code> у меню Фільтрів, або командами:\n"
+        "• <code>/blacklist</code> — перегляд списку.\n"
+        "• <code>/ban [exchange] [name] : [reason]</code> — бан.\n"
+        "• <code>/unban [exchange] [name]</code> — розбан.\n\n"
+        "💡 <b>Режими блеклісту:</b>\n"
+        "• <b>Приховати 🚫</b> — ігнорує спреди з мерчантами з блеклісту.\n"
+        "• <b>Попередити ⚠️</b> — надсилає спред із червоною плашкою попередження."
+    )
     with suppress(TelegramBadRequest):
         await call.message.edit_text(text, reply_markup=back_to_main_kb())
     await call.answer()
