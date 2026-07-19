@@ -14,6 +14,8 @@ playwright-stealth>=0.1.1
 pyrogram>=2.0.0
 psutil>=5.9.0
 tgcrypto>=1.2.0
+paramiko>=3.4.0
+scp>=0.14.0
 
 # Testing
 pytest>=8.0.0

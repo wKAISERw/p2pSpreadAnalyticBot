@@ -4,7 +4,6 @@
 import os
 import sys
 import time
-import subprocess
 from pathlib import Path
 import hashlib
 from PyQt6.QtWidgets import (
@@ -13,6 +12,10 @@ from PyQt6.QtWidgets import (
     QStatusBar, QMessageBox, QFrame, QSplitter
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+
+# Import paramiko and scp for native SSH/SCP handling
+import paramiko
+from scp import SCPClient
 
 ROOT = Path(__file__).parent
 ARCHIVE_NAME = "arbix-quantum.tar.gz"
@@ -121,12 +124,8 @@ class RunCommandWorker(QThread):
     def run(self):
         if self.task_type == "BUILD":
             self.run_build()
-        elif self.task_type == "DEPLOY":
-            self.run_deploy()
-        elif self.task_type == "STATUS":
-            self.run_remote_command("docker compose ps")
-        elif self.task_type == "LOGS":
-            self.run_remote_command("docker compose logs --tail=100")
+        else:
+            self.run_remote_task()
 
     def run_build(self):
         self.log.emit("🔧 Starting archive package build process...")
@@ -208,104 +207,149 @@ class RunCommandWorker(QThread):
             self.log.emit(f"❌ Build Error: {str(e)}")
             self.finished_status.emit(False, str(e))
 
-    def run_deploy(self):
-        target_host = self.args.get("host")
-        target_dir = self.args.get("dir")
-        archive_path = ROOT / ARCHIVE_NAME
+    def connect_ssh(self):
+        host_input = self.args.get("host", "").strip()
+        password = self.args.get("password", "").strip()
         
-        if not archive_path.exists():
-            self.log.emit("❌ Error: Archive not found. Please build it first.")
-            self.finished_status.emit(False, "Archive missing.")
-            return
-
-        h = self.get_file_md5(archive_path)
-        self.log.emit(f"🚀 Deploying to {target_host}...")
-        self.progress.emit(15)
-
-        # 1. SCP Upload
-        self.log.emit("📤 Uploading archive via SCP...")
-        scp_cmd = f'scp "{archive_path}" "{target_host}:/root/"'
-        if not self.run_local_subprocess(scp_cmd):
-            self.log.emit("❌ Upload failed. Make sure SSH key is loaded or host configuration is correct.")
-            self.finished_status.emit(False, "Upload failed.")
-            return
+        # Parse Host
+        username = "root"
+        ip = "127.0.0.1"
+        port = 22
+        
+        if "@" in host_input:
+            username, host_part = host_input.split("@", 1)
+        else:
+            host_part = host_input
             
-        self.log.emit("✅ Upload complete.")
-        self.progress.emit(50)
-
-        # 2. Remote SSH Commands
-        self.log.emit("⚙️ Executing unpack and Docker rebuild on server...")
-        
-        # Build command list
-        cmds = []
-        cmds.append("echo '=== Integrity check ==='")
-        cmds.append(f"SERVER_MD5=`$(md5sum /root/{ARCHIVE_NAME} | awk '{{print toupper($1)}}')`")
-        cmds.append(f"echo 'Local MD5: {h}'")
-        cmds.append("echo \"Server MD5: $SERVER_MD5\"")
-        cmds.append(f"if [ \"$SERVER_MD5\" != \"{h}\" ]; then echo 'Error: MD5 mismatch!' && exit 1; fi")
-        cmds.append(f"mkdir -p {target_dir}")
-        cmds.append(f"tar -xzf /root/{ARCHIVE_NAME} -C {target_dir}")
-        cmds.append(f"rm -f /root/{ARCHIVE_NAME}")
-        cmds.append(f"cd {target_dir}")
-        cmds.append("docker compose up --build -d")
-        cmds.append("docker compose ps")
-        
-        remote_cmd = " && ".join(cmds)
-        ssh_cmd = f'ssh "{target_host}" "{remote_cmd}"'
-        
-        self.progress.emit(75)
-        if self.run_local_subprocess(ssh_cmd):
-            self.log.emit("🎉 Deployment completed successfully!")
-            self.progress.emit(100)
-            self.finished_status.emit(True, "DEPLOY_OK")
+        if ":" in host_part:
+            ip, port_str = host_part.split(":", 1)
+            port = int(port_str)
         else:
-            self.log.emit("❌ Server commands execution failed.")
-            self.finished_status.emit(False, "SSH commands failed.")
-
-    def run_remote_command(self, cmd_suffix):
-        target_host = self.args.get("host")
-        target_dir = self.args.get("dir")
+            ip = host_part
+            
+        self.log.emit(f"🔑 Establishing SSH connection to {ip}:{port} as '{username}'...")
         
-        self.log.emit(f"⚙️ Running remote command: '{cmd_suffix}' on {target_host}...")
-        ssh_cmd = f'ssh "{target_host}" "cd {target_dir} && {cmd_suffix}"'
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
-        self.progress.emit(30)
-        if self.run_local_subprocess(ssh_cmd):
-            self.log.emit("✅ Remote command execution finished.")
-            self.progress.emit(100)
-            self.finished_status.emit(True, "CMD_OK")
+        # Connect using password if provided, else rely on keys
+        if password:
+            ssh.connect(ip, port=port, username=username, password=password, timeout=15)
         else:
-            self.log.emit("❌ Remote command failed.")
-            self.finished_status.emit(False, "Command execution failed.")
+            ssh.connect(ip, port=port, username=username, timeout=15)
+            
+        return ssh
 
-    def run_local_subprocess(self, cmd):
+    def run_ssh_command(self, ssh_client, cmd):
         try:
-            self.log.emit(f"   Executing: {cmd}")
-            # Use shell=True for command routing
-            process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                shell=True, text=True, bufsize=1, encoding='utf-8', errors='replace'
-            )
+            stdin, stdout, stderr = ssh_client.exec_command(cmd, get_pty=True)
             
+            # Read stdout line by line
             while True:
-                line = process.stdout.readline()
+                line = stdout.readline()
                 if not line:
                     break
-                # Emit line output directly to GUI log
                 self.log.emit(f"   [Remote] {line.strip()}")
                 
-            process.wait()
-            return process.returncode == 0
+            exit_status = stdout.channel.recv_exit_status()
+            return exit_status == 0
         except Exception as e:
-            self.log.emit(f"   [Subprocess Error] {str(e)}")
+            self.log.emit(f"   [SSH Command Error] {str(e)}")
             return False
+
+    def run_remote_task(self):
+        target_dir = self.args.get("dir", "/root/app")
+        archive_path = ROOT / ARCHIVE_NAME
+        
+        ssh = None
+        try:
+            ssh = self.connect_ssh()
+            self.log.emit("✅ SSH connection established.")
+            self.progress.emit(25)
+            
+            if self.task_type == "DEPLOY":
+                if not archive_path.exists():
+                    self.log.emit("❌ Error: Archive not found. Please build it first.")
+                    self.finished_status.emit(False, "Archive missing.")
+                    return
+                
+                h = self.get_file_md5(archive_path)
+                
+                # 1. SCP Upload with custom progress tracking
+                self.log.emit("📤 Uploading archive via SCP...")
+                
+                last_percent = [-1]
+                def scp_progress(filename, size, sent):
+                    pct = int(sent / size * 100)
+                    # Show progress in logs every 10% or at completion
+                    if (pct % 10 == 0 or pct == 100) and pct != last_percent[0]:
+                        last_percent[0] = pct
+                        self.log.emit(f"   Uploading... {pct}% ({round(sent/(1024*1024), 2)}MB / {round(size/(1024*1024), 2)}MB)")
+                    self.progress.emit(25 + int(pct * 0.35)) # Map 0-100% of upload to 25-60% of total
+                
+                with SCPClient(ssh.get_transport(), progress=scp_progress) as scp:
+                    scp.put(str(archive_path), f"/root/{ARCHIVE_NAME}")
+                    
+                self.log.emit("✅ Archive upload complete.")
+                self.progress.emit(65)
+                
+                # 2. Extract and Rebuild Containers
+                self.log.emit("⚙️ Extracting and rebuilding containers on VPS...")
+                
+                cmds = []
+                cmds.append("echo '=== Integrity check ==='")
+                cmds.append(f"SERVER_MD5=`$(md5sum /root/{ARCHIVE_NAME} | awk '{{print toupper($1)}}')`")
+                cmds.append(f"echo 'Local MD5: {h}'")
+                cmds.append("echo \"Server MD5: $SERVER_MD5\"")
+                cmds.append(f"if [ \"$SERVER_MD5\" != \"{h}\" ]; then echo 'Error: MD5 mismatch!' && exit 1; fi")
+                cmds.append(f"mkdir -p {target_dir}")
+                cmds.append(f"tar -xzf /root/{ARCHIVE_NAME} -C {target_dir}")
+                cmds.append(f"rm -f /root/{ARCHIVE_NAME}")
+                cmds.append(f"cd {target_dir}")
+                cmds.append("docker compose up --build -d")
+                cmds.append("docker compose ps")
+                
+                joined_cmd = " && ".join(cmds)
+                
+                self.progress.emit(75)
+                if self.run_ssh_command(ssh, joined_cmd):
+                    self.log.emit("🎉 Deployment completed successfully!")
+                    self.progress.emit(100)
+                    self.finished_status.emit(True, "DEPLOY_OK")
+                else:
+                    self.log.emit("❌ Command execution failed on server.")
+                    self.finished_status.emit(False, "Execution failed.")
+                    
+            elif self.task_type == "STATUS":
+                self.progress.emit(50)
+                if self.run_ssh_command(ssh, f"cd {target_dir} && docker compose ps"):
+                    self.progress.emit(100)
+                    self.finished_status.emit(True, "STATUS_OK")
+                else:
+                    self.finished_status.emit(False, "Status query failed.")
+                    
+            elif self.task_type == "LOGS":
+                self.progress.emit(50)
+                if self.run_ssh_command(ssh, f"cd {target_dir} && docker compose logs --tail=100"):
+                    self.progress.emit(100)
+                    self.finished_status.emit(True, "LOGS_OK")
+                else:
+                    self.finished_status.emit(False, "Logs query failed.")
+                    
+        except Exception as e:
+            self.log.emit(f"❌ Remote Task Error: {str(e)}")
+            self.finished_status.emit(False, str(e))
+        finally:
+            if ssh:
+                ssh.close()
+                self.log.emit("🔌 SSH connection closed.")
 
 
 class DeployApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Arbix Quantum Deployment Hub")
-        self.resize(950, 680)
+        self.resize(950, 720)
         self.setStyleSheet(STYLE)
         self._worker = None
         self.init_ui()
@@ -361,7 +405,7 @@ class DeployApp(QMainWindow):
 
         left_layout.addWidget(local_frame)
 
-        # Panel 2: Remote VPS Settings
+        # Panel 2: Remote VPS Settings (Added Password support)
         remote_frame = QFrame()
         remote_frame.setObjectName("panel")
         remote_layout = QVBoxLayout(remote_frame)
@@ -372,6 +416,13 @@ class DeployApp(QMainWindow):
         self.host_input = QLineEdit("root@167.233.147.232")
         h_layout_host.addWidget(self.host_input)
         remote_layout.addLayout(h_layout_host)
+
+        h_layout_pass = QHBoxLayout()
+        h_layout_pass.addWidget(QLabel("Password (optional):"))
+        self.pass_input = QLineEdit()
+        self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        h_layout_pass.addWidget(self.pass_input)
+        remote_layout.addLayout(h_layout_pass)
 
         h_layout_dir = QHBoxLayout()
         h_layout_dir.addWidget(QLabel("Target Directory:"))
@@ -458,6 +509,7 @@ class DeployApp(QMainWindow):
         self.status_btn.setEnabled(enabled)
         self.logs_btn.setEnabled(enabled)
         self.host_input.setEnabled(enabled)
+        self.pass_input.setEnabled(enabled)
         self.dir_input.setEnabled(enabled)
 
     def start_build(self):
@@ -485,6 +537,7 @@ class DeployApp(QMainWindow):
 
     def start_deploy(self):
         host = self.host_input.text().strip()
+        password = self.pass_input.text()
         directory = self.dir_input.text().strip()
 
         if not host:
@@ -501,7 +554,7 @@ class DeployApp(QMainWindow):
         self.progress.setValue(0)
         self.status.showMessage("Deploying application...")
 
-        args = {"host": host, "dir": directory}
+        args = {"host": host, "password": password, "dir": directory}
         self._worker = RunCommandWorker("DEPLOY", args)
         self._worker.log.connect(self.log_text)
         self._worker.progress.connect(self.progress.setValue)
@@ -519,6 +572,7 @@ class DeployApp(QMainWindow):
 
     def check_server_status(self):
         host = self.host_input.text().strip()
+        password = self.pass_input.text()
         directory = self.dir_input.text().strip()
 
         if not host or not directory:
@@ -529,7 +583,7 @@ class DeployApp(QMainWindow):
         self.progress.setValue(0)
         self.status.showMessage("Checking Docker status on remote server...")
 
-        args = {"host": host, "dir": directory}
+        args = {"host": host, "password": password, "dir": directory}
         self._worker = RunCommandWorker("STATUS", args)
         self._worker.log.connect(self.log_text)
         self._worker.progress.connect(self.progress.setValue)
@@ -538,6 +592,7 @@ class DeployApp(QMainWindow):
 
     def tail_server_logs(self):
         host = self.host_input.text().strip()
+        password = self.pass_input.text()
         directory = self.dir_input.text().strip()
 
         if not host or not directory:
@@ -548,7 +603,7 @@ class DeployApp(QMainWindow):
         self.progress.setValue(0)
         self.status.showMessage("Fetching Docker logs from remote server...")
 
-        args = {"host": host, "dir": directory}
+        args = {"host": host, "password": password, "dir": directory}
         self._worker = RunCommandWorker("LOGS", args)
         self._worker.log.connect(self.log_text)
         self._worker.progress.connect(self.progress.setValue)
