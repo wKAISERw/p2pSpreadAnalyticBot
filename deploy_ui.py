@@ -281,7 +281,6 @@ class RunCommandWorker(QThread):
                 last_percent = [-1]
                 def scp_progress(filename, size, sent):
                     pct = int(sent / size * 100)
-                    # Show progress in logs every 10% or at completion
                     if (pct % 10 == 0 or pct == 100) and pct != last_percent[0]:
                         last_percent[0] = pct
                         self.log.emit(f"   Uploading... {pct}% ({round(sent/(1024*1024), 2)}MB / {round(size/(1024*1024), 2)}MB)")
@@ -298,7 +297,7 @@ class RunCommandWorker(QThread):
                 
                 cmds = []
                 cmds.append("echo '=== Integrity check ==='")
-                cmds.append(f"SERVER_MD5=`$(md5sum /root/{ARCHIVE_NAME} | awk '{{print toupper($1)}}')`")
+                cmds.append(f"SERVER_MD5=$(md5sum /root/{ARCHIVE_NAME} | awk '{{print toupper($1)}}')")
                 cmds.append(f"echo 'Local MD5: {h}'")
                 cmds.append("echo \"Server MD5: $SERVER_MD5\"")
                 cmds.append(f"if [ \"$SERVER_MD5\" != \"{h}\" ]; then echo 'Error: MD5 mismatch!' && exit 1; fi")
@@ -405,7 +404,7 @@ class DeployApp(QMainWindow):
 
         left_layout.addWidget(local_frame)
 
-        # Panel 2: Remote VPS Settings (Added Password support)
+        # Panel 2: Remote VPS Settings
         remote_frame = QFrame()
         remote_frame.setObjectName("panel")
         remote_layout = QVBoxLayout(remote_frame)
@@ -422,6 +421,13 @@ class DeployApp(QMainWindow):
         self.pass_input = QLineEdit()
         self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
         h_layout_pass.addWidget(self.pass_input)
+        
+        # Toggle password visibility button
+        self.toggle_pass_btn = QPushButton("👁️")
+        self.toggle_pass_btn.setFixedWidth(38)
+        self.toggle_pass_btn.clicked.connect(self.toggle_password_visibility)
+        h_layout_pass.addWidget(self.toggle_pass_btn)
+        
         remote_layout.addLayout(h_layout_pass)
 
         h_layout_dir = QHBoxLayout()
@@ -480,6 +486,14 @@ class DeployApp(QMainWindow):
         # Set default splitter sizes
         splitter.setSizes([400, 550])
 
+    def toggle_password_visibility(self):
+        if self.pass_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.pass_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.toggle_pass_btn.setText("🔒")
+        else:
+            self.pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.toggle_pass_btn.setText("👁️")
+
     def update_archive_info(self):
         archive_path = ROOT / ARCHIVE_NAME
         if archive_path.exists():
@@ -510,6 +524,7 @@ class DeployApp(QMainWindow):
         self.logs_btn.setEnabled(enabled)
         self.host_input.setEnabled(enabled)
         self.pass_input.setEnabled(enabled)
+        self.toggle_pass_btn.setEnabled(enabled)
         self.dir_input.setEnabled(enabled)
 
     def start_build(self):
