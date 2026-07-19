@@ -1,6 +1,7 @@
 # core/workers/session_manager.py
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional, Callable, Awaitable
@@ -13,6 +14,8 @@ from bot.handlers.core import QRStates
 from core.storage.merchant_db import MerchantDB
 
 logger = logging.getLogger("SessionManager")
+
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 # Таргети для перехоплення з індивідуальними таймерами "протухання"
 # ttl = через скільки секунд ПІСЛЯ оновлення запускати Playwright-перехоплення.
@@ -176,10 +179,10 @@ class SessionManager:
                             user_data_dir=str(user_data_dir),
                             headless=headless,
                             channel="chrome",
+                            user_agent=DEFAULT_USER_AGENT,
                             ignore_default_args=["--enable-automation"],
                             args=[
                                 "--disable-blink-features=AutomationControlled",
-                                "--disable-http2",
                                 "--window-size=1280,720",
                             ],
                         )
@@ -189,11 +192,11 @@ class SessionManager:
                             context = await p.chromium.launch_persistent_context(
                                 user_data_dir=str(user_data_dir),
                                 headless=headless,
+                                user_agent=DEFAULT_USER_AGENT,
                                 ignore_default_args=["--enable-automation"],
                                 args=[
                                     "--disable-blink-features=AutomationControlled",
-                                    "--disable-http2",
-                                    "--window-size=1280,720",
+                                        "--window-size=1280,720",
                                 ],
                             )
                         except Exception as launch_err:
@@ -740,17 +743,22 @@ class SessionManager:
                     user_data_dir = Path(f"data/browser_profiles/qr_{exchange.lower()}_{user_id}")
                     user_data_dir.mkdir(parents=True, exist_ok=True)
                     
+                    # Bybit потребує --disable-http2 (їхній сервер повертає ERR_HTTP2_PROTOCOL_ERROR)
+                    browser_args = [
+                        "--disable-blink-features=AutomationControlled",
+                        "--window-size=1280,800",
+                    ]
+                    if exchange == "Bybit":
+                        browser_args.append("--disable-http2")
+                    
                     try:
                         browser_context = await p.chromium.launch_persistent_context(
                             user_data_dir=str(user_data_dir),
                             headless=headless,
                             channel="chrome",
+                            user_agent=DEFAULT_USER_AGENT,
                             ignore_default_args=["--enable-automation"],
-                            args=[
-                                "--disable-blink-features=AutomationControlled",
-                                "--disable-http2",
-                                "--window-size=1280,800",
-                            ]
+                            args=browser_args
                         )
                     except Exception as launch_err:
                         if not headless:
@@ -760,11 +768,7 @@ class SessionManager:
                                     user_data_dir=str(user_data_dir),
                                     headless=headless,
                                     ignore_default_args=["--enable-automation"],
-                                    args=[
-                                        "--disable-blink-features=AutomationControlled",
-                                        "--disable-http2",
-                                        "--window-size=1280,800",
-                                    ]
+                                    args=browser_args
                                 )
                             except Exception as fallback_err:
                                 logger.info(f"Failed to launch Chromium headed: {fallback_err}. Retrying in headless mode...")
@@ -773,23 +777,16 @@ class SessionManager:
                                     user_data_dir=str(user_data_dir),
                                     headless=headless,
                                     ignore_default_args=["--enable-automation"],
-                                    args=[
-                                        "--disable-blink-features=AutomationControlled",
-                                        "--disable-http2",
-                                        "--window-size=1280,800",
-                                    ]
+                                    args=browser_args
                                 )
                         else:
                             logger.info(f"Failed headless Chrome launch: {launch_err}. Retrying headless Chromium...")
                             browser_context = await p.chromium.launch_persistent_context(
                                 user_data_dir=str(user_data_dir),
                                 headless=headless,
+                                user_agent=DEFAULT_USER_AGENT,
                                 ignore_default_args=["--enable-automation"],
-                                args=[
-                                    "--disable-blink-features=AutomationControlled",
-                                    "--disable-http2",
-                                    "--window-size=1280,800",
-                                ]
+                                args=browser_args
                             )
                     
                     # Записуємо контекст в сесію для можливості примусового закриття
@@ -835,6 +832,23 @@ class SessionManager:
                     wait_mode = "domcontentloaded"
                     await page.goto(url, wait_until=wait_mode, timeout=45000)
                     await page.wait_for_timeout(3000)
+                    
+                    # Закриваємо cookie popup (OKX/Bybit)
+                    try:
+                        for cookie_sel in [
+                            "button:has-text('Reject All')",
+                            "button:has-text('Accept All Cookies')",
+                            "button:has-text('Accept')",
+                            "button[class*='cookie'] >> text=OK",
+                        ]:
+                            cookie_btn = await page.query_selector(cookie_sel)
+                            if cookie_btn and await cookie_btn.is_visible():
+                                await cookie_btn.click()
+                                logger.info(f"Dismissed cookie popup for {exchange}")
+                                await page.wait_for_timeout(500)
+                                break
+                    except Exception as cookie_err:
+                        logger.debug(f"Cookie popup dismiss failed: {cookie_err}")
                     
                     # Перевіряємо, чи ми вже авторизовані (наприклад, завдяки збереженій раніше сесії)
                     authenticated = False
@@ -968,6 +982,49 @@ class SessionManager:
                             logger.info(f"QR Login {exchange} canceled by user.")
                             break
                             
+                        # Детекція facial verification (OKX)
+                        try:
+                            page_text_fv = await page.evaluate("document.body ? document.body.innerText : ''")
+                            if "facial verification" in page_text_fv.lower() or "face verification" in page_text_fv.lower():
+                                if not self._active_qr_sessions[session_key].get("notified_facial"):
+                                    self._active_qr_sessions[session_key]["notified_facial"] = True
+                                    logger.info(f"Facial verification detected for {exchange}!")
+                                    
+                                    # Автоматично натискаємо "Get started"
+                                    try:
+                                        get_started_btn = await page.query_selector("button:has-text('Get started'), button:has-text('Start'), button:has-text('Начать'), button:has-text('Розпочати')")
+                                        if get_started_btn and await get_started_btn.is_visible():
+                                            await get_started_btn.click()
+                                            logger.info("Clicked 'Get started' for facial verification")
+                                            await page.wait_for_timeout(2000)
+                                    except Exception as fv_click_err:
+                                        logger.debug(f"Failed to click Get started: {fv_click_err}")
+                                    
+                                    # Скріншот сторінки та повідомлення користувачу
+                                    seconds_left = int(90 - (time.time() - start_time))
+                                    await page.screenshot(path=str(qr_path))
+                                    caption_fv = (
+                                        f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                                        f"🪪 <b>Потрібна верифікація обличчя!</b>\n\n"
+                                        f"👉 Відкрий додаток {exchange} на телефоні та пройди перевірку обличчя.\n"
+                                        f"Бот чекає на завершення...\n\n"
+                                        f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                                    )
+                                    qr_msg = self._active_qr_sessions[session_key].get("qr_msg")
+                                    if qr_msg:
+                                        try:
+                                            await qr_msg.edit_media(
+                                                media=InputMediaPhoto(
+                                                    media=FSInputFile(str(qr_path)),
+                                                    caption=caption_fv
+                                                ),
+                                                reply_markup=kb
+                                            )
+                                        except Exception as fv_edit_err:
+                                            logger.debug(f"Failed to edit media for facial verification: {fv_edit_err}")
+                        except Exception as fv_err:
+                            logger.debug(f"Facial verification check error: {fv_err}")
+                        
                         # Детекція 2FA для будь-якої біржі
                         try:
                             has_2fa = False
@@ -982,7 +1039,8 @@ class SessionManager:
                                     "enter code", "look out for a text", "verification code", 
                                     "google authenticator", "authenticator code", "sms verification",
                                     "введите код", "код подтверждения", "двухфакторная", "аутентификатор", "sms-код",
-                                    "введіть код", "код підтвердження", "двофакторна", "автентифікатор", "sms-код"
+                                    "введіть код", "код підтвердження", "двофакторна", "автентифікатор", "sms-код",
+                                    "telegram", "телеграм"
                                 ]
                                 if any(ind in page_text_lower for ind in okx_indicators):
                                     has_2fa = True
@@ -991,7 +1049,9 @@ class SessionManager:
                                     lines = page_text.split("\n")
                                     for line in lines:
                                         line_lower = line.lower()
-                                        if any(k in line_lower for k in ["sent to", "look out", "отправлен", "надіслано", "verification code", "код"]):
+                                        if any(k in line_lower for k in ["sent to", "look out", "отправлен", "надіслано", "verification code", "код", "telegram", "телеграм"]):
+                                            if any(skip in line_lower for skip in ["join", "group", "channel", "community", "chat", "новости", "новини"]):
+                                                continue
                                             if len(line.strip()) > 5 and len(line.strip()) < 150:
                                                 text_desc = line.strip()
                                                 break
@@ -1010,6 +1070,8 @@ class SessionManager:
                                     for line in lines:
                                         line_lower = line.lower()
                                         if any(k in line_lower for k in ["verification code", "код", "security", "безопасность", "безпека"]):
+                                            if any(skip in line_lower for skip in ["join", "group", "channel", "community", "chat"]):
+                                                continue
                                             if len(line.strip()) > 5 and len(line.strip()) < 150:
                                                 text_desc = line.strip()
                                                 break
@@ -1028,11 +1090,14 @@ class SessionManager:
                                     for line in lines:
                                         line_lower = line.lower()
                                         if any(k in line_lower for k in ["verification code", "код", "security", "безопасность", "безпека"]):
+                                            if any(skip in line_lower for skip in ["join", "group", "channel", "community", "chat"]):
+                                                continue
                                             if len(line.strip()) > 5 and len(line.strip()) < 150:
                                                 text_desc = line.strip()
                                                 break
                                                 
                             if has_2fa:
+                                self._active_qr_sessions[session_key]["text_desc"] = text_desc
                                 if not self._active_qr_sessions[session_key].get("notified_2fa"):
                                     self._active_qr_sessions[session_key]["notified_2fa"] = True
                                     seconds_left = int(90 - (time.time() - start_time))
@@ -1047,11 +1112,26 @@ class SessionManager:
                                         f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
                                     )
                                     
+                                    # Робимо скріншот всієї сторінки, щоб користувач бачив форму 2FA
+                                    await page.screenshot(path=str(qr_path))
+                                    
                                     if qr_msg:
-                                        await qr_msg.edit_caption(caption=caption_2fa, reply_markup=kb)
+                                        try:
+                                            await qr_msg.edit_media(
+                                                media=InputMediaPhoto(
+                                                    media=FSInputFile(str(qr_path)),
+                                                    caption=caption_2fa
+                                                ),
+                                                reply_markup=kb
+                                            )
+                                        except Exception as edit_err:
+                                            logger.error(f"Failed to edit QR media to 2FA screenshot: {edit_err}")
+                                            try:
+                                                await qr_msg.edit_caption(caption=caption_2fa, reply_markup=kb)
+                                            except Exception:
+                                                pass
                                     else:
-                                        # Надсилаємо нове повідомлення із скріншотом поточного стану, якщо раніше фото не створювалось
-                                        await page.screenshot(path=str(qr_path))
+                                        # Надсилаємо нове повідомлення із скріншотом поточного стану
                                         qr_msg = await message.answer_photo(
                                             photo=FSInputFile(str(qr_path)),
                                             caption=caption_2fa,
@@ -1070,27 +1150,76 @@ class SessionManager:
                         if code_queue and not code_queue.empty():
                             code = await code_queue.get()
                             logger.info(f"Received 2FA code from user for {exchange}: {code}")
+                            
+                            # UX feedback: оновлюємо статус в Telegram
+                            seconds_left = int(90 - (time.time() - start_time))
+                            caption_entering = (
+                                f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                                f"⏳ <b>Вводжу отриманий 2FA-код ({code[:2]}***{code[-1:] if len(code) > 3 else ''}) у браузер...</b>\n\n"
+                                f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                            )
+                            qr_msg = self._active_qr_sessions[session_key].get("qr_msg")
+                            if qr_msg:
+                                try:
+                                    await qr_msg.edit_caption(caption=caption_entering, reply_markup=kb)
+                                except Exception:
+                                    pass
+                                    
                             try:
                                 inputs = await page.query_selector_all("input[type='text'], input[type='number'], input[type='tel'], input[placeholder*='code'], input[placeholder*='Code']")
                                 if not inputs:
                                     inputs = await page.query_selector_all("input")
                                     
-                                visible_inputs = []
+                                # Відбираємо лише видимі та редаговані поля
+                                editable_inputs = []
                                 for inp in inputs:
-                                    if await inp.is_visible():
-                                        visible_inputs.append(inp)
+                                    try:
+                                        if await inp.is_visible() and await inp.is_editable():
+                                            editable_inputs.append(inp)
+                                    except Exception:
+                                        pass
                                         
+                                # Шукаємо конкретно поля OTP/2FA (зазвичай мають maxlength="1")
+                                otp_cells = []
+                                for inp in editable_inputs:
+                                    try:
+                                        max_len = await inp.get_attribute("maxlength")
+                                        if max_len == "1":
+                                            otp_cells.append(inp)
+                                    except Exception:
+                                        pass
+                                        
+                                # Якщо знайшли саме 6 окремих комірок (або відповідно до довжини коду)
+                                if len(otp_cells) in [4, 6, 8] or (len(otp_cells) > 0 and len(otp_cells) == len(code)):
+                                    visible_inputs = otp_cells
+                                else:
+                                    visible_inputs = editable_inputs
+                                    
                                 if len(visible_inputs) == 6:
-                                    # 6 окремих комірок для введення (OKX / Binance)
-                                    for idx, char in enumerate(code[:6]):
-                                        try:
-                                            await visible_inputs[idx].click()
-                                            await visible_inputs[idx].fill("")
-                                            await page.keyboard.send_character(char)
-                                            await page.wait_for_timeout(150)
-                                        except Exception as fill_char_err:
-                                            logger.debug(f"Failed to fill 2FA cell {idx} via keyboard: {fill_char_err}")
-                                            await visible_inputs[idx].fill(char)
+                                    # Спробуємо ввести весь код в першу комірку
+                                    try:
+                                        await visible_inputs[0].click()
+                                        await page.keyboard.type(code, delay=100)
+                                        await page.wait_for_timeout(1000)
+                                    except Exception as type_err:
+                                        logger.debug(f"Failed typing entire code into first cell: {type_err}")
+                                    
+                                    # Перевіримо, чи заповнилась остання комірка
+                                    last_val = ""
+                                    try:
+                                        last_val = await visible_inputs[-1].input_value()
+                                    except Exception:
+                                        pass
+                                        
+                                    if not last_val:
+                                        logger.info("First cell type didn't fill all cells, filling individually...")
+                                        for idx, char in enumerate(code[:6]):
+                                            try:
+                                                await visible_inputs[idx].click()
+                                                await visible_inputs[idx].fill(char)
+                                                await page.wait_for_timeout(100)
+                                            except Exception as fill_char_err:
+                                                logger.debug(f"Failed to fill cell {idx}: {fill_char_err}")
                                 elif len(visible_inputs) >= 1:
                                     # Одне суцільне поле для введення
                                     await visible_inputs[0].click()
@@ -1098,8 +1227,14 @@ class SessionManager:
                                     await page.keyboard.type(code)
                                     
                                 # Натискаємо кнопку підтвердження
-                                confirm_btn = await page.query_selector("button:has-text('Confirm'), button:has-text('Submit'), button:has-text('Verify'), button[type='submit']")
-                                if confirm_btn:
+                                confirm_btn = await page.query_selector(
+                                    "button:has-text('Confirm'), button:has-text('Submit'), button:has-text('Verify'), "
+                                    "button:has-text('Next'), button:has-text('Log in'), button:has-text('Login'), "
+                                    "button:has-text('Подтвердить'), button:has-text('Далее'), button:has-text('Войти'), "
+                                    "button:has-text('Підтвердити'), button:has-text('Далі'), button:has-text('Увійти'), "
+                                    "button[type='submit']"
+                                )
+                                if confirm_btn and await confirm_btn.is_visible() and await confirm_btn.is_enabled():
                                     await confirm_btn.click()
                                 else:
                                     if visible_inputs:
@@ -1137,39 +1272,66 @@ class SessionManager:
                             authenticated = True
                             break
                             
-                        # Автоматичне оновлення QR-коду кожні 25 секунд
+                        # Автоматичне оновлення QR-коду / 2FA скріншоту кожні 25 секунд
                         now_time = time.time()
                         if now_time - last_refresh_time >= 25.0:
                             last_refresh_time = now_time
-                            logger.info(f"🔄 Авто-оновлення QR-скріншоту для {exchange}...")
                             
-                            qr_el = await page.query_selector(qr_selector)
-                            if qr_el:
-                                # Видаляємо попередній файл скріншоту
-                                if qr_path.exists():
-                                    try:
-                                        os.remove(qr_path)
-                                    except Exception:
-                                        pass
-                                await qr_el.screenshot(path=str(qr_path))
-                                
-                                # Оновлюємо фото в надісланому повідомленні
+                            # Якщо ми вже в режимі 2FA, то оновлюємо скріншот всієї сторінки
+                            if self._active_qr_sessions[session_key].get("notified_2fa"):
+                                logger.info(f"🔄 Оновлення 2FA-скріншоту для {exchange}...")
                                 seconds_left = int(90 - (time.time() - start_time))
-                                new_caption = (
+                                text_desc_cached = self._active_qr_sessions[session_key].get("text_desc", "Security Verification")
+                                
+                                await page.screenshot(path=str(qr_path))
+                                caption_2fa = (
                                     f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
-                                    f"1️⃣ Відкрий офіційний додаток {exchange} на своєму телефоні.\n"
-                                    f"2️⃣ Знайди сканер QR-кодів і відскануй цей код.\n"
-                                    f"3️⃣ Підтверди вхід у додатку.\n\n"
-                                    f"<i>🔄 QR-код автоматично оновлено!</i>\n"
+                                    f"⚠️ <b>Потрібен 2FA-код підтвердження!</b>\n"
+                                    f"Опис: <i>{text_desc_cached}</i>\n\n"
+                                    f"👉 <b>Будь ласка, введіть цей код безпосередньо у цей чат:</b>\n"
+                                    f"<i>(Бот автоматично підставить його на сторінці)</i>\n\n"
                                     f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
                                 )
-                                await qr_msg.edit_media(
-                                    media=InputMediaPhoto(
-                                        media=FSInputFile(str(qr_path)),
-                                        caption=new_caption
-                                    ),
-                                    reply_markup=kb
-                                )
+                                try:
+                                    await qr_msg.edit_media(
+                                        media=InputMediaPhoto(
+                                            media=FSInputFile(str(qr_path)),
+                                            caption=caption_2fa
+                                        ),
+                                        reply_markup=kb
+                                    )
+                                except Exception as edit_err:
+                                    logger.error(f"Failed to edit 2FA media: {edit_err}")
+                            else:
+                                logger.info(f"🔄 Авто-оновлення QR-скріншоту для {exchange}...")
+                                qr_el = await page.query_selector(qr_selector)
+                                if qr_el:
+                                    if qr_path.exists():
+                                        try:
+                                            os.remove(qr_path)
+                                        except Exception:
+                                            pass
+                                    await qr_el.screenshot(path=str(qr_path))
+                                    
+                                    seconds_left = int(90 - (time.time() - start_time))
+                                    new_caption = (
+                                        f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
+                                        f"1️⃣ Відкрий офіційний додаток {exchange} на своєму телефоні.\n"
+                                        f"2️⃣ Знайди сканер QR-кодів і відскануй цей код.\n"
+                                        f"3️⃣ Підтверди вхід у додатку.\n\n"
+                                        f"<i>🔄 QR-код автоматично оновлено!</i>\n"
+                                        f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                                    )
+                                    try:
+                                        await qr_msg.edit_media(
+                                            media=InputMediaPhoto(
+                                                media=FSInputFile(str(qr_path)),
+                                                caption=new_caption
+                                            ),
+                                            reply_markup=kb
+                                        )
+                                    except Exception as edit_err:
+                                        logger.error(f"Failed to edit QR media: {edit_err}")
                                 
                         await asyncio.sleep(1.0)
                         
