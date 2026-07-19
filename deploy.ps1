@@ -37,32 +37,27 @@ try {
     # 2. Execute unpack and restart commands on server via SSH
     Write-Host "2/3 Unpacking archive and updating containers on server..." -ForegroundColor Cyan
     
-    $SshCommands = @(
-        # Check hash on server
-        "echo '=== Verifying archive integrity on server ==='",
-        "SERVER_MD5=`$(md5sum /root/$ArchiveName | awk '{print toupper(`$1)}')`",
-        "echo `"Local MD5: $ArchiveHash`"",
-        "echo `"Server MD5: `$SERVER_MD5`"",
-        "if [ `"`$SERVER_MD5`" != `"$ArchiveHash`" ]; then echo 'Error: MD5 hashes do not match!' && exit 1; fi",
-        "echo 'MD5 hashes match!'",
-        
-        # Create target directory if it doesn't exist
-        "mkdir -p $TargetDir",
-        
-        # Unpack files overriding old ones
-        "echo 'Unpacking archive...'",
-        "tar -xzf /root/$ArchiveName -C $TargetDir",
-        "rm -f /root/$ArchiveName",
-        
-        # Rebuild and restart containers
-        "echo 'Restarting Docker containers...'",
-        "cd $TargetDir",
-        "docker compose up --build -d",
-        "echo 'Containers updated and started successfully!'",
-        "docker compose ps"
-    ) -join " && "
+    # Construct remote commands using single quotes to avoid PowerShell quote issues
+    $Cmds = @()
+    $Cmds += "echo '=== Verifying archive integrity on server ==='"
+    $Cmds += "SERVER_MD5=\$(md5sum /root/$ArchiveName | awk '{print toupper(\$1)}')"
+    $Cmds += "echo 'Local MD5: $ArchiveHash'"
+    $Cmds += "echo 'Server MD5: '" + '$SERVER_MD5'
+    $Cmds += "if [ `"`$SERVER_MD5`" != `"$ArchiveHash`" ]; then echo 'Error: MD5 hashes do not match!' && exit 1; fi"
+    $Cmds += "echo 'MD5 hashes match!'"
+    $Cmds += "mkdir -p $TargetDir"
+    $Cmds += "echo 'Unpacking archive...'"
+    $Cmds += "tar -xzf /root/$ArchiveName -C $TargetDir"
+    $Cmds += "rm -f /root/$ArchiveName"
+    $Cmds += "echo 'Restarting Docker containers...'"
+    $Cmds += "cd $TargetDir"
+    $Cmds += "docker compose up --build -d"
+    $Cmds += "echo 'Containers updated and started successfully!'"
+    $Cmds += "docker compose ps"
 
-    ssh $TargetHost $SshCommands
+    $JoinedCmds = $Cmds -join " && "
+
+    ssh $TargetHost $JoinedCmds
     Write-Host "==============================================" -ForegroundColor Green
     Write-Host "Deployment completed successfully!" -ForegroundColor Green
     Write-Host "==============================================" -ForegroundColor Green
