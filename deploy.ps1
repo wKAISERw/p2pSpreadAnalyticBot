@@ -37,13 +37,13 @@ try {
     # 2. Execute unpack and restart commands on server via SSH
     Write-Host "2/3 Unpacking archive and updating containers on server..." -ForegroundColor Cyan
     
-    # Construct remote commands using single quotes to avoid PowerShell quote issues
+    # Construct remote commands using single-quoted strings to prevent local PowerShell execution
     $Cmds = @()
     $Cmds += "echo '=== Verifying archive integrity on server ==='"
-    $Cmds += "SERVER_MD5=\$(md5sum /root/$ArchiveName | awk '{print toupper(\$1)}')"
-    $Cmds += "echo 'Local MD5: $ArchiveHash'"
-    $Cmds += "echo 'Server MD5: '" + '$SERVER_MD5'
-    $Cmds += "if [ `"`$SERVER_MD5`" != `"$ArchiveHash`" ]; then echo 'Error: MD5 hashes do not match!' && exit 1; fi"
+    $Cmds += 'SERVER_MD5=$(md5sum /root/' + $ArchiveName + ' | awk ''{print toupper($1)}'')'
+    $Cmds += 'echo "Local MD5: ' + $ArchiveHash + '"'
+    $Cmds += 'echo "Server MD5: $SERVER_MD5"'
+    $Cmds += 'if [ "$SERVER_MD5" != "' + $ArchiveHash + '" ]; then echo "Error: MD5 hashes do not match!" && exit 1; fi'
     $Cmds += "echo 'MD5 hashes match!'"
     $Cmds += "mkdir -p $TargetDir"
     $Cmds += "echo 'Unpacking archive...'"
