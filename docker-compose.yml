@@ -1,0 +1,16 @@
+services:
+  scanner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arbix_quantum_scanner
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Зберігаємо базу даних SQLite (WAL) на хост-машині
+      - ./data:/app/data
+      # Зберігаємо логи сканера на хост-машині
+      - ./logs:/app/logs
+    env_file:
+      - .env

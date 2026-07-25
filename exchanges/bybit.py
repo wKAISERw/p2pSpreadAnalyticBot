@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from typing import List, Tuple
 from decimal import Decimal
 from exchanges.base import BaseExchange, Order
@@ -9,8 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class BybitExchange(BaseExchange):
-    def __init__(self, client: BybitP2PClient):
+    def __init__(self, client: BybitP2PClient, db = None):
         self.client = client
+        self.db = db
         self.url = "https://api2.bybit.com/fiat/otc/item/online"
 
     def _parse_order(self, item: dict) -> Order:
@@ -23,22 +25,51 @@ class BybitExchange(BaseExchange):
             else:
                 parsed_banks.append(str(p))
 
+        is_online = bool(item.get("isOnline"))
+        last_online_mins = 0
+        if not is_online:
+            last_logout = item.get("lastLogoutTime")
+            if last_logout:
+                try:
+                    last_online_mins = max(0, (int(time.time()) - int(last_logout)) // 60)
+                except (ValueError, TypeError):
+                    last_online_mins = None
+            else:
+                last_online_mins = None
+        raw_pid = str(item.get("userMaskId") or item.get("userId") or "").strip()
+        profile_id = raw_pid if raw_pid.startswith("s") else (f"s{raw_pid}" if raw_pid else "")
+
         return Order(
             id=str(item.get("id", "")),
             price=Decimal(str(item.get("price", "0"))),
             available_amount=Decimal(str(item.get("lastQuantity", "0"))),
             min_limit=Decimal(str(item.get("minAmount", "0"))),
             max_limit=Decimal(str(item.get("maxAmount", "0"))),
-            merchant_id=str(item.get("userId", "")),
+            merchant_id=profile_id,
             merchant_name=str(item.get("nickName", "Unknown")),
             month_order_count=int(item.get("recentOrderNum", 0)),
             finish_rate_pct=float(item.get("recentExecuteRate", 0.0)),
             exchange="Bybit",
-            link=f"https://www.bybit.com/fiat/trade/otc/profile/{item.get('userId', '')}",
-            bank_codes=parsed_banks  # <--- ПЕРЕДАЄМО СПИСОК БАНКІВ
+            link=f"https://www.bybit.com/uk-UA/p2p/profile/{profile_id}/USDT/UAH/item" if profile_id else "",
+            bank_codes=parsed_banks,
+            trade_terms=str(item.get("remark", "") or "").strip().lower(),
+            is_verified=bool(item.get("authTag") or item.get("isVerified")),
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, amount: float, banks: List[str], side: str) -> List[Order]:
+        headers = None
+        cookies = None
+        can_trade = False
+
+        if self.db:
+            try:
+                headers, cookies, _ = await self.db.get_auth_session("Bybit")
+                if headers or cookies:
+                    can_trade = True
+            except Exception as e:
+                logger.debug("Failed to retrieve Bybit session from DB: %s", e)
+
         payload = {
             "userId": "",
             "tokenId": "USDT",
@@ -47,12 +78,12 @@ class BybitExchange(BaseExchange):
             "side": side,
             "size": "50",
             "page": "1",
-            "amount": str(int(amount)),
+            "amount": str(int(amount)) if amount > 0 else "",
             "authMaker": False,
-            "canTrade": False
+            "canTrade": can_trade
         }
         try:
-            data = await self.client.fetch(self.url, payload)
+            data = await self.client.fetch(self.url, payload, headers=headers, cookies=cookies)
             items = data.get("result", {}).get("items", [])
             return [self._parse_order(item) for item in items]
         except Exception as e:
@@ -66,29 +97,10 @@ class BybitExchange(BaseExchange):
         return await self._fetch_orders(amount, banks, side="0")
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
-        tasks = []
-        for amount in amounts:
-            tasks.append(self.get_buy_orders(amount, banks))
-            tasks.append(self.get_sell_orders(amount, banks))
+        # Отримуємо топ-50 ордерів у стакані без фільтру суми (мінімізація API викликів)
+        buy_orders, sell_orders = await asyncio.gather(
+            self.get_buy_orders(0, banks),
+            self.get_sell_orders(0, banks)
+        )
+        return self.dedup(buy_orders), self.dedup(sell_orders)
 
-        results = await asyncio.gather(*tasks)
-
-        raw_buys = []
-        raw_sells = []
-        for i in range(0, len(results), 2):
-            raw_buys.extend(results[i])
-            raw_sells.extend(results[i + 1])
-
-        buy_orders = self._dedup_by_id(raw_buys)
-        sell_orders = self._dedup_by_id(raw_sells)
-
-        return buy_orders, sell_orders
-
-    def _dedup_by_id(self, orders: List[Order]) -> List[Order]:
-        seen = set()
-        result = []
-        for order in orders:
-            if order.id not in seen:
-                seen.add(order.id)
-                result.append(order)
-        return result

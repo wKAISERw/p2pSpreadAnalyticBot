@@ -1,0 +1,21 @@
+# .dockerignore
+.git
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.idea
+.vscode
+*.tar.gz
+project_dump.txt
+
+# Exclude local runtime data and logs to keep docker context small
+data/
+logs/
+tools/script/data/browser_profiles/
+scratch/
+scratch_out/
+deploy_temp/

@@ -1,0 +1,51 @@
+{
+  "entities": {
+    "UserSettings": {
+      "title": "User Settings",
+      "description": "Configuration and API keys for the P2P scanner",
+      "type": "object",
+      "properties": {
+        "maxCapital": {
+          "type": "number",
+          "description": "Maximum working capital in USDT"
+        },
+        "minSpread": {
+          "type": "number",
+          "description": "Minimum profit spread percentage"
+        },
+        "banks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of bank codes to scan"
+        },
+        "apiKeys": {
+          "type": "object",
+          "properties": {
+            "binance": { "$ref": "ApiKeyConfig" },
+            "bybit": { "$ref": "ApiKeyConfig" },
+            "okx": { "$ref": "ApiKeyConfig" }
+          }
+        }
+      },
+      "required": ["maxCapital", "minSpread", "banks"]
+    },
+    "ApiKeyConfig": {
+      "title": "API Key Configuration",
+      "description": "Credentials for exchange API access",
+      "type": "object",
+      "properties": {
+        "key": { "type": "string" },
+        "secret": { "type": "string" }
+      },
+      "required": ["key", "secret"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserSettings",
+      "description": "User-specific settings and credentials"
+    }
+  }
+}

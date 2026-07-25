@@ -1,21 +1,38 @@
-# Environments (Ніколи не пушимо віртуальне середовище)
+# Environments
 .env
 .venv/
 venv/
 env/
 
-# Logs (Логи серверу залишаються тільки на сервері)
+# Configuration and API Keys
+firebase-adminsdk.json
+firebase-applet-config.json
+_backup_v1_20260312_234529/
+scratch_out/
+
+# Logs
 logs/
 *.log
 
-# Python Caches (Кеші пайтона)
+# Python Caches
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
 
-# IDE & OS (Налаштування редакторів коду)
+# IDE & OS
 .idea/
 .vscode/
 *.swp
 .DS_Store
+
+# Sessions
+*.session
+*.session-journal
+
+# Data
+**/data/
+**/logs/
+# cURL-дампи з секретами для probe_from_curl
+_curl.txt
+*_curl.txt

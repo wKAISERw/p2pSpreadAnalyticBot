@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arbix Quantum — відкриття в застосунку</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #0f0f12; color: #fff; margin: 0;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 24px; text-align: center;
+  }
+  .spinner {
+    width: 44px; height: 44px; border-radius: 50%;
+    border: 4px solid rgba(255,255,255,.12); border-left-color: #3b82f6;
+    animation: spin .9s linear infinite; margin-bottom: 18px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  h2 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+  p  { color: #9ca3af; font-size: 14px; max-width: 420px; margin: 0 0 20px; }
+  .btn {
+    background: #1e1e24; color: #3b82f6; border: 1px solid #3b82f6;
+    padding: 12px 20px; border-radius: 10px; margin: 6px;
+    text-decoration: none; display: inline-block; font-weight: 600; font-size: 14px;
+  }
+  .btn.primary { background: #3b82f6; color: #fff; }
+  .hidden { display: none; }
+  code { color: #6b7280; font-size: 11px; word-break: break-all; }
+</style>
+</head>
+<body>
+
+<div id="loader">
+  <div class="spinner"></div>
+  <h2>Відкриваю застосунок…</h2>
+  <p id="target-label"></p>
+</div>
+
+<div id="manual" class="hidden">
+  <h2>Не відкрилось автоматично</h2>
+  <p>Натисни, щоб відкрити вручну.</p>
+  <a id="btn-app" class="btn primary" href="#">📱 Відкрити застосунок</a>
+  <a id="btn-web" class="btn" href="#">🌐 Веб-версія</a>
+  <p><code id="dbg"></code></p>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Мітка версії. Піднімати при кожній зміні маршрутів — інакше неможливо
+  // відрізнити «маршрут неправильний» від «на Pages лежить стара версія».
+  // Перевірити, що задеплоєно: відкрити сторінку з &debug=1
+  var VERSION = "2026-07-25.3";
+
+  var q = new URLSearchParams(location.search);
+
+  if (q.get("debug")) {
+    document.getElementById("loader").innerHTML =
+      '<h2>redirect.html</h2><p>Версія: <b>' + VERSION + '</b></p>' +
+      '<p><code>' + location.href + '</code></p>';
+    return;
+  }
+  var ex   = q.get("ex")   || "";
+  var id   = q.get("id")   || "";
+  var kind = q.get("kind") || "profile";   // ad | order | profile
+  var side = q.get("side") || "";
+  var code = q.get("code") || "";          // OKX shareCode, якщо бот його дістав
+
+  var ua = navigator.userAgent || "";
+  var isAndroid = /Android/i.test(ua);
+  var isIOS = /iPhone|iPad|iPod/i.test(ua) ||
+              (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  var isMobile = isAndroid || isIOS;
+
+  var PKG = {
+    Binance: "com.binance.dev",
+    OKX:     "com.okinc.okex.gp",
+    Bybit:   "com.bybit.app"
+  };
+
+  // ⚠️ Джерело правди — bot/deeplinks.py і tools/deeplink/FINDINGS.md.
+  // Не повертати сюди старі шляхи: перевірено на пристрої, роутер Binance
+  // відповідає на них NoSupportRouterPathActivity («Це посилання не працює.
+  // Перевірте, чи не застаріла ваша версія додатку»):
+  //     bnc://app.binance.com/fiat/ads/detail
+  //     bnc://app.binance.com/p2p/advertiserProfile
+  //     bnc://app.binance.com/p2p/orderDetail
+  //     bybitapp://open?page=…   (роутер Bybit працює по шляху, а не по ?page=)
+  function schemeUrl() {
+    var e = encodeURIComponent(id);
+    if (!id) return "";
+    if (ex === "Binance") {
+      // Нативних маршрутів на оголошення і профіль у Binance немає взагалі.
+      // Єдиний підтверджений — деталі ордера. Решта йде через webview-шлюз,
+      // який повертає appUrl() нижче, тобто сюди не потрапляє.
+      if (kind === "order") return "bnc://app.binance.com/fiat/orderDetails?id=" + e;
+      return "";
+    }
+    if (ex === "OKX") {
+      // shareCode має пріоритет: підтверджено на пристрої, що
+      // okx://exchange/merchanthome.com?shareCode=… відкриває нативну картку
+      // продавця (com.okinc.p2p.userinfo.profile.UserProfilePageActivity).
+      // Код видає GET /v3/c2c/merchant/share?pubUserId=…
+      if (code) return "okx://exchange/merchanthome.com?shareCode=" + encodeURIComponent(code);
+      // Ордер: приземляється на com.okinc.p2p.order.detail.OrderDetailActivity.
+      if (kind === "order") return "okx://exchange/p2p/order?id=" + e;
+      // Без коду профіль відкриває лише вітрину P2P — застосунок, але не картку.
+      return "okx://exchange/p2p/profile?userId=" + e;
+    }
+    if (ex === "Bybit") {
+      if (kind === "order") return "bybitapp://open/p2p/order/detail?orderId=" + e;
+      return "bybitapp://open/p2p/user/home?userId=" + e;
+    }
+    return "";
+  }
+
+  // Binance: замість неіснуючого нативного маршруту — власний webview-шлюз
+  // застосунку. Приймає base64 звичайного веб-URL і відкриває сторінку
+  // всередині застосунку, у вже авторизованій сесії.
+  function binanceWebviewUrl(target) {
+    if (!target) return "";
+    var b64 = btoa(unescape(encodeURIComponent(target)));
+    return "https://app.binance.com/webview/webview?type=default&url=" + b64;
+  }
+
+  function webUrl() {
+    var e = encodeURIComponent(id);
+    if (!id) return "";
+    if (ex === "Binance") {
+      if (kind === "order") return "https://p2p.binance.com/en/orderDetail?orderNo=" + e;
+      // id оголошення і id мерчанта — різні сутності, не плутати
+      if (kind === "ad")    return "https://p2p.binance.com/en/trade/detail/" + e;
+      return "https://p2p.binance.com/en/advertiserDetail?advertiserNo=" + e;
+    }
+    if (ex === "OKX") {
+      if (kind === "order") return "https://www.okx.com/p2p/order/" + e;
+      return "https://www.okx.com/p2p/ads-merchant?publicUserId=" + e + (side ? "&side=" + side : "");
+    }
+    if (ex === "Bybit") {
+      if (kind === "order") return "https://www.bybit.com/fiat/trade/otc/order-detail?orderId=" + e;
+      var bid = /^s/.test(id) ? id : "s" + id;
+      return "https://www.bybit.com/uk-UA/p2p/profile/" + encodeURIComponent(bid) + "/USDT/UAH/item";
+    }
+    return "";
+  }
+
+  var scheme = schemeUrl();
+  var web = webUrl();
+  // Для Binance без нативного маршруту шлюз — це звичайний https, тому його
+  // можна віддати одразу, без intent і без очікування.
+  var gateway = (ex === "Binance" && !scheme) ? binanceWebviewUrl(web) : "";
+
+  function showManual() {
+    document.getElementById("loader").classList.add("hidden");
+    document.getElementById("manual").classList.remove("hidden");
+  }
+
+  document.getElementById("btn-app").href = gateway || scheme || web;
+  document.getElementById("btn-web").href = web;
+  document.getElementById("dbg").textContent = (gateway || scheme || "(маршруту немає)");
+  document.getElementById("target-label").textContent =
+    ex + (kind === "order" ? " · ордер" : kind === "ad" ? " · оголошення" : " · профіль");
+
+  // Десктоп — одразу веб, без затримки.
+  if (!isMobile) {
+    if (web) { location.replace(web); } else { showManual(); }
+    return;
+  }
+
+  if (gateway) {
+    location.replace(gateway);
+    return;
+  }
+
+  // Мобілка, але маршруту немає — не крутити спінер вічно.
+  if (!scheme) {
+    if (web) { location.replace(web); } else { showManual(); }
+    return;
+  }
+
+  // Якщо застосунок перехопив перехід, вкладка йде у фон — тоді нічого не робимо.
+  var bailed = false;
+  function onHide() { if (document.hidden) bailed = true; }
+  document.addEventListener("visibilitychange", onHide);
+  window.addEventListener("pagehide", function () { bailed = true; });
+
+  if (isAndroid) {
+    // Intent URL сам робить fallback у браузер, якщо застосунка немає.
+    var m = scheme.match(/^([a-z]+):\/\/(.*)$/i);
+    var intent = "intent://" + m[2] + "#Intent;scheme=" + m[1] +
+                 ";package=" + (PKG[ex] || "") + ";";
+    if (web) intent += "S.browser_fallback_url=" + encodeURIComponent(web) + ";";
+    location.replace(intent + "end");
+    setTimeout(function () { if (!bailed) showManual(); }, 2000);
+  } else {
+    // iOS: перехід по схемі, і якщо через 1.2 с ми ще тут — застосунка немає.
+    location.replace(scheme);
+    setTimeout(function () {
+      if (bailed) return;
+      if (web) { location.replace(web); } else { showManual(); }
+    }, 1200);
+  }
+})();
+</script>
+</body>
+</html>

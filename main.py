@@ -1,41 +1,46 @@
+2# main.py
 import asyncio
 import logging
-import signal
 import sys
 import os
 from logging.handlers import RotatingFileHandler
+from contextlib import asynccontextmanager
 
-# Імпортуємо компоненти нашої системи
-from notifications.telegram_notifier import TelegramNotifier
+from fastapi import FastAPI, Response
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from bot.handlers.core import setup as bot_setup
+from bot.handlers import get_router as get_bot_router
+from bot.notifier import TelegramNotifier
+from core.storage.merchant_db import MerchantDB
+from core.workers.db_maintenance import DBMaintenanceTask
+from core.workers.card_sync import CardBalanceSyncTask
 from scanner import run_scanner
+
+# Імпортуємо чисті модульні роутери нашого власного API сервера
+from api.routers import dashboard_router, webhooks_router
+
+db = MerchantDB()   
 
 
 def setup_logging():
-    """Налаштовує 3 канали логування: консоль, debug.log, error.log"""
-    # Створюємо папку для логів, якщо її немає
     os.makedirs("logs", exist_ok=True)
-
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)  # Глобальний рівень
+    logger.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
-    # 1. Console (INFO) - виводимо в термінал тільки важливе
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
 
-    # 2. Debug Log (DEBUG) - пишемо все підряд (з ротацією по 5 МБ, зберігаємо 2 бекапи)
-    debug_handler = RotatingFileHandler(
-        "logs/debug.log", maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"
-    )
+    debug_handler = RotatingFileHandler("logs/debug.log", maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8")
     debug_handler.setLevel(logging.DEBUG)
     debug_handler.setFormatter(formatter)
 
-    # 3. Error Log (ERROR) - окремий файл тільки для помилок
-    error_handler = RotatingFileHandler(
-        "logs/error.log", maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"
-    )
+    error_handler = RotatingFileHandler("logs/error.log", maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8")
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
 
@@ -44,72 +49,108 @@ def setup_logging():
     logger.addHandler(error_handler)
 
 
-async def main():
+# Глобальні змінні оркестрації
+scanner_task = None
+notifier = None
+stop_event = asyncio.Event()
+db_maintainer = None
+card_sync_task = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global scanner_task, notifier, stop_event, db_maintainer, card_sync_task
+
     setup_logging()
     logger = logging.getLogger("Main")
-    logger.info("🚀 Ініціалізація P2P Сканера (Production Mode)...")
+    logger.info("🚀 Ініціалізація P2P Сканера + API (Production Mode)...")
 
-    stop_event = asyncio.Event()
+    # 1. Запуск БД та підключення до синглтону хендлерів боту
+    await db.start()
+    logger.info("✅ База даних успішно підключена для API")
+
+    # 2. Ініціалізація обслуговування бази
+    db_maintainer = DBMaintenanceTask(db)
+    db_maintainer.start()
+
+    # 2.1. Ініціалізація фонового оновлення балансів карток
+    card_sync_task = CardBalanceSyncTask(db)
+    card_sync_task.start()
+
+    # 3. Ініціалізація та зв'язування компонентів Telegram
     notifier = TelegramNotifier()
+    notifier.bind_db(db)
 
-    # Функція для перехоплення сигналів ОС (SIGINT, SIGTERM)
-    def handle_signal(sig):
-        logger.warning("🛑 Отримано сигнал %s. Ініціалізація graceful shutdown...", sig.name)
-        stop_event.set()
+    # Реєструємо залежності в ядрі хендлерів боту
+    bot_setup(db=db, account_clients={}, notifier=notifier, bot=notifier._bot)
 
-    # Реєструємо обробники сигналів (тільки для Unix-подібних систем, якими є всі VPS)
-    loop = asyncio.get_running_loop()
-    if sys.platform != "win32":
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, handle_signal, sig)
+    # Інтегруємо наш новий модульний роутер меню в єдиний Dispatcher
+    notifier._dp.include_router(get_bot_router())
 
     await notifier.start()
 
-    # Безпечна обгортка, яка не дасть помилкам зникнути мовчки
     async def run_scanner_safe():
         try:
-            await run_scanner(notifier, stop_event)
+            await run_scanner(notifier, stop_event, shared_db=db)
         except Exception as e:
             logger.critical("🔥 КРИТИЧНА ПОМИЛКА СКАНЕРА: %s", e, exc_info=True)
-            stop_event.set()  # Зупиняємо всю програму, якщо сканер впав
+            stop_event.set()
 
-    # Запускаємо через нашу обгортку
     scanner_task = asyncio.create_task(run_scanner_safe())
 
-    try:
-        # Блокуємо виконання, поки не спрацює stop_event (через сигнал або помилку)
-        await stop_event.wait()
-    except KeyboardInterrupt:
-        logger.warning("🛑 Отримано KeyboardInterrupt. Зупинка...")
-        stop_event.set()
-    finally:
-        logger.info("🧹 Початок завершення процесів...")
+    yield
 
-        # Скасовуємо таску сканера, якщо вона ще працює
+    # --- GRACEFUL SHUTDOWN (БЕЗПЕЧНА ЗУПИНКА) ---
+    logger.info("🧹 Початок завершення процесів...")
+    stop_event.set()
+
+    if scanner_task:
         scanner_task.cancel()
         try:
-            # Даємо сканеру час на коректне завершення
             await asyncio.wait_for(scanner_task, timeout=5.0)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
-        except asyncio.TimeoutError:
-            logger.error("⚠️ Сканер не зупинився вчасно (Timeout).")
-        except Exception as e:
-            logger.error("❌ Помилка під час зупинки сканера: %s", e)
 
+    if card_sync_task:
+        await card_sync_task.stop()
+
+    if db_maintainer:
+        await db_maintainer.stop()
+
+    if notifier:
         try:
-            # Graceful shutdown нотифікатора (чекаємо відправки останніх повідомлень)
             await asyncio.wait_for(notifier.stop(), timeout=10.0)
             logger.info("✅ Telegram Notifier успішно зупинено.")
         except asyncio.TimeoutError:
-            logger.error("⚠️ Timeout при зупинці нотифікатора. Можлива втрата повідомлень з черги.")
+            logger.error("⚠️ Timeout при зупинці нотифікатора.")
 
-        logger.info("🏁 Систему повністю зупинено. До зустрічі!")
+    await db.stop()
+    logger.info("🏁 Систему повністю зупинено. До зустрічі!")
 
+
+app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
+
+# CORS MIDDLEWARE
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,  # Wildcard сумісний тільки з False за специфікацією CORS
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 📈 Prometheus /metrics endpoint
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics():
+    """Expose Prometheus metrics for scraping."""
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+# 🚀 ПІД КАТАЛОГ ОДНОЧАСНО ПІДКЛЮЧАЄМО ВСІ НАШІ БОЙОВІ РОУТЕРИ
+app.include_router(dashboard_router)
+app.include_router(webhooks_router)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        # Pass, оскільки ми вже обробили це всередині main()
-        pass
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

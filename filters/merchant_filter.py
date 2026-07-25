@@ -1,25 +1,87 @@
+# filters/merchant_filter.py
+"""
+MerchantFilter — приймає рішення на основі risk_flag від RiskEngine.
+
+Режими:
+- WARNING: пропускає все, крім ручного blocked_names
+- STRICT: блокує тільки hard-block флаги
+"""
+
+import logging
 from exchanges.base import Order
+
+logger = logging.getLogger("MerchantFilter")
+
+SAFE_FLAGS = {"OK", "EMPTY_TERMS", "", "PENDING"}
+
+SAFE_PREFIXES = (
+    "REGEX_WEAK:",
+    "LLM_PENDING:",
+)
+
+SOFT_WARNING_FLAGS = {
+    "LOW_STATS",
+    "PERFECT_RATING",
+    "SUSPICIOUS_LIMITS",
+    "HIGH_RISK_SCORE",
+    "LLM_UNKNOWN",
+    "LLM_SUSPICIOUS",
+}
+
+HARD_BLOCK_PREFIXES = (
+    "BLOCK:",
+)
+
+HARD_BLOCK_EXACT = {
+    "BLOCK:CACHED",
+}
 
 
 class MerchantFilter:
-    # Встановили жорсткі ліміти: мінімум 50 угод за місяць і 95% успішних завершень
-    def __init__(self, min_orders: int = 50, min_finish_rate: float = 95.0, blocked_names: list[str] = None):
-        self.min_orders = min_orders
-        self.min_finish_rate = min_finish_rate
-        self.blocked_names = blocked_names or []  # Тут згодом зможеш вписати свій нік
+    def __init__(
+        self,
+        risk_mode: str = "WARNING",
+        blocked_names: list[str] | None = None,
+    ):
+        self.risk_mode = risk_mode.upper()
+        self.blocked_names = set(blocked_names or [])
 
     def passed(self, order: Order) -> bool:
-        """Повертає True, якщо мерчант надійний як швейцарський банк."""
-        # 1. Відсікаємо себе та заблокованих
         if order.merchant_name in self.blocked_names:
             return False
 
-        # 2. Відсікаємо новачків (менше 50 угод)
-        if order.month_order_count < self.min_orders:
-            return False
+        if self.risk_mode == "WARNING":
+            return True
 
-        # 3. Відсікаємо тих, хто часто скасовує або кидає в реф (успішність нижче 95%)
-        if order.finish_rate_pct < self.min_finish_rate:
-            return False
+        if not risk_flag or risk_flag in SAFE_FLAGS:
+            return True
+
+        parts = [p.strip() for p in risk_flag.split(",") if p.strip()]
+
+        for part in parts:
+            if part in HARD_BLOCK_EXACT:
+                logger.debug(
+                    "🚫 STRICT hard block: %s [%s] → %s",
+                    order.merchant_name, order.exchange, part
+                )
+                return False
+
+            if any(part.startswith(prefix) for prefix in HARD_BLOCK_PREFIXES):
+                logger.debug(
+                    "🚫 STRICT hard block: %s [%s] → %s",
+                    order.merchant_name, order.exchange, part
+                )
+                return False
+
+        for part in parts:
+            if part in SOFT_WARNING_FLAGS:
+                continue
+            if any(part.startswith(prefix) for prefix in SAFE_PREFIXES):
+                continue
+
+            logger.debug(
+                "⚠️ STRICT unknown risk flag, пропускаємо як soft: %s [%s] → %s",
+                order.merchant_name, order.exchange, part
+            )
 
         return True
