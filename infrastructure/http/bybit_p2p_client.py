@@ -135,26 +135,27 @@ class BybitP2PClient(BaseHttpClient):
             "appraiseType": "2"  # 2 = Bad (Негативні відгуки)
         }
 
-        # Робимо копію заголовків, щоб не зламати оригінальний словник
-        req_headers = dict(session_headers)
-
-        # Видаляємо статичні поля, які можуть конфліктувати з curl_cffi
-        req_headers.pop("Content-Length", None)
-        req_headers.pop("Accept-Encoding", None)
-
-        # МАГІЯ: Підставляємо правильний Referer під поточного мерчанта (Bybit це перевіряє!)
-        req_headers["Referer"] = f"https://www.bybit.com/uk-UA/p2p/profile/{merchant_id}/USDT/UAH/item"
+        user_agent = (session_headers or {}).get("User-Agent") or (session_headers or {}).get("user-agent") or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        clean_headers = {
+            "content-type": "application/json;charset=UTF-8",
+            "accept": "application/json",
+            "User-Agent": user_agent,
+            "Referer": f"https://www.bybit.com/uk-UA/p2p/profile/{merchant_id}/USDT/UAH/item"
+        }
 
         try:
             # Робимо POST запит напряму через curl_cffi сесію, передаючи вкрадені заголовки та кукіси
             if self._session is None:
                 await self.__aenter__()
 
+            # Очищаємо дефолтні заголовки сесії
+            self._session.headers.clear()
+            self._session.headers.update(clean_headers)
+
             response = await self._session.request(
                 "POST",
                 url,
                 json=payload,
-                headers=req_headers,
                 cookies=session_cookies
             )
             

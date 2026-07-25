@@ -119,13 +119,90 @@ class CardBalanceSyncTask:
                 for card_id, account_id, last_four in card_list:
                     if account_id in acc_map:
                         true_balance = acc_map[account_id]
+
+                        # 🚀 Отримуємо попередній баланс та дані картки
+                        old_bal = None
+                        owner_id = None
+                        label = f"Картка *{last_four}"
+                        try:
+                            async with conn.execute("SELECT balance, owner_id, label FROM cards WHERE id=?", (card_id,)) as c_cur:
+                                c_row = await c_cur.fetchone()
+                                if c_row:
+                                    old_bal = float(c_row["balance"]) if c_row["balance"] is not None else None
+                                    owner_id = c_row["owner_id"]
+                                    if c_row["label"]:
+                                        label = c_row["label"]
+                        except Exception as c_err:
+                            logger.debug(f"Failed to fetch old card balance: {c_err}")
+
                         await self.db.update_card_balance(card_id, true_balance)
                         logger.info(
                             f"🔄 [Background Card Sync] Card *{last_four} balance updated: {true_balance:.2f} ₴"
                         )
+
+                        # 🚀 Якщо баланс збільшився — надсилаємо сповіщення Трекера коштів!
+                        if old_bal is not None and true_balance > old_bal + 0.01 and owner_id:
+                            delta = true_balance - old_bal
+                            await self._notify_mono_income(token, account_id, card_id, delta, true_balance, owner_id, label)
+
+                        # Trigger Buy Mode Auto-scaler check
+                        try:
+                            if owner_id:
+                                from core.engine.taker_scanner import trigger_buy_autoscale_check
+                                await trigger_buy_autoscale_check(self.db, owner_id)
+                        except Exception as auto_err:
+                            logger.debug(f"Card sync autoscale trigger error: {auto_err}")
                     else:
                         logger.warning(
                             f"Mono account {account_id} not found in client-info for card *{last_four}"
                         )
             except Exception as e:
                 logger.error(f"Failed to sync Monobank balance: {e}")
+
+    async def _notify_mono_income(self, token: str, account_id: str, card_id: str, delta: float, new_balance: float, owner_id: int, label: str):
+        """Отримує деталі транзакції з Monobank Statement API та надсилає сповіщення в Telegram."""
+        try:
+            from_ts = int(time.time()) - 600
+            url = f"https://api.monobank.ua/personal/statement/{account_id}/{from_ts}"
+            headers = {"X-Token": token}
+            matching_item = None
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=10) as resp:
+                    if resp.status == 200:
+                        items = await resp.json()
+                        if isinstance(items, list):
+                            for it in items:
+                                amt = float(it.get("amount", 0)) / 100.0
+                                if amt > 0 and abs(amt - delta) < 1.0:
+                                    matching_item = it
+                                    break
+                            if not matching_item and items:
+                                matching_item = items[0]
+
+            from bot.handlers.core import _bot
+            if _bot and owner_id:
+                sender = matching_item.get("counterName") or matching_item.get("description") or "Зарахування коштів" if matching_item else "Зарахування коштів"
+                comment = matching_item.get("comment") if matching_item else ""
+                
+                lines = ["🐈 <b>Monobank — Нова транзакція!</b>\n"]
+                lines.append(f"💰 <b>Сума:</b> 🟢 +{delta:,.2f} ₴")
+                lines.append(f"👤 <b>Відправник/Опис:</b> {sender}")
+                if comment:
+                    lines.append(f"💬 <b>Коментар:</b> <i>{comment}</i>")
+                from datetime import datetime
+                time_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+                if matching_item and matching_item.get("time"):
+                    time_str = datetime.fromtimestamp(matching_item.get("time")).strftime("%d.%m.%Y %H:%M:%S")
+                lines.append(f"⏰ <b>Час:</b> {time_str}")
+                lines.append(f"💳 <b>Картка:</b> {label}")
+                lines.append(f"📊 <b>Новий залишок:</b> {new_balance:,.2f} ₴")
+                
+                # Перевіряємо чи є співпадаючий ордер
+                order_leg = await self.db.find_pending_order_for_card(card_id, delta) if hasattr(self.db, "find_pending_order_for_card") else None
+                if order_leg:
+                    lines.append(f"\n🔗 <b>✅ Співпадає з P2P ордером #{order_leg.get('order_id', order_leg.get('id', ''))}!</b>")
+                
+                await _bot.send_message(chat_id=owner_id, text="\n".join(lines), parse_mode="HTML")
+                logger.info(f"✅ Sent Monobank money tracker notification for card {label}: +{delta} UAH to user {owner_id}")
+        except Exception as e:
+            logger.error(f"Failed to process Monobank money tracker notification: {e}")

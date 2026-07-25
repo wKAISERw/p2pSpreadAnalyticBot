@@ -564,7 +564,12 @@ async def on_taker_confirm(call: CallbackQuery, state: FSMContext) -> None:
         if result["success"]:
             order_id = result.get("order_id", "")
             from core.analytics.merchant_profile import build_order_url
-            order_url = build_order_url(exchange, order_id)
+            from bot.deeplinks import tg_button_url
+
+            web_url = build_order_url(exchange, order_id)
+            # На телефоні відкриє застосунок одразу на екрані ордера,
+            # на десктопі — звичайну веб-версію.
+            order_url = tg_button_url(exchange, "order", order_id, web_fallback=web_url)
 
             text = (
                 f"✅ <b>{action} ордер відкрито!</b>\n\n"
@@ -579,10 +584,22 @@ async def on_taker_confirm(call: CallbackQuery, state: FSMContext) -> None:
             kb_rows = []
             if order_url:
                 kb_rows.append([InlineKeyboardButton(
-                    text=f"🔗 Відкрити ордер на {exchange}", url=order_url
+                    text=f"📱 Відкрити ордер ({exchange})", url=order_url
                 )])
             kb_rows.append([InlineKeyboardButton(text="🔙 В меню", callback_data="menu:main")])
             kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+            # Окреме повідомлення з лінком у тілі: кнопки зникають при
+            # редагуванні/навігації, а текстове посилання лишається в історії
+            # чату — до ордера можна повернутись у будь-який момент.
+            if order_url:
+                with suppress(Exception):
+                    await call.message.answer(
+                        f"🔗 <b>{action} ордер на {exchange}</b>\n"
+                        f"<code>{order_id}</code>\n\n"
+                        f'<a href="{order_url}">Відкрити ордер</a>',
+                        disable_web_page_preview=True,
+                    )
         else:
             text = f"❌ <b>Помилка {action}:</b> {result.get('error', 'Unknown')}"
             if result.get("warning"):
@@ -1266,6 +1283,7 @@ def _tbuy_edit_menu_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🏦 Банки", callback_data="tbuy_edit:banks"),
         ],
         [
+            InlineKeyboardButton(text="💳 Режим балансу", callback_data="tbuy_edit:balance_mode"),
             InlineKeyboardButton(text="⏱ Швидкість", callback_data="tbuy_edit:speed"),
         ],
         [
@@ -1419,33 +1437,93 @@ async def on_tsell_price_strategy_cb(call: CallbackQuery, state: FSMContext) -> 
 # 🛒 TAKER BUY FSM (Flexible Strategy, Single-param Edit, Confirmation)
 # =========================================================================
 
+@router.callback_query(F.data.startswith("tbuy_type:"))
+async def on_tbuy_type_selected(call: CallbackQuery, state: FSMContext) -> None:
+    tbuy_type = call.data.split(":", 1)[1]
+    await state.update_data(tbuy_type=tbuy_type)
+    await state.set_state(TakerBuySettingsStates.waiting_amount)
+
+    if tbuy_type == "UAH":
+        msg_text = (
+            "🛒 <b>TAKER BUY — Крок 1/5</b>\n\n"
+            "₴ <b>Введіть суму у гривнях (UAH) для купівлі:</b>\n"
+            "<i>Наприклад: 20000. Бот авто-конвертує в еквівалент USDT за поточним курсом ринку!</i>"
+        )
+    else:
+        msg_text = (
+            "🛒 <b>TAKER BUY — Крок 1/5</b>\n\n"
+            "📦 <b>Введіть кількість USDT для купівлі:</b>\n"
+            "<i>Наприклад: 500</i>"
+        )
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(msg_text, reply_markup=keyboards.back_to_main_kb())
+    await call.answer()
+async def on_tbuy_scale_on(call: CallbackQuery, state: FSMContext) -> None:
+    user_id = call.from_user.id
+    if _db:
+        await _db.update_buy_balance_mode(user_id, "AUTO_SCALE", scale_down=1, scale_up=1)
+        from core.engine.taker_scanner import trigger_buy_autoscale_check
+        await trigger_buy_autoscale_check(_db, user_id)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text("✅ <b>Авто-масштабування під баланс карт увімкнено!</b>\nТепер об'єм купівлі підлаштовується під картки автоматично.")
+    await call.answer("Увімкнено!")
+
+
+@router.callback_query(F.data.startswith("tbuy_fit_bal:"))
+async def on_tbuy_fit_bal(call: CallbackQuery, state: FSMContext) -> None:
+    user_id = call.from_user.id
+    fit_usdt = float(call.data.split(":", 1)[1])
+    if _db:
+        await _db.update_taker_buy_amount(user_id, fit_usdt)
+    with suppress(TelegramBadRequest):
+        await call.message.edit_text(f"✅ <b>Об'єм купівлі успішно встановлено до {fit_usdt:.2f} USDT!</b>")
+    await call.answer("Збережено!")
+
+
 @router.message(TakerBuySettingsStates.waiting_amount)
 async def on_tbuy_amount(message: Message, state: FSMContext) -> None:
+    text_raw = message.text.strip().lower()
+    data = await state.get_data()
+    tbuy_type = data.get("tbuy_type", "USDT")
+    is_uah = tbuy_type == "UAH" or "грн" in text_raw or "uah" in text_raw or "₴" in text_raw
+    cleaned = text_raw.replace("грн", "").replace("uah", "").replace("₴", "").replace("usdt", "").strip().replace(",", ".")
     try:
-        val = float(message.text.strip().replace(",", "."))
+        val = float(cleaned)
         if val <= 0: raise ValueError
     except ValueError:
-        return await message.answer("❌ Введи коректну суму USDT. Наприклад: <code>500</code>")
+        return await message.answer("❌ Введи коректну суму. Наприклад: <code>500</code> або <code>20 000 грн</code>")
+
+    est_rate = 40.0
+    if _db:
+        from bot.handlers.filters import _get_current_market_rate
+        est_rate = await _get_current_market_rate(_db, 100.0)
+
+    if is_uah:
+        val_usdt = round(val / est_rate, 2)
+        equiv_uah = val
+    else:
+        val_usdt = val
+        equiv_uah = val_usdt * est_rate
 
     data = await state.get_data()
     is_edit = data.get("is_edit", False)
     if is_edit:
-        await _update_taker_buy_param_db(message.from_user.id, "amount", val)
+        await _update_taker_buy_param_db(message.from_user.id, "amount", val_usdt)
         await state.clear()
         
         users = await _db.get_active_users()
         user_row = next((u for u in users if u["user_id"] == message.from_user.id), None)
         preset = _get_taker_buy_preset(user_row)
         await message.answer(
-            f"✅ Об'єм оновлено до {val:.1f} USDT!\n\n" + _buy_preset_text(preset),
+            f"✅ Об'єм оновлено до {val_usdt:,.2f} USDT (~{equiv_uah:,.0f} ₴)!\n\n" + _buy_preset_text(preset),
             reply_markup=_taker_preset_kb("TAKER_BUY")
         )
         return
         
-    await state.update_data(amount=val)
+    await state.update_data(amount=val_usdt)
     await state.set_state(TakerBuySettingsStates.waiting_price_strategy)
     await message.answer(
-        f"📦 Обʼєм: <b>{val:.1f} USDT</b>\n\n"
+        f"📦 Обʼєм: <b>{val_usdt:,.2f} USDT (~{equiv_uah:,.0f} ₴)</b>\n\n"
         f"💹 <b>TAKER BUY — крок 2/6</b>\n\n"
         f"Обери <b>стратегію ціни</b> для цього закупу:",
         reply_markup=_tbuy_price_strategy_kb(),
@@ -1874,8 +1952,79 @@ async def on_tbuy_edit(call: CallbackQuery, state: FSMContext) -> None:
                 InlineKeyboardButton(text="❌ Скасувати", callback_data="smode:TAKER_BUY"),
             ]
         ])
-        await call.message.edit_text("⏱ <b>Редагування швидкості</b>\n\nЧи важлива швидкість?", reply_markup=kb)
+    elif param == "balance_mode":
+        await _show_tbuy_balance_mode_menu(call, call.from_user.id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 💳 TAKER BUY Balance Mode & Auto-scaler Sub-menu
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def _show_tbuy_balance_mode_menu(call: CallbackQuery, user_id: int):
+    user = await _db.get_user_by_id(user_id) if _db else None
+    if not user:
+        return await call.answer("❌ Користувача не знайдено", show_alert=True)
+
+    mode = user.get("buy_balance_mode", "CARD_ENFORCED")
+    down = int(user.get("buy_auto_scale_down", 1))
+    up = int(user.get("buy_auto_scale_up", 1))
+
+    text = (
+        "💳 <b>Режим балансу та авто-масштабування (TAKER BUY)</b>\n\n"
+        "Оберіть як бот повинен перевіряти суму на ваших картках:\n\n"
+        "1️⃣ <b>💳 З урахуванням балансу карт (CARD_ENFORCED):</b>\n"
+        "   Перевіряє, щоб сума на активних картках була не меншою за закупівлю. Якщо грошей недостатньо — виводить попередження в чат.\n\n"
+        "2️⃣ <b>🔓 Ручний / Без перевірки карт (MANUAL_STRICT):</b>\n"
+        "   Шукає ордери під вказаний об'єм USDT, не зважаючи на баланси у боті.\n\n"
+        "3️⃣ <b>⚡ Авто-масштабування під баланс (AUTO_SCALE):</b>\n"
+        "   Якщо баланс картки зменшився (наприклад, після купівлі) або поповнився — бот автоматично масштабує параметр закупівлі USDT!"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text=f"💳 З урахуванням карт {'✅' if mode == 'CARD_ENFORCED' else ''}",
+        callback_data="tbuy_bm:CARD_ENFORCED"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"🔓 Без перевірки карт {'✅' if mode == 'MANUAL_STRICT' else ''}",
+        callback_data="tbuy_bm:MANUAL_STRICT"
+    ))
+    builder.row(InlineKeyboardButton(
+        text=f"⚡ Авто-масштабування {'✅' if mode == 'AUTO_SCALE' else ''}",
+        callback_data="tbuy_bm:AUTO_SCALE"
+    ))
+
+    if mode == "AUTO_SCALE":
+        builder.row(
+            InlineKeyboardButton(text=f"📉 Авто-зменшення {'✅' if down else '❌'}", callback_data="tbuy_scale:down"),
+            InlineKeyboardButton(text=f"📈 Авто-збільшення {'✅' if up else '❌'}", callback_data="tbuy_scale:up"),
+        )
+
+    builder.row(InlineKeyboardButton(text="🔙 Назад до пресету", callback_data="smode:TAKER_BUY"))
+
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+    if hasattr(call, "answer"):
         await call.answer()
+
+
+@router.callback_query(F.data.startswith("tbuy_bm:"))
+async def cb_tbuy_bal_mode(call: CallbackQuery):
+    new_mode = call.data.split(":")[1]
+    await _db.update_buy_balance_mode(call.from_user.id, mode=new_mode)
+    await _show_tbuy_balance_mode_menu(call, call.from_user.id)
+
+
+@router.callback_query(F.data.startswith("tbuy_scale:"))
+async def cb_tbuy_scale_toggle(call: CallbackQuery):
+    action = call.data.split(":")[1]
+    user = await _db.get_user_by_id(call.from_user.id)
+    if action == "down":
+        cur_down = int(user.get("buy_auto_scale_down", 1))
+        await _db.update_buy_balance_mode(call.from_user.id, scale_down=0 if cur_down else 1)
+    elif action == "up":
+        cur_up = int(user.get("buy_auto_scale_up", 1))
+        await _db.update_buy_balance_mode(call.from_user.id, scale_up=0 if cur_up else 1)
+    await _show_tbuy_balance_mode_menu(call, call.from_user.id)
 
 
 # =========================================================================

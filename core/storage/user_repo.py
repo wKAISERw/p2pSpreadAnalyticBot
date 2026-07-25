@@ -328,6 +328,7 @@ class UserRepo:
                 # Fallback: якщо buy/sell порожні — використовуємо загальні
                 buy_banks = [c for c in (buy_codes_raw.split(",") if buy_codes_raw else general_banks) if c in valid_keys]
                 sell_banks = [c for c in (sell_codes_raw.split(",") if sell_codes_raw else general_banks) if c in valid_keys]
+                r_dict = dict(row)
                 result.append({
                     "user_id": row["user_id"],
                     "chat_id": row["telegram_chat_id"],
@@ -364,6 +365,9 @@ class UserRepo:
                     "taker_buy_speed": row["taker_buy_speed"],
                     "taker_buy_price_strategy": row["taker_buy_price_strategy"],
                     "taker_buy_price_from": float(row["taker_buy_price_from"]),
+                    "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
+                    "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down") or 1),
+                    "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up") or 1),
                 })
             return result
         except Exception as e:
@@ -429,6 +433,7 @@ class UserRepo:
             # Fallback
             buy_banks = [c for c in (buy_codes_raw.split(",") if buy_codes_raw else general_banks) if c in valid_keys]
             sell_banks = [c for c in (sell_codes_raw.split(",") if sell_codes_raw else general_banks) if c in valid_keys]
+            r_dict = dict(row)
             return {
                 "user_id": row["user_id"],
                 "chat_id": row["telegram_chat_id"],
@@ -465,6 +470,9 @@ class UserRepo:
                 "taker_buy_speed": row["taker_buy_speed"],
                 "taker_buy_price_strategy": row["taker_buy_price_strategy"],
                 "taker_buy_price_from": float(row["taker_buy_price_from"]),
+                "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
+                "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down") or 1),
+                "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up") or 1),
             }
         except Exception as e:
             logger.error("get_user_by_id [%d]: %s", user_id, e)
@@ -792,3 +800,30 @@ class UserRepo:
         except Exception as e:
             logger.error("is_subsidy_used error: %s", e)
             return False
+
+    async def update_taker_buy_amount(self, user_id: int, new_amount: float) -> None:
+        if not self._db:
+            return
+        await self._db.execute("UPDATE scanner_users SET taker_buy_amount = ? WHERE user_id = ?", (new_amount, user_id))
+        await self._db.commit()
+
+    async def update_buy_balance_mode(self, user_id: int, mode: Optional[str] = None, scale_down: Optional[int] = None, scale_up: Optional[int] = None) -> None:
+        if not self._db:
+            return
+        updates = []
+        params = []
+        if mode is not None:
+            updates.append("buy_balance_mode = ?")
+            params.append(mode)
+        if scale_down is not None:
+            updates.append("buy_auto_scale_down = ?")
+            params.append(scale_down)
+        if scale_up is not None:
+            updates.append("buy_auto_scale_up = ?")
+            params.append(scale_up)
+        if not updates:
+            return
+        params.append(user_id)
+        sql = f"UPDATE scanner_users SET {', '.join(updates)} WHERE user_id = ?"
+        await self._db.execute(sql, tuple(params))
+        await self._db.commit()

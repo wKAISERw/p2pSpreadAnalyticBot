@@ -124,7 +124,10 @@ def card_details_kb(card_id: str, status: str, bank_name: str = "", is_warmed_up
     )
     
     if bank_name.lower() == "monobank":
-        builder.row(InlineKeyboardButton(text="🔗 Підключити Mono Webhook", callback_data=f"card:mono_setup:{card_id}"))
+        builder.row(
+            InlineKeyboardButton(text="🔑 Mono Token", callback_data=f"card:mono_setup:{card_id}"),
+            InlineKeyboardButton(text="🐈 Трекер коштів", callback_data=f"card:mono_tracker:{card_id}")
+        )
     
     builder.row(InlineKeyboardButton(text="⚙️ Індивідуальні ліміти", callback_data=f"card:limits:{card_id}"))
     

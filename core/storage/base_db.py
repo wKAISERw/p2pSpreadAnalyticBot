@@ -672,6 +672,16 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "max_spread_pct", "REAL DEFAULT 0.0")
         # 🚀 SNIPER: правила снайпер-моду (JSON масив)
         await self._ensure_column("scanner_users", "sniper_rules", "TEXT DEFAULT '[]'")
+
+        # 🚀 Monobank Tracker & Buy Mode Auto-Scaler
+        await self._ensure_column("cards", "mono_tracker_enabled", "INTEGER DEFAULT 1")
+        await self._ensure_column("cards", "mono_tracker_mode", "TEXT DEFAULT 'INCOME'")
+        await self._ensure_column("cards", "mono_tracker_fields", "TEXT DEFAULT '{\"amount\":1,\"sender\":1,\"comment\":1,\"time\":1,\"card\":1,\"balance\":1,\"p2p\":1}'")
+
+        await self._ensure_column("scanner_users", "buy_balance_mode", "TEXT DEFAULT 'CARD_ENFORCED'")
+        await self._ensure_column("scanner_users", "buy_auto_scale_down", "INTEGER DEFAULT 1")
+        await self._ensure_column("scanner_users", "buy_auto_scale_up", "INTEGER DEFAULT 1")
+
         try:
             await self.db.execute("ALTER TABLE snapshots ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         except Exception:

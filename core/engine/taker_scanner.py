@@ -114,45 +114,7 @@ class TakerScanner:
 
                 order_price = float(order.price)
 
-                # ── In-Memory Card Pre-filtering ──
-                if card_matching_active:
-                    from bot.formatters import _bank_code_to_db
-                    card_bank_db = _normalize_bank(_bank_code_to_db(bank_code))
-                    if not card_bank_db or card_bank_db not in user_cards_by_bank:
-                        continue
-                    
-                    # Calculate target UAH amount for card limit checks
-                    target_uah = order_min
-                    if mode == "TAKER_SELL":
-                        t_amount = float(user.get("taker_sell_amount", 0))
-                        if t_amount > 0:
-                            target_uah = t_amount * order_price
-                    elif mode == "TAKER_BUY":
-                        t_amount = float(user.get("taker_buy_amount", 0))
-                        if t_amount > 0:
-                            target_uah = t_amount * order_price
-
-                    # For TAKER_BUY we need enough total UAH balance across active cards
-                    if mode == "TAKER_BUY":
-                        total_bal = 0.0
-                        for c in user_cards_by_bank[card_bank_db]:
-                            card_id = c["id"]
-                            pending_out = 0.0
-                            async with self.db._db.execute(
-                                """
-                                SELECT SUM(l.amount) as total
-                                FROM card_order_legs l
-                                JOIN card_orders o ON l.order_id = o.id
-                                WHERE l.card_id = ? AND l.leg_status = 'pending' AND o.direction = 'out'
-                                """,
-                                (card_id,)
-                            ) as cur:
-                                row = await cur.fetchone()
-                                if row and row["total"]:
-                                    pending_out = float(row["total"])
-                            total_bal += max(0.0, float(c.get("balance", 0.0)) - pending_out)
-                        if total_bal < target_uah:
-                            continue
+                order_price = float(order.price)
 
                 # ── Фільтри TAKER_SELL (використовуємо обчислений min_sell_price) ──
                 if mode == "TAKER_SELL":
@@ -187,7 +149,7 @@ class TakerScanner:
                                 continue
 
                 # ── Фільтри TAKER_BUY ────────────────────────────────────────────────
-                if mode == "TAKER_BUY":
+                elif mode == "TAKER_BUY":
                     strategy = user.get("taker_buy_price_strategy", "any")
                     price_to = float(user.get("taker_buy_max_price", 0))
                     price_from = float(user.get("taker_buy_price_from", 0))
@@ -225,6 +187,66 @@ class TakerScanner:
                         else:
                             if order_min > fiat_needed:
                                 continue
+
+                # ── In-Memory Card Pre-filtering (Тільки для ордерів, що відповідають ціновій стратегії) ──
+                if card_matching_active:
+                    from bot.formatters import _bank_code_to_db
+                    card_bank_db = _normalize_bank(_bank_code_to_db(bank_code))
+                    if not card_bank_db or card_bank_db not in user_cards_by_bank:
+                        continue
+                    
+                    # Calculate target UAH amount for card limit checks
+                    target_uah = order_min
+                    if mode == "TAKER_SELL":
+                        t_amount = float(user.get("taker_sell_amount", 0))
+                        if t_amount > 0:
+                            target_uah = t_amount * order_price
+                    elif mode == "TAKER_BUY":
+                        t_amount = float(user.get("taker_buy_amount", 0))
+                        if t_amount > 0:
+                            target_uah = t_amount * order_price
+
+                    # For TAKER_BUY we check total UAH balance based on buy_balance_mode
+                    if mode == "TAKER_BUY":
+                        buy_bal_mode = user.get("buy_balance_mode", "CARD_ENFORCED")
+                        if buy_bal_mode == "MANUAL_STRICT":
+                            pass  # Ігноруємо перевірку балансів карт, шукаємо суто під вказаний параметр
+                        else:
+                            total_bal = 0.0
+                            for c in user_cards_by_bank[card_bank_db]:
+                                card_id = c["id"]
+                                pending_out = 0.0
+                                async with self.db._db.execute(
+                                    """
+                                    SELECT SUM(l.amount) as total
+                                    FROM card_order_legs l
+                                    JOIN card_orders o ON l.order_id = o.id
+                                    WHERE l.card_id = ? AND l.leg_status = 'pending' AND o.direction = 'out'
+                                    """,
+                                    (card_id,)
+                                ) as cur:
+                                    row = await cur.fetchone()
+                                    if row and row["total"]:
+                                        pending_out = float(row["total"])
+                                total_bal += max(0.0, float(c.get("balance", 0.0)) - pending_out)
+
+                            if total_bal < target_uah:
+                                # Якщо різниця між необхідною сумою та балансом незначна (< 50 грн або < 3%), не відкидаємо ордер і не спамимо варнінг
+                                if target_uah - total_bal <= 50.0 or total_bal >= target_uah * 0.95:
+                                    pass
+                                elif buy_bal_mode == "AUTO_SCALE" and int(user.get("buy_auto_scale_down", 1)):
+                                    calc_usdt = round(total_bal / order_price, 2)
+                                    if calc_usdt < t_amount and calc_usdt >= 5.0:
+                                        user_id = user["user_id"]
+                                        await self.db.update_taker_buy_amount(user_id, calc_usdt)
+                                        await notify_buy_autoscale(user, total_bal, t_amount, calc_usdt, order_price, is_down=True)
+                                        t_amount = calc_usdt
+                                        target_uah = calc_usdt * order_price
+                                    elif calc_usdt < 5.0:
+                                        continue
+                                else:
+                                    await notify_insufficient_buy_balance(user, total_bal, target_uah, t_amount, order_price)
+                                    continue
 
                 if not self._merchant_ok(order, mf, emf, used_subs):
                     continue
@@ -270,6 +292,20 @@ class TakerScanner:
                     crypto_available=True
                 )
                 if match_res.status not in ("success", "needs_split"):
+                    # 🚀 ТАЙТ-ТОЛЕРАНТНІСТЬ: Якщо суми на картці не вистачає всього на трохи (< 3% або < 50 ₴), підганяємо під доступний баланс
+                    if mode == "TAKER_BUY" and target_uah > 0:
+                        card_bal = float(getattr(match_res, "available_balance", 0) or 0.0)
+                        if card_bal > 0 and (target_uah - card_bal <= 50.0 or card_bal >= target_uah * 0.95):
+                            fit_res = await self.card_engine.run(
+                                user_id=user["user_id"],
+                                bank=card_bank_db,
+                                amount=card_bal,
+                                direction=card_direction,
+                                crypto_available=True
+                            )
+                            if fit_res.status in ("success", "needs_split"):
+                                matched.append(order)
+                                continue
                     continue
             matched.append(order)
 
@@ -336,3 +372,92 @@ class TakerScanner:
                 return False
 
         return True
+
+
+_last_insufficient_warn = {}
+
+
+async def notify_buy_autoscale(user: dict, total_bal: float, old_usdt: float, new_usdt: float, est_rate: float, is_down: bool):
+    from bot.handlers.core import _bot
+    user_id = user.get("user_id")
+    if not user_id or not _bot:
+        return
+    old_uah = old_usdt * est_rate
+    new_uah = new_usdt * est_rate
+    icon = "📉" if is_down else "📈"
+    verb = "зменшився" if is_down else "збільшився"
+    text = (
+        f"{icon} <b>Баланс картки {verb}! Суму купівлі авто-масштабовано</b>\n\n"
+        f"💳 Доступно на картках: <b>{total_bal:,.2f} ₴</b>\n"
+        f"📊 Оновлено параметр купівлі:\n"
+        f"<b>{old_usdt:,.2f} USDT</b> (~{old_uah:,.0f} ₴) ➔ <b>{new_usdt:,.2f} USDT</b> (~{new_uah:,.0f} ₴)\n"
+        f"<i>(курсом ~{est_rate:.2f} ₴/USDT)</i>"
+    )
+    try:
+        await _bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to send autoscale notification to {user_id}: {e}")
+
+
+async def notify_insufficient_buy_balance(user: dict, total_bal: float, target_uah: float, t_amount: float, est_rate: float):
+    from bot.handlers.core import _bot
+    import time
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    user_id = user.get("user_id")
+    if not user_id or not _bot:
+        return
+    now = time.time()
+    # Throttle warnings to once per 15 minutes per user
+    if now - _last_insufficient_warn.get(user_id, 0) < 900:
+        return
+    _last_insufficient_warn[user_id] = now
+    
+    needed_uah = t_amount * est_rate if t_amount > 0 else target_uah
+    calc_usdt = round(total_bal / est_rate, 2) if est_rate > 0 else 0.0
+
+    kb_buttons = [
+        [InlineKeyboardButton(text="⚡ Увімкнути авто-масштабування", callback_data="tbuy_scale_on")]
+    ]
+    if calc_usdt >= 5.0:
+        kb_buttons.append([InlineKeyboardButton(text=f"✏️ Встановити {calc_usdt:.2f} USDT під баланс", callback_data=f"tbuy_fit_bal:{calc_usdt}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+
+    text = (
+        f"⚠️ <b>Недостатньо коштів на картці для купівлі!</b>\n\n"
+        f"💳 Доступно на картці: <b>{total_bal:,.2f} ₴</b>\n"
+        f"💸 Необхідно для закупівлі: <b>{t_amount:,.2f} USDT (~{needed_uah:,.0f} ₴)</b>\n\n"
+        f"<i>💡 Натисніть кнопку нижче, щоб миттєво підлаштувати суму під баланс або увімкнути авто-масштабування:</i>"
+    )
+    try:
+        await _bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=kb)
+    except Exception as e:
+        logger.error(f"Failed to send insufficient balance warning to {user_id}: {e}")
+
+
+async def trigger_buy_autoscale_check(db, user_id: int):
+    if not db:
+        return
+    user = await db.get_user_by_id(user_id)
+    if not user or user.get("scanner_mode") != "TAKER_BUY":
+        return
+    if user.get("buy_balance_mode") != "AUTO_SCALE":
+        return
+
+    cards = await db.get_user_cards(user_id)
+    if not cards:
+        return
+    
+    total_bal = sum(max(0.0, float(c.get("balance", 0.0))) for c in cards if c.get("status") == "active")
+    cur_usdt = float(user.get("taker_buy_amount", 0.0))
+    est_rate = float(user.get("taker_buy_max_price", 0.0)) or 40.0
+
+    calc_usdt = round(total_bal / est_rate, 2)
+    auto_down = int(user.get("buy_auto_scale_down", 1))
+    auto_up = int(user.get("buy_auto_scale_up", 1))
+
+    if calc_usdt < cur_usdt and auto_down and calc_usdt >= 5.0:
+        await db.update_taker_buy_amount(user_id, calc_usdt)
+        await notify_buy_autoscale(user, total_bal, cur_usdt, calc_usdt, est_rate, is_down=True)
+    elif calc_usdt > cur_usdt and auto_up and cur_usdt > 0:
+        await db.update_taker_buy_amount(user_id, calc_usdt)
+        await notify_buy_autoscale(user, total_bal, cur_usdt, calc_usdt, est_rate, is_down=False)

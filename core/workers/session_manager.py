@@ -1,5 +1,6 @@
 # core/workers/session_manager.py
 import asyncio
+from contextlib import suppress
 import logging
 import os
 import time
@@ -161,6 +162,16 @@ class SessionManager:
     async def _capture_session(self, exchange: str, target: dict, headless: Optional[bool] = None):
         user_data_dir = Path(f"data/browser_profiles/{exchange.lower()}")
         user_data_dir.mkdir(parents=True, exist_ok=True)
+
+        # 🧹 Прибираємо старі залишкові файли блокування Chromium (SingletonLock)
+        for lock_name in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
+            lock_file = user_data_dir / lock_name
+            if lock_file.exists() or lock_file.is_symlink():
+                try:
+                    lock_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
         captured_event = asyncio.Event()
 
         lock = self._get_lock(exchange)
@@ -196,14 +207,24 @@ class SessionManager:
                                 ignore_default_args=["--enable-automation"],
                                 args=[
                                     "--disable-blink-features=AutomationControlled",
-                                        "--window-size=1280,720",
+                                    "--window-size=1280,720",
                                 ],
                             )
                         except Exception as launch_err:
                             if not headless:
-                                logger.error(f"Failed to launch headed browser: {launch_err}")
-                                raise Exception("Відсутній графічний дисплей на сервері (VPS). Будь ласка, скористайтеся Bookmarklet-скриптом для оновлення сесії з телефона/ПК.")
-                            raise launch_err
+                                logger.warning(f"Failed to launch headed browser ({launch_err}). Falling back to headless mode on VPS...")
+                                context = await p.chromium.launch_persistent_context(
+                                    user_data_dir=str(user_data_dir),
+                                    headless=True,
+                                    user_agent=DEFAULT_USER_AGENT,
+                                    ignore_default_args=["--enable-automation"],
+                                    args=[
+                                        "--disable-blink-features=AutomationControlled",
+                                        "--window-size=1280,720",
+                                    ],
+                                )
+                            else:
+                                raise launch_err
 
                     stealth_plugin = Stealth()
                     await stealth_plugin.apply_stealth_async(context)
@@ -739,9 +760,17 @@ class SessionManager:
                     headless = False
                     
                 async with async_playwright() as p:
-                    # Запускаємо в ізольованому профайлі
                     user_data_dir = Path(f"data/browser_profiles/qr_{exchange.lower()}_{user_id}")
                     user_data_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    # 🧹 Прибираємо залишкові файли блокування Chromium (SingletonLock)
+                    for lock_name in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
+                        lock_file = user_data_dir / lock_name
+                        if lock_file.exists() or lock_file.is_symlink():
+                            try:
+                                lock_file.unlink(missing_ok=True)
+                            except Exception:
+                                pass
                     
                     # Bybit потребує --disable-http2 (їхній сервер повертає ERR_HTTP2_PROTOCOL_ERROR)
                     browser_args = [
@@ -944,7 +973,8 @@ class SessionManager:
                         await qr_el.screenshot(path=str(qr_path))
                         
                         # Видаляємо тимчасовий статус-меседж
-                        await status_msg.delete()
+                        with suppress(Exception):
+                            await status_msg.delete()
                         
                         # Надсилаємо QR-код з кнопкою скасування
                         caption = (
@@ -974,41 +1004,98 @@ class SessionManager:
                     # Запускаємо цикл опитування (polling) успіху логіну
                     start_time = time.time()
                     last_refresh_time = time.time()
+                    last_fv_update_time = 0.0
                     authenticated = False
+                    max_duration = 180  # 🚀 Збільшено таймаут до 180 секунд для спокійної верифікації з телефона
                     
-                    while time.time() - start_time < 90:
-                        # Перевеверяємо подію скасування
+                    while time.time() - start_time < max_duration:
+                        # Перевіряємо подію скасування
                         if cancel_event.is_set():
                             logger.info(f"QR Login {exchange} canceled by user.")
                             break
                             
-                        # Детекція facial verification (OKX)
+                        # Детекція facial verification (OKX / Binance / Bybit)
+                        is_fv_active = bool(self._active_qr_sessions[session_key].get("notified_facial"))
                         try:
                             page_text_fv = await page.evaluate("document.body ? document.body.innerText : ''")
-                            if "facial verification" in page_text_fv.lower() or "face verification" in page_text_fv.lower():
-                                if not self._active_qr_sessions[session_key].get("notified_facial"):
-                                    self._active_qr_sessions[session_key]["notified_facial"] = True
-                                    logger.info(f"Facial verification detected for {exchange}!")
-                                    
-                                    # Автоматично натискаємо "Get started"
+                            page_text_fv_lower = page_text_fv.lower()
+                            fv_keywords = [
+                                "facial verification", "face verification", "scan your face",
+                                "switch to phone", "verify your identity", "use phone camera",
+                                "get ready for facial verification", "верификация лица", "верифікація обличчя"
+                            ]
+                            if any(k in page_text_fv_lower for k in fv_keywords):
+                                is_fv_active = True
+
+                            if is_fv_active:
+                                logger.info(f"Facial verification modal active for {exchange}!")
+                                
+                                # 1. Закриваємо Cookie Banner якщо він заважає
+                                try:
+                                    cookie_btn = page.locator("button:has-text('Accept All Cookies'), button#onetrust-accept-btn-handler").first
+                                    if await cookie_btn.count() > 0 and await cookie_btn.is_visible():
+                                        await cookie_btn.click(timeout=1000)
+                                        logger.info("Dismissed OKX cookie banner")
+                                except Exception:
+                                    pass
+
+                                # 2. ПРІОРИТЕТ 1: Натискаємо кнопку "Switch to phone" напряму через DOM & Event Dispatch
+                                switched = False
+                                try:
+                                    switched = await page.evaluate("""() => {
+                                        const els = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
+                                        const target = els.reverse().find(el => {
+                                            const t = (el.innerText || el.textContent || '').trim();
+                                            return t === 'Switch to phone' || t === 'Перейти на телефон';
+                                        });
+                                        if (target) {
+                                            target.click();
+                                            target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                                            return true;
+                                        }
+                                        return false;
+                                    }""")
+                                    if switched:
+                                        logger.info("✅ Dispatched click to 'Switch to phone' button successfully!")
+                                        await page.wait_for_timeout(1000)
+                                except Exception as switch_err:
+                                    logger.debug(f"Failed JS click Switch to phone: {switch_err}")
+
+                                # 3. ПРІОРИТЕТ 2: Якщо "Switch to phone" відсутня, натискаємо "Get started" (Крок 1/2)
+                                if not switched:
                                     try:
-                                        get_started_btn = await page.query_selector("button:has-text('Get started'), button:has-text('Start'), button:has-text('Начать'), button:has-text('Розпочати')")
-                                        if get_started_btn and await get_started_btn.is_visible():
-                                            await get_started_btn.click()
-                                            logger.info("Clicked 'Get started' for facial verification")
-                                            await page.wait_for_timeout(2000)
+                                        get_started_done = await page.evaluate("""() => {
+                                            const els = Array.from(document.querySelectorAll('button, a, [role="button"], div, span'));
+                                            const target = els.reverse().find(el => {
+                                                const t = (el.innerText || el.textContent || '').trim();
+                                                return t === 'Get started' || t === 'Start' || t === 'Розпочати' || t === 'Начать';
+                                            });
+                                            if (target) {
+                                                target.click();
+                                                target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                                                return true;
+                                            }
+                                            return false;
+                                        }""")
+                                        if get_started_done:
+                                            logger.info("Clicked 'Get started' via JS for facial verification")
+                                            await page.wait_for_timeout(1000)
                                     except Exception as fv_click_err:
                                         logger.debug(f"Failed to click Get started: {fv_click_err}")
-                                    
-                                    # Скріншот сторінки та повідомлення користувачу
-                                    seconds_left = int(90 - (time.time() - start_time))
+
+                                # Оновлюємо статус у Telegram (перший раз або кожні 10 сек)
+                                now_ts = time.time()
+                                if not self._active_qr_sessions[session_key].get("notified_facial") or (now_ts - last_fv_update_time > 10):
+                                    self._active_qr_sessions[session_key]["notified_facial"] = True
+                                    last_fv_update_time = now_ts
+                                    seconds_left = max(0, int(max_duration - (now_ts - start_time)))
                                     await page.screenshot(path=str(qr_path))
                                     caption_fv = (
                                         f"🔐 <b>Вхід через QR-код для {exchange}</b>\n\n"
-                                        f"🪪 <b>Потрібна верифікація обличчя!</b>\n\n"
-                                        f"👉 Відкрий додаток {exchange} на телефоні та пройди перевірку обличчя.\n"
-                                        f"Бот чекає на завершення...\n\n"
-                                        f"<i>⏳ Залишилось часу: {seconds_left} сек.</i>"
+                                        f"🪪 <b>Потрібна верифікація обличчя (Face Verification)!</b>\n\n"
+                                        f"👉 <b>Бот автоматично натиснув «Get started» та «Switch to phone».</b>\n"
+                                        f"Будь ласка, відкрийте додаток {exchange} на своєму телефоні та завершіть перевірку обличчя там!\n\n"
+                                        f"<i>⏳ Залишилось часу: {seconds_left} сек. Бот очікує...</i>"
                                     )
                                     qr_msg = self._active_qr_sessions[session_key].get("qr_msg")
                                     if qr_msg:
@@ -1025,14 +1112,14 @@ class SessionManager:
                         except Exception as fv_err:
                             logger.debug(f"Facial verification check error: {fv_err}")
                         
-                        # Детекція 2FA для будь-якої біржі
+                        # Детекція 2FA для будь-якої біржі (лише якщо немає активної верифікації обличчя)
                         try:
                             has_2fa = False
                             text_desc = ""
                             
-                            # Отримуємо весь видимий текст сторінки для надійного аналізу
-                            page_text = await page.evaluate("document.body ? document.body.innerText : ''")
-                            page_text_lower = page_text.lower()
+                            if not is_fv_active:
+                                page_text = await page.evaluate("document.body ? document.body.innerText : ''")
+                                page_text_lower = page_text.lower()
                             
                             if exchange == "OKX":
                                 okx_indicators = [
@@ -1448,28 +1535,24 @@ class SessionManager:
                                 # Чекаємо на перехоплення (запити асинхронні)
                                 await page.wait_for_timeout(4000)
 
-                                if not captured_event.is_set():
-                                    # Fallback: зберігаємо cookies напряму якщо fetch не спрацював
-                                    logger.warning("Bybit: fetch() не перехоплено, зберігаємо cookies напряму...")
-                                    cookies_list = await browser_context.cookies()
-                                    cookies_dict_direct = {c["name"]: c["value"] for c in cookies_list}
-                                    # Мінімальний headers dict (cookies — основне для Bybit)
-                                    fallback_headers = {
-                                        "content-type": "application/json;charset=UTF-8",
-                                        "accept": "application/json",
-                                    }
-                                    await self._db.save_auth_session(exchange, fallback_headers, cookies_dict_direct, user_id)
-                                    captured_event.set()
-                                    logger.info("Bybit: сесія збережена через прямий cookie capture")
+                                cookies_list = await browser_context.cookies()
+                                cookies_dict_direct = {c["name"]: c["value"] for c in cookies_list}
+                                captured_hdr = self._active_qr_sessions.get(session_key, {}).get("headers") or {
+                                    "content-type": "application/json;charset=UTF-8",
+                                    "accept": "application/json",
+                                    "User-Agent": DEFAULT_USER_AGENT
+                                }
+                                await self._db.save_auth_session(exchange, captured_hdr, cookies_dict_direct, user_id)
+                                captured_event.set()
+                                logger.info(f"Bybit: сесія збережена у БД ({len(cookies_dict_direct)} cookies)")
                             except Exception as bybit_fetch_err:
                                 logger.error(f"Bybit browser fetch error: {bybit_fetch_err}")
-                                # Ultimate fallback: cookies напряму
                                 try:
                                     cookies_list = await browser_context.cookies()
                                     cookies_dict_direct = {c["name"]: c["value"] for c in cookies_list}
                                     await self._db.save_auth_session(exchange, {}, cookies_dict_direct, user_id)
                                     captured_event.set()
-                                    logger.info("Bybit: ultimate fallback — cookies збережено напряму")
+                                    logger.info("Bybit: fallback cookies збережено")
                                 except Exception:
                                     pass
                         else:

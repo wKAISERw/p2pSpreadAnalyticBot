@@ -91,4 +91,64 @@ async def mono_webhook(card_id: str, secret: str, request: Request):
         )
         logger.info(f"ℹ️ Webhook recorded personal transaction for card {card['id']}")
 
+    # 🚀 Monobank Tracker Notification
+    owner_id = card.get("owner_id")
+    tracker_enabled = int(settings_card.get("tracker_enabled", 1))
+    tracker_mode = settings_card.get("tracker_mode", "INCOME")
+    fields_raw = settings_card.get("tracker_fields") or '{}'
+
+    try:
+        import json
+        fields_dict = json.loads(fields_raw) if isinstance(fields_raw, str) else fields_raw
+    except Exception:
+        fields_dict = {"amount": 1, "sender": 1, "comment": 1, "time": 1, "card": 1, "balance": 1, "p2p": 1}
+
+    should_notify = tracker_enabled == 1 and (tracker_mode == "ALL" or (tracker_mode == "INCOME" and amount > 0))
+
+    if should_notify and owner_id:
+        try:
+            from bot.handlers.core import _bot
+            import time
+            from datetime import datetime
+
+            if _bot:
+                lines = ["🐈 <b>Monobank — Нова транзакція!</b>\n"]
+                if fields_dict.get("amount", 1):
+                    icon = "🟢 +" if amount > 0 else "🔴 "
+                    lines.append(f"💰 <b>Сума:</b> {icon}{abs_amount:,.2f} ₴")
+
+                if fields_dict.get("sender", 1):
+                    sender_name = stmt.get("counterName") or stmt.get("description") or "Невідомо"
+                    lines.append(f"👤 <b>Відправник/Опис:</b> {sender_name}")
+
+                if fields_dict.get("comment", 1) and stmt.get("comment"):
+                    lines.append(f"💬 <b>Коментар:</b> <i>{stmt.get('comment')}</i>")
+
+                if fields_dict.get("time", 1):
+                    ts = stmt.get("time", time.time())
+                    time_str = datetime.fromtimestamp(ts).strftime("%d.%m.%Y %H:%M:%S")
+                    lines.append(f"⏰ <b>Час:</b> {time_str}")
+
+                if fields_dict.get("card", 1):
+                    card_label = card.get("label") or f"Картка *{card.get('last_four', '')}"
+                    lines.append(f"💳 <b>Картка:</b> {card_label}")
+
+                if fields_dict.get("balance", 1):
+                    lines.append(f"📊 <b>Новий залишок:</b> {true_balance:,.2f} ₴")
+
+                if fields_dict.get("p2p", 1) and order_leg:
+                    lines.append(f"\n🔗 <b>✅ Співпадає з P2P ордером #{order_leg.get('order_id', order_leg.get('id', ''))}!</b>")
+
+                await _bot.send_message(chat_id=owner_id, text="\n".join(lines), parse_mode="HTML")
+        except Exception as notify_err:
+            logger.error(f"Failed to send Mono tracker notification to {owner_id}: {notify_err}")
+
+    # 🚀 Trigger Buy Mode Auto-scaler check
+    if owner_id:
+        try:
+            from core.engine.taker_scanner import trigger_buy_autoscale_check
+            await trigger_buy_autoscale_check(db, owner_id)
+        except Exception as auto_err:
+            logger.debug(f"Auto-scale check error: {auto_err}")
+
     return {"status": "ok"}

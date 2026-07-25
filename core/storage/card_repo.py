@@ -434,9 +434,37 @@ class CardRepo:
     async def get_card_mono_settings(self, card_id: str) -> dict:
         if not self._db:
             return {}
-        async with self._db.execute("SELECT mono_x_token_encrypted as x_token_encrypted, mono_webhook_secret as webhook_secret FROM cards WHERE id=?", (card_id,)) as cur:
+        async with self._db.execute(
+            """SELECT mono_x_token_encrypted as x_token_encrypted, mono_webhook_secret as webhook_secret,
+                      COALESCE(mono_tracker_enabled, 1) as tracker_enabled,
+                      COALESCE(mono_tracker_mode, 'INCOME') as tracker_mode,
+                      COALESCE(mono_tracker_fields, '{"amount":1,"sender":1,"comment":1,"time":1,"card":1,"balance":1,"p2p":1}') as tracker_fields
+               FROM cards WHERE id=?""", (card_id,)
+        ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else {}
+
+    async def update_mono_tracker_config(self, card_id: str, enabled: Optional[int] = None, mode: Optional[str] = None, fields: Optional[dict] = None) -> None:
+        if not self._db:
+            return
+        import json
+        updates = []
+        params = []
+        if enabled is not None:
+            updates.append("mono_tracker_enabled = ?")
+            params.append(enabled)
+        if mode is not None:
+            updates.append("mono_tracker_mode = ?")
+            params.append(mode)
+        if fields is not None:
+            updates.append("mono_tracker_fields = ?")
+            params.append(json.dumps(fields))
+        if not updates:
+            return
+        params.append(card_id)
+        sql = f"UPDATE cards SET {', '.join(updates)} WHERE id=?"
+        await self._db.execute(sql, tuple(params))
+        await self._db.commit()
 
     async def save_card_mono_settings(self, card_id: str, x_token_encrypted: str, webhook_secret: str) -> None:
         if not self._db:

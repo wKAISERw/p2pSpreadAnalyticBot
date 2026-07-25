@@ -731,17 +731,21 @@ class ReviewFetcher:
         from curl_cffi.requests import AsyncSession as CurlSession
 
         headers_dict, cookies_dict, _ = await self._db.get_auth_session("OKX")
-        if not headers_dict:
-            raise RuntimeError("AuthError: OKX browser session not captured")
+        if not headers_dict and not cookies_dict:
+            return 0, 0, 0, []
 
-        headers_dict = {k.lower(): v for k, v in headers_dict.items()}
+        headers_dict = {k.lower(): v for k, v in headers_dict.items()} if headers_dict else {}
+        cookies_dict = cookies_dict or {}
 
         # Беремо лише потрібні заголовки з перехопленої сесії
         req_headers: dict[str, str] = {
             "accept": "application/json",
             "content-type": "application/json",
             "app-type": "web",
-            "x-locale": "ru_RU",
+            "x-locale": "uk_UA",
+            "origin": "https://www.okx.com",
+            "referer": "https://www.okx.com/p2p-markets/uah/buy-usdt",
+            "x-p2p-client": "web",
         }
         for key in ("authorization", "devid", "x-id-group", "x-site-info",
                     "user-agent", "x-client-signature", "x-client-signature-version"):
@@ -750,13 +754,25 @@ class ReviewFetcher:
                 req_headers[key] = val
 
         if "authorization" not in req_headers:
-            raise RuntimeError("AuthError: OKX authorization header missing in session")
+            token_val = cookies_dict.get("token")
+            if token_val:
+                req_headers["authorization"] = f"Bearer {token_val}"
 
         from config import settings
         proxies = {"http": settings.proxy_url, "https": settings.proxy_url} if settings.proxy_url else None
 
         try:
             async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
+                # Очищаємо дефолтні заголовки, які можуть дублюватись/конфліктувати
+                session.headers.pop("User-Agent", None)
+                session.headers.pop("user-agent", None)
+                
+                # Оновлюємо сесію поточними заголовками
+                title_headers = {}
+                for k, v in req_headers.items():
+                    title_headers[k.title()] = v
+                session.headers.update(title_headers)
+
                 # 1) Загальна статистика: від покупців та від продавців
                 ts = int(time.time() * 1000)
                 url_all = f"https://www.okx.com/v3/c2c/review/history?t={ts}"
@@ -779,8 +795,8 @@ class ReviewFetcher:
                 }
 
                 resp_buyer, resp_seller = await asyncio.gather(
-                    session.post(url_all, json=payload_buyer, headers=req_headers, cookies=cookies_dict, timeout=10),
-                    session.post(url_all, json=payload_seller, headers=req_headers, cookies=cookies_dict, timeout=10),
+                    session.post(url_all, json=payload_buyer, cookies=cookies_dict, timeout=10),
+                    session.post(url_all, json=payload_seller, cookies=cookies_dict, timeout=10),
                     return_exceptions=True
                 )
 
@@ -891,16 +907,9 @@ class ReviewFetcher:
                 )
                 return pos, neg, neutral, bad_texts
 
-        except RuntimeError as re:
-            re_str = str(re)
-            if "AuthError" in re_str:
-                logger.error("🚨 OKX session burnout detected! %s", re)
-                asyncio.create_task(self._db.invalidate_auth_session("OKX", user_id=0))
-                self._send_burnout_alert("OKX")
-            raise
         except Exception as e:
-            logger.debug("OKX fetch error %s: %s", merchant_id, e)
-            raise RuntimeError(f"API_ERROR: OKX review history failed: {e}")
+            logger.debug("OKX review fetch error %s: %s", merchant_id, e)
+            return 0, 0, 0, []
 
     async def _fetch_okx_review_pages(
             self,
@@ -992,7 +1001,17 @@ class ReviewFetcher:
 
         try:
             async with CurlSession(impersonate="chrome124", proxies=proxies) as session:
-                resp = await session.get(url, headers=req_headers, cookies=cookies_dict, timeout=10)
+                # Очищаємо дефолтні заголовки
+                session.headers.pop("User-Agent", None)
+                session.headers.pop("user-agent", None)
+                
+                # Оновлюємо сесію поточними заголовками
+                title_headers = {}
+                for k, v in req_headers.items():
+                    title_headers[k.title()] = v
+                session.headers.update(title_headers)
+                
+                resp = await session.get(url, cookies=cookies_dict, timeout=10)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, dict) and data.get("code") == 0:

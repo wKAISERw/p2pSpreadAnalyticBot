@@ -5,6 +5,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
 from core.engine.price_advisor import PriceAdvisor
+from core.analytics.merchant_profile import build_order_url
+from bot.deeplinks import tg_button_url
 from bot.formatters import (
     EXCHANGE_ICONS,
     REC_LABELS,
@@ -171,12 +173,15 @@ async def send_maker_order_alert(
             ),
         ])
 
-        # Лінк на біржу
-        order_url = ""
-        if exchange == "Bybit" and order_id:
-            order_url = f"https://www.bybit.com/uk-UA/p2p/order/{order_id}"
+        # Лінк на ордер. Старий шаблон https://www.bybit.com/uk-UA/p2p/order/{id}
+        # застосунок не перехоплював — у манифесті Bybit покритий лише префікс
+        # /inapp на app.bybit.com. Тепер лінк веде саме туди.
+        order_url = tg_button_url(
+            exchange, "order", order_id,
+            web_fallback=build_order_url(exchange, order_id),
+        ) if order_id else ""
         if order_url:
-            kb_rows.append([InlineKeyboardButton(text="🔗 Відкрити на біржі", url=order_url)])
+            kb_rows.append([InlineKeyboardButton(text="🔗 Відкрити ордер", url=order_url)])
 
         # Бан контрагента
         mid = counterparty.merchant_id

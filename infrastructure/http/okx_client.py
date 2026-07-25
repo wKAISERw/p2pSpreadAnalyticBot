@@ -69,9 +69,21 @@ class OkxClient(BaseHttpClient):
 
     async def fetch(self, url: str, payload: dict = None, method: str = "GET", headers: dict = None, cookies: dict = None) -> Any:
         """Сканування P2P ринку."""
-        kwargs = {}
+        merged_headers = {
+            "accept": "application/json",
+            "content-type": "application/json",
+            "origin": "https://www.okx.com",
+            "referer": "https://www.okx.com/p2p-markets/uah/buy-usdt",
+            "x-p2p-client": "web",
+            "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-platform": '"Windows"',
+        }
         if headers:
-            kwargs["headers"] = headers
+            for k, v in headers.items():
+                if v:
+                    merged_headers[k] = v
+
+        kwargs = {"headers": merged_headers}
         if cookies:
             kwargs["cookies"] = cookies
             

@@ -45,9 +45,12 @@ class BaseHttpClient:
 
         self._session.headers.update({
             "Accept-Language": "uk-UA,uk;q=0.9,en-US;q=0.8",
-            "User-Agent": random.choice(USER_AGENTS),
         })
         self._session.headers.update(self._extra_headers)
+        
+        # Видаляємо дефолтний User-Agent з сесії, щоб він задавався тільки на рівні запиту
+        self._session.headers.pop("User-Agent", None)
+        self._session.headers.pop("user-agent", None)
 
         return self
 
@@ -67,6 +70,29 @@ class BaseHttpClient:
         # (наприклад account clients що живуть весь час, не як context manager)
         if self._session is None:
             await self.__aenter__()
+
+        # Нормалізуємо заголовки запиту, щоб уникнути дублів User-Agent
+        headers = kwargs.get("headers")
+        if headers is None:
+            headers = {}
+        else:
+            headers = dict(headers)
+            
+        has_ua = False
+        ua_key = "User-Agent"
+        for k, v in list(headers.items()):
+            if k.lower() == "user-agent":
+                has_ua = True
+                ua_key = k
+                break
+                
+        if not has_ua:
+            headers["User-Agent"] = random.choice(USER_AGENTS)
+        else:
+            ua_val = headers.pop(ua_key)
+            headers["User-Agent"] = ua_val
+
+        kwargs["headers"] = headers
 
         last_exc: Optional[Exception] = None
 

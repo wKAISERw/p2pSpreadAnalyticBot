@@ -15,6 +15,9 @@ COPY requirements.txt .
 # Встановлюємо залежності Python
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Встановлюємо офіційну стабільну версію Google Chrome для Playwright
+RUN playwright install chrome
+
 # Копіюємо всі файли проекту в контейнер
 COPY . .
 

@@ -86,14 +86,24 @@ class OkxExchange(BaseExchange):
         try:
             data = await self.client.fetch(url, params, method="GET", headers=headers, cookies=cookies)
             if not isinstance(data, dict) or data.get("code") != 0:
+                if url == self.url_auth:
+                    logger.debug("OKX auth endpoint returned non-zero code, trying prelogin endpoint...")
+                    data = await self.client.fetch(self.url_prelogin, params, method="GET", headers=headers, cookies=cookies)
+            if not isinstance(data, dict) or data.get("code") != 0:
                 return []
             items = data.get("data", {}).get(side, [])
             return [self._parse_order(item, side) for item in items]
         except Exception as e:
-            logger.error("❌ OKX Fetch Error: %s", e)
-            if "Unexpected Status 403" in str(e) and self.db:
-                logger.warning("OKX Fetch got 403! Invalidating session in DB.")
-                asyncio.create_task(self.db.invalidate_auth_session("OKX"))
+            logger.debug("OKX fetch error: %s", e)
+            if url == self.url_auth:
+                try:
+                    logger.debug("Retrying OKX prelogin fallback...")
+                    data = await self.client.fetch(self.url_prelogin, params, method="GET", headers=headers, cookies=cookies)
+                    if isinstance(data, dict) and data.get("code") == 0:
+                        items = data.get("data", {}).get(side, [])
+                        return [self._parse_order(item, side) for item in items]
+                except Exception as e2:
+                    logger.debug("OKX prelogin fallback failed: %s", e2)
             return []
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:

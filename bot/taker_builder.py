@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from exchanges.base import Order
 from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
+from bot.deeplinks import resolve_target, tg_button_url, tg_button_url_async
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -329,12 +330,18 @@ async def send_taker_single(
     if url:
         url_row.append(InlineKeyboardButton(text="🔗 На біржі", url=url))
         
-    # 📱 App-кнопка — через redirect page з Android Intent / iOS scheme
-    if order.merchant_id:
-        redirect_url = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={order.exchange}&id={order.merchant_id}&side={'buy' if is_buy else 'sell'}"
-        if getattr(order, "share_code", ""):
-            redirect_url += f"&qr={order.share_code}"
-        url_row.append(InlineKeyboardButton(text="📱 Відкрити в App", url=redirect_url))
+    # 📱 App-кнопка. Binance/Bybit відкриваються прямим https-диплінком,
+    # OKX — через redirect.html (у нього немає зареєстрованих https-шляхів на P2P).
+    _kind, _eid = resolve_target(order)
+    if _eid:
+        app_url = await tg_button_url_async(
+            order.exchange, _kind, _eid,
+            side="buy" if is_buy else "sell",
+            web_fallback=url,
+            db=getattr(notifier, "_db", None),
+        )
+        if app_url:
+            url_row.append(InlineKeyboardButton(text="📱 Відкрити в App", url=app_url))
         
     if url_row:
         kb.append(url_row)

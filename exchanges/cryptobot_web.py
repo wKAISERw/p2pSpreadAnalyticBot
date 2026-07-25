@@ -79,9 +79,9 @@ class CryptoBotWebExchange(BaseExchange):
                 logger.warning("Не вдалося розпарсити CryptoBot ордер: %s", e)
 
         # 🚀 Сортуємо ВІДФІЛЬТРОВАНІ ордери за найкращим курсом.
-        # Купуємо ми (side="SELL" від мерчанта) → шукаємо найдешевший.
-        # Продаємо ми (side="BUY" від мерчанта) → шукаємо найдорожчий.
-        if side == "SELL":
+        # type=buy (тейкер купує) → мерчант продає → шукаємо найдешевший курс.
+        # type=sell (тейкер продає) → мерчант купує → шукаємо найдорожчий курс.
+        if side == "BUY":
             orders.sort(key=lambda o: o.price)
         else:
             orders.sort(key=lambda o: o.price, reverse=True)
@@ -143,10 +143,12 @@ class CryptoBotWebExchange(BaseExchange):
         return orders
 
     async def get_buy_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        return await self._fetch_orders("SELL", banks)
+        # type=buy: тейкер купує USDT → мерчант продає → ми купуємо ✅
+        return await self._fetch_orders("BUY", banks)
 
     async def get_sell_orders(self, amount: float, banks: List[str]) -> List[Order]:
-        return await self._fetch_orders("BUY", banks)
+        # type=sell: тейкер продає USDT → мерчант купує → ми продаємо ✅
+        return await self._fetch_orders("SELL", banks)
 
     async def fetch_both_multi(self, amounts: list[float], banks: list[str]) -> Tuple[List[Order], List[Order]]:
         results = await asyncio.gather(

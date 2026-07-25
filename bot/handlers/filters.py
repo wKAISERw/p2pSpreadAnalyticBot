@@ -1463,8 +1463,11 @@ def _get_taker_buy_preset(user_row: dict | None) -> dict | None:
             "limit_min": float(user_row.get("taker_buy_limit_min", 0)),
             "limit_max": float(user_row.get("taker_buy_limit_max", 0)),
             "speed": user_row.get("taker_buy_speed", "ANY"),
-            "price_strategy": user_row.get("taker_buy_price_strategy", "any"),  # ← додати
-            "price_from": float(user_row.get("taker_buy_price_from", 0)),  # ← додати
+            "price_strategy": user_row.get("taker_buy_price_strategy", "any"),
+            "price_from": float(user_row.get("taker_buy_price_from", 0)),
+            "buy_balance_mode": user_row.get("buy_balance_mode", "CARD_ENFORCED"),
+            "buy_auto_scale_down": int(user_row.get("buy_auto_scale_down", 1)),
+            "buy_auto_scale_up": int(user_row.get("buy_auto_scale_up", 1)),
         }
     return None
 
@@ -1592,10 +1595,29 @@ def _buy_preset_text(p: dict) -> str:
     lim_line = (f"  • Ліміти: <b>{p['limit_min']:.0f}–{p['limit_max']:.0f} ₴</b>\n"
                 if p.get("limit_min", 0) > 0 or p.get("limit_max", 0) > 0 else "")
     speed = "⚡ FAST" if p.get("speed") == "FAST" else "🐢 ANY"
+
+    # Dual Currency calculations
+    amount_usdt = p.get("amount", 0.0)
+    est_rate = float(p.get("max_price", 0.0)) or float(p.get("price_from", 0.0)) or 40.0
+    equiv_uah = amount_usdt * est_rate
+
+    bal_mode = p.get("buy_balance_mode", "CARD_ENFORCED")
+    bal_mode_labels = {
+        "CARD_ENFORCED": "💳 З урахуванням балансу карт",
+        "MANUAL_STRICT": "🔓 Ручний / Без перевірки карт",
+        "AUTO_SCALE": "⚡ Авто-масштабування під баланс",
+    }
+    bal_line = f"  • Баланс карт: <b>{bal_mode_labels.get(bal_mode, bal_mode)}</b>\n"
+
+    if bal_mode == "AUTO_SCALE":
+        down = "✅" if int(p.get("buy_auto_scale_down", 1)) else "❌"
+        up = "✅" if int(p.get("buy_auto_scale_up", 1)) else "❌"
+        bal_line += f"    └ 📉 Авто-зменшення: {down} | 📈 Авто-збільшення: {up}\n"
+
     return (
         f"💾 <b>TAKER BUY — збережені налаштування</b>\n\n"
-        f"  • Об'єм: <b>{p['amount']:.1f} USDT</b>\n"
-        f"{strat_line}{mp_line}{lim_line}"
+        f"  • Об'єм: <b>{amount_usdt:,.2f} USDT (~{equiv_uah:,.0f} ₴)</b>\n"
+        f"{strat_line}{mp_line}{lim_line}{bal_line}"
         f"  • Швидкість: {speed}\n\n"
         f"Що робимо?"
     )
@@ -1680,12 +1702,21 @@ async def _start_taker_buy_fsm(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.update_data(pending_mode="TAKER_BUY")
     await state.set_state(TakerBuySettingsStates.waiting_amount)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💵 USDT (крипта)", callback_data="tbuy_type:USDT"),
+            InlineKeyboardButton(text="₴ UAH (гривня)", callback_data="tbuy_type:UAH"),
+        ],
+        [
+            InlineKeyboardButton(text="❌ Скасувати", callback_data="menu:main")
+        ]
+    ])
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
             "🛒 <b>TAKER BUY — Крок 1/5</b>\n\n"
-            "📦 <b>Скільки USDT ти хочеш купити?</b>\n"
-            "<i>Наприклад: 500</i>",
-            reply_markup=back_to_main_kb(),
+            "📦 <b>Оберіть спосіб введення об'єму для купівлі:</b>\n"
+            "<i>Ви можете вказати суму у USDT (напр: 500) або у гривнях (напр: 20 000 грн). Бот авто-конвертує в еквівалент!</i>",
+            reply_markup=kb,
         )
 
 

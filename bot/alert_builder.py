@@ -9,6 +9,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from exchanges.base import Order
 from core.engine.network_fee_engine import NetworkFeeEngine
 from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
+from bot.deeplinks import resolve_target, tg_button_url, tg_button_url_async
 from bot.handlers import core as bot_commands
 from bot.formatters import (
     EXCHANGE_ICONS,
@@ -436,18 +437,26 @@ async def send_single(
     if url_row:
         kb.append(url_row)
 
-    # 📱 App-кнопки переходу в додаток (працюють через redirect page з Android Intent / iOS scheme)
+    # 📱 App-кнопки переходу в додаток.
+    # Binance/Bybit — прямий https-диплінк у застосунок (проміжна сторінка не потрібна),
+    # OKX — через redirect.html, бо https-маршрутів на P2P у нього немає.
+    # Якщо у сканера є id самого оголошення — ведемо на оголошення, інакше на профіль.
     app_row = []
-    if alert.buy_order.merchant_id:
-        buy_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.buy_order.exchange}&id={alert.buy_order.merchant_id}&side=buy"
-        if getattr(alert.buy_order, "share_code", ""):
-            buy_redirect += f"&qr={alert.buy_order.share_code}"
-        app_row.append(InlineKeyboardButton(text="📱 Buy App", url=buy_redirect))
-    if alert.sell_order.merchant_id:
-        sell_redirect = f"https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html?ex={alert.sell_order.exchange}&id={alert.sell_order.merchant_id}&side=sell"
-        if getattr(alert.sell_order, "share_code", ""):
-            sell_redirect += f"&qr={alert.sell_order.share_code}"
-        app_row.append(InlineKeyboardButton(text="📱 Sell App", url=sell_redirect))
+    for order, label, side in (
+        (alert.buy_order, "📱 Buy App", "buy"),
+        (alert.sell_order, "📱 Sell App", "sell"),
+    ):
+        kind, entity_id = resolve_target(order)
+        if not entity_id:
+            continue
+
+        app_url = await tg_button_url_async(
+            order.exchange, kind, entity_id, side=side,
+            web_fallback=build_profile_url(order.exchange, order.merchant_id),
+            db=getattr(notifier, "_db", None),
+        )
+        if app_url:
+            app_row.append(InlineKeyboardButton(text=label, url=app_url))
     if app_row:
         kb.append(app_row)
 

@@ -36,16 +36,24 @@ class CircuitBreaker:
         # Явний перехід у HALF_OPEN тут, а не всередині property
         if current_state == State.HALF_OPEN and self._state != State.HALF_OPEN:
             self._state = State.HALF_OPEN
-            coro.close()
             logger.info("💓 Circuit HALF_OPEN: Пробний запит для відновлення...")
 
         if current_state == State.OPEN:
-            wait_time = self._recovery_timeout - (time.monotonic() - self._opened_at)
-            coro.close()
+            wait_time = max(0.0, self._recovery_timeout - (time.monotonic() - (self._opened_at or time.monotonic())))
+            if hasattr(coro, "close"):
+                try:
+                    coro.close()
+                except Exception:
+                    pass
             raise RuntimeError(f"🚫 Circuit is OPEN. Очікування: {wait_time:.0f}s")
 
         if current_state == State.HALF_OPEN:
             if self._probe_in_flight:
+                if hasattr(coro, "close"):
+                    try:
+                        coro.close()
+                    except Exception:
+                        pass
                 raise RuntimeError("⏳ Circuit is HALF_OPEN. Пробний запит вже виконується.")
             self._probe_in_flight = True
 
@@ -76,11 +84,11 @@ class CircuitBreaker:
         self._record_failure(Exception(reason or "manual failure"))
 
     def _record_failure(self, error: Exception):
-        """Рахує помилки і переходить в OPEN тільки після threshold."""
+        """Рахує помилки і переходить в OPEN після threshold або якщо біржа у HALF_OPEN."""
         self._failures += 1
         logger.warning("⚠️ Failure #%d/%d | %s", self._failures, self._threshold, error)
 
-        if self._failures >= self._threshold:
+        if self._failures >= self._threshold or self._state == State.HALF_OPEN:
             self._state = State.OPEN
             self._opened_at = time.monotonic()
             logger.error("🔴 Circuit OPEN: Пауза запитів на %.0fs", self._recovery_timeout)

@@ -1451,13 +1451,60 @@ async def on_session_qr_cancel(call: CallbackQuery) -> None:
     await call.answer("❌ QR-вхід скасовано.")
 
 
+@router.callback_query(F.data.startswith("session:qr_unable:"))
+async def on_session_qr_unable(call: CallbackQuery) -> None:
+    exchange = call.data.split(":")[-1]
+    if not _session_manager:
+        await call.answer("❌ SessionManager не підключено!", show_alert=True)
+        return
+        
+    success = await _session_manager.trigger_unable_to_verify(exchange, call.from_user.id)
+    if success:
+        await call.answer("🔄 Перемикаю спосіб підтвердження...")
+    else:
+        await call.answer("❌ Не вдалося знайти інші способи або сталася помилка.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("session:qr_select:"))
+async def on_session_qr_select(call: CallbackQuery) -> None:
+    parts = call.data.split(":")
+    # Формат callback: session:qr_select:Exchange:Method
+    exchange = parts[-2] if len(parts) >= 3 else "OKX"
+    method = parts[-1]
+    
+    if not _session_manager:
+        await call.answer("❌ SessionManager не підключено!", show_alert=True)
+        return
+        
+    success = await _session_manager.select_verification_method(exchange, call.from_user.id, method)
+    if success:
+        await call.answer(f"🔄 Обираю метод {method}...")
+    else:
+        await call.answer("❌ Не вдалося обрати метод або спосіб недоступний.", show_alert=True)
+
+
 @router.message(QRStates.waiting_for_code)
 async def on_qr_code_received(message: Message, state: FSMContext) -> None:
+    # 1. Якщо це команда, ігноруємо її тут, щоб вона обробилась відповідним хендлером
+    text = (message.text or "").strip()
+    if text.startswith("/"):
+        return
+
     data = await state.get_data()
     session_key = data.get("session_key")
     exchange = data.get("exchange")
     
-    code = message.text.strip()
+    # 2. Перевіряємо, чи це повідомлення від того ж користувача, який запустив сесію
+    if session_key:
+        try:
+            started_user_id = int(session_key.split(":")[-1])
+            if message.from_user.id != started_user_id:
+                # Ігноруємо повідомлення від сторонніх користувачів
+                return
+        except Exception:
+            pass
+
+    code = text
     if not code.isdigit() or len(code) < 4 or len(code) > 8:
         await message.answer("❌ Некоректний формат коду. Будь ласка, введіть цифровий 2FA-код (зазвичай 6 цифр):")
         return
@@ -1570,6 +1617,8 @@ async def on_cookies_received(message: Message, state: FSMContext) -> None:
     
     if success:
         logger.info(f"✅ Успішно оновлено сесію {exchange} від користувача {message.from_user.id} вручну")
+        with suppress(Exception):
+            await message.delete()
         await message.answer(f"✅ <b>Сесію {exchange} успішно оновлено вручну!</b>\n\nБот тепер може перевіряти ваші P2P ордери та відгуки.")
     else:
         await message.answer(f"❌ <b>Помилка збереження сесії {exchange}</b> в базу даних. Спробуйте ще раз.")

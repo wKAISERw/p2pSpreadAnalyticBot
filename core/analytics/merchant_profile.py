@@ -40,7 +40,7 @@ def build_profile_url(
         return "https://t.me/wallet?startapp=market"
 
     _URLS = {
-        "Binance": "https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={id}",
+        "Binance": "https://p2p.binance.com/en/advertiserDetail?advertiserNo={id}",
         "Bybit":   "https://www.bybit.com/uk-UA/p2p/profile/{id}/USDT/UAH/item",
         "OKX":     "https://www.okx.com/p2p/ads-merchant?publicUserId={id}",
         "MEXC":    "https://www.mexc.com/uk-UA/buy-crypto/merchant?id={id}",
@@ -77,97 +77,39 @@ def build_order_url(exchange: str, order_id: str) -> str:
     return template.format(id=order_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Мобільні диплінки.
+#
+# Раніше тут лежали вгадані схеми (binance://app/advertiserDetail,
+# okx://app/p2p, пакет com.binance.merchant). Жодна з них не існує в реальних
+# застосунках — саме тому «відкрити в App» вело на головну або в браузер.
+# Підтверджені маршрути тепер в одному місці: bot/deeplinks.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
 def build_app_profile_url(exchange: str, merchant_id: str, merchant_name: str = "") -> str:
-    """
-    Повертає URL-схему (deep link) для мобільного додатку, що дозволяє відкрити
-    профіль мерчанта безпосередньо в додатку (без логіну в браузері).
-    """
-    _APP_URLS = {
-        "Binance": "binance://app/advertiserDetail?advertiserNo={id}",
-        "Bybit":   "bybit://app/p2p",  # Bybit не має прямого лінку на профіль мерчанта, відкриваємо P2P
-        "OKX":     "okx://app/p2p",
-        "MEXC":    "mexc://app/p2p",
-        "BingX":   "bingbon://c2c/create/order",
-    }
-    template = _APP_URLS.get(exchange)
-    if not template or not merchant_id:
-        return ""
-    return template.format(id=merchant_id, name=merchant_name)
+    """Custom-scheme диплінк на профіль мерчанта. Не для InlineKeyboardButton."""
+    from bot.deeplinks import app_scheme_url
+    return app_scheme_url(exchange, "profile", merchant_id)
 
 
 def build_app_order_url(exchange: str, order_id: str) -> str:
-    """
-    Повертає URL-схему (deep link) для мобільного додатку для прямого переходу до ордера.
-    """
-    _APP_ORDER_URLS = {
-        "Binance": "binance://app/orderDetail?orderNo={id}",
-        "Bybit":   "bybit://app/p2p",
-        "OKX":     "okx://app/p2p",
-        "MEXC":    "mexc://app/p2p",
-        "BingX":   "bingbon://c2c/create/order",
-    }
-    template = _APP_ORDER_URLS.get(exchange)
-    if not template or not order_id:
-        return ""
-    return template.format(id=order_id)
+    """Custom-scheme диплінк на ордер. Не для InlineKeyboardButton."""
+    from bot.deeplinks import app_scheme_url
+    return app_scheme_url(exchange, "order", order_id)
 
 
 def build_android_intent_profile_url(exchange: str, merchant_id: str, merchant_name: str = "", side: str = "") -> str:
-    """
-    Повертає Intent URL для Android, який відкриває додаток біржі (через схему),
-    або робить fallback на веб-версію в браузері, якщо додаток не встановлено.
-    """
-    import urllib.parse
+    """Intent URL: застосунок, з fallback у браузер якщо його немає."""
+    from bot.deeplinks import android_intent_url
     web_url = build_profile_url(exchange, merchant_id, merchant_name, side=side)
-    if not web_url:
-        return ""
-        
-    _SCHEMES = {
-        "Binance": ("binance", "app/advertiserDetail?advertiserNo={id}", "com.binance.merchant"),
-        "Bybit":   ("bybit",   "app/p2p",                               "com.bybit.app"),
-        "OKX":     ("okx",     "app/p2p",                               "com.okinc.okex.gp"),
-        "MEXC":    ("mexc",    "app/p2p",                               "com.mexcpro.client"),
-        "BingX":   ("bingbon", "c2c/create/order",                       "com.coinoex.coinoex"),
-    }
-    
-    cfg = _SCHEMES.get(exchange)
-    if not cfg:
-        return web_url
-        
-    scheme, app_path_tpl, package = cfg
-    app_path = app_path_tpl.format(id=merchant_id, name=merchant_name)
-    encoded_fallback = urllib.parse.quote(web_url, safe='')
-    
-    return f"intent://{app_path}#Intent;scheme={scheme};package={package};S.browser_fallback_url={encoded_fallback};end"
+    return android_intent_url(exchange, "profile", merchant_id, web_url) or web_url
 
 
 def build_android_intent_order_url(exchange: str, order_id: str) -> str:
-    """
-    Повертає Intent URL для Android, який відкриває конкретний ордер у додатку біржі,
-    або робить fallback на веб-версію ордера, якщо додаток не встановлено.
-    """
-    import urllib.parse
+    """Intent URL на ордер, з fallback у браузер."""
+    from bot.deeplinks import android_intent_url
     web_url = build_order_url(exchange, order_id)
-    if not web_url:
-        return ""
-        
-    _SCHEMES = {
-        "Binance": ("binance", "app/orderDetail?orderNo={id}", "com.binance.merchant"),
-        "Bybit":   ("bybit",   "app/p2p",                      "com.bybit.app"),
-        "OKX":     ("okx",     "app/p2p",                      "com.okinc.okex.gp"),
-        "MEXC":    ("mexc",    "app/p2p",                      "com.mexcpro.client"),
-        "BingX":   ("bingbon", "c2c/create/order",                 "com.coinoex.coinoex"),
-    }
-    
-    cfg = _SCHEMES.get(exchange)
-    if not cfg:
-        return web_url
-        
-    scheme, app_path_tpl, package = cfg
-    app_path = app_path_tpl.format(id=order_id)
-    encoded_fallback = urllib.parse.quote(web_url, safe='')
-    
-    return f"intent://{app_path}#Intent;scheme={scheme};package={package};S.browser_fallback_url={encoded_fallback};end"
+    return android_intent_url(exchange, "order", order_id, web_url) or web_url
 
 
 def format_merchant_link(exchange: str, merchant_id: str, merchant_name: str = "") -> str:

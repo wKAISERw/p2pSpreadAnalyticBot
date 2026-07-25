@@ -700,6 +700,113 @@ async def process_mono_token(message: Message, state: FSMContext):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# 🐈 Monobank Tracker Settings UI
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("card:mono_tracker:"))
+async def cb_mono_tracker_menu(call: CallbackQuery):
+    card_id = call.data.split(":")[2]
+    await _show_mono_tracker_menu(call, card_id)
+
+
+async def _show_mono_tracker_menu(call: CallbackQuery, card_id: str):
+    import json
+    cards = await _db.get_cards(call.from_user.id)
+    card = next((c for c in cards if c["id"] == card_id), None)
+    if not card:
+        return await call.answer("❌ Картку не знайдено", show_alert=True)
+
+    mono = await _db.get_card_mono_settings(card_id)
+    enabled = int(mono.get("tracker_enabled", 1))
+    mode = mono.get("tracker_mode", "INCOME")
+    fields_raw = mono.get("tracker_fields") or '{}'
+    try:
+        fields = json.loads(fields_raw) if isinstance(fields_raw, str) else fields_raw
+    except Exception:
+        fields = {"amount": 1, "sender": 1, "comment": 1, "time": 1, "card": 1, "balance": 1, "p2p": 1}
+
+    status_str = "🟢 УВІМКНЕНО" if enabled else "🔴 ВИМКНЕНО"
+    mode_str = "🟢 Тільки зарахування (+)" if mode == "INCOME" else "🔄 Всі транзакції (+/-)"
+
+    card_name = card.get("label") or f"{card.get('bank_name', 'Mono').capitalize()} *{card.get('last_four', '')}"
+
+    text = (
+        f"🐈 <b>Налаштування Трекера коштів Monobank</b>\n"
+        f"Картка: <b>{card_name}</b>\n\n"
+        f"🔔 <b>Трекер коштів:</b> {status_str}\n"
+        f"🔄 <b>Режим сповіщень:</b> {mode_str}\n\n"
+        f"⚙️ <b>Поля у Telegram-повідомленні:</b>\n"
+        f" • 💰 Сума: {'✅' if fields.get('amount') else '❌'}\n"
+        f" • 👤 Відправник / Опис: {'✅' if fields.get('sender') else '❌'}\n"
+        f" • 💬 Коментар: {'✅' if fields.get('comment') else '❌'}\n"
+        f" • ⏰ Час: {'✅' if fields.get('time') else '❌'}\n"
+        f" • 💳 Назва картки: {'✅' if fields.get('card') else '❌'}\n"
+        f" • 📊 Залишок: {'✅' if fields.get('balance') else '❌'}\n"
+        f" • 🔗 P2P Ордер: {'✅' if fields.get('p2p') else '❌'}\n"
+    )
+
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=f"🔔 Трекер: {'УВІМКНЕНО ✅' if enabled else 'ВИМКНЕНО ❌'}", callback_data=f"card:mono_tr_toggle:{card_id}"))
+    builder.row(InlineKeyboardButton(text=f"🔄 Режим: {'🟢 Тільки (+)' if mode == 'INCOME' else '🔄 Всі (+/-)'}", callback_data=f"card:mono_tr_mode:{card_id}"))
+    builder.row(
+        InlineKeyboardButton(text=f"💰 Сума {'✅' if fields.get('amount') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:amount"),
+        InlineKeyboardButton(text=f"👤 Відправник {'✅' if fields.get('sender') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:sender"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"💬 Коментар {'✅' if fields.get('comment') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:comment"),
+        InlineKeyboardButton(text=f"⏰ Час {'✅' if fields.get('time') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:time"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=f"💳 Картка {'✅' if fields.get('card') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:card"),
+        InlineKeyboardButton(text=f"📊 Залишок {'✅' if fields.get('balance') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:balance"),
+    )
+    builder.row(InlineKeyboardButton(text=f"🔗 P2P Ордер {'✅' if fields.get('p2p') else '❌'}", callback_data=f"card:mono_tr_field:{card_id}:p2p"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад до картки", callback_data=f"card:view:{card_id}"))
+
+    await call.message.edit_text(text, reply_markup=builder.as_markup())
+    if hasattr(call, "answer"):
+        await call.answer()
+
+
+@router.callback_query(F.data.startswith("card:mono_tr_toggle:"))
+async def cb_mono_tr_toggle(call: CallbackQuery):
+    card_id = call.data.split(":")[2]
+    mono = await _db.get_card_mono_settings(card_id)
+    enabled = int(mono.get("tracker_enabled", 1))
+    new_enabled = 0 if enabled else 1
+    await _db.update_mono_tracker_config(card_id, enabled=new_enabled)
+    await _show_mono_tracker_menu(call, card_id)
+
+
+@router.callback_query(F.data.startswith("card:mono_tr_mode:"))
+async def cb_mono_tr_mode(call: CallbackQuery):
+    card_id = call.data.split(":")[2]
+    mono = await _db.get_card_mono_settings(card_id)
+    mode = mono.get("tracker_mode", "INCOME")
+    new_mode = "ALL" if mode == "INCOME" else "INCOME"
+    await _db.update_mono_tracker_config(card_id, mode=new_mode)
+    await _show_mono_tracker_menu(call, card_id)
+
+
+@router.callback_query(F.data.startswith("card:mono_tr_field:"))
+async def cb_mono_tr_field(call: CallbackQuery):
+    import json
+    parts = call.data.split(":")
+    card_id = parts[2]
+    field_name = parts[3]
+    mono = await _db.get_card_mono_settings(card_id)
+    fields_raw = mono.get("tracker_fields") or '{}'
+    try:
+        fields = json.loads(fields_raw) if isinstance(fields_raw, str) else fields_raw
+    except Exception:
+        fields = {"amount": 1, "sender": 1, "comment": 1, "time": 1, "card": 1, "balance": 1, "p2p": 1}
+
+    fields[field_name] = 0 if fields.get(field_name, 1) else 1
+    await _db.update_mono_tracker_config(card_id, fields=fields)
+    await _show_mono_tracker_menu(call, card_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # /report — Звіт по картках
 # ═══════════════════════════════════════════════════════════════════════════════
 
