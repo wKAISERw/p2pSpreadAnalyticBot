@@ -23,9 +23,12 @@ InlineKeyboardButton(url=...) приймає лише http/https/tg. Custom sche
 
 from __future__ import annotations
 
+import logging
 from base64 import b64encode
 from typing import Literal, Optional
 from urllib.parse import quote, urlencode
+
+_log = logging.getLogger(__name__)
 
 # Проміжна сторінка потрібна лише там, де немає робочого https-маршруту.
 REDIRECT_BASE = "https://wkaiserw.github.io/p2pSpreadAnalyticBot/redirect.html"
@@ -222,7 +225,7 @@ def app_https_url(exchange: str, kind: Kind, entity_id: str) -> str:
 
 
 def _redirect_url(exchange: str, kind: Kind, entity_id: str, side: str = "",
-                  share_code: str = "") -> str:
+                  share_code: str = "", dplk: str = "") -> str:
     params = {"ex": exchange, "kind": kind, "id": str(entity_id)}
     if side:
         params["side"] = side
@@ -230,6 +233,9 @@ def _redirect_url(exchange: str, kind: Kind, entity_id: str, side: str = "",
         # Пріоритетний параметр для OKX: сторінка збудує з нього
         # okx://exchange/merchanthome.com?shareCode=… — нативну картку продавця.
         params["code"] = share_code
+    if dplk:
+        # Пріоритетний параметр для Binance: сторінка викличе Intent com.binance.dev
+        params["dplk"] = dplk
     return f"{REDIRECT_BASE}?{urlencode(params)}"
 
 
@@ -282,30 +288,47 @@ async def tg_button_url_async(
     на нативний екран оголошення.
     """
     if exchange == "Binance" and kind in ("ad", "profile", "order"):
-        if db is not None:
+        if db is None:
+            _log.warning("deeplinks: Binance %s — db не передано, dplk неможливий, "
+                         "кнопка піде у веб", kind)
+        else:
             try:
                 from bot.binance_share import get_share_link
                 dplk = await get_share_link(kind, entity_id, db, user_id)
                 if dplk:
-                    return dplk
-            except Exception:
-                pass
+                    return _redirect_url("Binance", kind, entity_id, side=side, dplk=dplk)
+                # Порожньо без винятку — причину вже залогував binance_share.
+                # Якщо в логах поруч нічого немає, значить спрацював кеш або
+                # запобіжник, або kind не з тих, що вміє share.
+                _log.warning("deeplinks: Binance %s (%s) — dplk порожній, "
+                             "кнопка піде у веб", kind, entity_id)
+            except Exception as e:
+                # Тут раніше стояв голий pass, і через нього причина зникала
+                # безслідно. Саме так ми втратили день на діагностику.
+                _log.warning("deeplinks: Binance %s — dplk впав: %s: %s",
+                             kind, type(e).__name__, e, exc_info=True)
         web = web_fallback or binance_web_url(kind, entity_id)
         if web:
             return web
 
-    # OKX: shareCode -> okx://exchange/merchanthome.com?shareCode=… відкриває
-    # нативну картку продавця (UserProfilePageActivity, перевірено на пристрої).
-    # Схему не можна класти в кнопку Telegram, тому веземо код через
-    # redirect.html — сторінка сама підставить його у схему.
-    if exchange == "OKX" and kind in ("order", "profile") and db is not None:
+    # OKX ПРОФІЛЬ (лише!): shareCode -> okx://exchange/merchanthome.com?shareCode=…
+    # відкриває нативну картку продавця (UserProfilePageActivity, перевірено на
+    # пристрої). Схему не можна класти в кнопку Telegram, тому веземо код через
+    # redirect.html.
+    #
+    # Для ОРДЕРА shareCode НЕ використовуємо: merchanthome — це профіль, а не
+    # ордер. Ордер OKX має власний прямий маршрут okx://exchange/p2p/order?id=,
+    # який redirect.html будує сам. Якби ми сюди пустили order — кнопка ордера
+    # відкривала б профіль продавця.
+    if exchange == "OKX" and kind == "profile" and db is not None:
         try:
             from bot.okx_share import get_share_code
-            code = await get_share_code(kind, entity_id, db, user_id)
+            code = await get_share_code("profile", entity_id, db, user_id)
             if code:
                 return _redirect_url(exchange, kind, entity_id, side, share_code=code)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("deeplinks: OKX profile — shareCode впав: %s: %s",
+                         type(e).__name__, e, exc_info=True)
 
     return tg_button_url(exchange, kind, entity_id, side=side, web_fallback=web_fallback)
 
@@ -322,6 +345,32 @@ def binance_web_url(kind: Kind, entity_id: str) -> str:
     }.get(kind, "")
 
 
+# Префікси, які сканер додає до id оголошення для власних потреб.
+_ID_PREFIXES: dict[str, tuple[str, ...]] = {
+    "Binance": ("bn_",),
+}
+
+
+def strip_exchange_prefix(exchange: str, entity_id: str) -> str:
+    """
+    Прибирає внутрішній префікс сканера з id оголошення.
+
+    `exchanges/binance.py` зберігає `id=f"bn_{advNo}"` — префікс потрібен
+    самому сканеру, але біржа його не знає. Якщо відправити `bn_129082…`
+    у `adv-share`, Binance відповість:
+
+        code=083626 msg=Оголошення не існує
+
+    Саме це й ламало dplk: сесія була жива, csrf правильний, а id — чужий.
+    """
+    if not entity_id:
+        return ""
+    for pref in _ID_PREFIXES.get(exchange, ()):
+        if entity_id.startswith(pref):
+            return entity_id[len(pref):]
+    return entity_id
+
+
 def resolve_target(order) -> tuple[Kind, str]:
     """
     Обирає найточніший екран для конкретного ордера сканера.
@@ -331,7 +380,7 @@ def resolve_target(order) -> tuple[Kind, str]:
     Поле з id оголошення в моделі Order зветься `id`.
     """
     exchange = getattr(order, "exchange", "")
-    ad_id = str(getattr(order, "id", "") or "")
+    ad_id = strip_exchange_prefix(exchange, str(getattr(order, "id", "") or ""))
     merchant_id = str(getattr(order, "merchant_id", "") or "")
 
     # Binance веде на оголошення через webview-шлюз (нативного маршруту немає),

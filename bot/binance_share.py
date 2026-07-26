@@ -33,6 +33,7 @@ import asyncio
 import logging
 import time
 from typing import Literal, Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,37 @@ _TIMEOUT = 8
 # key -> (url, expires_at)
 _cache: dict[str, tuple[str, float]] = {}
 _lock = asyncio.Lock()
+
+# Запобіжник. Коли сесія помирає, невдалим стає КОЖЕН мерчант окремо, і при
+# потоці ордерів це десятки 401 щохвилини — з боку Binance виглядає як атака на
+# власний акаунт. Тому після кількох поспіль невдач вимикаємо звернення
+# глобально на пів години: усі кнопки тихо йдуть канонічним веб-шляхом.
+_FAILS_TO_TRIP = 3
+_COOLDOWN = 30 * 60
+_consecutive_fails = 0
+_disabled_until = 0.0
+
+
+def _note_failure() -> None:
+    global _consecutive_fails, _disabled_until
+    _consecutive_fails += 1
+    if _consecutive_fails >= _FAILS_TO_TRIP:
+        _disabled_until = time.time() + _COOLDOWN
+        logger.warning(
+            "binance_share: %d невдачі поспіль — вимикаю dplk на %d хв, "
+            "кнопки підуть у веб. Схоже, сесія Binance померла.",
+            _consecutive_fails, _COOLDOWN // 60)
+
+
+def _note_success() -> None:
+    global _consecutive_fails, _disabled_until
+    _consecutive_fails = 0
+    _disabled_until = 0.0
+
+
+def is_available() -> bool:
+    """Чи не спрацював запобіжник. Зручно для статусу в адмінці."""
+    return time.time() >= _disabled_until
 
 Kind = Literal["ad", "profile"]
 
@@ -121,9 +153,16 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
 
     path, field = _REQUEST[kind]
 
+    # Другий рубіж захисту. Сканер зберігає id оголошення як `bn_<advNo>`
+    # (exchanges/binance.py). Якщо префікс долетить сюди, Binance відповість
+    # `code=083626 Оголошення не існує`, і причина буде неочевидною.
+    entity_id = str(entity_id)
+    if entity_id.startswith("bn_"):
+        entity_id = entity_id[3:]
+
     headers_dict, cookies_dict, _ = await db.get_auth_session("Binance", user_id)
     if not headers_dict or not cookies_dict:
-        logger.debug("binance_share: немає сесії Binance")
+        logger.warning("binance_share: немає сесії Binance")
         return ""
     cookies_dict = cookies_dict or {}
 
@@ -153,13 +192,27 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
         f"https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={eid}"
     )
 
-    # csrftoken НЕ дорівнює куці cr00 — це окреме значення, і воно вже лежить
-    # серед збережених заголовків. Дублюємо його в X-CSRF-TOKEN лише якщо є
-    # справжній заголовок; кука cr00 сюди НЕ підставляється (перевірено на
-    # живому cURL: csrftoken != cr00).
-    csrf = headers_dict.get("csrftoken") or headers_dict.get("Csrftoken")
-    if csrf:
-        req_headers.setdefault("X-CSRF-TOKEN", csrf)
+    # ПОРЯДОК ТУТ КРИТИЧНИЙ, НЕ МІНЯТИ.
+    #
+    # `csrftoken` і кука `cr00` — це РІЗНІ значення. Доведено на живому cURL
+    # з браузера: заголовок був `csrftoken: 0703c7bc…`, а кука `cr00: D73053C4…`.
+    # Якщо підставити `cr00` замість справжнього csrftoken, Binance віддає
+    # 401 "Please log in first", і кнопка тихо падає на веб.
+    #
+    # Тому спершу шукаємо СПРАВЖНІЙ заголовок серед збережених, і лише якщо
+    # його там немає — пробуємо куку як останній шанс.
+    _hl = {k.lower(): v for k, v in headers_dict.items()}
+    csrf_val = _hl.get("csrftoken") or _hl.get("x-csrf-token") or cookies_dict.get("csrftoken")
+    if not csrf_val:
+        csrf_val = cookies_dict.get("cr00")
+        if csrf_val:
+            logger.warning(
+                "binance_share: справжнього csrftoken немає в сесії, беру cr00 — "
+                "запит найімовірніше дасть 401. Перезніми cURL з приватного "
+                "запиту до c2c.binance.com.")
+    if csrf_val:
+        req_headers["X-CSRF-TOKEN"] = csrf_val
+        req_headers["csrftoken"] = csrf_val
 
     try:
         from config import settings
@@ -178,19 +231,19 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
                 timeout=_TIMEOUT,
             )
         if resp.status_code != 200:
-            logger.debug("binance_share %s: HTTP %s", path, resp.status_code)
+            logger.warning("binance_share %s: HTTP %s", path, resp.status_code)
             return ""
         payload = resp.json()
         if payload.get("code") != "000000":
-            logger.debug("binance_share %s: code=%s msg=%s",
+            logger.warning("binance_share %s: code=%s msg=%s",
                          path, payload.get("code"), payload.get("message"))
             return ""
         link = _extract_link(payload.get("data"))
         if not link:
-            logger.debug("binance_share %s: лінка немає у відповіді %s", path, payload)
+            logger.warning("binance_share %s: лінка немає у відповіді %s", path, payload)
         return link
     except Exception as e:
-        logger.debug("binance_share %s: %s: %s", path, type(e).__name__, e)
+        logger.warning("binance_share %s: %s: %s", path, type(e).__name__, e)
         return ""
 
 
@@ -211,18 +264,32 @@ async def get_share_link(kind: Kind, entity_id: str, db, user_id: int = 0) -> st
     if cached and cached[1] > now:
         return cached[0]
 
+    # Запобіжник спрацював — не звертаємось узагалі, одразу віддаємо порожньо.
+    if now < _disabled_until:
+        return ""
+
     async with _lock:
         cached = _cache.get(key)                       # могли встигнути поки чекали
         if cached and cached[1] > now:
             return cached[0]
+        if time.time() < _disabled_until:
+            return ""
         try:
             link = await _fetch(kind, entity_id, user_id, db)
         except Exception as e:
-            logger.debug("binance_share: несподівана помилка %s", e)
+            logger.warning("binance_share: несподівана помилка %s", e)
             link = ""
+        if link:
+            _note_success()
+        else:
+            _note_failure()
         _cache[key] = (link, now + (_CACHE_TTL if link else _NEGATIVE_TTL))
         return link
 
 
 def clear_cache() -> None:
+    """Скидає кеш і запобіжник. Викликати після оновлення сесії."""
+    global _consecutive_fails, _disabled_until
     _cache.clear()
+    _consecutive_fails = 0
+    _disabled_until = 0.0
