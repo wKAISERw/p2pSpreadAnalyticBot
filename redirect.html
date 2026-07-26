@@ -100,13 +100,13 @@
       return "";
     }
     if (ex === "OKX") {
-      // shareCode має пріоритет: підтверджено на пристрої, що
+      // Ордер має власний маршрут і НЕ використовує shareCode: merchanthome —
+      // це профіль продавця, а не ордер.
+      if (kind === "order") return "okx://exchange/p2p/order?id=" + e;
+      // shareCode (лише для профілю): підтверджено на пристрої, що
       // okx://exchange/merchanthome.com?shareCode=… відкриває нативну картку
       // продавця (com.okinc.p2p.userinfo.profile.UserProfilePageActivity).
-      // Код видає GET /v3/c2c/merchant/share?pubUserId=…
       if (code) return "okx://exchange/merchanthome.com?shareCode=" + encodeURIComponent(code);
-      // Ордер: приземляється на com.okinc.p2p.order.detail.OrderDetailActivity.
-      if (kind === "order") return "okx://exchange/p2p/order?id=" + e;
       // Без коду профіль відкриває лише вітрину P2P — застосунок, але не картку.
       return "okx://exchange/p2p/profile?userId=" + e;
     }
@@ -115,15 +115,6 @@
       return "bybitapp://open/p2p/user/home?userId=" + e;
     }
     return "";
-  }
-
-  // Binance: замість неіснуючого нативного маршруту — власний webview-шлюз
-  // застосунку. Приймає base64 звичайного веб-URL і відкриває сторінку
-  // всередині застосунку, у вже авторизованій сесії.
-  function binanceWebviewUrl(target) {
-    if (!target) return "";
-    var b64 = btoa(unescape(encodeURIComponent(target)));
-    return "https://app.binance.com/webview/webview?type=default&url=" + b64;
   }
 
   function webUrl() {
@@ -149,18 +140,20 @@
 
   var scheme = schemeUrl();
   var web = webUrl();
-  // Для Binance без нативного маршруту шлюз — це звичайний https, тому його
-  // можна віддати одразу, без intent і без очікування.
-  var gateway = (ex === "Binance" && !scheme) ? binanceWebviewUrl(web) : "";
+  // webview-шлюз (app.binance.com/webview/webview?url=<base64>) НЕ використовуємо:
+  // прогін на пристрої показав, що Binance відхиляє його серверним білим списком
+  // зовнішніх диплінків (NoSupportRouterPathActivity) — навіть для адрес, узятих
+  // з їхнього ж dex. Єдиний робочий вхід у застосунок — dplk нижче.
 
   function showManual() {
     document.getElementById("loader").classList.add("hidden");
     document.getElementById("manual").classList.remove("hidden");
   }
 
-  document.getElementById("btn-app").href = gateway || scheme || web;
+  var dplkPreview = q.get("dplk") || "";
+  document.getElementById("btn-app").href = dplkPreview || scheme || web;
   document.getElementById("btn-web").href = web;
-  document.getElementById("dbg").textContent = (gateway || scheme || "(маршруту немає)");
+  document.getElementById("dbg").textContent = (dplkPreview || scheme || "(маршруту немає)");
   document.getElementById("target-label").textContent =
     ex + (kind === "order" ? " · ордер" : kind === "ad" ? " · оголошення" : " · профіль");
 
@@ -170,8 +163,39 @@
     return;
   }
 
-  if (gateway) {
-    location.replace(gateway);
+  // Якщо застосунок перехопив перехід, вкладка йде у фон — тоді нічого не робимо.
+  //
+  // ВАЖЛИВО: слухачі мають бути встановлені ДО будь-якого location.replace.
+  // Раніше вони стояли нижче, а гілка dplk робила return раніше — через це
+  // `bailed` завжди лишався хибним, і через 2 с показувалось «Не відкрилось
+  // автоматично» навіть коли застосунок відкрився нормально.
+  var bailed = false;
+  function onHide() { if (document.hidden) bailed = true; }
+  document.addEventListener("visibilitychange", onHide);
+  window.addEventListener("pagehide", function () { bailed = true; });
+
+  var dplk = q.get("dplk") || "";
+
+  if (ex === "Binance" && dplk) {
+    if (isAndroid) {
+      // Вбудований браузер Telegram не віддає https-посилання застосунку.
+      // Intent із явним пакетом обходить це і йде повз webview одразу в апку.
+      var cleanDplk = dplk.replace(/^https?:\/\//i, "");
+      var bncIntent = "intent://" + cleanDplk +
+                      "#Intent;scheme=https;package=com.binance.dev;";
+      // Фолбек — канонічна веб-сторінка, а НЕ сам dplk: у Telegram-webview
+      // dplk знову покаже «Завантажити застосунок».
+      if (web) bncIntent += "S.browser_fallback_url=" + encodeURIComponent(web) + ";";
+      location.replace(bncIntent + "end");
+      setTimeout(function () { if (!bailed) showManual(); }, 2000);
+      return;
+    }
+    // iOS: універсального лінка достатньо, там його ловить сам застосунок.
+    location.replace(dplk);
+    setTimeout(function () {
+      if (bailed) return;
+      if (web) { location.replace(web); } else { showManual(); }
+    }, 1500);
     return;
   }
 
@@ -180,12 +204,6 @@
     if (web) { location.replace(web); } else { showManual(); }
     return;
   }
-
-  // Якщо застосунок перехопив перехід, вкладка йде у фон — тоді нічого не робимо.
-  var bailed = false;
-  function onHide() { if (document.hidden) bailed = true; }
-  document.addEventListener("visibilitychange", onHide);
-  window.addEventListener("pagehide", function () { bailed = true; });
 
   if (isAndroid) {
     // Intent URL сам робить fallback у браузер, якщо застосунка немає.

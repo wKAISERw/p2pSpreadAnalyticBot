@@ -47,6 +47,17 @@ _TIMEOUT = 8
 _cache: dict[str, tuple[str, float]] = {}
 _lock = asyncio.Lock()
 
+# Той самий запобіжник, що й у binance_share: після кількох невдач поспіль
+# перестаємо звертатись зовсім, щоб не сипати помилками в бік біржі.
+_FAILS_TO_TRIP = 3
+_COOLDOWN = 30 * 60
+_consecutive_fails = 0
+_disabled_until = 0.0
+
+
+def is_available() -> bool:
+    return time.time() >= _disabled_until
+
 Kind = Literal["order", "profile"]
 
 _REQUEST = {
@@ -93,7 +104,7 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
 
     headers_dict, cookies_dict, _ = await db.get_auth_session("OKX", user_id)
     if not headers_dict or not cookies_dict:
-        logger.debug("okx_share: немає сесії OKX")
+        logger.warning("okx_share: немає сесії OKX")
         return ""
 
     headers_dict = {k.lower(): v for k, v in headers_dict.items()}
@@ -130,24 +141,31 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
                 timeout=_TIMEOUT,
             )
         if resp.status_code != 200:
-            logger.debug("okx_share %s: HTTP %s", path, resp.status_code)
+            logger.warning("okx_share %s: HTTP %s", path, resp.status_code)
             return ""
         payload = resp.json()
         if payload.get("code") not in (0, "0"):
-            logger.debug("okx_share %s: code=%s msg=%s",
+            logger.warning("okx_share %s: code=%s msg=%s",
                          path, payload.get("code"), payload.get("msg"))
             return ""
         code = _extract_share_code(payload.get("data") or payload)
         if not code:
-            logger.debug("okx_share %s: shareCode у відповіді немає", path)
+            # Друкуємо саму відповідь: без неї незрозуміло, чи це інша форма
+            # даних, чи мерчант просто не має share-коду (не верифікований).
+            import json as _json
+            logger.warning("okx_share %s: shareCode у відповіді немає; data=%s",
+                           path, _json.dumps(payload.get("data"),
+                                             ensure_ascii=False)[:400])
         return code
     except Exception as e:
-        logger.debug("okx_share %s: %s: %s", path, type(e).__name__, e)
+        logger.warning("okx_share %s: %s: %s", path, type(e).__name__, e)
         return ""
 
 
 async def get_share_code(kind: Kind, entity_id: str, db, user_id: int = 0) -> str:
     """Повертає `shareCode` або "". Ніколи не кидає виняток."""
+    global _consecutive_fails, _disabled_until
+
     if kind not in _REQUEST or not entity_id or db is None:
         return ""
 
@@ -158,18 +176,37 @@ async def get_share_code(kind: Kind, entity_id: str, db, user_id: int = 0) -> st
     if cached and cached[1] > now:
         return cached[0]
 
+    if now < _disabled_until:
+        return ""
+
     async with _lock:
         cached = _cache.get(key)
         if cached and cached[1] > now:
             return cached[0]
+        if time.time() < _disabled_until:
+            return ""
         try:
             link = await _fetch(kind, entity_id, user_id, db)
         except Exception as e:
-            logger.debug("okx_share: несподівана помилка %s", e)
+            logger.warning("okx_share: несподівана помилка %s", e)
             link = ""
+        if link:
+            _consecutive_fails = 0
+            _disabled_until = 0.0
+        else:
+            _consecutive_fails += 1
+            if _consecutive_fails >= _FAILS_TO_TRIP:
+                _disabled_until = time.time() + _COOLDOWN
+                logger.warning(
+                    "okx_share: %d невдачі поспіль — вимикаю shareCode на %d хв. "
+                    "Схоже, сесія OKX померла.", _consecutive_fails, _COOLDOWN // 60)
         _cache[key] = (link, now + (_CACHE_TTL if link else _NEGATIVE_TTL))
         return link
 
 
 def clear_cache() -> None:
+    """Скидає кеш і запобіжник. Викликати після оновлення сесії."""
+    global _consecutive_fails, _disabled_until
     _cache.clear()
+    _consecutive_fails = 0
+    _disabled_until = 0.0

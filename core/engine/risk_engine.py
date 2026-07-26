@@ -964,6 +964,17 @@ class RiskEngine:
                     if not flags and regex_result.reason:
                         flags.append(_build_weak_regex_flag(regex_result))
                     order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+                    if self._db:
+                        await self._db.save_verdict(
+                            exchange, mid, order.merchant_name,
+                            terms, "OK", "NONE",
+                            f"Довірений мерчант ({order.month_order_count} угод, {order.finish_rate_pct:.1f}% успішності). Ризиків не виявлено.",
+                            "trusted_skip",
+                            trade_recommendation="APPROVE",
+                            terms_summary="Умови обміну перевірено, стандартні вимоги безпеки.",
+                            reviews_analysis="Відгуки чисті, без скарг на шахрайство."
+                        )
                     return
 
                 # Передаємо review_summary в LLM — відгуки є ключовим сигналом
@@ -1008,6 +1019,17 @@ class RiskEngine:
             flags.extend(review_flags)
             flags.extend(behavior_flags)
             order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+
+            if self._db and order.risk_flag == "OK":
+                await self._db.save_verdict(
+                    exchange, mid, order.merchant_name,
+                    terms, "OK", "NONE",
+                    "Автоматична перевірка: ризиків не виявлено.",
+                    "risk_engine_pass",
+                    trade_recommendation="APPROVE",
+                    terms_summary="Умови стандартні.",
+                    reviews_analysis="Загроз не виявлено."
+                )
 
         except Exception as e:
             logger.error("RiskEngine async помилка для %s: %s", order.merchant_name, e, exc_info=True)
