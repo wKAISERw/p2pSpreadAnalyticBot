@@ -53,7 +53,7 @@
   // Мітка версії. Піднімати при кожній зміні маршрутів — інакше неможливо
   // відрізнити «маршрут неправильний» від «на Pages лежить стара версія».
   // Перевірити, що задеплоєно: відкрити сторінку з &debug=1
-  var VERSION = "2026-07-25.3";
+  var VERSION = "2026-08-04.1";
 
   var q = new URLSearchParams(location.search);
 
@@ -107,12 +107,30 @@
       // okx://exchange/merchanthome.com?shareCode=… відкриває нативну картку
       // продавця (com.okinc.p2p.userinfo.profile.UserProfilePageActivity).
       if (code) return "okx://exchange/merchanthome.com?shareCode=" + encodeURIComponent(code);
-      // Без коду профіль відкриває лише вітрину P2P — застосунок, але не картку.
-      return "okx://exchange/p2p/profile?userId=" + e;
+      // БЕЗ КОДУ НЕ ЙДЕМО В ЗАСТОСУНОК.
+      // `okx://exchange/p2p/profile?userId=` ігнорує переданий id і відкриває
+      // профіль ТОГО, ХТО ЗАЛОГІНЕНИЙ, тобто самого користувача. Показати
+      // людині її власний профіль замість продавця — гірше, ніж браузер:
+      // вона вирішить, що бот дав не того мерчанта. Тому повертаємо порожньо
+      // і сторінка піде у веб, де сторінка продавця відкриється правильно.
+      return "";
     }
     if (ex === "Bybit") {
-      if (kind === "order") return "bybitapp://open/p2p/order/detail?orderId=" + e;
-      return "bybitapp://open/p2p/user/home?userId=" + e;
+      // Маршрутів `open/p2p/...` у роутері Bybit НЕМАЄ — у libapp.so апки з
+      // пристрою лежить таблиця з 92 декларованих маршрутів, і жодного такого
+      // серед них. Стара пара `open/p2p/order/detail` + `open/p2p/user/home`
+      // мовчки падала на головну, і вердикт APP це приховував.
+      if (kind === "order") {
+        // Декларований нативний екран: open/fiat_otc_order_detail{orderId?,sourcePage?}
+        return "bybitapp://open/fiat_otc_order_detail?orderId=" + e + "&sourcePage=deeplink";
+      }
+      // Профіль. Нативного маршруту на картку контрагента не існує:
+      // by-mini://p2p/user/home відкриває профіль ЗАЛОГІНЕНОГО користувача,
+      // ігноруючи будь-який переданий параметр (перевірено 6 імен). Робочий
+      // шлях — універсальний webview-шлюз хоста: підтверджено на пристрої,
+      // відкриває саме потрібного мерчанта під його ж сесією.
+      var bw = webUrl();
+      return bw ? "bybitapp://open/web?url=" + encodeURIComponent(bw) : "";
     }
     return "";
   }
@@ -178,9 +196,19 @@
 
   if (ex === "Binance" && dplk) {
     if (isAndroid) {
-      // Вбудований браузер Telegram не віддає https-посилання застосунку.
-      // Intent із явним пакетом обходить це і йде повз webview одразу в апку.
-      var cleanDplk = dplk.replace(/^https?:\/\//i, "");
+      // Вбудований браузер Telegram не віддає https-посилання застосунку,
+      // тому йдемо через Intent із явним пакетом.
+      //
+      // КЛЮЧОВА ДЕТАЛЬ. Сервер віддає dplk на хості `www.binance.com`, але
+      // в AndroidManifest застосунку зареєстровані лише `app.binance.com`,
+      // `app.binance.info` і `accounts.binance.com`. Навіть із указаним
+      // package Android шукає в застосунку intent-filter під цей URI — і для
+      // www не знаходить, тож одразу йде на фолбек.
+      //
+      // Зате `app.binance.com` приймає БУДЬ-ЯКИЙ шлях, тому для Intent
+      // підміняємо хост, лишаючи сам шлях `/uk-UA/qr/dplk…` недоторканим.
+      var cleanDplk = dplk.replace(/^https?:\/\//i, "")
+                          .replace(/^www\.binance\.com/i, "app.binance.com");
       var bncIntent = "intent://" + cleanDplk +
                       "#Intent;scheme=https;package=com.binance.dev;";
       // Фолбек — канонічна веб-сторінка, а НЕ сам dplk: у Telegram-webview
