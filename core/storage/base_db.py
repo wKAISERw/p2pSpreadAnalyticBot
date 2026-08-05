@@ -410,6 +410,17 @@ class MerchantDB:
                                          PRIMARY KEY (user_id, exchange)
                                      );
 
+                                     -- shareCode мерчантів OKX.
+                                     -- Код сталий і не протухає, на відміну від сесії,
+                                     -- якою його дістають. Тому зберігаємо назавжди:
+                                     -- сесія потрібна лише в момент збору, далі кнопка
+                                     -- відкриває нативну картку без жодної авторизації.
+                                     CREATE TABLE IF NOT EXISTS okx_share_codes (
+                                         merchant_id TEXT PRIMARY KEY,
+                                         share_code  TEXT NOT NULL,
+                                         updated_at  REAL DEFAULT 0
+                                     );
+
                                      -- Таблиця: trade_sessions
                                      CREATE TABLE IF NOT EXISTS trade_sessions (
                                          id              INTEGER PRIMARY KEY AUTOINCREMENT,
