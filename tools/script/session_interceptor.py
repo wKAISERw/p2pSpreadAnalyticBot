@@ -2,6 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 from playwright.async_api import async_playwright, Request
+from playwright_stealth import Stealth  # без нього рядок apply_stealth_async падає з NameError
 from core.storage.merchant_db import MerchantDB
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
