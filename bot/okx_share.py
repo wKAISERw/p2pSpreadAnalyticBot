@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Literal
 from urllib.parse import quote
@@ -72,8 +73,10 @@ def _extract_share_code(data) -> str:
 
     Фактична відповідь ендпоінта:
 
-        {"shareCode": "AysnnUZlACimN",
-         "qrCode": "https://okx.com/ua/p2p?action=otcTransfer&shareCode=AysnnUZlACimN"}
+        1. {"shareCode": "AysnnUZlACimN",
+            "qrCode": "https://okx.com/ua/p2p?action=otcTransfer&shareCode=AysnnUZlACimN"}
+
+        2. {"password": "Нажмите здесь для торговли криптой на OKX https://okx.com/otc/transfer?shareCode=9ZpaFCwJnn8my SQ7491 [Поделиться кодом:￥9ZpaFCwJnn8my￥]"}
 
     Брати треба саме код, а не `qrCode`. Шлях `/ua/p2p` у манифесті не
     зареєстрований, тому qrCode-посилання відкриє браузер. А код, підставлений
@@ -89,11 +92,18 @@ def _extract_share_code(data) -> str:
             got = _extract_share_code(v)
             if got:
                 return got
-    if isinstance(data, list):
+    elif isinstance(data, list):
         for v in data:
             got = _extract_share_code(v)
             if got:
                 return got
+    elif isinstance(data, str):
+        m = re.search(r"shareCode=([A-Za-z0-9]+)", data)
+        if m:
+            return m.group(1)
+        m2 = re.search(r"\[Поделиться кодом:[￥$]?([A-Za-z0-9]+)[￥$]?\]", data)
+        if m2:
+            return m2.group(1)
     return ""
 
 
@@ -162,6 +172,44 @@ async def _fetch(kind: Kind, entity_id: str, user_id: int, db) -> str:
         return ""
 
 
+async def load_cached_code(db, merchant_id: str) -> str:
+    """
+    Постійний кеш `shareCode` у БД.
+
+    Код мерчанта сталий — він не протухає разом із сесією, якою його дістали.
+    Тому сесія потрібна лише в МОМЕНТ збору: далі кнопка відкриває нативну
+    картку без будь-якої авторизації, скільки б часу не минуло.
+
+    Саме це прибирає головну ваду попередньої схеми, коли кеш жив у пам'яті
+    процесу й помирав разом із перезапуском бота.
+    """
+    if not merchant_id or db is None:
+        return ""
+    try:
+        async with db._db.execute(
+            "SELECT share_code FROM okx_share_codes WHERE merchant_id = ?",
+            (str(merchant_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        return (row[0] if row else "") or ""
+    except Exception as e:
+        logger.debug("okx_share: читання кешу впало: %s", e)
+    return ""
+
+
+async def save_cached_code(db, merchant_id: str, code: str) -> None:
+    """Зберігає код назавжди. Помилка запису не має ламати кнопку."""
+    if not merchant_id or not code or db is None:
+        return
+    try:
+        await db._db.execute(
+            "INSERT OR REPLACE INTO okx_share_codes (merchant_id, share_code, updated_at) "
+            "VALUES (?, ?, ?)", (str(merchant_id), str(code), time.time()))
+        await db._db.commit()
+    except Exception as e:
+        logger.debug("okx_share: запис кешу впав: %s", e)
+
+
 async def get_share_code(kind: Kind, entity_id: str, db, user_id: int = 0) -> str:
     """Повертає `shareCode` або "". Ніколи не кидає виняток."""
     global _consecutive_fails, _disabled_until
@@ -175,6 +223,29 @@ async def get_share_code(kind: Kind, entity_id: str, db, user_id: int = 0) -> st
     cached = _cache.get(key)
     if cached and cached[1] > now:
         return cached[0]
+
+    # ВИМКНЕНО. Задум був: код сталий, тому зберігаємо назавжди і кнопка
+    # відкриває нативну картку без сесії. Прогін на пристрої 05.08 спростував
+    # обидві передумови:
+    #
+    #   * коди з масового збору НЕ вказують на потрібного мерчанта —
+    #     `Bno26f7YUndsE` (мав бути FastDealX) відкрив ВЛАСНИЙ профіль
+    #     користувача, ще два — головну застосунку. Відповідь ендпоінта — це
+    #     реферальне запрошення («Поделиться кодом:￥…￥» + код виду SQ7491),
+    #     а не посилання на картку продавця. Тому кожен виклик повертає новий
+    #     унікальний код, і відсутність дублікатів нічого не доводила;
+    #   * код ПРОТУХАЄ: `IwngxnsTgPimM`, який о 14:04 відкривав картку Varked
+    #     (UserProfilePageActivity), о 23:09 вже вів на головну.
+    #
+    # Протухлий код гірший за його відсутність: замість робочого webview
+    # користувач отримав би головну застосунку. Тому кеш не читаємо, а профіль
+    # іде через `okx://app/web` — він працює вічно і без сесії.
+    #
+    # Таблиця і функції лишені навмисно: якщо колись знайдеться ендпоінт, що
+    # видає саме код мерчанта, інфраструктура вже готова.
+
+
+
 
     if now < _disabled_until:
         return ""
@@ -193,6 +264,10 @@ async def get_share_code(kind: Kind, entity_id: str, db, user_id: int = 0) -> st
         if link:
             _consecutive_fails = 0
             _disabled_until = 0.0
+            if kind == "profile":
+                # Кладемо назавжди — далі цей мерчант відкривається нативно
+                # незалежно від стану сесії.
+                await save_cached_code(db, entity_id, link)
         else:
             _consecutive_fails += 1
             if _consecutive_fails >= _FAILS_TO_TRIP:

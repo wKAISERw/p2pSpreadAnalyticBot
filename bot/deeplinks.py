@@ -505,28 +505,26 @@ async def tg_button_url_async(
         if web:
             return web
 
-    # OKX ПРОФІЛЬ (лише!): shareCode -> okx://exchange/merchanthome.com?shareCode=…
-    # відкриває нативну картку продавця (UserProfilePageActivity, перевірено на
-    # пристрої). Схему не можна класти в кнопку Telegram, тому веземо код через
-    # redirect.html.
+    # OKX-профіль через shareCode ВИМКНЕНО 05.08 після прогону на пристрої.
     #
-    # Для ОРДЕРА shareCode НЕ використовуємо: merchanthome — це профіль, а не
-    # ордер. Ордер OKX має власний прямий маршрут okx://exchange/p2p/order?id=,
-    # який redirect.html будує сам. Якби ми сюди пустили order — кнопка ордера
-    # відкривала б профіль продавця.
-    if exchange == "OKX" and kind == "profile" and db is not None:
-        try:
-            from bot.okx_share import get_share_code
-            code = await get_share_code("profile", entity_id, db, user_id)
-            if code:
-                # shareCode дає НАТИВНУ картку (UserProfilePageActivity), тому
-                # він кращий за webview. Але веземо його вже не через
-                # redirect.html, а офіційною https-обгорткою OKX — вона й так
-                # відкриває застосунок, і на один перехід менше.
-                return okx_universal_deeplink(okx_merchant_url(code))
-        except Exception as e:
-            _log.warning("deeplinks: OKX profile — shareCode впав: %s: %s",
-                         type(e).__name__, e, exc_info=True)
+    # Задум був: shareCode -> okx://exchange/merchanthome.com?shareCode= відкриває
+    # НАТИВНУ картку продавця. Сам маршрут робочий — це підтверджено кодом, який
+    # користувач отримав із мобільної апки.
+    #
+    # Але код, який `/v3/c2c/merchant/share` віддає НАМ, інший за природою: у
+    # відповіді лежить реферальне запрошення («Поделиться кодом:￥…￥» + код виду
+    # SQ7491), а не посилання на картку мерчанта. Три свіжі коди на пристрої:
+    #     Bno26f7YUndsE (мав бути FastDealX) -> ВЛАСНИЙ профіль користувача
+    #     SUsnySx3G2PjT, GjtKfwaEonECa       -> головна застосунку
+    # Плюс коди протухають: код, що о 14:04 відкривав картку Varked, о 23:09 вже
+    # вів на головну.
+    #
+    # Тобто шлях не просто не кращий за webview — він гірший: замість картки
+    # продавця людина бачить свій профіль. Тому профіль іде через
+    # `okx://app/web` (див. app_scheme_url) — він працює вічно й без сесії.
+    #
+    # Щоб повернути нативну картку, потрібен ендпоінт, який видає код САМЕ
+    # мерчанта. Наразі такого не знайдено.
 
     return tg_button_url(exchange, kind, entity_id, side=side, web_fallback=web_fallback)
 
