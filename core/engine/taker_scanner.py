@@ -245,7 +245,9 @@ class TakerScanner:
                                     elif calc_usdt < 5.0:
                                         continue
                                 else:
-                                    await notify_insufficient_buy_balance(user, total_bal, target_uah, t_amount, order_price)
+                                    await notify_insufficient_buy_balance(
+                                        user, total_bal, target_uah, t_amount,
+                                        order_price, bank=card_bank_db)
                                     continue
 
                 if not self._merchant_ok(order, mf, emf, used_subs):
@@ -399,7 +401,9 @@ async def notify_buy_autoscale(user: dict, total_bal: float, old_usdt: float, ne
         logger.error(f"Failed to send autoscale notification to {user_id}: {e}")
 
 
-async def notify_insufficient_buy_balance(user: dict, total_bal: float, target_uah: float, t_amount: float, est_rate: float):
+async def notify_insufficient_buy_balance(user: dict, total_bal: float, target_uah: float,
+                                          t_amount: float, est_rate: float,
+                                          bank: str = ""):
     from bot.handlers.core import _bot
     import time
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -407,11 +411,21 @@ async def notify_insufficient_buy_balance(user: dict, total_bal: float, target_u
     if not user_id or not _bot:
         return
     now = time.time()
-    # Throttle warnings to once per 15 minutes per user
-    if now - _last_insufficient_warn.get(user_id, 0) < 900:
+
+    # Тротлінг за СИТУАЦІЄЮ, а не просто за часом.
+    #
+    # Раніше ключем був лише user_id з інтервалом 15 хв — і те саме
+    # попередження приходило кожні 15 хвилин, поки ордер висів. Користувач
+    # усе зрозумів з першого разу, решта — спам.
+    #
+    # Тепер ключ включає банк і потрібну суму: нове повідомлення приходить,
+    # якщо змінився банк або сума (тобто ситуація справді інша). Та сама
+    # ситуація повторюється не частіше разу на 6 годин.
+    sit_key = (user_id, bank or "?", round(t_amount, 2))
+    if now - _last_insufficient_warn.get(sit_key, 0) < 6 * 3600:
         return
-    _last_insufficient_warn[user_id] = now
-    
+    _last_insufficient_warn[sit_key] = now
+
     needed_uah = t_amount * est_rate if t_amount > 0 else target_uah
     calc_usdt = round(total_bal / est_rate, 2) if est_rate > 0 else 0.0
 
@@ -422,11 +436,21 @@ async def notify_insufficient_buy_balance(user: dict, total_bal: float, target_u
         kb_buttons.append([InlineKeyboardButton(text=f"✏️ Встановити {calc_usdt:.2f} USDT під баланс", callback_data=f"tbuy_fit_bal:{calc_usdt}")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
 
+    # Банк обов'язково називаємо. Перевірка рахує лише картки того банку, який
+    # приймає мерчант, тому число тут МЕНШЕ за загальний капітал у /start —
+    # без назви банку це виглядає як помилка бота.
+    bank_line = (f"💳 Доступно на картках <b>{bank}</b>: <b>{total_bal:,.2f} ₴</b>\n"
+                 if bank else
+                 f"💳 Доступно на картках цього банку: <b>{total_bal:,.2f} ₴</b>\n")
+
     text = (
-        f"⚠️ <b>Недостатньо коштів на картці для купівлі!</b>\n\n"
-        f"💳 Доступно на картці: <b>{total_bal:,.2f} ₴</b>\n"
-        f"💸 Необхідно для закупівлі: <b>{t_amount:,.2f} USDT (~{needed_uah:,.0f} ₴)</b>\n\n"
-        f"<i>💡 Натисніть кнопку нижче, щоб миттєво підлаштувати суму під баланс або увімкнути авто-масштабування:</i>"
+        f"⚠️ <b>Недостатньо коштів для купівлі</b>\n\n"
+        f"{bank_line}"
+        f"💸 Необхідно: <b>{t_amount:,.2f} USDT (~{needed_uah:,.0f} ₴)</b>\n\n"
+        f"<i>Мерчант приймає оплату лише цим банком, тому решта карток "
+        f"не враховується.</i>\n\n"
+        f"<i>💡 Кнопка нижче підлаштує суму під баланс або увімкне "
+        f"авто-масштабування:</i>"
     )
     try:
         await _bot.send_message(chat_id=user_id, text=text, parse_mode="HTML", reply_markup=kb)

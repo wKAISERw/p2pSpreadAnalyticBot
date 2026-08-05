@@ -402,9 +402,10 @@ class TelegramNotifier:
         from bot.alert_builder import send_batch
         await send_batch(self, batch)
 
-    async def send_taker_to_user(self, chat_id: int, orders: list[Order], mode: str) -> None:
+    async def send_taker_to_user(self, chat_id: int, orders: list[Order], mode: str,
+                                 group: bool | None = None) -> None:
         from bot.taker_builder import send_taker_to_user
-        await send_taker_to_user(self, chat_id, orders, mode)
+        await send_taker_to_user(self, chat_id, orders, mode, group=group)
 
     async def _send_taker_single(self, order: Order, mode: str, chat_id: int | None = None, display_settings: dict | None = None) -> None:
         from bot.taker_builder import send_taker_single

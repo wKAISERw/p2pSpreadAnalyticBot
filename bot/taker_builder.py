@@ -27,16 +27,36 @@ logger = logging.getLogger(__name__)
 
 async def send_taker_to_user(
     notifier, chat_id: int, orders: list[Order], mode: str,
+    group: bool | None = None,
 ) -> None:
     """
     Відправляє тейкер-алерти юзеру.
     Якщо ордер один — відправляє його детально.
     Якщо ордерів кілька — відправляє їх об'єднаним компактним списком, щоб уникнути флуду.
     mode: TAKER_BUY або TAKER_SELL
+
+    group:
+        None  — вирішуємо за кількістю (стара поведінка, для авто-алертів);
+        False — завжди окремими повідомленнями, навіть якщо ордерів багато;
+        True  — зводимо в одне, якщо ордерів більше одного.
+
+    Параметр з'явився через баг: тумблер «Групувати /active в 1 повідомлення»
+    діяв лише в режимі SPREAD, а тейкерні режими його ігнорували і завжди
+    зводили все в одне повідомлення.
     """
     if not orders:
         return
     ds = await notifier._get_display_settings(chat_id)
+
+    if group is False and len(orders) > 1:
+        for order in orders:
+            try:
+                await send_taker_single(notifier, order, mode, chat_id=chat_id,
+                                        display_settings=ds)
+            except Exception as e:
+                logger.error("send_taker_to_user [%d] single-of-many error: %s", chat_id, e)
+        return
+
     if len(orders) == 1:
         try:
             await send_taker_single(notifier, orders[0], mode, chat_id=chat_id, display_settings=ds)
@@ -133,10 +153,29 @@ async def send_taker_combined(
                     "ts": time.time(),
                 })
                 action_label = "Купити" if is_buy else "Продати"
-                kb.append([InlineKeyboardButton(
+                row = [InlineKeyboardButton(
                     text=f"⚡ {idx}. {action_label} ({order.exchange} {order.price})",
                     callback_data=f"taker:take:{cache_key}",
-                )])
+                )]
+                # 📱 Відкрити в застосунку — те саме, що в одиночному алерті.
+                # Раніше цієї кнопки в зведеному списку не було взагалі, тож
+                # зайти в апку до мерчанта зі списку було неможливо.
+                _kind, _eid = resolve_target(order)
+                if _eid:
+                    try:
+                        app_url = await tg_button_url_async(
+                            order.exchange, _kind, _eid,
+                            side="buy" if is_buy else "sell",
+                            web_fallback=getattr(order, "link", "") or build_profile_url(
+                                order.exchange, order.merchant_id),
+                            db=getattr(notifier, "_db", None),
+                        )
+                        if app_url:
+                            row.append(InlineKeyboardButton(text="📱 App", url=app_url))
+                    except Exception as e:
+                        logger.warning("taker combined: app-кнопка для %s впала: %s",
+                                       order.exchange, e)
+                kb.append(row)
                 
     # ── Додаємо картковий блок для топ-1 ордера ──
     card_text_combined = ""

@@ -469,7 +469,14 @@ async def cmd_active(message: Message) -> None:
             f"Відправляю топ-{count}..."
         )
 
-        await _notifier.send_taker_to_user(message.chat.id, t_orders, mode)
+        # Тумблер «Групувати /active в 1 повідомлення» діє і тут. Раніше
+        # тейкерні режими його ігнорували: список завжди зводився в одне
+        # повідомлення, і вимкнений тумблер нічого не міняв.
+        ds_active = await _db.get_user_display_settings(message.chat.id) if _db else {}
+        await _notifier.send_taker_to_user(
+            message.chat.id, t_orders, mode,
+            group=ds_active.get("group_active_alerts", True),
+        )
         return
 
     if mode != "SPREAD":
