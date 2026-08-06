@@ -216,15 +216,8 @@ export default function LandingPage() {
       {/* ─── Заклик ───────────────────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
-          <div className="relative overflow-hidden rounded-[2rem] border border-accent-500/25 bg-slate-900/60 p-8 sm:p-14 text-center">
-            <div
-              className="absolute inset-x-0 -top-24 h-64 pointer-events-none"
-              style={{
-                background:
-                  'radial-gradient(ellipse 55% 100% at 50% 100%, rgb(var(--accent-rgb)/0.22), transparent 70%)',
-              }}
-            />
-            <div className="relative">
+          <GlowCard className="bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-[2.5rem] p-8 sm:p-14 text-center shadow-2xl hover:border-accent-500/40 transition-all">
+            <div className="relative z-10">
               <h2 className="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-4">
                 Підключається за хвилину
               </h2>
@@ -235,13 +228,13 @@ export default function LandingPage() {
               </p>
               <Link
                 to="/login"
-                className="group inline-flex items-center gap-2 px-7 py-3.5 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-colors shadow-lg shadow-accent-500/25"
+                className="group inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-all shadow-xl shadow-accent-500/25"
               >
                 Увійти через Telegram
-                <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-0.5" />
+                <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-0.5" />
               </Link>
             </div>
-          </div>
+          </GlowCard>
         </Reveal>
       </Section>
     </LandingLayout>

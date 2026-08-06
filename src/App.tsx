@@ -11,6 +11,7 @@ const LandingPage = lazy(() => import('./landing/LandingPage'));
 const FeaturesPage = lazy(() => import('./landing/FeaturesPage'));
 const HowItWorksPage = lazy(() => import('./landing/HowItWorksPage'));
 const SecurityPage = lazy(() => import('./landing/SecurityPage'));
+const LandingLayout = lazy(() => import('./landing/LandingLayout'));
 
 // Дашборд і екран входу теж ліниві: відвідувачу лендингу не потрібні ані
 // панелі, ані клієнт API, ані SWR. Інакше публічна сторінка тягнула б
@@ -40,7 +41,7 @@ export default function App() {
           <Route path="/features" element={<FeaturesPage />} />
           <Route path="/how-it-works" element={<HowItWorksPage />} />
           <Route path="/security" element={<SecurityPage />} />
-          <Route path="/login" element={<LoginScreen />} />
+          <Route path="/login" element={<LandingLayout><LoginScreen /></LandingLayout>} />
 
           {/* Дашборд */}
           <Route path="/app/*" element={<AppShell />} />

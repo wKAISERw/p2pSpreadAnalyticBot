@@ -43,26 +43,28 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
       {/* Фон живе під усім вмістом і не бере участі в потоці */}
       <AuroraField />
 
-      <header className="header-condense sticky top-0 z-40 border-b border-slate-800/60 bg-slate-950/80 backdrop-blur-xl">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+      <header className="header-condense sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-2xl">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <Link to="/" className="flex items-center gap-2.5 shrink-0">
             <span className="w-9 h-9 rounded-xl bg-accent-500 flex items-center justify-center shadow-lg shadow-accent-500/25">
               <Activity className="w-5 h-5 text-slate-950" />
             </span>
-            <span className="font-bold tracking-tight text-white">
+            <span className="font-bold tracking-tight text-white text-base sm:text-lg">
               ARBIX <span className="text-accent-400">QUANTUM</span>
             </span>
           </Link>
 
-          <nav className="hidden md:flex items-center gap-1">
+          <nav className="hidden md:flex items-center gap-2">
             {NAV.map(item => (
               <NavLink
                 key={item.to}
                 to={item.to}
                 className={({ isActive }) =>
                   cn(
-                    'px-3 py-2 rounded-lg text-sm font-medium transition-colors',
-                    isActive ? 'text-accent-400' : 'text-slate-400 hover:text-white'
+                    'px-4 py-2 rounded-xl text-sm font-semibold transition-all',
+                    isActive
+                      ? 'text-accent-400 bg-accent-500/10 border border-accent-500/20'
+                      : 'text-slate-300 hover:text-white hover:bg-slate-900/60'
                   )
                 }
               >
@@ -71,10 +73,10 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
             ))}
           </nav>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <Link
               to={isLoggedIn ? '/app' : '/login'}
-              className="hidden sm:inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-500 hover:bg-accent-400 text-slate-950 text-sm font-bold transition-colors"
+              className="hidden sm:inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-500 hover:bg-accent-400 text-slate-950 text-sm font-bold transition-all shadow-md shadow-accent-500/20"
             >
               {isLoggedIn ? 'До дашборду' : 'Увійти'}
               <ArrowUpRight className="w-4 h-4" />
@@ -82,7 +84,7 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
 
             <button
               onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className="md:hidden p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400"
+              className="md:hidden p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-accent-400 hover:text-accent-300 active:scale-95 transition-all shadow-md flex items-center justify-center min-w-[42px] min-h-[42px] shrink-0"
               aria-label="Меню"
             >
               {isMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -91,46 +93,8 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
         </div>
 
         {/*
-          Повноекранний оверлей замість випадайчика: у нього легше влучити
-          пальцем, і він не притискає контент шапкою.
-        */}
-        {isMenuOpen && (
-          <div className="md:hidden fixed inset-0 top-16 z-40 bg-slate-950/95 backdrop-blur-xl animate-rise">
-            <nav className="px-4 py-6 space-y-2">
-              {NAV.map((item, i) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  style={{ animationDelay: `${i * 50}ms` }}
-                  className={({ isActive }) =>
-                    cn(
-                      'flex items-center justify-between px-5 py-4 rounded-2xl text-lg font-bold border animate-rise',
-                      isActive
-                        ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
-                        : 'bg-slate-900/60 border-slate-800 text-slate-200'
-                    )
-                  }
-                >
-                  {item.label}
-                  <ArrowUpRight className="w-5 h-5 opacity-40" />
-                </NavLink>
-              ))}
-
-              <Link
-                to={isLoggedIn ? '/app' : '/login'}
-                className="flex items-center justify-center gap-2 px-5 py-4 rounded-2xl bg-accent-500 text-slate-950 text-lg font-bold mt-4 animate-rise"
-                style={{ animationDelay: `${NAV.length * 50}ms` }}
-              >
-                {isLoggedIn ? 'До дашборду' : 'Увійти'}
-                <ArrowUpRight className="w-5 h-5" />
-              </Link>
-            </nav>
-          </div>
-        )}
-
-        {/*
-          Смужка прогресу читання. Ширина рахується самим браузером зі
-          scroll-таймлайну — жодного обробника scroll у JS.
+          Смужка прогресу читання. Ширину рахує браузер зі scroll-таймлайну
+          — жодного обробника scroll у JS.
         */}
         <div
           className="scroll-progress absolute bottom-0 left-0 h-px w-full bg-accent-500"
@@ -138,10 +102,86 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
         />
       </header>
 
+      {/*
+        Оверлей меню живе ПОЗА <header> — і це не косметика.
+
+        У хедера backdrop-filter, а будь-який backdrop-filter, filter,
+        transform чи contain на предку створює containing block для
+        position: fixed. Тобто inset-0 всередині хедера рахувався від
+        його власної коробки у 65px, а не від екрана: меню відкривалось
+        смужкою у 48 пікселів і виглядало як «не працює».
+      */}
+      {isMenuOpen && (
+        <div className="md:hidden fixed inset-0 z-50 flex flex-col animate-rise">
+          {/*
+            Розмиття фону з м'яким згасанням. Маска робить шар щільним
+            там, де лежать пункти меню, і поступово прозорим донизу —
+            інакше різкий край виглядав би як приклеєний прямокутник.
+          */}
+          <div className="menu-scrim absolute inset-0" onClick={() => setIsMenuOpen(false)} />
+
+          <div className="relative z-10 flex items-center justify-between h-16 px-4 shrink-0">
+            <Link
+              to="/"
+              onClick={() => setIsMenuOpen(false)}
+              className="flex items-center gap-2.5"
+            >
+              <span className="w-9 h-9 rounded-xl bg-accent-500 flex items-center justify-center">
+                <Activity className="w-5 h-5 text-slate-950" />
+              </span>
+              <span className="font-bold tracking-tight text-white">
+                ARBIX <span className="text-accent-400">QUANTUM</span>
+              </span>
+            </Link>
+
+            <button
+              onClick={() => setIsMenuOpen(false)}
+              className="p-2.5 rounded-xl bg-slate-900 border border-slate-700 text-accent-400 min-w-[42px] min-h-[42px] flex items-center justify-center"
+              aria-label="Закрити меню"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <nav className="relative z-10 px-5 pt-4 pb-10 space-y-3 overflow-y-auto">
+            {NAV.map((item, i) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                onClick={() => setIsMenuOpen(false)}
+                style={{ animationDelay: `${i * 55}ms` }}
+                className={({ isActive }) =>
+                  cn(
+                    'flex items-center justify-between px-6 py-4 rounded-2xl text-lg font-bold border transition-all animate-rise',
+                    isActive
+                      ? 'bg-accent-500/15 border-accent-500/40 text-accent-400'
+                      : 'bg-slate-900 border-slate-800 text-slate-100 active:bg-slate-800'
+                  )
+                }
+              >
+                {item.label}
+                <ArrowUpRight className="w-5 h-5 opacity-60 text-accent-400" />
+              </NavLink>
+            ))}
+
+            <Link
+              to={isLoggedIn ? '/app' : '/login'}
+              onClick={() => setIsMenuOpen(false)}
+              className="flex items-center justify-center gap-2.5 px-6 py-4 mt-5 rounded-2xl bg-accent-500 text-slate-950 text-lg font-bold shadow-xl shadow-accent-500/20 animate-rise"
+              style={{ animationDelay: `${NAV.length * 55}ms` }}
+            >
+              {isLoggedIn ? 'До дашборду' : 'Увійти'}
+              <ArrowUpRight className="w-5 h-5" />
+            </Link>
+          </nav>
+        </div>
+      )}
+
+
       <main className="relative z-10">{children}</main>
 
       <footer className="relative z-10 border-t border-slate-800/60 mt-24">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-12">
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 py-12">
           <div className="flex flex-col md:flex-row md:items-start justify-between gap-8">
             <div className="max-w-sm">
               <div className="flex items-center gap-2.5 mb-3">
@@ -166,11 +206,6 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
             </nav>
           </div>
 
-          {/*
-            Це не інвестиційна порада і не обіцянка доходу — інструмент
-            показує ринкові дані й оцінює ризик контрагента. Рішення про
-            угоду приймає людина, і гроші ризикує теж вона.
-          */}
           <p className="mt-10 pt-6 border-t border-slate-800/60 text-xs text-slate-500 leading-relaxed">
             Arbix Quantum — інструмент аналізу ринку, а не інвестиційна порада.
             Спред, який показує сканер, не гарантує прибутку: ціни й доступні
@@ -194,7 +229,7 @@ export function Section({
   id?: string;
 }) {
   return (
-    <section id={id} className={cn('mx-auto max-w-6xl px-4 sm:px-6 py-16 sm:py-24', className)}>
+    <section id={id} className={cn('mx-auto max-w-7xl px-4 sm:px-6 py-16 sm:py-24', className)}>
       {children}
     </section>
   );

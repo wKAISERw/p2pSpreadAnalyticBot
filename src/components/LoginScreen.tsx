@@ -71,26 +71,26 @@ export default function LoginScreen() {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-[80vh] px-4">
+    <div className="flex items-center justify-center min-h-[85vh] py-12 px-4">
       <motion.div
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md"
       >
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-accent-500/20 rounded-2xl flex items-center justify-center mx-auto mb-5">
+          <div className="w-16 h-16 bg-accent-500/20 border border-accent-500/30 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-accent-500/10">
             <div className="w-8 h-8 bg-accent-500 rounded-xl" />
           </div>
           <h1 className="text-2xl font-bold text-white mb-2">
-            ARBIX <span className="text-accent-500">QUANTUM</span>
+            ARBIX <span className="text-accent-400">QUANTUM</span>
           </h1>
-          <p className="text-sm text-slate-400">
+          <p className="text-sm text-slate-400 max-w-xs mx-auto">
             Увійди тим самим Telegram, у якому користуєшся ботом — фільтри,
             картки й баланси підтягнуться самі.
           </p>
         </div>
 
-        <div className="bg-slate-900/50 border border-slate-800/50 rounded-3xl p-6 space-y-6">
+        <div className="bg-slate-900/80 border border-slate-800/80 backdrop-blur-2xl rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl shadow-slate-950/80">
           {config?.widgetAvailable && (
             <div>
               <SectionLabel icon={<Send className="w-4 h-4 text-blue-400" />} text="Вхід одним кліком" />
@@ -103,24 +103,24 @@ export default function LoginScreen() {
               icon={<KeyRound className="w-4 h-4 text-accent-400" />}
               text="Код із бота"
             />
-            <p className="text-xs text-slate-400 mb-3 leading-relaxed">
-              Надішли боту <code className="text-accent-400">/login</code> — він відповість
+            <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+              Надішли боту <code className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-accent-400 font-mono">/login</code> — він відповість
               шестизначним кодом. Код живе 5 хвилин і спрацьовує один раз.
             </p>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2.5">
               <input
                 value={code}
                 onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 onKeyDown={e => e.key === 'Enter' && submitCode()}
                 placeholder="000000"
                 inputMode="numeric"
-                className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-center text-base sm:text-lg font-bold tracking-[0.3em] text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all"
+                className="flex-1 min-w-0 bg-slate-950/90 border border-slate-700/80 rounded-xl px-4 py-3 text-center text-lg sm:text-xl font-bold tracking-[0.3em] text-white placeholder-slate-600 focus:border-accent-500 focus:ring-2 focus:ring-accent-500/40 outline-none transition-all"
               />
               <button
                 onClick={submitCode}
                 disabled={busy !== null || code.length < 4}
-                className="shrink-0 px-4 sm:px-6 py-2.5 bg-accent-500 hover:bg-accent-400 disabled:opacity-40 text-slate-950 text-sm font-bold rounded-xl transition-all flex items-center gap-2"
+                className="shrink-0 px-5 sm:px-6 py-3 bg-accent-500 hover:bg-accent-400 disabled:opacity-40 text-slate-950 text-sm font-bold rounded-xl transition-all shadow-lg shadow-accent-500/20 flex items-center gap-2"
               >
                 {busy === 'code' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
                 Увійти
@@ -130,7 +130,7 @@ export default function LoginScreen() {
 
           <div className="flex items-center gap-3">
             <div className="flex-1 h-px bg-slate-800" />
-            <span className="text-[10px] uppercase tracking-widest text-slate-600">або</span>
+            <span className="text-[10px] uppercase tracking-widest text-slate-500 font-semibold">або</span>
             <div className="flex-1 h-px bg-slate-800" />
           </div>
 
@@ -138,7 +138,7 @@ export default function LoginScreen() {
             <button
               onClick={signInWithGoogle}
               disabled={busy !== null}
-              className="w-full px-6 py-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white text-sm font-bold rounded-xl transition-colors flex items-center justify-center gap-2"
+              className="w-full px-6 py-3 bg-slate-800/90 hover:bg-slate-700/90 border border-slate-700/60 disabled:opacity-40 text-white text-sm font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-md"
             >
               {busy === 'google' ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
               Продовжити з Google

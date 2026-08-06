@@ -71,35 +71,65 @@ export default function SecurityPage() {
     <LandingLayout>
       <Section className="pt-16 sm:pt-20">
         <SectionHeading
-          eyebrow="Безпека"
-          title="Спред без перевірки контрагента — половина картини"
-          description="У P2P втрачають не на курсі, а на людині по той бік. Ризик-движок зводить чотири незалежні джерела в один бал і вердикт."
+          eyebrow="Anti-Scam & Ризик-Движок"
+          title="Спред без перевірки контрагента — це пастка"
+          description="У P2P арбітражі втрачають не на коливанні курсу, а на трикутниках, фінімоніторингу та скаргах. RiskEngine зводить 4 аналізатори в один hazard score від 0 до 100."
         />
 
-        <div className="grid md:grid-cols-2 gap-4">
+        {/* Візуальний індикатор RiskEngine Scorer */}
+        <Reveal delay={40} className="mb-12">
+          <div className="bg-slate-900/80 border border-slate-800/80 backdrop-blur-2xl rounded-3xl p-6 sm:p-8 shadow-2xl">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 pb-6 border-b border-slate-800/80">
+              <div>
+                <h3 className="text-lg font-bold text-white mb-1">CompositeScorer: Оцінка рівня небезпеки (0–100)</h3>
+                <p className="text-xs text-slate-400">Автоматичний аналіз умов угоди, клонів профілю та скарг у чаті</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">0-25: Безпечно</span>
+                <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">26-60: Увага</span>
+                <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/10 text-red-400 border border-red-500/30">61+: Блок</span>
+              </div>
+            </div>
+
+            {/* Прогрес-бар ризиків */}
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <div className="flex justify-between text-xs font-bold">
+                  <span className="text-slate-300">Приклад: Перевірка мерчанта Binance</span>
+                  <span className="text-emerald-400">Score 12 / 100 (Низький ризик)</span>
+                </div>
+                <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
+                  <div className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-red-500 rounded-full transition-all" style={{ width: '12%' }} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </Reveal>
+
+        <div className="grid md:grid-cols-2 gap-6">
           {LAYERS.map((layer, i) => {
             const Icon = layer.icon;
             return (
               <Reveal key={layer.title} delay={(i % 2) * 90}>
-              <GlowCard
-                className="h-full bg-slate-900/40 border border-slate-800/60 rounded-3xl p-6 hover:border-accent-500/25 transition-colors"
-              >
-                <div className="w-11 h-11 rounded-2xl bg-accent-500/10 border border-accent-500/20 flex items-center justify-center mb-4">
-                  <Icon className="w-5 h-5 text-accent-400" />
-                </div>
-                <h3 className="text-lg font-bold text-white mb-2">{layer.title}</h3>
-                <p className="text-sm text-slate-400 leading-relaxed mb-4">{layer.text}</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {layer.examples.map(ex => (
-                    <span
-                      key={ex}
-                      className="px-2 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-[11px] text-slate-500"
-                    >
-                      {ex}
-                    </span>
-                  ))}
-                </div>
-              </GlowCard>
+                <GlowCard
+                  className="h-full bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl"
+                >
+                  <div className="w-12 h-12 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center mb-5 shadow-lg shadow-accent-500/10">
+                    <Icon className="w-6 h-6 text-accent-400" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">{layer.title}</h3>
+                  <p className="text-sm text-slate-400 leading-relaxed mb-5">{layer.text}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {layer.examples.map(ex => (
+                      <span
+                        key={ex}
+                        className="px-2.5 py-1 rounded-lg bg-slate-950/80 border border-slate-800 text-xs font-semibold text-slate-300"
+                      >
+                        {ex}
+                      </span>
+                    ))}
+                  </div>
+                </GlowCard>
               </Reveal>
             );
           })}
@@ -108,67 +138,66 @@ export default function SecurityPage() {
 
       <Section className="pt-0">
         <SectionHeading
-          eyebrow="Вердикт"
-          title="Три рівні, не «добре / погано»"
-          description="Бал ризику складається з усіх джерел із вагами, які можна налаштувати. Різні люди готові до різного ризику, тож поріг теж твій."
+          eyebrow="Вердикти"
+          title="Три рівня реагування"
+          description="Кожен вердикт супроводжується чітким поясненням причини в алерті Telegram та дашборді."
         />
 
-        <div className="grid sm:grid-cols-3 gap-4">
+        <div className="grid sm:grid-cols-3 gap-6">
           <Verdict
             tone="ok"
-            title="OK"
-            text="Нічого підозрілого не знайдено. Алерт приходить як звичайно."
+            title="OK (0-25)"
+            text="Умови чисті, відгуки без фіксованого криміналу. Спред додається в дашборд і сповіщення."
           />
           <Verdict
             tone="warn"
-            title="WARNING"
-            text="Є ознаки, вартні уваги. Зв'язку показано, але з поясненням, що саме насторожило."
+            title="WARNING (26-60)"
+            text="Виявлено нетипову поведінку або свіжі скарги. Алерт надходить із розширеним попередженням."
           />
           <Verdict
             tone="block"
-            title="BLOCK"
-            text="Спрацювало жорстке правило — наприклад, оплата з чужих реквізитів. Такі зв'язки не показуються."
+            title="BLOCK (61-100)"
+            text="Спрацював жорсткий фільтр (вимога фото картки, трикутник, казино). Оголошення відсікається."
           />
         </div>
       </Section>
 
       <Section className="pt-0">
-        <SectionHeading eyebrow="Дані" title="Де що лежить" />
+        <SectionHeading eyebrow="Конфіденційність" title="Де зберігаються ваші ключі та дані" />
 
-        <div className="space-y-3">
+        <div className="space-y-4">
           {DATA.map((item, i) => {
             const Icon = item.icon;
             return (
               <Reveal key={item.title} delay={i * 80}>
-              <div
-                className="flex gap-5 p-6 rounded-3xl bg-slate-900/40 border border-slate-800/60"
-              >
-                <Icon className="w-5 h-5 text-accent-400 shrink-0 mt-0.5" />
-                <div className="min-w-0">
-                  <h3 className="font-bold text-white mb-1.5">{item.title}</h3>
-                  <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">{item.text}</p>
+                <div
+                  className="flex gap-5 p-7 rounded-3xl bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl shadow-xl hover:border-slate-700/80 transition-all"
+                >
+                  <div className="w-10 h-10 rounded-2xl bg-slate-800 border border-slate-700/60 flex items-center justify-center shrink-0">
+                    <Icon className="w-5 h-5 text-accent-400" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-lg font-bold text-white mb-1.5">{item.title}</h3>
+                    <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">{item.text}</p>
+                  </div>
                 </div>
-              </div>
               </Reveal>
             );
           })}
         </div>
       </Section>
 
-      <Section className="pt-0">
-        <Reveal className="rounded-[2rem] border border-orange-500/20 bg-orange-500/5 p-8">
-          <h2 className="text-xl font-bold text-white mb-3">Чесно про межі</h2>
-          <p className="text-sm text-slate-300 leading-relaxed max-w-2xl mb-4">
-            Антифрод відсіює відомі схеми, а не всі можливі. Мерчант із чистою
-            історією може повестися нечесно вперше саме з тобою; банк може
-            заблокувати картку через обіг, до якого сканер не має стосунку.
-            Інструмент зменшує ризик, але не прибирає його.
+      <Section className="pt-0 pb-16">
+        <Reveal className="rounded-[2.5rem] border border-amber-500/30 bg-amber-500/5 p-8 sm:p-10 shadow-2xl backdrop-blur-xl">
+          <h2 className="text-xl font-bold text-white mb-3">Чесно про межі захисту</h2>
+          <p className="text-sm text-slate-300 leading-relaxed max-w-3xl mb-5">
+            RiskEngine суттєво мінімізує ризики, але не усуває людський фактор. Контрагент може вперше спробувати нечесні дії, або банк може надіслати запит на джерело коштів через обсяги. Сканер надає максимальну аналітику для вашої безпеки.
           </p>
           <Link
             to="/how-it-works"
-            className="inline-flex items-center gap-2 text-sm font-bold text-accent-400 hover:text-accent-300 transition-colors"
+            className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-accent-400 text-sm font-bold transition-all border border-slate-700"
           >
-            Подивитись увесь конвеєр
+            Подивитись покроковий конвеєр
             <ArrowRight className="w-4 h-4" />
           </Link>
         </Reveal>
