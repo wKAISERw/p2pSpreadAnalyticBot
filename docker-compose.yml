@@ -1,29 +1,51 @@
-# Заготівка деплою дашборду. Піднімається окремо від бота і чіпляється
-# до його мережі, щоб ходити на сканер по імені контейнера.
+# Дашборд Arbix Quantum.
 #
-# Перед першим запуском на сервері бот має бути піднятий з мережею arbix_net
-# (див. docker-compose.yml у репозиторії бота).
+# Образ не збирається: статику збирає Vite на твоїй машині за секунди, а
+# сюди їде готовий dist/. Складати образ на сервері означало б ганяти там
+# npm ci на кожен передеплой — це хвилини й ризик впертись у пам'ять на
+# маленькому VPS.
+#
+# Перед першим запуском бот має бути піднятий: його compose створює
+# мережу arbix_net, до якої ми чіпляємось.
 
 services:
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        # Відносний шлях: запити йдуть на той самий origin, далі їх ловить
-        # location /api/ у nginx.
-        VITE_API_URL: /api/v1
+    image: caddy:2-alpine
     container_name: arbix_quantum_dashboard
     restart: unless-stopped
+
     ports:
-      - "8080:80"
+      - "80:80"
+      # 443 потрібен лише коли заданий домен. З портом, що просто слухає,
+      # нічого не станеться — тримаємо відкритим, щоб увімкнення HTTPS
+      # не вимагало правити compose.
+      - "443:443"
+
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Статика монтується, а не копіюється в образ: передеплой стає
+      # заливкою файлів без перезбірки й навіть без рестарту.
+      - ./dist:/srv/www:ro
+      # Сертифікати. Том обов'язковий: без нього кожен перезапуск
+      # випускав би їх наново і впирався б у ліміт Let's Encrypt.
+      - caddy_data:/data
+      - caddy_config:/config
+
     environment:
-      # Куди проксувати. Ім'я контейнера сканера з compose-файлу бота.
+      # Порожньо → HTTP на IP. Домен → Caddy сам вмикає HTTPS.
+      ARBIX_SITE_ADDRESS: ${ARBIX_SITE_ADDRESS:-http://:80}
+      ARBIX_ACME_EMAIL: ${ARBIX_ACME_EMAIL:-}
+      # Ім'я контейнера сканера з compose-файлу бота.
       SCANNER_UPSTREAM: ${SCANNER_UPSTREAM:-arbix_quantum_scanner:8000}
-      # Те саме значення, що API_KEY у .env бота. Порожнє = бот без захисту.
+      # Те саме значення, що API_KEY у .env бота.
       ARBIX_API_KEY: ${ARBIX_API_KEY:-}
+
     networks:
       - arbix_net
+
+volumes:
+  caddy_data:
+  caddy_config:
 
 networks:
   arbix_net:

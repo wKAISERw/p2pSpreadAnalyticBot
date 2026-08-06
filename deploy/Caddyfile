@@ -1,0 +1,43 @@
+# Конфіг дашборду.
+#
+# Адреса сайту — єдина змінна, яка вирішує все:
+#
+#   ARBIX_SITE_ADDRESS не задана  → http://:80, звичайний HTTP на IP сервера.
+#   ARBIX_SITE_ADDRESS=example.org → Caddy сам випускає сертифікат
+#                                    Let's Encrypt і вмикає HTTPS.
+#
+# Ніякого certbot, крону на оновлення й перезавантаження конфіга після
+# нього: Caddy тримає сертифікати сам. Важливо лише, щоб том /data
+# зберігався між перезапусками — інакше кожен рестарт випускав би
+# сертифікат наново, а в Let's Encrypt ліміт 5 на домен на тиждень.
+
+
+
+{$ARBIX_SITE_ADDRESS:http://:80} {
+	root * /srv/www
+	encode gzip zstd
+
+	# Проксі на сканер. Ключ підставляється саме тут: браузер його не
+	# бачить, тож спільний секрет не роз'їжджається по всіх, хто відкрив
+	# дашборд.
+	handle /api/* {
+		reverse_proxy {$SCANNER_UPSTREAM:arbix_quantum_scanner:8000} {
+			header_up X-API-Key {$ARBIX_API_KEY:}
+		}
+	}
+
+	# Хешовані ассети Vite незмінні — тримаємо їх у кеші довго.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# index.html навпаки не кешуємо: інакше після деплою браузер тягнув би
+	# стару сторінку зі старими іменами чанків, яких на сервері вже немає.
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+
+	# SPA: будь-який маршрут віддає index.html, далі роутить React Router.
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}
