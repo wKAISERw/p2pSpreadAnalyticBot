@@ -1,14 +1,132 @@
 <!doctype html>
-<html lang="en">
+<html lang="uk">
   <head>
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="data:," />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#020617" />
     <title>Arbix Quantum</title>
+
+    <!--
+      Стилі завантажувача живуть тут, а не в бандлі, і це принципово.
+
+      Раніше html/body не мали фону, а #root був порожній — тож від
+      розбору HTML до монтування React браузер показував свій дефолтний
+      БІЛИЙ екран. На повільному звʼязку, поки їде ~90 кБ джаваскрипту,
+      це секунди сліпучого нічого. Саме це й побачив дизайнер.
+
+      Тепер фон і індикатор малюються з першого кадру, ще до будь-якого
+      JS. React рендерить у #root і природно затирає цей вміст.
+    -->
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      html,
+      body {
+        margin: 0;
+        background: #020617;
+        color: #94a3b8;
+      }
+
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        font-family: 'JetBrains Mono', Consolas, ui-monospace, monospace;
+        background: #020617;
+      }
+
+      /* Та сама сітка, що й на сторінках — щоб перехід був непомітним */
+      #boot::before {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgb(148 163 184 / 0.07) 1px, transparent 1px),
+          linear-gradient(90deg, rgb(148 163 184 / 0.07) 1px, transparent 1px);
+        background-size: 48px 48px;
+        mask-image: radial-gradient(ellipse 70% 50% at 50% 50%, black, transparent);
+      }
+
+      .boot-mark {
+        position: relative;
+        width: 46px;
+        height: 46px;
+        border-radius: 13px;
+        background: #10b981;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        animation: boot-pulse 1.6s ease-in-out infinite;
+      }
+
+      .boot-mark svg {
+        width: 26px;
+        height: 26px;
+      }
+
+      .boot-label {
+        position: relative;
+        font-size: 11px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #10b981;
+      }
+
+      .boot-status {
+        position: relative;
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        color: #475569;
+      }
+
+      /* Три крапки, що біжать — показують, що процес живий */
+      .boot-status i {
+        font-style: normal;
+        animation: boot-blink 1.2s infinite;
+      }
+      .boot-status i:nth-child(2) { animation-delay: 0.2s; }
+      .boot-status i:nth-child(3) { animation-delay: 0.4s; }
+
+      @keyframes boot-pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50%      { opacity: 0.65; transform: scale(0.94); }
+      }
+
+      @keyframes boot-blink {
+        0%, 100% { opacity: 0.25; }
+        50%      { opacity: 1; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .boot-mark,
+        .boot-status i {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot">
+        <span class="boot-mark">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#020617" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+          </svg>
+        </span>
+        <span class="boot-label">arbix quantum</span>
+        <span class="boot-status">
+          Запуск сканера<i>.</i><i>.</i><i>.</i>
+        </span>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

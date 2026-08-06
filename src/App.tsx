@@ -20,8 +20,41 @@ const LandingLayout = lazy(() => import('./landing/LandingLayout'));
 const AppShell = lazy(() => import('./components/AppShell'));
 const LoginScreen = lazy(() => import('./components/LoginScreen'));
 
+/**
+ * Заглушка на час підвантаження чанка сторінки.
+ *
+ * Раніше це був порожній прямокутник — на повільному звʼязку виглядало
+ * як «сайт помер». Тепер видно каркас майбутньої сторінки: шапка, місце
+ * під заголовок, сітка блоків. Людина розуміє, що щось вантажиться, а не
+ * зламалось.
+ */
 function PageFallback() {
-  return <div className="min-h-screen bg-slate-950" aria-busy="true" />;
+  return (
+    <div className="min-h-screen bg-slate-950" aria-busy="true" aria-label="Завантаження">
+      <div className="h-16 border-b border-slate-800/60 flex items-center px-4 sm:px-6 gap-3">
+        <div className="w-9 h-9 rounded-xl bg-slate-800 animate-pulse" />
+        <div className="h-4 w-36 rounded bg-slate-800 animate-pulse" />
+      </div>
+
+      <div className="mx-auto max-w-6xl px-4 sm:px-6 py-16 space-y-8">
+        <div className="space-y-4">
+          <div className="h-3 w-28 rounded bg-slate-800/80 animate-pulse" />
+          <div className="h-10 w-2/3 max-w-lg rounded-lg bg-slate-800 animate-pulse" />
+          <div className="h-4 w-full max-w-xl rounded bg-slate-900 animate-pulse" />
+        </div>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {[0, 1, 2, 3, 4, 5].map(i => (
+            <div
+              key={i}
+              className="h-36 rounded-2xl bg-slate-900/70 border border-slate-800/60 animate-pulse"
+              style={{ animationDelay: `${i * 80}ms` }}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function App() {
