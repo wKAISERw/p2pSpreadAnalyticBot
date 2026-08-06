@@ -123,12 +123,12 @@ export default function LandingPage() {
         читається як одна сіра стрічка незалежно від текстів.
       */}
       <Section className="py-10 sm:py-14">
-        <div className="grid md:grid-cols-3 gap-px bg-slate-800/50">
+        <div className="grid md:grid-cols-3 gap-4">
             {PILLARS.map((pillar, i) => {
               const Icon = pillar.icon;
               return (
                 <Reveal key={pillar.title} delay={i * 90}>
-                  <div className="h-full bg-slate-950 px-6 py-8 sm:px-8 hover:bg-slate-900/60 transition-colors">
+                  <GlowCard className="h-full bg-slate-950/40 border border-slate-800/60 backdrop-blur-sm rounded-3xl px-6 py-8 sm:px-8 hover:border-accent-500/25 hover:bg-slate-950/60 transition-all">
                     <div className="flex items-center gap-3 mb-4">
                       <div className="w-9 h-9 rounded-lg bg-accent-500/15 border border-accent-500/25 flex items-center justify-center shrink-0">
                         <Icon className="w-4.5 h-4.5 text-accent-400" />
@@ -140,7 +140,7 @@ export default function LandingPage() {
                     <h3 className="text-lg font-bold text-white mb-2">{pillar.title}</h3>
                     <p className="text-sm text-slate-400 leading-relaxed mb-5">{pillar.text}</p>
                     <PillarVisual kind={pillar.visual} />
-                  </div>
+                  </GlowCard>
                 </Reveal>
               );
             })}

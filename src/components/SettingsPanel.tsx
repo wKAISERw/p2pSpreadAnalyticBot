@@ -16,6 +16,7 @@ import AccountSection from './settings/AccountSection';
 import DisplaySettingsSection from './settings/DisplaySettingsSection';
 import CardDisplaySection from './settings/CardDisplaySection';
 import AppearanceSection from './settings/AppearanceSection';
+import SyncSection from './settings/SyncSection';
 import FeaturesSection from './settings/FeaturesSection';
 import BankLimitsSection from './settings/BankLimitsSection';
 
@@ -76,7 +77,12 @@ export default function SettingsPanel() {
       {/* key на вкладці — щоб перехід між ними мав ту саму появу,
           що й решта інтерфейсу, а не різкий підмін контенту. */}
       <div key={active} className="space-y-6 animate-rise">
-        {active === 'account' && <AccountSection />}
+        {active === 'account' && (
+          <>
+            <AccountSection />
+            <SyncSection />
+          </>
+        )}
         {active === 'appearance' && (
           <>
             <AppearanceSection />

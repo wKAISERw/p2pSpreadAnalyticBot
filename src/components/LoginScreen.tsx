@@ -39,6 +39,16 @@ export default function LoginScreen() {
   const [config, setConfig] = useState<AuthConfig | null>(null);
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState<'code' | 'google' | null>(null);
+  /*
+   * Спосіб входу обирається явно, а не показується весь одразу.
+   *
+   * Кнопку Telegram малює сам Telegram, її кольори нам не належать —
+   * і яскраво-синій прямокутник посеред темно-смарагдової гами
+   * вибивається, скільки б оправ навколо не додавати. Тому за
+   * замовчуванням показуємо код (він працює будь-де), а віджет
+   * зʼявляється лише коли його свідомо обрали.
+   */
+  const [method, setMethod] = useState<'code' | 'widget'>('code');
 
   useEffect(() => {
     authApi.getConfig().then(setConfig).catch(() => setConfig(null));
@@ -96,18 +106,43 @@ export default function LoginScreen() {
 
         <Surface kind="scan" noise className="p-6 sm:p-8 space-y-6 shadow-2xl shadow-slate-950/80">
           <div className="relative z-10 space-y-6">
+          {/* Перемикач способу входу */}
           {config?.widgetAvailable && (
-            <div>
-              <SectionLabel icon={<Send className="w-4 h-4 text-blue-400" />} text="Вхід одним кліком" />
-              <TelegramWidget botUsername={config.botUsername} onAuth={setAuth} />
+            <div className="flex gap-1 p-1 bg-slate-950/80 border border-slate-800 rounded-2xl">
+              {([
+                { id: 'code', label: 'Код із бота', icon: KeyRound },
+                { id: 'widget', label: 'Telegram', icon: Send },
+              ] as const).map(opt => {
+                const Icon = opt.icon;
+                const active = method === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => setMethod(opt.id)}
+                    className={cn(
+                      'flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold transition-all',
+                      active
+                        ? 'bg-accent-500/15 border border-accent-500/30 text-accent-400'
+                        : 'border border-transparent text-slate-400 hover:text-slate-200'
+                    )}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {opt.label}
+                  </button>
+                );
+              })}
             </div>
           )}
 
+          {method === 'widget' && config?.widgetAvailable ? (
+            <div>
+              <p className="text-xs text-slate-400 mb-4 leading-relaxed">
+                Telegram підтвердить вхід сам — жодних кодів вводити не треба.
+              </p>
+              <TelegramWidget botUsername={config.botUsername} onAuth={setAuth} />
+            </div>
+          ) : (
           <div>
-            <SectionLabel
-              icon={<KeyRound className="w-4 h-4 text-accent-400" />}
-              text="Код із бота"
-            />
             <p className="text-xs text-slate-400 mb-4 leading-relaxed">
               Надішли боту <code className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-accent-400 font-mono">/login</code> — він відповість
               шестизначним кодом. Код живе 5 хвилин і спрацьовує один раз.
@@ -132,6 +167,7 @@ export default function LoginScreen() {
               </button>
             </div>
           </div>
+          )}
 
           <div className="flex items-center gap-3">
             <div className="flex-1 h-px bg-slate-800" />

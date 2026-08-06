@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, ChevronLeft, ChevronRight, BarChart3, Wallet, SlidersHorizontal, CreditCard, MonitorDot, Users } from 'lucide-react';
+import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, ChevronLeft, ChevronRight, BarChart3, Wallet, SlidersHorizontal, CreditCard, MonitorDot, Users, Home } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store';
 
@@ -106,6 +106,20 @@ export default function Sidebar({ isOpen, setIsOpen, onLogout }: SidebarProps) {
         </nav>
 
         <div className="p-4 border-t border-slate-800 space-y-2 overflow-x-hidden">
+
+          {/* Повернення на публічний сайт: із дашборду туди не було
+              жодного шляху, крім ручного правлення адреси. */}
+          <NavLink
+            to="/"
+            className={cn(
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-slate-800 hover:text-white transition-all font-bold text-sm focus:ring-2 focus:ring-accent-500/50 outline-none",
+              isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
+            )}
+            title={!isOpen ? "На головну" : undefined}
+          >
+            <Home className="w-5 h-5 shrink-0" />
+            {isOpen && <span className="whitespace-nowrap">На головну</span>}
+          </NavLink>
 
           <button
             onClick={onLogout}
