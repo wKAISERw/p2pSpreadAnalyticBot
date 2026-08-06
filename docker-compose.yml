@@ -14,3 +14,11 @@ services:
       - ./logs:/app/logs
     env_file:
       - .env
+    networks:
+      - arbix_net
+
+networks:
+  # Іменована явно, щоб дашборд (окремий compose-проєкт) міг підключитись
+  # до неї як external і ходити на сканер по імені контейнера.
+  arbix_net:
+    name: arbix_net

@@ -69,6 +69,32 @@ async def save_credentials(exchange: str, payload: ApiKeyPayload, telegram_id: i
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@router.delete("/credentials/{exchange}")
+async def delete_credentials(exchange: str, telegram_id: int = 0):
+    """
+    Відв'язує біржу від акаунта.
+
+    Кнопка «Disconnect» на фронтенді досі лише прибирала ключі з локального
+    сховища браузера — у боті вони лишались і сканер далі ходив на біржу
+    під ними.
+    """
+    from bot.handlers.core import _db as db
+    name = exchange.capitalize()
+    try:
+        # delete_credentials рапортує True навіть коли рядка не було —
+        # тому наявність перевіряємо окремо, інакше 404 був би недосяжним.
+        if not await db.has_credentials(name, user_id=telegram_id):
+            raise HTTPException(status_code=404, detail="Credentials not found")
+        if not await db.delete_credentials(exchange=name, user_id=telegram_id):
+            raise HTTPException(status_code=500, detail="Delete failed")
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("delete_credentials: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/blacklist")
 async def get_blacklist():
     from bot.handlers.core import _db as db
@@ -137,14 +163,22 @@ async def update_global_settings(settings: dict):
     """
     from config.runtime import runtime_config, ALLOWED_KEYS
 
+    # Ключі ваг ризик-движка лежать у ALLOWED_KEYS у верхньому регістрі
+    # (W_REGEX, W_LLM…). Дорога туди й назад їх ламає: to_camel робить
+    # W_REGEX → WRegex, а to_snake з WRegex → w_regex. Точного збігу немає,
+    # і ці шість ключів відхилялись завжди, хоч UI і рапортував успіх.
+    # Звіряємось без урахування регістру і пишемо в канонічному вигляді.
+    canonical = {key.lower(): key for key in ALLOWED_KEYS}
+
     snake_settings = dict_to_snake(settings)
     applied, rejected = {}, []
     for key, value in snake_settings.items():
-        if key not in ALLOWED_KEYS:
+        canonical_key = canonical.get(key.lower())
+        if not canonical_key:
             rejected.append(key)
             continue
-        if await runtime_config.set(key, value):
-            applied[key] = str(value)
+        if await runtime_config.set(canonical_key, value):
+            applied[canonical_key] = str(value)
         else:
             rejected.append(key)
 

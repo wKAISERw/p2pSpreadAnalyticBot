@@ -636,6 +636,7 @@ class CardRepo:
                 return bool(row["is_enabled"]) if row else False
 
     async def toggle_feature_status(self, user_id: int, feature_key: str) -> bool:
+            """Перемикає фічу і повертає НОВИЙ стан."""
             if not self._db: return False
             current = await self.get_feature_status(user_id, feature_key)
             new_state = 0 if current else 1
@@ -645,6 +646,10 @@ class CardRepo:
                 (user_id, feature_key, new_state, new_state)
             )
             await self._db.commit()
+            # Раніше функція нічого не повертала, хоч і оголошена як -> bool.
+            # Через це тост у боті завжди писав "Disabled": виклик отримував
+            # None незалежно від того, що реально записалось у БД.
+            return bool(new_state)
 
     async def get_user_auto_capital(self, user_id: int, allowed_banks: list[str] | set[str] | None = None) -> float:
         """

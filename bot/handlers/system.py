@@ -132,6 +132,37 @@ async def on_sniper_volume(message: Message, state: FSMContext) -> None:
 # 📋 КЕРУВАННЯ УГОДАМИ (ORDERS)
 # =========================================================================
 
+@router.message(Command("login"))
+async def cmd_login(message: Message) -> None:
+    """
+    Одноразовий код для входу у вебдашборд.
+
+    Telegram Login Widget вимагає домену, прописаного в BotFather, і на
+    localhost не працює. Код доводить володіння акаунтом не гірше: отримати
+    його можна лише в цьому діалозі.
+    """
+    if not _db:
+        return await message.answer("❌ База даних недоступна.")
+
+    from api.auth import LOGIN_CODE_TTL_SECONDS, create_login_code
+
+    user_id = message.from_user.id
+    if not await _db.get_user_by_id(user_id):
+        await _db.register_user(user_id, message.chat.id)
+
+    code = await create_login_code(_db, user_id)
+    minutes = LOGIN_CODE_TTL_SECONDS // 60
+
+    await message.answer(
+        "🔐 <b>Вхід у вебдашборд</b>\n\n"
+        f"Код: <code>{code}</code>\n\n"
+        f"Дійсний {minutes} хв і спрацьовує один раз.\n"
+        "<i>Нікому його не передавай — той, хто введе код, отримає доступ "
+        "до твоїх фільтрів, карток і балансів.</i>",
+        parse_mode="HTML",
+    )
+
+
 @router.message(Command("orders"))
 async def cmd_orders(message: Message) -> None:
     if not _db:

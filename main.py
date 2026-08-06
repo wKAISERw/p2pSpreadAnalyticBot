@@ -22,7 +22,9 @@ from core.workers.card_sync import CardBalanceSyncTask
 from scanner import run_scanner
 
 # Імпортуємо чисті модульні роутери нашого власного API сервера
-from api.routers import dashboard_router, webhooks_router
+from api.routers import (
+    dashboard_router, webhooks_router, control_router, auth_router, personal_router,
+)
 
 db = MerchantDB()   
 
@@ -190,6 +192,9 @@ async def prometheus_metrics():
 # 🚀 ПІД КАТАЛОГ ОДНОЧАСНО ПІДКЛЮЧАЄМО ВСІ НАШІ БОЙОВІ РОУТЕРИ
 app.include_router(dashboard_router)
 app.include_router(webhooks_router)
+app.include_router(control_router)
+app.include_router(auth_router)
+app.include_router(personal_router)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
