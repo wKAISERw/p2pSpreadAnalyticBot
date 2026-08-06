@@ -3,7 +3,7 @@ import { KeyRound, PlugZap, ShieldAlert, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store';
-import { checkConnection, getApiKey, setApiKey } from '../services/api';
+import { checkConnection, diagnoseApiBase, getApiKey, setApiKey } from '../services/api';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
@@ -41,6 +41,8 @@ export default function ApiAccessBanner() {
   };
 
   const isAuthProblem = connection === 'unauthorized';
+  // Якщо запити ріже сам браузер, «недоступний» — хибний діагноз.
+  const configProblem = isAuthProblem ? null : diagnoseApiBase();
 
   return (
     <div
@@ -81,6 +83,8 @@ export default function ApiAccessBanner() {
                 файлу <code className="text-orange-300">.env</code> бота — воно збережеться лише в
                 цьому браузері.
               </>
+            ) : configProblem ? (
+              configProblem
             ) : (
               <>
                 Не достукались до <code className="text-red-300">{API_BASE_URL}</code>. Перевір, що

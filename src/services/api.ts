@@ -42,7 +42,35 @@ import {
   AdminUser,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
+
+/**
+ * Чи не заблокує браузер запити ще до відправки.
+ *
+ * Класична пастка: сторінка віддається по https, а VITE_API_URL лишився
+ * абсолютною http-адресою. Браузер ріже це як mixed content — запит не
+ * йде взагалі, axios не бачить відповіді, і все виглядає як «бекенд
+ * недоступний», хоча бекенд живий і чудово відповідає.
+ *
+ * Повертає опис проблеми або null, якщо все гаразд.
+ */
+export function diagnoseApiBase(): string | null {
+  if (typeof window === 'undefined') return null;
+
+  const pageIsSecure = window.location.protocol === 'https:';
+  const apiIsPlain = /^http:\/\//i.test(API_BASE_URL);
+
+  if (pageIsSecure && apiIsPlain) {
+    return (
+      `Сторінка відкрита по HTTPS, а API вказаний як ${API_BASE_URL} — ` +
+      'браузер блокує такі запити як mixed content ще до відправки. ' +
+      'Бекенд при цьому може бути цілком живий. ' +
+      'Треба зібрати фронтенд із відносним шляхом (VITE_API_URL=/api/v1).'
+    );
+  }
+
+  return null;
+}
 
 // ─── Ключ доступу ─────────────────────────────────────────────────────────
 //
