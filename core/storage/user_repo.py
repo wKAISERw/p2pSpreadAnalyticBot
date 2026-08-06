@@ -7,6 +7,27 @@ import aiosqlite
 from core.utils.crypto import encrypt, decrypt
 logger = logging.getLogger(__name__)
 
+# Слот user_id=0 — це системний/легасі слот власника інсталяції, а не
+# "спільний". Раніше на нього мовчки падали і креденшли, і сесії будь-якого
+# юзера — тобто чужа людина торгувала ключами власника, а фонові задачі ходили
+# під кукі випадкового юзера. Тепер до слота 0 прирівнюється тільки адмін.
+OWNER_SLOT = 0
+
+
+def _owner_user_id() -> int:
+    """Telegram id власника інсталяції (ADMIN_ID, інакше TELEGRAM_CHAT_ID)."""
+    try:
+        from config import settings
+        return int(getattr(settings, "admin_id", 0) or getattr(settings, "telegram_chat_id", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _is_owner(user_id: int) -> bool:
+    owner = _owner_user_id()
+    return bool(owner) and int(user_id) == owner
+
+
 class UserRepo:
     """Users, credentials, auth sessions, settings."""
 
@@ -80,6 +101,34 @@ class UserRepo:
         except Exception as e:
             logger.error("get_credentials [%s]: %s", exchange, e)
             return None
+
+    async def get_credentials_for_user(self, exchange: str, user_id: int) -> dict | None:
+        """
+        Креденшли конкретного юзера — з фолбеком на слот власника ТІЛЬКИ для
+        самого власника.
+
+        Раніше в цьому місці стояв безумовний фолбек на user_id=0:
+
+            creds = await db.get_credentials(exchange, user_id) or {}
+            if not creds.get("api_key"):
+                creds = await db.get_credentials(exchange, 0) or {}
+
+        Через це будь-який юзер, не підключивши свої ключі, створював
+        оголошення і угоди на акаунті власника. Окремо гірше те, що при
+        зіпсованому ENCRYPTION_KEY decrypt() повертає порожній рядок — тобто
+        фолбек спрацьовував ще й для тих, у кого ключі насправді Є.
+        """
+        creds = await self.get_credentials(exchange, user_id) or {}
+        if creds.get("api_key"):
+            return creds
+
+        if _is_owner(user_id):
+            legacy = await self.get_credentials(exchange, OWNER_SLOT) or {}
+            if legacy.get("api_key"):
+                logger.debug("Креденшли %s взято з легасі-слота власника", exchange)
+                return legacy
+
+        return None
 
     async def get_all_credentials(self, user_id: int = 0) -> dict[str, dict]:
         """
@@ -193,14 +242,22 @@ class UserRepo:
             ) as cur:
                 row = await cur.fetchone()
 
-            if not row:
-                # 🚀 ДОДАНО ФОЛБЕК: Якщо для вказаного користувача немає активної сесії (наприклад, для фонових тасок з user_id=0),
-                # завантажуємо будь-яку останню активну сесію для цієї біржі
-                async with self._db.execute(
-                        "SELECT headers_json, cookies_json, updated_at FROM auth_sessions WHERE exchange=? AND is_active=1 ORDER BY updated_at DESC LIMIT 1",
-                        (exchange,),
-                ) as cur:
-                    row = await cur.fetchone()
+            if not row and user_id == OWNER_SLOT:
+                # Фонові задачі (review_fetcher, risk_engine) просять сесію під
+                # слотом 0, а букмарклет зберігає її під реальним telegram id
+                # власника. Тому для слота 0 підхоплюємо сесію ВЛАСНИКА.
+                #
+                # Раніше тут бралася "будь-яка остання активна сесія для цієї
+                # біржі" — тобто фоновий фетчер ходив під кукі випадкового
+                # юзера: його акаунт, його рейт-ліміти, його ризик бану.
+                owner = _owner_user_id()
+                if owner:
+                    async with self._db.execute(
+                            "SELECT headers_json, cookies_json, updated_at FROM auth_sessions "
+                            "WHERE user_id=? AND exchange=? AND is_active=1",
+                            (owner, exchange),
+                    ) as cur:
+                        row = await cur.fetchone()
 
             if not row:
                 return {}, {}, 0.0
@@ -214,15 +271,27 @@ class UserRepo:
             return {}, {}, 0.0
 
     async def invalidate_auth_session(self, exchange: str, user_id: int = 0) -> bool:
-        """Позначає сесію як протухшу (is_active=0)."""
+        """
+        Позначає сесію як протухшу (is_active=0).
+
+        Слот 0 гасить сесію власника (слот 0 + його реальний telegram id) —
+        саме ту, під якою працюють фонові задачі. Раніше тут стояло
+        `WHERE exchange=?` без user_id, тобто перший же AuthError у фетчера
+        відгуків розлогінював УСІХ юзерів одразу.
+        """
         if not self._db:
             return False
         try:
-            if user_id == 0:
-                # 🚀 ДОДАНО: Якщо анулюємо сесію глобально (user_id=0), анулюємо ВСІ активні сесії для цієї біржі
+            if user_id == OWNER_SLOT:
+                targets = [OWNER_SLOT]
+                owner = _owner_user_id()
+                if owner:
+                    targets.append(owner)
+                placeholders = ",".join("?" * len(targets))
                 await self._db.execute(
-                    "UPDATE auth_sessions SET is_active=0 WHERE exchange=?",
-                    (exchange,)
+                    f"UPDATE auth_sessions SET is_active=0 "
+                    f"WHERE exchange=? AND user_id IN ({placeholders})",
+                    (exchange, *targets),
                 )
             else:
                 await self._db.execute(
@@ -294,7 +363,6 @@ class UserRepo:
                               COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
                               COALESCE(target_margin, 0.005)                 as target_margin,
                               COALESCE(sniper_rules, '[]')                   as sniper_rules,
-                              COALESCE(sniper_rules, '')             AS sniper_rules,
                             -- ── TAKER SELL ────────────────────────────────────────
                               COALESCE(taker_sell_amount, 0.0)       AS taker_sell_amount,
                               COALESCE(taker_sell_price, 0.0)        AS taker_sell_price,
@@ -311,7 +379,14 @@ class UserRepo:
                               COALESCE(taker_buy_limit_max, 0.0)     AS taker_buy_limit_max,
                               COALESCE(taker_buy_speed, 'ANY')       AS taker_buy_speed,
                               COALESCE(taker_buy_price_strategy, 'any') AS taker_buy_price_strategy,
-                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from
+                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from,
+                             -- ── BUY BALANCE / AUTO-SCALE ──────────────────────────
+                             -- Читаються в taker_scanner і в меню, але роками не
+                             -- потрапляли в SELECT: меню показувало дефолт, сканер
+                             -- поводився як CARD_ENFORCED незалежно від налаштування.
+                              COALESCE(buy_balance_mode, 'CARD_ENFORCED') AS buy_balance_mode,
+                              COALESCE(buy_auto_scale_down, 1)       AS buy_auto_scale_down,
+                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up
                        FROM scanner_users
                        WHERE is_active = 1
                          AND COALESCE(is_alerts_active, 1) = 1"""
@@ -365,9 +440,12 @@ class UserRepo:
                     "taker_buy_speed": row["taker_buy_speed"],
                     "taker_buy_price_strategy": row["taker_buy_price_strategy"],
                     "taker_buy_price_from": float(row["taker_buy_price_from"]),
+                    # `or 1` тут був би багом: збережений 0 (авто-скейл ВИМКНЕНО) —
+                    # це валідне значення, а не "порожньо". COALESCE у SELECT
+                    # уже підставив дефолт для NULL.
                     "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
-                    "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down") or 1),
-                    "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up") or 1),
+                    "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down", 1)),
+                    "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up", 1)),
                 })
             return result
         except Exception as e:
@@ -399,7 +477,6 @@ class UserRepo:
                               COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
                               COALESCE(target_margin, 0.005)                 as target_margin,
                               COALESCE(sniper_rules, '[]')                   as sniper_rules,
-                              COALESCE(sniper_rules, '')             AS sniper_rules,
                             -- ── TAKER SELL ────────────────────────────────────────
                               COALESCE(taker_sell_amount, 0.0)       AS taker_sell_amount,
                               COALESCE(taker_sell_price, 0.0)        AS taker_sell_price,
@@ -416,7 +493,14 @@ class UserRepo:
                               COALESCE(taker_buy_limit_max, 0.0)     AS taker_buy_limit_max,
                               COALESCE(taker_buy_speed, 'ANY')       AS taker_buy_speed,
                               COALESCE(taker_buy_price_strategy, 'any') AS taker_buy_price_strategy,
-                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from
+                              COALESCE(taker_buy_price_from, 0.0)    AS taker_buy_price_from,
+                             -- ── BUY BALANCE / AUTO-SCALE ──────────────────────────
+                             -- Читаються в taker_scanner і в меню, але роками не
+                             -- потрапляли в SELECT: меню показувало дефолт, сканер
+                             -- поводився як CARD_ENFORCED незалежно від налаштування.
+                              COALESCE(buy_balance_mode, 'CARD_ENFORCED') AS buy_balance_mode,
+                              COALESCE(buy_auto_scale_down, 1)       AS buy_auto_scale_down,
+                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up
                        FROM scanner_users
                        WHERE user_id = ?""",
                     (user_id,),
@@ -471,8 +555,8 @@ class UserRepo:
                 "taker_buy_price_strategy": row["taker_buy_price_strategy"],
                 "taker_buy_price_from": float(row["taker_buy_price_from"]),
                 "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
-                "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down") or 1),
-                "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up") or 1),
+                "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down", 1)),
+                "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up", 1)),
             }
         except Exception as e:
             logger.error("get_user_by_id [%d]: %s", user_id, e)
@@ -658,7 +742,30 @@ class UserRepo:
             return 0.0
 
     async def save_review_snapshot(self, exchange: str, merchant_id: str, pos: int, neg: int, neg_pct: float) -> None:
-        if not self._db: return
+        """
+        Пише снапшот відгуків — ТІЛЬКИ якщо лічильники змінилися.
+
+        Раніше це був сліпий INSERT + commit на кожному аналізі кожного
+        кандидата спреду. На бойовій базі це дало 67 209 рядків на 434
+        мерчантів, а рекордсмен мав 8 447 снапшотів з одними й тими самими
+        цифрами. Плюс окремий fsync на спільному з'єднанні — тобто кожен такий
+        запис підвішував усі інші запити застосунку.
+
+        Для тренду має значення лише ЗМІНА, тож дублікати не несуть інформації.
+        """
+        if not self._db:
+            return
+
+        async with self._db.execute(
+            "SELECT positive_count, negative_count FROM merchant_review_history "
+            "WHERE exchange=? AND merchant_id=? ORDER BY recorded_at DESC LIMIT 1",
+            (exchange, merchant_id),
+        ) as cur:
+            last = await cur.fetchone()
+
+        if last and int(last["positive_count"]) == int(pos) and int(last["negative_count"]) == int(neg):
+            return  # нічого не змінилось — писати нічого
+
         await self._db.execute(
             "INSERT INTO merchant_review_history (exchange, merchant_id, positive_count, negative_count, neg_pct, recorded_at) VALUES (?, ?, ?, ?, ?, ?)",
             (exchange, merchant_id, pos, neg, neg_pct, time.time())
@@ -666,7 +773,17 @@ class UserRepo:
         await self._db.commit()
 
     async def get_review_trend(self, exchange: str, merchant_id: str, days: int = 7) -> dict:
-        if not self._db: return {"trend": "stable", "delta": 0.0}
+        """
+        Тренд негативу за N днів: різниця між першим і останнім снапшотом.
+
+        Читає все вікно одним запитом. Пробував розбити на два точкових
+        (ASC LIMIT 1 + DESC LIMIT 1) — на бойових даних вийшло на 0.02 мс
+        ПОВІЛЬНІШЕ: індекс робить скан дешевим, а зайвий await через aiosqlite
+        коштує більше за самі рядки. Кількість рядків тримає під контролем
+        дедуп у save_review_snapshot.
+        """
+        if not self._db:
+            return {"trend": "stable", "delta": 0.0}
         since = time.time() - (days * 86400)
         async with self._db.execute(
                 "SELECT neg_pct FROM merchant_review_history WHERE exchange=? AND merchant_id=? AND recorded_at > ? ORDER BY recorded_at ASC",

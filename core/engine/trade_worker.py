@@ -578,4 +578,6 @@ class TradeWorker:
                 logger.warning("[TradeWorker] Binance auth session недоступна — запустіть SessionManager")
             return {"headers": headers, "cookies": cookies}
         else:
-            return await self._db.get_credentials(exchange=exchange, user_id=user_id) or {}
+            # get_credentials_for_user: ключі самого юзера, а для власника —
+            # ще й легасі-слот 0. Чужі ключі сюди не потраплять.
+            return await self._db.get_credentials_for_user(exchange, user_id) or {}

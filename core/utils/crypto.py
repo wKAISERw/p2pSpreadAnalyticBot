@@ -98,3 +98,29 @@ def is_encrypted(value: str) -> bool:
         return decoded[:1] == b"\x80"  # Fernet magic byte
     except Exception:
         return False
+
+
+def has_explicit_key() -> bool:
+    """Чи заданий ENCRYPTION_KEY явно (а не згенерований на льоту)."""
+    try:
+        import dotenv
+        dotenv.load_dotenv()
+    except ImportError:
+        pass
+    return bool(os.environ.get("ENCRYPTION_KEY", "").strip())
+
+
+def can_decrypt(sample_ciphertext: str) -> bool:
+    """Чи вдається розшифрувати зразок наявним ключем."""
+    if not sample_ciphertext:
+        return True
+    try:
+        f = _get_fernet()
+        f.decrypt(sample_ciphertext.encode("utf-8"))
+        return True
+    except Exception:
+        return False
+
+
+class EncryptionKeyError(RuntimeError):
+    """Ключ шифрування відсутній або не підходить до збережених даних."""

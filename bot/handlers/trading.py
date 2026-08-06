@@ -316,9 +316,7 @@ async def on_ad_confirm(call: CallbackQuery, state: FSMContext) -> None:
         user_id = call.from_user.id
         creds = {}
         if _db:
-            creds = await _db.get_credentials(exchange=exchange, user_id=user_id) or {}
-            if not creds.get("api_key"):
-                creds = await _db.get_credentials(exchange=exchange, user_id=0) or {}
+            creds = await _db.get_credentials_for_user(exchange, user_id) or {}
         if not creds.get("api_key"):
             raise RuntimeError(f"Немає API ключів для {exchange}. Підключіть через /connect.")
 

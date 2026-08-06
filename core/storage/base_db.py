@@ -76,6 +76,10 @@ class MerchantDB:
         await self._db.execute("PRAGMA synchronous=NORMAL")  # безпечно + швидше
         await self._db.execute("PRAGMA cache_size=-65536")  # 64 MB кеш
         await self._db.execute("PRAGMA foreign_keys=ON")
+        # Без busy_timeout дефолт = 0: будь-яка заблокована операція падає з
+        # "database is locked" МИТТЄВО, замість почекати. З добовим VACUUM це
+        # означало гарантований збій раз на добу.
+        await self._db.execute("PRAGMA busy_timeout=10000")  # 10s
         await self._db.commit()
 
         # Check if sent_alerts has the correct primary key, if not, drop it (it's just a 30 min cache)
@@ -346,8 +350,10 @@ class MerchantDB:
                                             recorded_at REAL NOT NULL
                                         );
                                     CREATE INDEX IF NOT EXISTS idx_rev_hist ON merchant_review_history(exchange, merchant_id, recorded_at);
-                                     CREATE INDEX IF NOT EXISTS idx_verdict_lookup
-                                         ON merchant_verdict (exchange, merchant_id);
+                                     /* idx_verdict_lookup (exchange, merchant_id) прибрано:
+                                        це була дослівна копія PRIMARY KEY тієї ж таблиці,
+                                        тобто зайвий індекс, який лише сповільнював кожен запис.
+                                        Видалення виконує _drop_redundant_indexes(). */
 
                                      /* 🚀 ІНДЕКСИ ДЛЯ СНАПШОТІВ */
                                      CREATE INDEX IF NOT EXISTS idx_snap_lookup
@@ -606,6 +612,24 @@ class MerchantDB:
                                          used_at       REAL NOT NULL,
                                          UNIQUE(user_id, exchange, subsidy_type)
                                      );
+
+                                     /* ── Індекси на гарячі шляхи, яких бракувало ──────────────
+                                        active_trades не мала ЖОДНОГО індексу, хоча stats_engine
+                                        джойнить її сімома запитами. card_order_legs теж не мала —
+                                        а card_matching_engine робить по ній JOIN на кожну картку
+                                        в кожному підборі. */
+                                     CREATE INDEX IF NOT EXISTS idx_trades_owner_status
+                                         ON active_trades(owner_user_id, status);
+                                     CREATE INDEX IF NOT EXISTS idx_trades_session
+                                         ON active_trades(session_id);
+                                     CREATE INDEX IF NOT EXISTS idx_legs_card_status
+                                         ON card_order_legs(card_id, leg_status);
+                                     CREATE INDEX IF NOT EXISTS idx_legs_order
+                                         ON card_order_legs(order_id);
+                                     /* Уся персональна статистика фільтрує по user_id + даті,
+                                        а індекс був лише на created_at. */
+                                     CREATE INDEX IF NOT EXISTS idx_proposals_user_ts
+                                         ON scanner_proposals(user_id, created_at);
                                      """)
 
         await self._db.commit()
@@ -693,15 +717,111 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "buy_auto_scale_down", "INTEGER DEFAULT 1")
         await self._ensure_column("scanner_users", "buy_auto_scale_up", "INTEGER DEFAULT 1")
 
-        try:
-            await self.db.execute("ALTER TABLE snapshots ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass  # Колонка вже існує
+        await self._drop_redundant_indexes()
+        await self._migrate_inflated_risk_scores()
 
+    async def _drop_redundant_indexes(self) -> None:
+        """
+        Прибирає індекси, які дублюють PRIMARY KEY.
+
+        SQLite і так створює унікальний індекс під PK, тож окремий індекс на
+        тих самих колонках лише сповільнює кожен INSERT/UPDATE, не прискорюючи
+        жоден SELECT.
+        """
+        for idx in ("idx_verdict_lookup",):
+            try:
+                await self._db.execute(f"DROP INDEX IF EXISTS {idx}")
+            except Exception as e:
+                logger.debug("DROP INDEX %s: %s", idx, e)
+        await self._db.commit()
+
+    async def verify_encryption_key(self) -> None:
+        """
+        Перевіряє, що ENCRYPTION_KEY підходить до вже збережених креденшлів.
+
+        Без цієї перевірки система деградувала мовчки і найгіршим можливим
+        чином: crypto.py при відсутності ключа генерує тимчасовий, decrypt()
+        на чужому шифротексті ловить виняток і повертає ПОРОЖНІЙ РЯДОК, а
+        код вище читає це як "у юзера немає ключів". Далі спрацьовував фолбек
+        на слот власника — і всі торгували з чужого акаунта. Краще не
+        стартувати взагалі, ніж стартувати отак.
+        """
+        from core.utils.crypto import has_explicit_key, can_decrypt, EncryptionKeyError
+
+        async with self._db.execute(
+            "SELECT api_key FROM user_credentials WHERE api_key != '' LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+
+        sample = row["api_key"] if row else ""
+
+        if not sample:
+            if not has_explicit_key():
+                logger.warning(
+                    "⚠️ ENCRYPTION_KEY не заданий у .env. Збережених креденшлів ще немає, "
+                    "тому старт дозволено — але ЗАДАЙ ключ до того, як підключати біржі, "
+                    "інакше вони стануть нечитабельними після першого ж рестарту."
+                )
+            return
+
+        if not has_explicit_key():
+            raise EncryptionKeyError(
+                "У базі є збережені API-ключі, але ENCRYPTION_KEY не заданий у .env. "
+                "Без нього вони не розшифруються, і бот працюватиме так, ніби ключів "
+                "немає взагалі. Додай ENCRYPTION_KEY у .env і перезапусти."
+            )
+
+        if not can_decrypt(sample):
+            raise EncryptionKeyError(
+                "ENCRYPTION_KEY не підходить до збережених API-ключів — ймовірно, "
+                "змінено ключ або перенесено базу з іншої інсталяції. "
+                "Постав правильний ключ або перепідключи біржі через /connect."
+            )
+
+        logger.info("🔐 ENCRYPTION_KEY перевірено — збережені креденшли читаються")
+
+    async def _migrate_inflated_risk_scores(self) -> None:
+        """
+        Одноразове приведення risk_score до шкали вердикту.
+
+        До фіксу save_verdict додавав скор вердикту до попереднього значення,
+        тому risk_score рахував не ризик, а кількість перевірок і в багатьох
+        рядків доповз до стелі 200. Через це `_is_trusted_merchant` назавжди
+        переставав довіряти нормальним мерчантам. Природне згасання (×0.7 за
+        перевірку) розібрало б це лише за тижні, тому нормалізуємо одразу.
+        """
+        flag_key = "_migration_risk_score_scale_v2"
         try:
-            await self.db.execute("ALTER TABLE proposals ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-        except Exception:
-            pass  # Колонка вже існує
+            async with self._db.execute(
+                "SELECT value FROM bot_settings WHERE user_id = 0 AND key = ?", (flag_key,)
+            ) as cur:
+                if await cur.fetchone():
+                    return
+
+            async with self._db.execute(
+                "UPDATE merchant_verdict SET risk_score = CASE verdict "
+                "  WHEN 'BLOCK' THEN 100 "
+                "  WHEN 'SUSPICIOUS' THEN 30 "
+                "  WHEN 'UNKNOWN' THEN 10 "
+                "  ELSE 0 END "
+                "WHERE risk_score > CASE verdict "
+                "  WHEN 'BLOCK' THEN 100 "
+                "  WHEN 'SUSPICIOUS' THEN 30 "
+                "  WHEN 'UNKNOWN' THEN 10 "
+                "  ELSE 0 END"
+            ) as cur:
+                fixed = cur.rowcount
+
+            await self._db.execute(
+                "INSERT OR REPLACE INTO bot_settings (user_id, key, value, updated_at) "
+                "VALUES (0, ?, ?, ?)",
+                (flag_key, "done", time.time()),
+            )
+            await self._db.commit()
+            if fixed > 0:
+                logger.info("🧮 Міграція risk_score: нормалізовано %d роздутих записів", fixed)
+        except Exception as e:
+            logger.warning("Міграція risk_score не виконана: %s", e)
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:
