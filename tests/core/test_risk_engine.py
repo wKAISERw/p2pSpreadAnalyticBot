@@ -172,17 +172,22 @@ class TestRiskEngineSync(unittest.TestCase):
 
         scheduled = {}
 
-        def _capture_and_close(coro):
+        def _capture_and_close(coro, name, **kwargs):
             scheduled["called"] = True
             scheduled["coro"] = coro
+            scheduled["name"] = name
             coro.close()
             return MagicMock()
 
-        with patch.object(risk_mod.asyncio, "ensure_future", side_effect=_capture_and_close) as ensure_future_mock:
+        # analyze() планує _async_analyze через core.utils.tasks.spawn —
+        # він, на відміну від голого ensure_future, тримає посилання на таск
+        # і логує виняток.
+        with patch.object(risk_mod, "spawn", side_effect=_capture_and_close) as spawn_mock:
             out = engine.analyze(order)
 
-        ensure_future_mock.assert_called_once()
+        spawn_mock.assert_called_once()
         self.assertTrue(scheduled.get("called"))
+        self.assertTrue(scheduled["name"].startswith("risk-analyze-"))
         self.assertEqual(out.risk_flag, "PENDING")
 
 

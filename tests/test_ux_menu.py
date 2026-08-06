@@ -1,31 +1,17 @@
-import asyncio
-import sys
 import unittest
-import types
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 
-# Mock dependency modules that require DB or config startup
-sys.modules['core.storage.merchant_db'] = MagicMock()
-sys.modules['core.utils.cache'] = MagicMock()
-sys.modules['core.utils'] = MagicMock()
-
-# Setup config as a package module
-config_mock = types.ModuleType('config')
-config_mock.__path__ = []
-config_mock.settings = MagicMock()
-config_mock.settings.working_capital_uah = 5000.0
-config_mock.settings.min_spread_pct = 0.5
-config_mock.settings.admin_id = 123456
-sys.modules['config'] = config_mock
-
-# Setup default bank codes mock
-config_banks_mock = MagicMock()
-config_banks_mock.DEFAULT_BANK_CODES = ["43", "14"]
-config_banks_mock.BANK_NAMES = {"43": "Monobank", "14": "PrivatBank"}
-sys.modules['config.banks'] = config_banks_mock
-
-# Setup config.runtime mock
-sys.modules['config.runtime'] = MagicMock()
+# ─────────────────────────────────────────────────────────────────────────────
+# Тут раніше на рівні імпорту підмінялися sys.modules: 'config', 'core.utils',
+# 'core.storage.merchant_db' тощо — щоб клавіатури імпортувалися без БД і .env.
+#
+# Це труїло ВЕСЬ прогін: pytest збирає всі тестові модулі до того, як запустити
+# перший, тож усі наступні файли імпортувалися з MagicMock замість config і
+# core.utils. Результат залежав від порядку файлів — поодинці зелено, разом
+# червоно.
+#
+# Перевірено: клавіатури імпортуються чисто, жодні підміни їм не потрібні.
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Import keyboards to verify layout and builders
 from bot.keyboards.menu import main_menu_kb, system_menu_kb
