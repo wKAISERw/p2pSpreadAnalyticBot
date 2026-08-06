@@ -7,6 +7,7 @@ import {
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
+import { Surface, DataRain, MonoTag, Metric } from './surfaces';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
 
@@ -110,30 +111,42 @@ export default function LandingPage() {
         </Section>
       </div>
 
-      {/* ─── Три опори ─────────────────────────────────────────────────── */}
-      <Section className="py-12 sm:py-16">
-        <div className="grid md:grid-cols-3 gap-5">
-          {PILLARS.map((pillar, i) => {
-            const Icon = pillar.icon;
-            return (
-              <Reveal key={pillar.title} delay={i * 90}>
-                <GlowCard className="h-full bg-slate-900/50 border border-slate-800/60 rounded-3xl p-6 hover:border-accent-500/30 transition-colors">
-                  <div className="w-11 h-11 rounded-2xl bg-accent-500/10 border border-accent-500/20 flex items-center justify-center mb-5">
-                    <Icon className="w-5 h-5 text-accent-400" />
+      {/*
+        Три опори. Свідомо БЕЗ спільного контейнера і на іншій фактурі,
+        ніж сусідні секції: якщо всі блоки — картка з бордером, сторінка
+        читається як одна сіра стрічка незалежно від текстів.
+      */}
+      <Section className="py-10 sm:py-14">
+        <Surface kind="dots" className="p-6 sm:p-10" noise>
+          <div className="grid md:grid-cols-3 gap-px bg-slate-800/60 rounded-2xl overflow-hidden">
+            {PILLARS.map((pillar, i) => {
+              const Icon = pillar.icon;
+              return (
+                <Reveal key={pillar.title} delay={i * 90}>
+                  <div className="h-full bg-slate-950/90 p-6 hover:bg-slate-900/90 transition-colors">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="w-9 h-9 rounded-lg bg-accent-500/15 border border-accent-500/25 flex items-center justify-center shrink-0">
+                        <Icon className="w-4.5 h-4.5 text-accent-400" />
+                      </div>
+                      <span className="tag-mono text-[10px] text-slate-600">
+                        0{i + 1}
+                      </span>
+                    </div>
+                    <h3 className="text-lg font-bold text-white mb-2">{pillar.title}</h3>
+                    <p className="text-sm text-slate-400 leading-relaxed">{pillar.text}</p>
                   </div>
-                  <h3 className="text-lg font-bold text-white mb-2">{pillar.title}</h3>
-                  <p className="text-sm text-slate-400 leading-relaxed">{pillar.text}</p>
-                </GlowCard>
-              </Reveal>
-            );
-          })}
-        </div>
+                </Reveal>
+              );
+            })}
+          </div>
+        </Surface>
       </Section>
 
       {/* ─── Чому не просто «найдешевше й найдорожче» ──────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
-          <div className="relative overflow-hidden bg-slate-900/50 border border-slate-800/60 rounded-[2rem] p-7 sm:p-12">
+          <Surface kind="scan" className="p-7 sm:p-14" noise>
+            <DataRain count={16} />
             {/* Червоний натяк під блоком про ризик — рівно щоб змінити
                 настрій секції, без блюру: градієнт і так м'який. */}
             <div
@@ -144,8 +157,11 @@ export default function LandingPage() {
               }}
             />
 
-            <div className="relative grid lg:grid-cols-2 gap-10 items-center">
+            <div className="relative z-10 grid lg:grid-cols-2 gap-10 items-center">
               <div>
+                <div className="mb-5">
+                  <MonoTag>risk_engine</MonoTag>
+                </div>
                 <SectionHeading
                   eyebrow="Головна відмінність"
                   title="Найкращий курс часто найнебезпечніший"
@@ -173,13 +189,20 @@ export default function LandingPage() {
                 ))}
               </div>
             </div>
-          </div>
+          </Surface>
         </Reveal>
       </Section>
 
       {/* ─── Можливості ───────────────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+            <Metric value="7" label="майданчиків" hint="Сканяться одночасно" />
+            <Metric value="4" label="джерела ризику" hint="Regex, поведінка, відгуки, списки" />
+            <Metric value="5" label="режимів" hint="Спред, тейкер ×2, мейкер ×2" />
+            <Metric value="8" label="лімітів картки" hint="Добові, місячні, разові" />
+          </div>
+
           <SectionHeading
             eyebrow="Що всередині"
             title="Не тільки пошук спредів"
