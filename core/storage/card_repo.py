@@ -276,10 +276,30 @@ class CardRepo:
         if not self._db:
             return 0.0
         cutoff = time.time() - (hours * 3600)
+        return await self._sum_transactions(card_id, direction, cutoff)
+
+    async def get_monthly_used(self, card_id: str, direction: str) -> float:
+        """
+        Витрачено з початку КАЛЕНДАРНОГО місяця.
+
+        Банки обнуляють місячний ліміт 1-го числа, а не через 30 днів. Раніше
+        місячне використання рахувалось як get_rolling_used(hours=24*30) —
+        тобто 1-го числа банк давав чистий ліміт, а модель ще місяць пам'ятала
+        минулі перекази і вважала картку завантаженою. Заодно це суперечило
+        lazy_monthly_reset, який уже працює саме по календарному місяцю.
+        """
+        if not self._db:
+            return 0.0
+        import datetime
+        now = datetime.datetime.now()
+        month_start = datetime.datetime(now.year, now.month, 1).timestamp()
+        return await self._sum_transactions(card_id, direction, month_start)
+
+    async def _sum_transactions(self, card_id: str, direction: str, since_ts: float) -> float:
         async with self._db.execute(
             "SELECT SUM(amount) as total FROM card_transactions "
             "WHERE card_id=? AND direction=? AND timestamp > ?",
-            (card_id, direction, cutoff)
+            (card_id, direction, since_ts)
         ) as cur:
             row = await cur.fetchone()
             return float(row["total"]) if row and row["total"] else 0.0
@@ -390,7 +410,8 @@ class CardRepo:
     async def release_expired_reservations(self) -> int:
         """
         Звільняє завислі leg-и ордерів (timeout) та маркує ордер відповідно.
-        Викликається з циклу сканера. Повертає кількість звільнених legs.
+        Викликається щогодини з DBMaintenanceTask.prune_hot_tables.
+        Повертає кількість звільнених legs.
         """
         if not self._db:
             return 0
@@ -692,7 +713,7 @@ class CardRepo:
                 
             # 4. Rolling used limits
             used_daily = await self.get_rolling_used(card_id, "out", hours=24)
-            used_monthly = await self.get_rolling_used(card_id, "out", hours=24*30)
+            used_monthly = await self.get_monthly_used(card_id, "out")
             
             avail_daily = max(0.0, daily_out - used_daily)
             avail_monthly = max(0.0, monthly_out - used_monthly)

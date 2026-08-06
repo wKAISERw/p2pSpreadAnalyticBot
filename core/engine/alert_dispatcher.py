@@ -4,8 +4,8 @@ import logging
 import time
 
 from bot.notifier import TelegramNotifier, SpreadAlert
-from config.banks import BankRegistry
 from core.storage.merchant_db import MerchantDB
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("Scanner.AlertDispatcher")
 
@@ -88,19 +88,30 @@ class AlertDispatcher:
         return sorted_candidates[0][0]
 
     @classmethod
-    async def adapt_alert_for_user(cls, db, user: dict, alert: SpreadAlert) -> tuple[str, str]:
+    async def adapt_alert_for_user(
+        cls, db, user: dict, alert: SpreadAlert, cards: tuple[list, list] | None = None,
+    ) -> tuple[str, str]:
         """
         Коригує банки алерта під наявні картки користувача.
+
+        :param cards: (активні_картки, усі_картки) — якщо передані, БД не
+            смикається. Це важливо для батчевої розсилки: раніше тут летіли
+            два get_cards на КОЖЕН алерт кожного юзера, хоча набір карток за
+            цикл не змінюється.
         """
         uid = user.get("user_id")
-        try:
-            user_cards = await db.get_cards(owner_id=uid, status="active")
+        if cards is not None:
+            user_cards, user_all_cards = cards
             user_card_names = {str(c["bank_name"]).lower() for c in user_cards}
-            user_all_cards = await db.get_cards(owner_id=uid)
-        except Exception as e:
-            logger.warning("Помилка отримання карток користувача %s: %s", uid, e)
-            user_card_names = set()
-            user_all_cards = []
+        else:
+            try:
+                user_cards = await db.get_cards(owner_id=uid, status="active")
+                user_card_names = {str(c["bank_name"]).lower() for c in user_cards}
+                user_all_cards = await db.get_cards(owner_id=uid)
+            except Exception as e:
+                logger.warning("Помилка отримання карток користувача %s: %s", uid, e)
+                user_card_names = set()
+                user_all_cards = []
 
         # Очищуємо та розгортаємо глобальні списки доступних карт
         user_buy_names = cls._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
@@ -278,134 +289,17 @@ class AlertDispatcher:
                     return False, f"{side_label} merchant last online {last_online}m > {max_offline}m", entry
 
         return True, "", scaled_entry
-    async def dispatch(self, alert: SpreadAlert, opp: dict) -> None:
-        """Відправляє алерт з розумним підбором банку на основі ВСІХ спільних фільтрів."""
-        users = await self._get_users()
-        if not users:
-            logger.info("📬 Dispatch fallback → queue (немає зареєстрованих юзерів)")
-            await self._notifier.push(alert)
-            return
-
-        from config.runtime import runtime_config
-        show_logs = runtime_config.get("show_spread_logs", "true") == "true"
-
-        if show_logs:
-            logger.info("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
-        else:
-            logger.debug("🔍 Аналіз розсилки для %d юзерів (Спред: %.2f%%)...", len(users), opp["net_spread_pct"])
-        matched_count = 0
-
-        for user in users:
-            uid = user.get("user_id")
-            chat_id = user.get("chat_id")
-
-            # 🚀 Отримуємо авто-капітал та налаштування карт
-            user_buy_names = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
-            opp_buy_names = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
-            allowed_buy_names = opp_buy_names & user_buy_names
-
-            auto_cap = await self._db.get_user_auto_capital(uid, allowed_banks=allowed_buy_names)
-            card_settings = await self._db.get_user_card_settings(uid)
-            card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
-
-            if user.get("capital_mode") == "auto":
-                user["capital"] = auto_cap
-            else:
-                if card_module_enabled and auto_cap > 0:
-                    user["capital"] = min(float(user["capital"]), auto_cap)
-
-            if opp.get("is_asymmetric"):
-                is_asym_active = await self._db.get_feature_status(uid, "asymmetric_spread")
-                if not is_asym_active:
-                    continue
-
-            is_sniper = False
-            for r in user.get("sniper_rules", []):
-                req_ex = r.get("exchange", "")
-                req_dir = r.get("direction", "")
-                min_spd = float(r.get("min_spread", 0))
-                min_vol = float(r.get("min_volume", 0))
-
-                if float(opp["net_spread_pct"]) >= min_spd and float(opp["actual_entry_uah"]) >= min_vol:
-                    if req_dir == "BUY" and opp["sell_order"].exchange.upper() == req_ex.upper():
-                        is_sniper = True
-                        break
-                    elif req_dir == "SELL" and opp["buy_order"].exchange.upper() == req_ex.upper():
-                        is_sniper = True
-                        break
-
-            # Preload used subsidies for per-exchange filtering
-            user["_used_subsidies"] = await self._db.get_used_subsidies(uid) if self._db else {}
-
-            wants, skip_reason, scaled_amount = self._user_wants(user, opp)
-
-            if wants or is_sniper:
-                matched_count += 1
-                match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
-
-                chosen_buy, chosen_sell = await self.adapt_alert_for_user(self._db, user, alert)
-
-                # Створюємо ізольовану копію алерта під користувача
-                local_alert = copy.copy(alert)
-                local_alert.buy_bank = chosen_buy
-                local_alert.sell_bank = chosen_sell
-                local_alert.is_asymmetric = opp.get("is_asymmetric", False)
-                local_alert.asymmetric_details = opp.get("asymmetric_details")
-                
-                # Застосовуємо зменшену суму угоди (якщо капітал юзера менший)
-                original_amount = float(opp["actual_entry_uah"])
-                if scaled_amount < original_amount:
-                    ratio = scaled_amount / original_amount if original_amount > 0 else 1.0
-                    local_alert.deal_amount_uah = scaled_amount
-                    local_alert.profit_uah = alert.profit_uah * ratio
-                    if local_alert.is_asymmetric and local_alert.asymmetric_details:
-                        local_alert.asymmetric_details = copy.copy(local_alert.asymmetric_details)
-                        local_alert.asymmetric_details["buy_required"] = scaled_amount
-                        local_alert.asymmetric_details["sell_executed"] = local_alert.asymmetric_details["sell_executed"] * ratio
-                else:
-                    local_alert.deal_amount_uah = original_amount
-
-                try:
-                    await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
-                    import asyncio
-                    asyncio.create_task(self._db.save_proposal(
-                        buy_exchange=local_alert.buy_order.exchange,
-                        sell_exchange=local_alert.sell_order.exchange,
-                        buy_merchant=local_alert.buy_order.merchant_name,
-                        sell_merchant=local_alert.sell_order.merchant_name,
-                        spread_pct=opp["net_spread_pct"],
-                        profit_uah=local_alert.profit_uah,
-                        deal_amount=local_alert.deal_amount_uah,
-                        route_type=opp.get("route_type", "SPREAD"),
-                        buy_bank=local_alert.buy_bank,
-                        sell_bank=local_alert.sell_bank,
-                        was_sent=True,
-                        user_id=uid,
-                    ))
-                    if show_logs:
-                        logger.info(
-                            "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
-                            match_type, uid, chosen_buy.upper(), chosen_sell.upper()
-                        )
-                    else:
-                        logger.debug(
-                            "  └─ %s ВІДПРАВЛЕНО → Юзер: %s | Картки адаптовано під гаманець: %s ➔ %s",
-                            match_type, uid, chosen_buy.upper(), chosen_sell.upper()
-                        )
-                except Exception as e:
-                    logger.warning("  └─ ❌ Помилка відправки юзеру %s: %s", uid, e)
-            else:
-                logger.debug("  └─ ⏭ ПРОПУЩЕНО → Юзер: %s | Причина: %s", uid, skip_reason)
-
-        if show_logs:
-            logger.info("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))
-        else:
-            logger.debug("📬 Підсумок розсилки: %d/%d юзерів отримали зв'язку.", matched_count, len(users))
 
     async def dispatch_batch(self, items: list[tuple[SpreadAlert, dict]]) -> None:
         """
-        Групова версія dispatch. Збирає всі підходящі ордери для кожного користувача
-        і відправляє їх або поодинці (якщо 1 ордер), або батчем (якщо >1 ордерів).
+        Єдина точка розсилки. Збирає всі підходящі ордери для кожного
+        користувача і відправляє їх або поодинці (якщо 1 ордер), або батчем.
+
+        Раніше поруч жив ще й `dispatch()` на один алерт — копія цієї ж логіки
+        на 120 рядків, яку сканер не викликав. Розійшлися вони не косметично:
+        у dispatch() мутувався спільний закешований dict юзера
+        (`user["capital"] = min(...)`), через що капітал "танув" між алертами.
+        Тут для кожного алерта береться copy.copy(user).
         """
         if not items:
             return
@@ -423,19 +317,40 @@ class AlertDispatcher:
         for user in users:
             uid = user.get("user_id")
             chat_id = user.get("chat_id")
-            
+
+            # ── Дані юзера, незмінні в межах батчу — тягнемо ОДИН раз ───────
+            # Раніше все це смикалось на кожен алерт: при 20 алертах і 4 юзерах
+            # виходило ~400 запитів за цикл замість 4.
             is_asym_active = await self._db.get_feature_status(uid, "asymmetric_spread")
-            
+            card_settings = await self._db.get_user_card_settings(uid)
+            card_module_enabled = bool(card_settings and card_settings.get("card_module_mode") != "off")
+            used_subsidies = await self._db.get_used_subsidies(uid) if self._db else {}
+            try:
+                user_cards_active = await self._db.get_cards(owner_id=uid, status="active")
+                user_cards_all = await self._db.get_cards(owner_id=uid)
+            except Exception as e:
+                logger.warning("Помилка отримання карток користувача %s: %s", uid, e)
+                user_cards_active, user_cards_all = [], []
+
+            # auto_capital залежить від набору дозволених банків, а він у різних
+            # алертів різний — тому мемоїзуємо по цьому набору.
+            auto_cap_cache: dict[frozenset, float] = {}
+            user_buy_names = self._clean_and_normalize_banks(
+                user.get("buy_bank_codes") or user.get("bank_codes")
+            )
+
             user_matches = []  # list of (local_alert, opp, is_sniper)
-            
+
             for alert, opp in items:
-                user_buy_names = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
                 opp_buy_names = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
                 allowed_buy_names = opp_buy_names & user_buy_names
 
-                auto_cap = await self._db.get_user_auto_capital(uid, allowed_banks=allowed_buy_names)
-                card_settings = await self._db.get_user_card_settings(uid)
-                card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
+                cache_key = frozenset(allowed_buy_names)
+                if cache_key in auto_cap_cache:
+                    auto_cap = auto_cap_cache[cache_key]
+                else:
+                    auto_cap = await self._db.get_user_auto_capital(uid, allowed_banks=allowed_buy_names)
+                    auto_cap_cache[cache_key] = auto_cap
 
                 local_user = copy.copy(user)
                 if local_user.get("capital_mode") == "auto":
@@ -462,13 +377,14 @@ class AlertDispatcher:
                             is_sniper = True
                             break
 
-                # Preload used subsidies for per-exchange filtering
-                local_user["_used_subsidies"] = await self._db.get_used_subsidies(uid) if self._db else {}
+                local_user["_used_subsidies"] = used_subsidies
 
                 wants, skip_reason, scaled_amount = self._user_wants(local_user, opp)
 
                 if wants or is_sniper:
-                    chosen_buy, chosen_sell = await self.adapt_alert_for_user(self._db, local_user, alert)
+                    chosen_buy, chosen_sell = await self.adapt_alert_for_user(
+                        self._db, local_user, alert, cards=(user_cards_active, user_cards_all),
+                    )
 
                     local_alert = copy.copy(alert)
                     local_alert.buy_bank = chosen_buy
@@ -504,8 +420,7 @@ class AlertDispatcher:
                     match_type = "🎯 SNIPER" if is_sniper else "✅ SPREAD"
                     try:
                         await self._notifier.send_to_user(chat_id, local_alert, is_sniper_match=is_sniper)
-                        import asyncio
-                        asyncio.create_task(self._db.save_proposal(
+                        spawn(self._db.save_proposal(
                             buy_exchange=local_alert.buy_order.exchange,
                             sell_exchange=local_alert.sell_order.exchange,
                             buy_merchant=local_alert.buy_order.merchant_name,
@@ -518,7 +433,7 @@ class AlertDispatcher:
                             sell_bank=local_alert.sell_bank,
                             was_sent=True,
                             user_id=uid,
-                        ))
+                        ), "save_proposal", logger_=logger)
                         if show_logs:
                             logger.info("  └─ %s ВІДПРАВЛЕНО (Одиночний) → Юзер: %s", match_type, uid)
                     except Exception as e:
@@ -530,9 +445,8 @@ class AlertDispatcher:
                     await self._notifier.send_batch_to_user(chat_id, batch_alerts)
                     
                     # Зберігаємо пропозиції для всіх алертів у пачці
-                    import asyncio
                     for local_alert, opp, is_sniper in user_matches:
-                        asyncio.create_task(self._db.save_proposal(
+                        spawn(self._db.save_proposal(
                             buy_exchange=local_alert.buy_order.exchange,
                             sell_exchange=local_alert.sell_order.exchange,
                             buy_merchant=local_alert.buy_order.merchant_name,
@@ -545,7 +459,7 @@ class AlertDispatcher:
                             sell_bank=local_alert.sell_bank,
                             was_sent=True,
                             user_id=uid,
-                        ))
+                        ), "save_proposal", logger_=logger)
                     if show_logs:
                         logger.info("  └─ 📦 BATCH ВІДПРАВЛЕНО (Кількість: %d) → Юзер: %s", len(batch_alerts), uid)
                 except Exception as e:

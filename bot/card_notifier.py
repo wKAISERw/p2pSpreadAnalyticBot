@@ -44,7 +44,7 @@ class CardNotifier:
         # Зчитуємо ліміти й поточні накопичені лічильники з SQLite
         limits = await self._db.get_card_effective_limits(card_id)
         used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
-        used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
+        used_monthly = await self._db.get_monthly_used(card_id, direction)
         tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
 
         # Визначаємо константи залежно від напрямку
@@ -176,7 +176,7 @@ class CardNotifier:
 
             # Check destination rolling used IN
             dest_used_daily = await self._db.get_rolling_used(dest_id, "in", hours=24)
-            dest_used_monthly = await self._db.get_rolling_used(dest_id, "in", hours=24*30)
+            dest_used_monthly = await self._db.get_monthly_used(dest_id, "in")
             dest_tx_count = await self._db.get_card_transactions_count(dest_id, hours=24)
 
             if dest_daily_in != -1 and dest_daily_in != -1.0 and (dest_used_daily + needed_transfer) > dest_daily_in:
@@ -208,7 +208,7 @@ class CardNotifier:
 
                 # Check source rolling used OUT
                 src_used_daily = await self._db.get_rolling_used(src_id, "out", hours=24)
-                src_used_monthly = await self._db.get_rolling_used(src_id, "out", hours=24*30)
+                src_used_monthly = await self._db.get_monthly_used(src_id, "out")
                 src_tx_count = await self._db.get_card_transactions_count(src_id, hours=24)
 
                 if src_daily_out != -1 and src_daily_out != -1.0 and (src_used_daily + needed_transfer) > src_daily_out:
@@ -367,7 +367,7 @@ class CardNotifier:
                     avail_daily = float('inf')
 
                 # 5. Місячний ліміт
-                used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
+                used_monthly = await self._db.get_monthly_used(card_id, direction)
                 if monthly_max != -1 and monthly_max != -1.0:
                     avail_monthly = monthly_max - used_monthly
                     if avail_monthly <= 0:
@@ -545,7 +545,7 @@ class CardNotifier:
         max_tx = limits.get("max_tx_per_day", 15)
 
         used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
-        used_monthly = await self._db.get_rolling_used(card_id, direction, hours=24 * 30)
+        used_monthly = await self._db.get_monthly_used(card_id, direction)
         tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
 
         # 🚀 ПОСЛІДОВНИЙ РОЗРАХУНОК БАЛАНСУ: якщо це та сама карта на Sell-нозі, зменшуємо стартовий баланс

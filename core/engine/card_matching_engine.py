@@ -146,7 +146,8 @@ class CardMatchingEngine:
                 card["_is_warm"] = is_warm
 
                 used_daily = await self.db.get_rolling_used(card["id"], direction, hours=24)
-                used_monthly = await self.db.get_rolling_used(card["id"], direction, hours=24*30) 
+                # Місячний ліміт банк обнуляє 1-го числа, а не через 30 днів.
+                used_monthly = await self.db.get_monthly_used(card["id"], direction)
                 
                 avail_daily = daily_max - used_daily if daily_max != float('inf') else float('inf')
                 avail_monthly = monthly_max - used_monthly if monthly_max != float('inf') else float('inf')

@@ -1,23 +1,23 @@
 # core/workers/review_fetcher.py
 """
-ReviewFetcher v2.0 — повний рефакторинг.
+ReviewFetcher — завантаження відгуків мерчантів на вимогу.
 
-Ключові виправлення:
-  1. pos/neg/neutral більше не нулі — беремо з профілю мерчанта
-  2. Пріоритетна черга (urgent) для нових мерчантів
+  1. pos/neg/neutral беремо з профілю мерчанта (не нулі)
+  2. Один шлях: fetch_now(), викликається лениво з RiskEngine для
+     реальних кандидатів спреду. Фонова черга прибрана — див. докстрінг класу
   3. Окремий аналіз тексту відгуків по review_only правилах
-  4. Degraded mode залишено без змін
+  4. Degraded mode: 3 відмови поспіль → cooldown на біржу
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import suppress
 from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
 from core.analysis.rules import ALL_RULES
+from core.utils.tasks import spawn
 
 if TYPE_CHECKING:
     from infrastructure.http.binance_client import BinanceClient
@@ -123,31 +123,36 @@ def _enrich_bad_text(text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ReviewFetcher:
+    """
+    Тягне відгуки мерчантів на вимогу (lazy), з-під RiskEngine.
+
+    Історична довідка: тут була пріоритетна черга з фоновим воркером
+    (schedule → _urgent_queue/_queue → _worker_loop → _fetch_and_save).
+    Після переходу на lazy-модель сканер перестав викликати schedule(), тож
+    воркер роками просто висів на порожній черзі, а _fetch_and_save —
+    майже дослівна копія fetch_now — була недосяжна. Черга прибрана,
+    лишився один шлях: fetch_now().
+    """
+
     def __init__(
             self,
             db: MerchantDB,
-            max_queue: int = 500,
             review_ttl_hours: float = 24.0,
             binance_client=None,
             bybit_client=None,
             okx_client=None,
-            mexc_client=None,  # 🚀 ДОДАНО
+            mexc_client=None,
             notifier=None,
     ):
         self._db = db
         self._review_ttl = review_ttl_hours
         self._notifier = notifier
 
-        self._urgent_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=100)
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=max_queue)
-
-        self._worker_task: Optional[asyncio.Task] = None
         self._processed = 0
         self._errors = 0
-        self._pending: set[tuple[str, str]] = set()
-
-        # In-memory кеш для швидкого визначення нових мерчантів (замість повільних запитів до БД)
-        self._known_merchants: set[tuple[str, str]] = set()
+        # Скільки фетчів прямо зараз у польоті — це те, що показує /status
+        # замість колишнього розміру черги.
+        self._in_flight = 0
 
         self._binance: Optional["BinanceClient"] = binance_client
         self._bybit: Optional["BybitP2PClient"] = bybit_client
@@ -175,18 +180,15 @@ class ReviewFetcher:
     def bind_notifier(self, notifier) -> None:
         self._notifier = notifier
 
+    @property
+    def in_flight(self) -> int:
+        """Скільки фетчів відгуків виконується просто зараз."""
+        return self._in_flight
+
     async def start(self) -> None:
-        if self._worker_task and not self._worker_task.done():
-            logger.debug("ReviewFetcher start skipped: already running")
-            return
-        self._worker_task = asyncio.create_task(
-            self._worker_loop(), name="review-fetcher"
-        )
         logger.info(
-            "ReviewFetcher запущено | ttl=%.1fh | urgent_q=%d | normal_q=%d | clients: B=%s By=%s OKX=%s MEXC=%s CB=%s",
+            "ReviewFetcher готовий (lazy-режим) | ttl=%.1fh | clients: B=%s By=%s OKX=%s MEXC=%s CB=%s",
             self._review_ttl,
-            self._urgent_queue.maxsize,
-            self._queue.maxsize,
             "✅" if self._binance else "❌",
             "✅" if self._bybit else "❌",
             "✅" if self._okx else "❌",
@@ -195,38 +197,10 @@ class ReviewFetcher:
         )
 
     async def stop(self) -> None:
-        if self._worker_task:
-            self._worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._worker_task
-            self._worker_task = None
         logger.info(
-            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, pending: %d",
-            self._processed, self._errors, len(self._pending),
+            "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, у польоті: %d",
+            self._processed, self._errors, self._in_flight,
         )
-
-    def schedule(self, exchange: str, merchant_id: str) -> bool:
-        """
-        Ставить мерчанта в чергу на завантаження відгуків.
-        Fast in-memory перевірка: якщо мерчанта ще немає в кеші, він йде в urgent_queue.
-        """
-        if exchange not in RATE_LIMITS or not merchant_id:
-            return False
-
-        key = (exchange, merchant_id)
-        if key in self._pending:
-            return False
-
-        # Магія швидкості: визначаємо urgent без запиту до БД!
-        urgent = key not in self._known_merchants
-        target = self._urgent_queue if urgent else self._queue
-
-        try:
-            target.put_nowait(key)
-            self._pending.add(key)
-            return True
-        except asyncio.QueueFull:
-            return False
 
     async def fetch_now(self, exchange: str, merchant_id: str) -> dict:
         """
@@ -244,6 +218,18 @@ class ReviewFetcher:
         if not merchant_id:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN",
                     "error_reason": "empty merchant_id"}
+
+        # Degraded mode: після 3 підряд відмов біржа йде в cooldown, щоб не
+        # довбати мертве API кожним циклом. Перенесено з _fetch_and_save —
+        # раніше ця логіка жила тільки у мертвому шляху через чергу, тож
+        # lazy-фетч довбав API без обмежень.
+        if asyncio.get_event_loop().time() < self._exchange_cooldown.get(exchange, 0.0):
+            logger.debug("fetch_now: %s у degraded mode, пропускаємо %s", exchange, merchant_id[:12])
+            return {
+                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+                "status": "UNAVAILABLE",
+                "error_reason": f"{exchange} degraded mode (temporary cooldown)",
+            }
 
         if exchange not in RATE_LIMITS:
             # Біржа взагалі не підтримується (не в RATE_LIMITS)
@@ -308,6 +294,7 @@ class ReviewFetcher:
             # Невідома біржа з клієнтом — без перевірки
             pass
 
+        self._in_flight += 1
         try:
             # У блок try-except виклику фетчерів додаємо роут:
             if exchange == "Binance":
@@ -322,6 +309,9 @@ class ReviewFetcher:
                 pos, neg, neutral, bad_texts = await self._fetch_cryptobot(merchant_id)
             elif exchange == "Wallet":
                 pos, neg, neutral, bad_texts = await self._fetch_wallet(merchant_id)
+
+            self._exchange_fails[exchange] = 0
+            self._processed += 1
 
             # Bybit/Binance/OKX/CryptoBot/Wallet: без сесії → NO_SESSION щоб needs_review_fetch
             # повернув True через 10 хв — як тільки сесія з'явиться, всі перефетчаться
@@ -346,23 +336,28 @@ class ReviewFetcher:
                 exchange, merchant_id, pos, neg, neutral, bad_texts,
                 status=save_status, error_reason=save_reason
             )
-            self._known_merchants.add((exchange, merchant_id))
+
+            total = pos + neg + neutral
+            bad_pct = (neg / total * 100.0) if total > 0 else 0.0
 
             if save_status == "OK":
-                total = pos + neg + neutral
-                bad_pct = (neg / total * 100.0) if total > 0 else 0.0
                 try:
                     await self._db.save_review_snapshot(exchange, merchant_id, pos, neg, bad_pct)
                 except Exception as _snap_err:
                     logger.debug("save_review_snapshot error: %s", _snap_err)
 
                 if self._notifier is not None:
-                    try:
-                        asyncio.ensure_future(
-                            self._notifier.redraw_alerts_for_merchant(exchange, merchant_id)
-                        )
-                    except Exception as _re:
-                        logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
+                    spawn(
+                        self._notifier.redraw_alerts_for_merchant(exchange, merchant_id),
+                        f"redraw-{exchange}-{merchant_id}",
+                        logger_=logger,
+                    )
+
+            if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
+                logger.warning(
+                    "🚨 Поганий мерчант %s [%s]: %.0f%% негативних (%d/%d)",
+                    merchant_id, exchange, bad_pct, neg, total,
+                )
 
             return {
                 "positive": pos,
@@ -374,6 +369,15 @@ class ReviewFetcher:
             }
         except Exception as e:
             logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
+            self._errors += 1
+
+            # 3 відмови поспіль → біржа в degraded mode на N хвилин.
+            self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
+            if self._exchange_fails[exchange] >= 3:
+                cooldown_sec = {"Binance": 300.0, "OKX": 600.0}.get(exchange, 7200.0)
+                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
+                logger.error("🚨 %s API впало 3 рази! Degraded Mode на %.0f хв.", exchange, cooldown_sec / 60)
+
             emsg = str(e)
             status = "UNAVAILABLE"
             if "AuthError" in emsg:
@@ -391,198 +395,10 @@ class ReviewFetcher:
                 "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
                 "status": status, "error_reason": emsg[:500]
             }
+        finally:
+            self._in_flight -= 1
 
-    # ─── Worker loop ────────────────────────────────────────────────────────
-
-    async def _worker_loop(self) -> None:
-        from state import state
-        while True:
-            try:
-                # Очікуємо відновлення інтернету якщо він пропав
-                while not state.stats.get("internet_connected", True):
-                    await asyncio.sleep(5.0)
-
-                # Пріоритет: спочатку urgent, потім normal
-                try:
-                    exchange, merchant_id = self._urgent_queue.get_nowait()
-                    from_urgent = True
-                except asyncio.QueueEmpty:
-                    exchange, merchant_id = await self._queue.get()
-                    from_urgent = False
-
-                key = (exchange, merchant_id)
-                try:
-                    now = asyncio.get_event_loop().time()
-                    if now < self._exchange_cooldown.get(exchange, 0):
-                        logger.debug("ReviewFetcher Degraded Mode для %s, пропускаємо", exchange)
-                        await self._db.save_reviews(
-                            exchange, merchant_id, 0, 0, 0, [],
-                            status="UNAVAILABLE",
-                            error_reason=f"{exchange} degraded mode (temporary cooldown)"
-                        )
-                        continue
-
-                    needs_fetch = await self._db.needs_review_fetch(
-                        exchange, merchant_id, self._review_ttl
-                    )
-                    if not needs_fetch and not from_urgent:
-                        logger.debug("ReviewFetcher TTL skip %s [%s]", merchant_id, exchange)
-                        continue
-
-                    logger.debug("ReviewFetcher fetch [%s] %s urgent=%s", exchange, merchant_id, from_urgent)
-                    await self._fetch_and_save(exchange, merchant_id)
-                    await asyncio.sleep(RATE_LIMITS.get(exchange, 2.0))
-
-                finally:
-                    self._pending.discard(key)
-                    # task_done тільки для нормальної черги (urgent — get_nowait)
-                    if not from_urgent:
-                        self._queue.task_done()
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                self._errors += 1
-                logger.error("ReviewFetcher worker помилка: %s", e, exc_info=True)
-                await asyncio.sleep(3.0)
-
-    async def _fetch_and_save(self, exchange: str, merchant_id: str) -> None:
-        try:
-            # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──
-            if exchange in ("CryptoBot", "Wallet"):
-                _client = self._cryptobot if exchange == "CryptoBot" else self._wallet
-                if not _client:
-                    logger.debug("_fetch_and_save: %s клієнт не підключений, skip %s", exchange, merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_AUTH", error_reason=f"{exchange} client is not initialized"
-                    )
-                    return
-                if not getattr(_client, "userbot", None):
-                    logger.debug("_fetch_and_save: %s userbot не встановлено, skip %s", exchange, merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_SESSION", error_reason=f"{exchange} userbot not set"
-                    )
-                    return
-
-            elif exchange == "MEXC":
-                if not self._mexc:
-                    logger.debug("_fetch_and_save: MEXC клієнт не підключений, skip %s", merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_AUTH", error_reason="MEXC client is not initialized"
-                    )
-                    return
-
-            elif exchange in ("Bybit", "Binance", "OKX"):
-                # Bybit/Binance/OKX: всі потребують браузерну сесію.
-                # OKX використовує POST /v3/c2c/review/history з reviewScoreType="negative".
-                _client_map = {"Bybit": self._bybit, "Binance": self._binance, "OKX": self._okx}
-                client = _client_map.get(exchange)
-                if not client:
-                    logger.debug("_fetch_and_save: %s [%s] — клієнт відсутній", exchange, merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_AUTH", error_reason=f"{exchange} client is not initialized"
-                    )
-                    return
-                session_h, _, _ = await self._db.get_auth_session(exchange)
-                if not session_h:
-                    logger.debug("_fetch_and_save: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_SESSION", error_reason=f"{exchange} browser session not captured"
-                    )
-                    return
-
-            else:
-                # Невідома біржа — пропускаємо
-                pass
-
-            if exchange == "Binance":
-                pos, neg, neutral, bad_texts = await self._fetch_binance(merchant_id)
-            elif exchange == "Bybit":
-                pos, neg, neutral, bad_texts = await self._fetch_bybit(merchant_id)
-            elif exchange == "OKX":
-                pos, neg, neutral, bad_texts = await self._fetch_okx(merchant_id)
-            elif exchange == "MEXC":
-                pos, neg, neutral, bad_texts = await self._fetch_mexc(merchant_id)
-            elif exchange == "CryptoBot":
-                pos, neg, neutral, bad_texts = await self._fetch_cryptobot(merchant_id)
-            elif exchange == "Wallet":
-                pos, neg, neutral, bad_texts = await self._fetch_wallet(merchant_id)
-            else:
-                return
-
-            self._exchange_fails[exchange] = 0
-            total = pos + neg + neutral
-            bad_pct = (neg / total * 100.0) if total > 0 else 0.0
-
-            self._known_merchants.add((exchange, merchant_id))
-
-            # Bybit/Binance/OKX/CryptoBot/Wallet: NO_SESSION якщо сесія не захоплена — перефетч через 10 хв
-            if exchange in ("Bybit", "Binance", "OKX"):
-                session_h, _, _ = await self._db.get_auth_session(exchange)
-                save_status = "OK" if session_h else "NO_SESSION"
-            elif exchange in ("CryptoBot", "Wallet"):
-                _client = self._cryptobot if exchange == "CryptoBot" else self._wallet
-                save_status = "OK" if getattr(_client, "userbot", None) else "NO_SESSION"
-            else:
-                save_status = "OK"
-
-            save_reason = ""
-            if save_status == "OK" and total == 0 and not bad_texts:
-                if exchange in ("Binance", "Bybit"):
-                    pass  # For Binance/Bybit, 0 negative reviews is a normal successful result, NOT "no feedback"
-                else:
-                    save_status = "NO_FEEDBACK"
-                    save_reason = f"{exchange} API returned 0 feedback entries"
-
-            await self._db.save_reviews(
-                exchange, merchant_id, pos, neg, neutral, bad_texts,
-                status=save_status, error_reason=save_reason
-            )
-            self._processed += 1
-
-            if save_status == "OK":
-                try:
-                    await self._db.save_review_snapshot(exchange, merchant_id, pos, neg, bad_pct)
-                except Exception as _snap_err:
-                    logger.debug("save_review_snapshot error: %s", _snap_err)
-
-                if self._notifier is not None:
-                    try:
-                        asyncio.ensure_future(
-                            self._notifier.redraw_alerts_for_merchant(exchange, merchant_id)
-                        )
-                    except Exception as _re:
-                        logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
-
-            if bad_pct >= BAD_REVIEW_THRESHOLD_PCT and neg >= 3:
-                logger.warning(
-                    "🚨 Поганий мерчант %s [%s]: %.0f%% негативних (%d/%d)",
-                    merchant_id, exchange, bad_pct, neg, total,
-                )
-
-        except Exception as e:
-            self._errors += 1
-            self._exchange_fails[exchange] = self._exchange_fails.get(exchange, 0) + 1
-            if self._exchange_fails[exchange] >= 3:
-                cooldown_sec = {"Binance": 300.0, "OKX": 600.0}.get(exchange, 7200.0)
-                self._exchange_cooldown[exchange] = asyncio.get_event_loop().time() + cooldown_sec
-                logger.error("🚨 %s API впало 3 рази! Degraded Mode на %.0f хв.", exchange, cooldown_sec / 60)
-
-            emsg = str(e)
-            err_status = "UNAVAILABLE"
-            if "AuthError" in emsg:
-                err_status = "SESSION_EXPIRED"
-            elif "API_ERROR" in emsg:
-                err_status = "API_ERROR"
-            await self._db.save_reviews(
-                exchange, merchant_id, 0, 0, 0, [],
-                status=err_status, error_reason=emsg[:500]
-            )
+    # ─── Exchange fetchers ───────────────────────────────────────────────────
 
     def _send_burnout_alert(self, exchange: str):
         """Надсилає миттєве Telegram-сповіщення (і пише в лог) про згоряння сесії."""
@@ -603,7 +419,7 @@ class ReviewFetcher:
                     except Exception as e:
                         logger.debug("burnout_alert push failed: %s", e)
 
-                asyncio.create_task(_push())
+                spawn(_push(), "burnout-alert-push", logger_=logger)
         except Exception:
             pass
 
@@ -639,7 +455,8 @@ class ReviewFetcher:
         except Exception as fe:
             if "AuthError" in str(fe):
                 logger.error("🚨 Binance session burnout detected! %s", fe)
-                asyncio.create_task(self._db.invalidate_auth_session("Binance", user_id=0))
+                spawn(self._db.invalidate_auth_session("Binance", user_id=0),
+                      "invalidate-session-Binance", logger_=logger)
                 self._send_burnout_alert("Binance")
                 raise RuntimeError(f"AuthError: Binance session expired: {fe}")
             else:
@@ -692,7 +509,8 @@ class ReviewFetcher:
             is_auth_error = "AuthError" in fe_str or "10007" in fe_str or "authentication failed" in fe_str.lower()
             if is_auth_error:
                 logger.error("🚨 Bybit session burnout detected! %s", fe)
-                asyncio.create_task(self._db.invalidate_auth_session("Bybit", user_id=0))
+                spawn(self._db.invalidate_auth_session("Bybit", user_id=0),
+                      "invalidate-session-Bybit", logger_=logger)
                 self._send_burnout_alert("Bybit")
                 raise RuntimeError(f"AuthError: Bybit session expired: {fe}")
             else:
