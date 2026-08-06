@@ -629,7 +629,7 @@ async def cmd_status(message: Message) -> None:
             f"🔄 Циклів всього: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
             f"🤖 Ботів сьогодні: <code>{_scanner_stats.get('bots_detected_today', 0)}</code>\n"
             f"📈 Спредів сьогодні: <code>{_scanner_stats.get('spreads_found_today', 0)}</code>\n"
-            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
+            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Відгуки в роботі: <code>{rev_q}</code>"
             f"{mute_line}\n\n"
             f"💼 Капітал: <code>{capital} ₴</code>\n"
             f"📉 Спред: <code>{spread}%</code>\n"

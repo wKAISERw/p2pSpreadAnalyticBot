@@ -99,5 +99,5 @@ llm_queue_size = Gauge(
 
 review_queue_size = Gauge(
     "review_queue_size",
-    "Current number of merchants pending in the ReviewFetcher queue",
+    "Number of merchant review fetches currently in flight (ReviewFetcher is lazy — no queue)",
 )

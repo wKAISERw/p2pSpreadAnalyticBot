@@ -811,7 +811,7 @@ async def _build_status_text(user_id: int) -> str:
             "📊 <b>Стан системи</b>\n\n"
             f"⚡ Останній цикл: <code>{_scanner_stats.get('last_cycle_ms', 0):.0f}ms</code>\n"
             f"🔄 Циклів: <code>{_scanner_stats.get('cycles', 0)}</code>\n"
-            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Reviews: <code>{rev_q}</code>"
+            f"🧠 LLM черга: <code>{llm_q}</code>  📋 Відгуки в роботі: <code>{rev_q}</code>"
             f"{mute_line}\n\n"
             f"💼 Капітал: <code>{_my_capital} ₴</code>\n"
             f"📉 Спред: <code>{_my_spread}%</code>"

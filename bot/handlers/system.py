@@ -23,6 +23,7 @@ from bot.keyboards import back_to_main_kb
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
 from config.runtime import runtime_config
+from core.utils.tasks import spawn
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -347,13 +348,16 @@ async def process_tm_amount(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("⏳ Запускаю гібридний маршрут T→M...\nОчікуй сповіщення про створення угоди.")
 
-    import asyncio
-    asyncio.create_task(_trade_worker.execute_tm_route(
-        buy_leg=data["tm_buy_leg"],
-        sell_exchange=data["tm_sell_exchange"],
-        amount_usdt=amount_usdt,
-        owner_user_id=message.from_user.id
-    ))
+    spawn(
+        _trade_worker.execute_tm_route(
+            buy_leg=data["tm_buy_leg"],
+            sell_exchange=data["tm_sell_exchange"],
+            amount_usdt=amount_usdt,
+            owner_user_id=message.from_user.id,
+        ),
+        f"tm-route-{message.from_user.id}",
+        logger_=logger,
+    )
 
 
 # =========================================================================
@@ -369,9 +373,15 @@ async def on_intercept_session(call: CallbackQuery, state: FSMContext) -> None:
     domain = getattr(settings, "public_url", None) or "http://192.168.1.100:8000"
     domain = runtime_config.get("api_domain", domain)
 
+    # Ендпоінт закритий API-ключем. Букмарклет не може слати кастомні
+    # заголовки крізь редагування закладки, тому ключ іде query-параметром.
+    from urllib.parse import quote
+    _api_key = getattr(settings, "api_key", "") or ""
+    key_qs = f"?api_key={quote(_api_key, safe='')}" if _api_key else ""
+
     js_code = f"""javascript:(function(){{
     let c = document.cookie;
-    fetch('{domain}/api/v1/session/receive', {{
+    fetch('{domain}/api/v1/session/receive{key_qs}', {{
         method: 'POST',
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{
@@ -491,14 +501,17 @@ async def process_mt_amount(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("⏳ Запускаю гібридний маршрут M→T...\nОголошення скоро з'явиться у стакані.")
 
-    import asyncio
-    asyncio.create_task(_trade_worker.execute_mt_route(
-        buy_exchange=data["mt_buy_exchange"],
-        buy_price=data["mt_buy_price"],
-        sell_leg=data["mt_sell_leg"],
-        amount_usdt=amount_usdt,
-        owner_user_id=message.from_user.id
-    ))
+    spawn(
+        _trade_worker.execute_mt_route(
+            buy_exchange=data["mt_buy_exchange"],
+            buy_price=data["mt_buy_price"],
+            sell_leg=data["mt_sell_leg"],
+            amount_usdt=amount_usdt,
+            owner_user_id=message.from_user.id,
+        ),
+        f"mt-route-{message.from_user.id}",
+        logger_=logger,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1,16 +1,23 @@
 # api/routers/webhooks.py
 import logging
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from api.schemas import SessionPayload
+from api.security import require_api_key
 
 router = APIRouter(prefix="/api/v1", tags=["Webhooks"])
 logger = logging.getLogger("ApiWebhooks")
 
 
-@router.post("/session/receive")
+@router.post("/session/receive", dependencies=[Depends(require_api_key)])
 async def receive_session(payload: SessionPayload):
-    """Ендпоінт для отримання кукісів браузера через Bookmarklet скрипт."""
+    """
+    Ендпоінт для отримання кукісів браузера через Bookmarklet скрипт.
+
+    Захищений API-ключем: без нього будь-хто міг підкинути власну сесію
+    біржі для довільного user_id, і сканер працював би під нею.
+    Букмарклет може передати ключ як ?api_key=... (див. api/security.py).
+    """
     from bot.handlers.core import _db as db
     cookies_dict = {}
     if payload.cookies_str:

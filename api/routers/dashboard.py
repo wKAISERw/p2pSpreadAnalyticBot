@@ -1,6 +1,6 @@
 # api/routers/dashboard.py
 import logging
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 
 from state import state
@@ -16,7 +16,11 @@ from infrastructure.api.mexc_account import MEXCAccountClient
 # Імпортуємо перевірку прав з хендлерів боту
 from bot.handlers.core import _is_admin
 
-router = APIRouter(prefix="/api/v1", tags=["Dashboard"])
+from api.security import require_api_key
+
+# Автентифікація на рівні роутера — жоден ендпоінт не може випадково
+# лишитись без неї.
+router = APIRouter(prefix="/api/v1", tags=["Dashboard"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger("ApiDashboard")
 
 @router.get("/stats")
@@ -43,8 +47,11 @@ async def get_opportunities():
     return dict_to_camel(jsonable_encoder(state.opportunities))
 
 @router.get("/logs")
-async def get_logs():
-    return dict_to_camel(jsonable_encoder(state.logs))
+async def get_logs(limit: int = 200):
+    """Останні записи логу (найновіші першими)."""
+    recent = list(state.logs)[-max(1, min(limit, 500)):]
+    recent.reverse()
+    return dict_to_camel(jsonable_encoder(recent))
 
 @router.post("/credentials/{exchange}")
 async def save_credentials(exchange: str, payload: ApiKeyPayload, telegram_id: int = 0):
@@ -94,52 +101,70 @@ async def add_to_blacklist(payload: BlacklistPayload):
 async def remove_from_blacklist(exchange: str, merchant_id: str):
     from bot.handlers.core import _db as db
     try:
-        await db._db.execute(
-            "DELETE FROM merchant_blacklist WHERE exchange=? AND merchant_id=?",
+        # Таблиця називається global_blacklist. Тут роками стояло
+        # `merchant_blacklist`, якої не існує — DELETE завжди падав у except
+        # і ендпоінт мовчки повертав error.
+        cursor = await db._db.execute(
+            "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
             (exchange, merchant_id)
         )
         await db._db.commit()
-        return {"status": "success"}
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Merchant not found in blacklist")
+        return {"status": "success", "deleted": cursor.rowcount}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.error("remove_from_blacklist: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/settings/global")
 async def get_global_settings():
-    if hasattr(state, "global_settings"):
-        return dict_to_camel(jsonable_encoder(state.global_settings))
-    return dict_to_camel({"min_spread": 0.5, "min_profit": 100, "max_risk_score": 50, "scan_interval": 5,
-                          "active_exchanges": ["binance", "bybit"]})
+    """Глобальні налаштування — читаються з того ж джерела, що й сканер."""
+    from config.runtime import runtime_config, ALLOWED_KEYS
+    return dict_to_camel({key: runtime_config.get(key) for key in sorted(ALLOWED_KEYS)})
 
-@router.get("/settings/user")
-async def get_user_settings():
-    if hasattr(state, "user_settings"):
-        return dict_to_camel(jsonable_encoder(state.user_settings))
-    return dict_to_camel(
-        {"telegram_notifications": True, "telegram_chat_id": "", "sound_alerts": True, "auto_trade": None})
 
 @router.post("/settings/global")
 async def update_global_settings(settings: dict):
-    from state import state
-    snake_settings = dict_to_snake(settings)
-    if hasattr(state, "global_settings"):
-        if isinstance(state.global_settings, dict):
-            state.global_settings.update(snake_settings)
-        else:
-            for key, value in snake_settings.items():
-                setattr(state.global_settings, key, value)
-    return {"status": "success", "updated_settings": snake_settings}
+    """
+    Пише глобальні налаштування в bot_settings (runtime_config) — сканер
+    перечитує їх раз на 10с.
 
-@router.post("/settings/user")
-async def update_local_user_settings(settings: dict):
-    from state import state
+    Раніше цей ендпоінт складав значення в in-memory `state.global_settings`,
+    який НІХТО не читав: сканер бере конфіг з runtime_config. Тобто UI
+    рапортував "success", а налаштування не діяли взагалі.
+    """
+    from config.runtime import runtime_config, ALLOWED_KEYS
+
     snake_settings = dict_to_snake(settings)
-    if hasattr(state, "user_settings"):
-        if isinstance(state.user_settings, dict):
-            state.user_settings.update(snake_settings)
+    applied, rejected = {}, []
+    for key, value in snake_settings.items():
+        if key not in ALLOWED_KEYS:
+            rejected.append(key)
+            continue
+        if await runtime_config.set(key, value):
+            applied[key] = str(value)
         else:
-            for key, value in snake_settings.items():
-                setattr(state.user_settings, key, value)
-    return {"status": "success", "updated_settings": snake_settings}
+            rejected.append(key)
+
+    if rejected and not applied:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Невідомі ключі налаштувань: {', '.join(sorted(rejected))}",
+        )
+    return {"status": "success", "applied": applied, "rejected": sorted(rejected)}
+
+
+@router.get("/settings/user")
+async def get_user_settings(telegram_id: int):
+    """Персональні налаштування юзера зі scanner_users."""
+    from bot.handlers.core import _db as db
+    users = await db.get_active_users()
+    user = next((u for u in users if u["user_id"] == telegram_id), None)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return dict_to_camel(jsonable_encoder(user))
 
 @router.get("/telegram/sync/{telegram_id}")
 async def sync_telegram(telegram_id: int):
@@ -165,26 +190,53 @@ async def sync_telegram(telegram_id: int):
     }
     return dict_to_camel(data)
 
+@router.post("/settings/user")
+async def update_local_user_settings(settings: dict):
+    """
+    Аліас на /user/settings — лишений щоб не ламати наявний фронтенд.
+    Раніше писав у in-memory state.user_settings, який ніхто не читав.
+    """
+    return await update_telegram_settings(settings)
+
+
 @router.post("/user/settings")
 async def update_telegram_settings(settings: dict):
     from bot.handlers.core import _db as db
     snake_settings = dict_to_snake(settings)
     telegram_id = settings.get("telegramUserId")
 
-    if telegram_id:
-        banks_data = snake_settings.get("banks", [])
-        banks_str = ",".join(banks_data) if isinstance(banks_data, list) else str(banks_data)
-
-        await db._db.execute(
-            "UPDATE scanner_users SET working_capital = ?, min_spread_pct = ?, bank_codes = ? WHERE user_id = ?",
-            (snake_settings.get("max_capital"), snake_settings.get("min_spread"), banks_str, telegram_id)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=400,
+            detail="telegramUserId обов'язковий — без нього немає кого оновлювати",
         )
-        await db._db.commit()
 
-    if hasattr(state, "user_settings"):
-        state.user_settings.update(snake_settings)
+    # Оновлюємо тільки ті поля, що реально прийшли. Раніше сюди летіли
+    # безумовні .get() — відсутній ключ перетворювався на NULL і затирав
+    # капітал/спред юзера.
+    updates: dict[str, object] = {}
+    if snake_settings.get("max_capital") is not None:
+        updates["working_capital"] = float(snake_settings["max_capital"])
+    if snake_settings.get("min_spread") is not None:
+        updates["min_spread_pct"] = float(snake_settings["min_spread"])
+    if "banks" in snake_settings:
+        banks_data = snake_settings.get("banks") or []
+        updates["bank_codes"] = (
+            ",".join(str(b) for b in banks_data)
+            if isinstance(banks_data, list) else str(banks_data)
+        )
 
-    return {"status": "success"}
+    if not updates:
+        return {"status": "success", "updated": []}
+
+    assignments = ", ".join(f"{col} = ?" for col in updates)
+    await db._db.execute(
+        f"UPDATE scanner_users SET {assignments} WHERE user_id = ?",
+        (*updates.values(), telegram_id),
+    )
+    await db._db.commit()
+
+    return {"status": "success", "updated": sorted(updates)}
 
 @router.get("/accounts/{telegram_id}")
 async def get_real_exchange_accounts(telegram_id: int):

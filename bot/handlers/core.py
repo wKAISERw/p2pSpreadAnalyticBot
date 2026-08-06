@@ -345,6 +345,9 @@ _scanner_stats: dict = {
 }
 _mute_until: float = 0.0
 
+# Дата, на яку рахуються *_today лічильники (локальний день).
+_stats_day: str = ""
+
 
 def is_muted() -> bool:
     """Перевіряє чи бот на паузі."""
@@ -379,7 +382,44 @@ def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_le
 
 
 def update_stats(**kwargs) -> None:
+    """
+    Єдина точка запису статистики сканера.
+
+    Раніше метрики жили у двох місцях: `_scanner_stats` (звідки читає Telegram)
+    і `state.stats` (звідки читає /api/v1/stats). Писали тільки в перше, тому
+    веб-дашборд вічно показував 0 циклів і всі CircuitBreaker'и «CLOSED».
+    Тепер обидва сховища оновлюються синхронно.
+    """
     _scanner_stats.update(kwargs)
+    try:
+        from state import state
+        state.stats.update(kwargs)
+    except Exception:  # pragma: no cover — state імпортується завжди
+        pass
+
+
+def bump_stat(key: str, amount: int = 1) -> None:
+    """
+    Інкрементує денний лічильник (`*_today`) зі скиданням на новий день.
+    До цього `bots_detected_today` і `spreads_found_today` були оголошені,
+    читались в /status, але не інкрементувались ніде — тобто завжди 0.
+    """
+    global _stats_day
+    from datetime import date
+
+    today = date.today().isoformat()
+    if _stats_day != today:
+        _stats_day = today
+        for k in _scanner_stats:
+            if k.endswith("_today"):
+                _scanner_stats[k] = 0
+
+    _scanner_stats[key] = _scanner_stats.get(key, 0) + amount
+    try:
+        from state import state
+        state.stats[key] = _scanner_stats[key]
+    except Exception:  # pragma: no cover
+        pass
 
 
 # ── /start (ГОЛОВНИЙ ДАШБОРД) ──────────────────────────────────────────────

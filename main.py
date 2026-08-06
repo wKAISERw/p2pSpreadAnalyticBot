@@ -11,9 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
+from api.security import warn_if_unprotected
 from bot.handlers.core import setup as bot_setup
 from bot.handlers import get_router as get_bot_router
 from bot.notifier import TelegramNotifier
+from config import settings
 from core.storage.merchant_db import MerchantDB
 from core.workers.db_maintenance import DBMaintenanceTask
 from core.workers.card_sync import CardBalanceSyncTask
@@ -23,6 +25,25 @@ from scanner import run_scanner
 from api.routers import dashboard_router, webhooks_router
 
 db = MerchantDB()   
+
+
+class StateLogHandler(logging.Handler):
+    """
+    Складає останні записи логу в state.logs — саме звідти читає /api/v1/logs.
+    Раніше цей буфер не наповнювався ніде, тож ендпоінт завжди віддавав [].
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            from state import state
+            state.logs.append({
+                "timestamp": int(record.created * 1000),
+                "level": record.levelname,
+                "source": record.name,
+                "message": record.getMessage()[:1000],
+            })
+        except Exception:  # логер не має права ламати застосунок
+            pass
 
 
 def setup_logging():
@@ -44,9 +65,13 @@ def setup_logging():
     error_handler.setLevel(logging.ERROR)
     error_handler.setFormatter(formatter)
 
+    state_handler = StateLogHandler()
+    state_handler.setLevel(logging.INFO)
+
     logger.addHandler(console_handler)
     logger.addHandler(debug_handler)
     logger.addHandler(error_handler)
+    logger.addHandler(state_handler)
 
 
 # Глобальні змінні оркестрації
@@ -65,9 +90,20 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger("Main")
     logger.info("🚀 Ініціалізація P2P Сканера + API (Production Mode)...")
 
+    # Гучно кажемо, якщо HTTP API лишився без ключа.
+    warn_if_unprotected()
+
     # 1. Запуск БД та підключення до синглтону хендлерів боту
     await db.start()
     logger.info("✅ База даних успішно підключена для API")
+
+    # Краще не стартувати, ніж стартувати з нечитабельними креденшлами:
+    # мовчазна деградація тут призводить до торгівлі з чужого акаунта.
+    try:
+        await db.verify_encryption_key()
+    except Exception as key_err:
+        logger.critical("🔑 %s", key_err)
+        raise SystemExit(1) from key_err
 
     # 2. Ініціалізація обслуговування бази
     db_maintainer = DBMaintenanceTask(db)
@@ -131,10 +167,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Arbix Quantum API", lifespan=lifespan)
 
 # CORS MIDDLEWARE
+_cors_origins = list(getattr(settings, "cors_origins", ["*"]) or ["*"])
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,  # Wildcard сумісний тільки з False за специфікацією CORS
+    allow_origins=_cors_origins,
+    # Wildcard сумісний тільки з credentials=False за специфікацією CORS.
+    # Автентифікація йде заголовком X-API-Key, кукі нам не потрібні.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

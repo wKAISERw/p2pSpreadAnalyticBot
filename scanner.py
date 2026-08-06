@@ -4,7 +4,7 @@
 # =============================================================================
 from __future__ import annotations
 
-from bot.handlers.core import update_stats, is_muted
+from bot.handlers.core import update_stats, bump_stat, is_muted
 from state import state
 import asyncio
 import logging
@@ -12,7 +12,7 @@ import time
 from typing import Optional
 
 from config import settings
-from config.banks import BankRegistry, DEFAULT_BANK_CODES, BANK_NAMES
+from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config.runtime import runtime_config
 
 from bot.notifier import TelegramNotifier, SpreadAlert
@@ -26,6 +26,7 @@ from core.engine.price_advisor import PriceAdvisor
 from core.storage.merchant_db import MerchantDB
 from core.utils.circuit_breaker import CircuitBreaker
 from core.utils.dedup_cache import TTLCache
+from core.utils.tasks import spawn
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
 from exchanges.binance import BinanceExchange
@@ -38,11 +39,6 @@ from exchanges.wallet import WalletExchange
 from exchanges.bingx import BingxExchange
 from filters.merchant_filter import MerchantFilter
 from filters.limit_filter import set_max_capital
-from infrastructure.api.binance_account import BinanceAccountClient
-from infrastructure.api.bybit_account import BybitAccountClient
-from infrastructure.api.mexc_account import MEXCAccountClient
-from infrastructure.api.okx_account import OKXAccountClient
-from infrastructure.http.base_client import BaseHttpClient
 from infrastructure.http.binance_client import BinanceClient
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from infrastructure.http.mexc_client import MexcClient
@@ -135,7 +131,7 @@ async def _internet_watchdog(
                         f"Зв'язок був відсутній протягом <code>{duration:.0f}s</code>.\n"
                         f"Сканер автоматично продовжує роботу."
                     )
-                    asyncio.create_task(notifier._send_with_retry(msg))
+                    spawn(notifier._send_with_retry(msg), "internet-restored-notify", logger_=logger)
             else:
                 if _internet_connected:
                     _internet_connected = False
@@ -164,26 +160,9 @@ async def _watchdog(
             logger.error("🚨 [WATCHDOG] Головний цикл не відповідає %.0fs!", elapsed)
 
 
-async def _db_maintenance_loop(
-        db: MerchantDB,
-        interval_hours: float = getattr(settings, "db_maint_interval_h", 1.0),
-) -> None:
-    # 24 години історії повністю достатньо для детекції ботів
-    max_age = getattr(settings, "db_snapshot_max_age_h", 24)
-    while True:
-        await asyncio.sleep(interval_hours * 3600)
-        try:
-            deleted = await db.prune_snapshots(max_age_hours=max_age)
-            if deleted > 0:
-                logger.info("🧹 DB Maintenance: видалено %d старих снапшотів", deleted)
-            # Чистка старих пропозицій сканера (7 днів)
-            prop_deleted = await db.cleanup_old_proposals(retention_days=7)
-            if prop_deleted > 0:
-                logger.info("🧹 DB Maintenance: видалено %d старих пропозицій", prop_deleted)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("Помилка під час DB Maintenance: %s", e)
+# Обслуговування БД (prune снапшотів/пропозицій + GC + VACUUM) живе в
+# core/workers/db_maintenance.DBMaintenanceTask і стартує з main.py.
+# Тут раніше був другий, незалежний цикл на ту саму базу.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -338,7 +317,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
     last_cycle_time = [time.monotonic()]
     watchdog_task = asyncio.create_task(_watchdog(last_cycle_time))
-    maintenance_task = asyncio.create_task(_db_maintenance_loop(merchant_db))
 
     logger.info("🚀 Запуск Cross-Exchange Сканера (Bybit + OKX + Wallet + Binance + MEXC)...")
     logger.info(
@@ -433,8 +411,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                     if "Circuit is OPEN" in str(e):
                         logger.warning("📉 Degraded Mode: %s ВІДКЛЮЧЕНА", name)
                         # Сповіщуємо юзера з пропозицією вимкнути
-                        asyncio.create_task(
-                            exchange_manager.on_circuit_open(name, runtime_config)
+                        spawn(
+                            exchange_manager.on_circuit_open(name, runtime_config),
+                            f"circuit-open-notify-{name}",
+                            logger_=logger,
                         )
                     raise
 
@@ -517,6 +497,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                     # 🚀 ФІКС: Перевірка чи сканер на паузі
                     is_active = runtime_config.get("is_scanner_active", "false") == "true"
+                    # Прокидаємо стан у спільну статистику — /api/v1/stats читає
+                    # саме звідти і раніше завжди показував "зупинено".
+                    if state.stats.get("is_scanner_active") != is_active:
+                        update_stats(is_scanner_active=is_active)
                     if not is_active:
                         last_cycle_time[0] = time.monotonic()
                         await asyncio.sleep(3.0)
@@ -622,7 +606,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                         sell_grouped[bank_code].append(o)
 
                     if all_cycle_orders:
-                        asyncio.ensure_future(merchant_db.add_snapshots_batch(all_cycle_orders))
+                        spawn(
+                            merchant_db.add_snapshots_batch(all_cycle_orders),
+                            "add_snapshots_batch",
+                            logger_=logger,
+                        )
 
                     last_cycle_time[0] = time.monotonic()
 
@@ -635,7 +623,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         cycles=_cycle_counter,
                         last_cycle_ms=latency * 1000,
                         llm_queue=llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0,
-                        review_queue=review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0,
+                        review_queue=review_fetcher.in_flight,
                         cb_status={
                             cfg["name"]: "DISABLED" if not exchange_manager.is_enabled(cfg["name"])
                             else cfg["cb"].state.value
@@ -651,7 +639,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         )
                         scanner_cycle_duration_seconds.observe(latency)
                         llm_queue_size.set(llm_pool._queue.qsize() if hasattr(llm_pool, "_queue") else 0)
-                        review_queue_size.set(review_fetcher._queue.qsize() if hasattr(review_fetcher, "_queue") else 0)
+                        review_queue_size.set(review_fetcher.in_flight)
                     except Exception:
                         pass
 
@@ -663,6 +651,8 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         if opportunities else 0.0,
                         2
                     )
+                    if opportunities:
+                        bump_stat("spreads_found_today", len(opportunities))
 
                     # 1. Створюємо новий пустий список для актуальних ордерів
                     current_frontend_opps = []
@@ -843,23 +833,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         dedup_cache.mark(dedup_key)
                         sent_count += 1
 
-                        # 🚀 Зберігаємо пропозицію ПІСЛЯ всіх фільтрів (dedup, stability, BLOCK)
-                        # (Пропозиції тепер зберігаються персонально для кожного юзера в AlertDispatcher.dispatch)
-                        # _was_sent = not is_muted()
-                        # asyncio.create_task(merchant_db.save_proposal(
-                        #     buy_exchange=buy_o.exchange,
-                        #     sell_exchange=sell_o.exchange,
-                        #     buy_merchant=buy_o.merchant_name,
-                        #     sell_merchant=sell_o.merchant_name,
-                        #     spread_pct=opp["net_spread_pct"],
-                        #     profit_uah=opp["net_profit"],
-                        #     deal_amount=opp["actual_entry_uah"],
-                        #     route_type=opp.get("route_type", "UNKNOWN"),
-                        #     buy_bank=opp.get("buy_bank", ""),
-                        #     sell_bank=opp.get("sell_bank", ""),
-                        #     was_sent=_was_sent,
-                        # ))
-
+                        # Пропозиція зберігається персонально під кожного юзера
+                        # в AlertDispatcher.dispatch_batch — після того, як
+                        # алерт реально пішов у чат.
                         if not is_muted():
                             if runtime_config.get("show_spread_logs", "true") == "true":
                                 logger.info("📤 Додано в dispatch-батч алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
@@ -870,9 +846,10 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             logger.debug("⏭ Скіп: muted")
                     
                     if alerts_to_dispatch:
-                        task = asyncio.create_task(dispatcher.dispatch_batch(alerts_to_dispatch))
-                        task.add_done_callback(
-                            lambda t: logger.error("💥 dispatch_batch task error: %s", t.exception()) if t.exception() else None
+                        spawn(
+                            dispatcher.dispatch_batch(alerts_to_dispatch),
+                            "dispatch_batch",
+                            logger_=logger,
                         )
                     state.opportunities = current_frontend_opps[:50]
                     state.current_alerts = current_cycle_alerts[:50]
@@ -911,7 +888,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         if "internet_watchdog_task" in locals():
             internet_watchdog_task.cancel()
         watchdog_task.cancel()
-        maintenance_task.cancel()
         if "cb_userbot" in locals():
             await cb_userbot.stop()
         maker_monitor.stop_all()
