@@ -13,6 +13,7 @@ from aiogram.fsm.context import FSMContext
 from bot.handlers.core import QRStates
 
 from core.storage.merchant_db import MerchantDB
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("SessionManager")
 
@@ -107,9 +108,10 @@ class SessionManager:
             logger.error(f"Невідома біржа для ручного захоплення: {exchange}")
             return
         logger.info(f"🖥 Запуск видимого браузера (headed) для сесії {exchange}...")
-        asyncio.create_task(
+        spawn(
             self._capture_session(exchange, target, headless=False),
-            name=f"session-capture-headed-{exchange}"
+            f"session-capture-headed-{exchange}",
+            logger_=logger,
         )
 
     async def _worker_loop(self):

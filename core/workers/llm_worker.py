@@ -28,6 +28,7 @@ import aiohttp
 from dotenv import load_dotenv
 
 from core.utils.cache import TTLCache
+from core.utils.tasks import spawn
 
 load_dotenv()
 
@@ -341,12 +342,11 @@ class LLMWorkerPool:
 
         # 🔄 Trigger alert redraw after verdict is saved — edits sent Telegram messages
         if self._notifier is not None:
-            try:
-                asyncio.ensure_future(
-                    self._notifier.redraw_alerts_for_merchant(task.exchange, task.merchant_id)
-                )
-            except Exception as _re:
-                logger.debug("redraw_alerts_for_merchant schedule error: %s", _re)
+            spawn(
+                self._notifier.redraw_alerts_for_merchant(task.exchange, task.merchant_id),
+                f"redraw-{task.exchange}-{task.merchant_id}",
+                logger_=logger,
+            )
 
     # ── Groq / OpenAI / Gemini cooldown (class-level) ─────────────────────────
     _groq_cooldown_until: float = 0.0

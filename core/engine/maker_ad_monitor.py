@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Awaitable, Optional
@@ -25,6 +26,7 @@ from typing import Callable, Awaitable, Optional
 from exchanges.base import Order
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
 from core.storage.merchant_db import MerchantDB
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("MakerAdMonitor")
 
@@ -51,6 +53,8 @@ class MakerAdMonitor:
 
     POLL_INTERVAL = 15.0   # секунди між опитуваннями
     MAX_ORDERS_CACHE = 500  # макс. кеш order_id
+    # Біржі, для яких реально є клієнт полінгу вхідних ордерів.
+    SUPPORTED_EXCHANGES = frozenset({"Bybit"})
 
     def __init__(
         self,
@@ -62,7 +66,10 @@ class MakerAdMonitor:
         self._risk_engine = risk_engine
         self._notify_cb = notify_cb
         self._watches: dict[int, UserWatch] = {}   # user_id → UserWatch
-        self._seen_order_ids: set[str] = set()      # глобальний кеш побачених ордерів
+        # FIFO-кеш побачених ордерів. Саме OrderedDict, а не set: set.pop()
+        # викидає ДОВІЛЬНИЙ елемент, тобто міг викинути щойно доданий order_id —
+        # і наступний polling через 15с слав по ньому повторну нотифікацію.
+        self._seen_order_ids: OrderedDict[str, None] = OrderedDict()
         self._global_poll_task: Optional[asyncio.Task] = None
 
     # ─── Публічний API ──────────────────────────────────────────────────────
@@ -82,8 +89,26 @@ class MakerAdMonitor:
         Додає oголошення для моніторингу.
         Якщо юзер вже має активний polling task — просто додаємо ad_id.
         """
+        # Полінг реалізований лише через BybitP2PClient. Раніше сюди пролазила
+        # будь-яка біржа, і монітор тихо опитував Bybit чужими ключами —
+        # моніторинг «працював», не бачачи жодного ордера.
+        if exchange not in self.SUPPORTED_EXCHANGES:
+            logger.warning(
+                "[MakerAdMonitor] %s не підтримується (є лише %s) — "
+                "оголошення %s для user %d моніторитись не буде",
+                exchange, ", ".join(sorted(self.SUPPORTED_EXCHANGES)), ad_id, user_id,
+            )
+            return
+
         if user_id in self._watches:
             watch = self._watches[user_id]
+            if watch.exchange != exchange:
+                logger.warning(
+                    "[MakerAdMonitor] user %d вже моніторить %s — оголошення %s "
+                    "на %s проігноровано (один монітор на юзера)",
+                    user_id, watch.exchange, ad_id, exchange,
+                )
+                return
             watch.ad_ids.add(ad_id)
             logger.info(
                 "[MakerAdMonitor] Додано ad %s для user %d (всього: %d)",
@@ -91,11 +116,10 @@ class MakerAdMonitor:
             )
             return
 
-        # Завантажуємо credentials з БД
-        creds = await self._db.get_credentials(exchange=exchange, user_id=user_id) or {}
-        if not creds.get("api_key"):
-            # Fallback: single-user credentials (user_id=0)
-            creds = await self._db.get_credentials(exchange=exchange, user_id=0) or {}
+        # Креденшли ТІЛЬКИ цього юзера (для власника — з фолбеком на легасі
+        # слот). Раніше тут був безумовний фолбек на user_id=0, тобто монітор
+        # опитував Bybit ключами власника від імені чужого юзера.
+        creds = await self._db.get_credentials_for_user(exchange, user_id) or {}
 
         if not creds.get("api_key"):
             logger.warning(
@@ -138,6 +162,13 @@ class MakerAdMonitor:
         if self._global_poll_task and not self._global_poll_task.done():
             self._global_poll_task.cancel()
         logger.info("[MakerAdMonitor] Всі монітори зупинено.")
+
+    def _mark_seen(self, order_id: str) -> None:
+        """Позначає ордер обробленим і витісняє найстаріші записи (FIFO)."""
+        self._seen_order_ids[order_id] = None
+        self._seen_order_ids.move_to_end(order_id)
+        while len(self._seen_order_ids) > self.MAX_ORDERS_CACHE:
+            self._seen_order_ids.popitem(last=False)
 
     # ─── Внутрішній цикл ────────────────────────────────────────────────────
 
@@ -198,25 +229,20 @@ class MakerAdMonitor:
 
                 status = str(order_data.get("orderStatus") or "")
                 if status not in ("10", "20", ""):
-                    self._seen_order_ids.add(order_id)
+                    self._mark_seen(order_id)
                     continue
 
-                self._seen_order_ids.add(order_id)
-
-                if len(self._seen_order_ids) > self.MAX_ORDERS_CACHE:
-                    excess = len(self._seen_order_ids) - self.MAX_ORDERS_CACHE
-                    for _ in range(excess):
-                        if self._seen_order_ids:
-                            self._seen_order_ids.pop()
+                self._mark_seen(order_id)
 
                 logger.info(
                     "[MakerAdMonitor] 🔔 Новий вхідний ордер! user=%d order=%s item=%s",
                     watch.user_id, order_id, item_id,
                 )
 
-                asyncio.create_task(
+                spawn(
                     self._process_incoming_order(watch, order_data, order_id),
-                    name=f"maker_process_{order_id}",
+                    f"maker_process_{order_id}",
+                    logger_=logger,
                 )
 
         except Exception as e:
@@ -356,7 +382,7 @@ class MakerAdMonitor:
                 for t in trades:
                     oid = t.get("order_id", "")
                     if oid and not oid.startswith("PENDING_"):
-                        self._seen_order_ids.add(oid)
+                        self._mark_seen(oid)
                 logger.info(
                     "[MakerAdMonitor] Seeded %d known order IDs from DB.",
                     len(self._seen_order_ids),

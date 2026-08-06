@@ -15,6 +15,7 @@ from typing import Optional
 from core.storage.merchant_db import MerchantDB
 from core.engine.route_executor import RouteExecutor
 from core.engine.order_monitor import OrderMonitor
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("SingleLegExecutor")
 
@@ -384,7 +385,8 @@ class SingleLegExecutor:
                         f"ID ордера: <code>{order_id}</code>\n\n"
                         f"👉 Будь ласка, перевірте надходження коштів на картку/рахунок та підтвердіть (звільніть активи)."
                     )
-                    asyncio.create_task(self._notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None))
+                    spawn(self._notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None),
+                          "single-leg-notify", logger_=logger)
         except Exception as e:
             logger.error(f"[SingleLeg] Помилка обробки on_paid: {e}")
 

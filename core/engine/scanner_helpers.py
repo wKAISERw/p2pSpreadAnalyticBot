@@ -1,9 +1,9 @@
 # core/engine/scanner_helpers.py
-import asyncio
 import logging
 
 from bot.handlers.core import is_muted
 from core.engine.price_advisor import PriceAdvisor
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("Scanner.Helpers")
 
@@ -46,27 +46,30 @@ async def process_taker_path(
             )
             if not t_orders:
                 continue
-            # Dedup: не спамимо тим самим ордером щоцикл
             t_mode = t_user["scanner_mode"]
+
+            # Кандидати, які ще не відправлялись. Позначку в dedup ставимо НЕ
+            # тут, а після ризик-фільтрів: раніше ордер маркувався до перевірки,
+            # і якщо його відсіяв BLOCK, він лишався "побаченим" на 12 годин —
+            # тобто після зняття блоку LLM юзер його вже не отримував.
+            candidates = [
+                o for o in t_orders
+                if not taker_dedup.seen(f"taker:{t_user['user_id']}:{o.id}")
+            ]
+
             fresh = []
-            for o in t_orders:
-                dk = f"taker:{t_user['user_id']}:{o.id}"
-                if not taker_dedup.seen(dk):
-                    taker_dedup.mark(dk)
-                    fresh.append(o)
-            if fresh:
+            if candidates:
                 if risk_engine:
                     try:
-                        await risk_engine.analyze_batch_async(fresh)
+                        await risk_engine.analyze_batch_async(candidates)
                     except Exception as re_err:
                         logger.error("Error analyzing Taker orders in RiskEngine: %s", re_err)
 
                 # Фільтруємо ордери відповідно до особистих налаштувань користувача
                 filter_fop = t_user.get("filter_fop_tov", "hide")
                 filter_banka = t_user.get("filter_banka_jar", "hide")
-                
-                filtered = []
-                for o in fresh:
+
+                for o in candidates:
                     risk_flags = getattr(o, "risk_flag", "") or ""
                     if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
                         continue
@@ -74,18 +77,21 @@ async def process_taker_path(
                         continue
                     if "BLOCK" in risk_flags:
                         continue
-                    filtered.append(o)
-                fresh = filtered
+                    fresh.append(o)
+
+                # Маркуємо тільки те, що реально піде юзеру.
+                for o in fresh:
+                    taker_dedup.mark(f"taker:{t_user['user_id']}:{o.id}")
 
             if fresh:
                 logger.info(
                     "📤 Taker dispatch → user %s | %s | %d ордерів",
                     t_user["user_id"], t_mode, len(fresh),
                 )
-                asyncio.create_task(
-                    notifier.send_taker_to_user(
-                        t_user["chat_id"], fresh, t_mode,
-                    )
+                spawn(
+                    notifier.send_taker_to_user(t_user["chat_id"], fresh, t_mode),
+                    f"taker-send-{t_user['user_id']}",
+                    logger_=logger,
                 )
                 for o in fresh:
                     buy_ex = o.exchange if t_mode == "TAKER_BUY" else ""
@@ -95,7 +101,7 @@ async def process_taker_path(
                     buy_bk = o.bank_codes[0] if o.bank_codes and t_mode == "TAKER_BUY" else ""
                     sell_bk = o.bank_codes[0] if o.bank_codes and t_mode == "TAKER_SELL" else ""
                     
-                    asyncio.create_task(
+                    spawn(
                         notifier._db.save_proposal(
                             buy_exchange=buy_ex,
                             sell_exchange=sell_ex,
@@ -108,8 +114,10 @@ async def process_taker_path(
                             buy_bank=buy_bk,
                             sell_bank=sell_bk,
                             was_sent=True,
-                            user_id=t_user["user_id"]
-                        )
+                            user_id=t_user["user_id"],
+                        ),
+                        "save_proposal_taker",
+                        logger_=logger,
                     )
         except Exception as e:
             logger.warning(
@@ -183,12 +191,12 @@ async def process_maker_path(
                 "📤 Maker SELL advice → user %s | buy=%.2f min_sell=%.4f book_top=%.2f",
                 uid, buy_price, advice["min_sell_price"], sell_book_top,
             )
-            asyncio.create_task(
-                notifier.send_maker_sell_update(
-                    ms_user["chat_id"], advice,
-                )
+            spawn(
+                notifier.send_maker_sell_update(ms_user["chat_id"], advice),
+                f"maker-sell-{uid}",
+                logger_=logger,
             )
-            asyncio.create_task(
+            spawn(
                 notifier._db.save_proposal(
                     buy_exchange="",
                     sell_exchange="",
@@ -201,8 +209,10 @@ async def process_maker_path(
                     buy_bank="",
                     sell_bank="",
                     was_sent=True,
-                    user_id=uid
-                )
+                    user_id=uid,
+                ),
+                "save_proposal_maker",
+                logger_=logger,
             )
         except Exception as e:
             logger.warning("Maker SELL error user %s: %s", ms_user.get("user_id"), e)
@@ -240,12 +250,12 @@ async def process_maker_path(
                 "📤 Maker BUY advice → user %s | sell_top=%.2f max_buy=%.4f margin=%.1f%%",
                 uid, sell_book_top, advice["max_buy_price"], target_margin * 100,
             )
-            asyncio.create_task(
-                notifier.send_maker_buy_suggestion(
-                    mb_user["chat_id"], advice,
-                )
+            spawn(
+                notifier.send_maker_buy_suggestion(mb_user["chat_id"], advice),
+                f"maker-buy-{uid}",
+                logger_=logger,
             )
-            asyncio.create_task(
+            spawn(
                 notifier._db.save_proposal(
                     buy_exchange="",
                     sell_exchange="",
@@ -258,8 +268,10 @@ async def process_maker_path(
                     buy_bank="",
                     sell_bank="",
                     was_sent=True,
-                    user_id=uid
-                )
+                    user_id=uid,
+                ),
+                "save_proposal_maker",
+                logger_=logger,
             )
         except Exception as e:
             logger.warning("Maker BUY error user %s: %s", mb_user.get("user_id"), e)

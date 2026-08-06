@@ -16,6 +16,7 @@ from core.engine.ad_repricer import AdRepricer
 from core.engine.route_executor import RouteExecutor
 from core.engine.order_monitor import OrderMonitor
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("Startup")
 
@@ -141,13 +142,14 @@ async def recover_active_repricers(
             # ФІКС #2: _creds=creds захоплює поточне значення creds (не останнє з циклу)
             return await executor.update_maker_ad_price(exc, ad, price, _creds)
 
-        asyncio.create_task(
+        spawn(
             repricer.watch(
                 fetch_book_top=_make_fetch_book_top,
                 update_ad_price=_make_update_ad_price,
                 db=db,
             ),
-            name=f"repricer_session_{session_id}",
+            f"repricer_session_{session_id}",
+            logger_=logger,
         )
 
         repricers_started += 1

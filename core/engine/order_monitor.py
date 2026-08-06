@@ -19,6 +19,7 @@ from typing import Callable, Awaitable, Optional
 
 from core.storage.merchant_db import MerchantDB
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
+from core.utils.tasks import spawn
 
 logger = logging.getLogger("OrderMonitor")
 
@@ -194,7 +195,8 @@ class OrderMonitor:
                             f"Будь ласка, перевірте статус ордера на біржі та розберіться в апеляції."
                         )
                         if _notifier:
-                            asyncio.create_task(_notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None))
+                            spawn(_notifier._send_with_retry(msg, chat_id=owner_id if owner_id else None),
+                                  "order-monitor-notify", logger_=logger)
                     except Exception as notify_err:
                         logger.error(f"[OrderMonitor] Appeal notification error: {notify_err}")
                     break
