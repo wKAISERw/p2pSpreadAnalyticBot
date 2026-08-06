@@ -2,16 +2,30 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight, ShieldCheck, Radar, CreditCard, Bell, Brain, LineChart,
-  Layers, Bot, Clock,
+  Layers, Bot, Clock, Users, ReceiptText, CircleCheck,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
-import { Surface, DataRain, MonoTag, Metric } from './surfaces';
+import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
+import { VerdictRow, BracketMetric } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
+
+/**
+ * Приклад того, що ризик-движок бачить в одному мерчанті.
+ *
+ * Формулювання взяті з реальних правил: трикутник, тиск чеком, липкі
+ * ліміти. Вердикти — ті самі, що пише бот.
+ */
+const RISK_SIGNALS = [
+  { verdict: 'BLOCK' as const, icon: Users, title: 'Оплата з чужих реквізитів', note: 'Ознака трикутника' },
+  { verdict: 'WARN' as const, icon: ReceiptText, title: 'Просить чек перед відпуском', note: 'Тиск на апеляцію' },
+  { verdict: 'WARN' as const, icon: Bot, title: 'Ліміти не змінюються 40 циклів', note: 'Схоже на бота' },
+  { verdict: 'OK' as const, icon: CircleCheck, title: '1840 угод, 99.2% завершення', note: 'Скарг немає' },
+];
 
 const PILLARS = [
   {
@@ -188,14 +202,9 @@ export default function LandingPage() {
               </div>
 
               <div className="space-y-3">
-                {[
-                  ['block', 'Оплата з чужих реквізитів', 'Ознака трикутника'],
-                  ['warn', 'Просить чек перед відпуском', 'Тиск на апеляцію'],
-                  ['warn', 'Ліміти не змінюються 40 циклів', 'Схоже на бота'],
-                  ['ok', '1840 угод, 99.2% завершення', 'Скарг немає'],
-                ].map(([verdict, title, meta], i) => (
-                  <Reveal key={title} delay={i * 80}>
-                    <RiskRow verdict={verdict as 'ok' | 'warn' | 'block'} title={title} meta={meta} />
+                {RISK_SIGNALS.map((row, i) => (
+                  <Reveal key={row.title} delay={i * 80}>
+                    <VerdictRow {...row} />
                   </Reveal>
                 ))}
               </div>
@@ -215,10 +224,10 @@ export default function LandingPage() {
       <Section className="py-12 sm:py-16">
         <Reveal>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-            <Metric value="7" label="майданчиків" hint="Сканяться одночасно" />
-            <Metric value="4" label="джерела ризику" hint="Regex, поведінка, відгуки, списки" />
-            <Metric value="5" label="режимів" hint="Спред, тейкер ×2, мейкер ×2" />
-            <Metric value="8" label="лімітів картки" hint="Добові, місячні, разові" />
+            <BracketMetric value="7" label="майданчиків" hint="Скануються одночасно" />
+            <BracketMetric value="6" label="сигналів ризику" hint="Умови, поведінка, LLM, негатив, тексти, клони" />
+            <BracketMetric value="5" label="режимів" hint="Спред, тейкер ×2, мейкер ×2" />
+            <BracketMetric value="8" label="лімітів на банк" hint="Добові, місячні, разові, кількість" />
           </div>
 
           <SectionHeading
@@ -427,33 +436,3 @@ function PillarVisual({ kind }: { kind: 'exchanges' | 'risk' | 'limits' }) {
   );
 }
 
-function RiskRow({
-  verdict,
-  title,
-  meta,
-}: {
-  verdict: 'ok' | 'warn' | 'block';
-  title: string;
-  meta: string;
-}) {
-  const style = {
-    ok: { dot: 'bg-accent-500', label: 'OK', cls: 'text-accent-400 border-accent-500/30' },
-    warn: { dot: 'bg-orange-500', label: 'WARN', cls: 'text-orange-400 border-orange-500/30' },
-    block: { dot: 'bg-red-500', label: 'BLOCK', cls: 'text-red-400 border-red-500/30' },
-  }[verdict];
-
-  return (
-    <div className="flex items-center gap-3 px-4 py-3 rounded-2xl bg-slate-950/60 border border-slate-800/60 hover:border-slate-700 transition-colors">
-      <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
-      <div className="min-w-0 flex-1">
-        <div className="text-sm text-slate-200 truncate">{title}</div>
-        <div className="text-[11px] text-slate-500">{meta}</div>
-      </div>
-      <span
-        className={`shrink-0 px-2 py-0.5 rounded-md border text-[10px] font-black tracking-wider ${style.cls}`}
-      >
-        {style.label}
-      </span>
-    </div>
-  );
-}

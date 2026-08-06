@@ -7,6 +7,24 @@ import {
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
+import { BracketMetric, ConsoleFeed, Sparkline, type LogLine } from './blocks';
+
+/**
+ * Стрічка снайпера.
+ *
+ * Показує шлях правила до алерта: озброєне → поріг пробито → перевірки →
+ * повідомлення. Саме до алерта, а не до угоди: сканер не має доступу до
+ * коштів, і домальовувати в лог «автоматичний вхід» означало б показати
+ * функцію, якої немає.
+ */
+const SNIPER_LOG: LogLine[] = [
+  { tone: 'muted', text: 'правило озброєне · спред ≥ 1.5% · обсяг ≥ 20 000 ₴' },
+  { tone: 'muted', text: 'цикл: Bybit · OKX · Binance · MEXC · Wallet' },
+  { tone: 'hit', text: 'OKX → Binance · 1.84% · 24 000 ₴' },
+  { tone: 'muted', text: 'мерчант: 1840 угод · скарг немає · вердикт OK' },
+  { tone: 'muted', text: 'monobank: проходить під добовий ліміт' },
+  { tone: 'done', text: 'алерт надіслано в Telegram' },
+];
 
 /**
  * Детальний розбір можливостей.
@@ -24,6 +42,7 @@ const GROUPS = [
       ['Чистий спред', 'Різниця рахується після комісій біржі й мережевого переказу, а не «на око».'],
       ['Симуляція склянки', 'Ціна перевіряється на кількох обсягах — верхній ордер часто не тягне потрібну суму.'],
       ['Автоматичний cooldown', 'Біржа, що почала відмовляти, тимчасово виходить із циклу й не гальмує решту.'],
+      ['Швидкість циклу', 'Повний обхід усіх майданчиків — 0.6–0.7 с у середньому, до 1.2 с коли біржа гальмує.'],
     ],
   },
   {
@@ -77,14 +96,6 @@ const GROUPS = [
     ],
   },
   {
-    icon: Crosshair,
-    title: 'Снайпер',
-    items: [
-      ['Пробиття тиші', 'Правило з порогами спреду й обсягу спрацює навіть під час паузи.'],
-      ['За біржами', 'Окреме правило для кожного майданчика й напрямку.'],
-    ],
-  },
-  {
     icon: MonitorDot,
     title: 'Контроль',
     items: [
@@ -94,6 +105,16 @@ const GROUPS = [
       ['Черги', 'Скільки завдань чекає на розбір відгуків і мовну модель.'],
     ],
   },
+];
+
+/**
+ * Аналітика й снайпер винесені з загальної сітки в окрему секцію.
+ *
+ * Обидва модулі краще показувати, ніж описувати: у першому суть — форма
+ * кривої, у другому — послідовність подій у часі. У списку з дев'яти
+ * однакових карток це б загубилось.
+ */
+const SHOWCASE = [
   {
     icon: LineChart,
     title: 'Аналітика',
@@ -102,6 +123,14 @@ const GROUPS = [
       ['Топ бірж і банків', 'Де реально йде обіг, а де лише здається.'],
       ['Теплова карта', 'Години й дні тижня, коли зв\'язок найбільше.'],
       ['Історія пропозицій', 'Що сканер знаходив, поки тебе не було.'],
+    ],
+  },
+  {
+    icon: Crosshair,
+    title: 'Снайпер',
+    items: [
+      ['Пробиття тиші', 'Правило з порогами спреду й обсягу спрацює навіть під час паузи.'],
+      ['За біржами', 'Окреме правило для кожного майданчика й напрямку.'],
     ],
   },
 ];
@@ -117,28 +146,22 @@ export default function FeaturesPage() {
         />
 
         {/*
-          Плитки навмисно містять лише те, що можна перевірити в коді:
-          перелік бірж, кількість шарів перевірки, режими роботи.
+          Кожне число тут звірене з кодом бота, а не написане на око:
+          ALL_EXCHANGES — сім майданчиків, _SCANNER_MODES — п'ять режимів,
+          user_bank_limits — вісім полів ліміту на банк.
 
-          Раніше тут стояло «Захист Anti-Scam — 100%» і «< 1.2s». Перше —
-          обіцянка, яку продукт не може дати й сам спростовує на сусідній
-          сторінці; друге — цифра, яку ніхто не міряв.
+          Раніше тут стояло «Захист Anti-Scam — 100%»: обіцянка, яку
+          продукт сам спростовує на сусідній сторінці.
         */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-12">
           {[
-            { label: 'Майданчиків', val: '7', desc: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
-            { label: 'Шари перевірки', val: '3', desc: 'Розбір умов, поведінка в часі, аналіз відгуків' },
-            { label: 'Режими роботи', val: '3', desc: 'Спред, тейкер в один бік, порада ціни мейкеру' },
-            { label: 'Авто-репрайсер', val: 'Bybit', desc: 'Поки лише Bybit — решта майданчиків у планах' },
+            { value: '7', label: 'майданчиків', hint: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
+            { value: '6', label: 'сигналів ризику', hint: 'Умови, поведінка, LLM, негатив, тексти, клони' },
+            { value: '5', label: 'режимів', hint: 'Спред, тейкер ×2, мейкер ×2' },
+            { value: '8', label: 'лімітів на банк', hint: 'Добові, місячні, разові, кількість, кулдаун' },
           ].map((m, i) => (
             <Reveal key={m.label} delay={i * 40}>
-              <div className="bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-4 sm:p-5 hover:border-accent-500/30 transition-all">
-                <div className="text-2xl sm:text-3xl font-black text-white tracking-tight mb-1">
-                  <span className="text-accent-400">{m.val}</span>
-                </div>
-                <div className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-1">{m.label}</div>
-                <div className="text-[11px] text-slate-500 leading-tight">{m.desc}</div>
-              </div>
+              <BracketMetric {...m} />
             </Reveal>
           ))}
         </div>
@@ -148,7 +171,10 @@ export default function FeaturesPage() {
             const Icon = group.icon;
               // Перші дві групи — сканування й антифрод — це суть
               // продукту, тож вони займають усю ширину. Решта парами.
-              const isWide = gi < 2;
+              //
+              // Якщо на пари лишається непарна кількість, останню теж
+              // розтягуємо: інакше в кінці сітки зяє порожня половина.
+              const isWide = gi < 2 || (gi === GROUPS.length - 1 && GROUPS.length % 2 === 1);
 
               return (
               <Reveal
@@ -201,6 +227,64 @@ export default function FeaturesPage() {
         </div>
       </Section>
 
+      <Section className="pt-0">
+        <Reveal>
+          <SectionHeading
+            eyebrow="Глибший розбір"
+            title="Аналітика і снайпер"
+            description="Два модулі, які легше показати, ніж описати: один про форму кривої за період, другий — про послідовність подій у часі."
+          />
+        </Reveal>
+
+        <div className="grid lg:grid-cols-2 gap-6">
+          {SHOWCASE.map((group, i) => {
+            const Icon = group.icon;
+            // min-w-0 на елементі сітки: за замовчуванням у нього
+            // min-width: auto, і нерозривні рядки логу розпирали трек,
+            // тягнучи за собою сусідню картку.
+            return (
+              <Reveal key={group.title} delay={i * 90} className="min-w-0">
+                <GlowCard className="h-full surface-dots bg-slate-950/70 border border-slate-800/80 rounded-3xl p-6 sm:p-8 hover:border-accent-500/25 transition-colors">
+                  <div className="flex items-center justify-between gap-4 mb-6">
+                    <div className="flex items-center gap-3">
+                      <div className="w-11 h-11 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shrink-0 shadow-lg shadow-accent-500/10">
+                        <Icon className="w-5 h-5 text-accent-400" />
+                      </div>
+                      <h2 className="text-xl font-bold text-white tracking-tight">{group.title}</h2>
+                    </div>
+                    <span className="tag-mono text-[10px] px-2.5 py-1 rounded-lg bg-slate-900/80 text-slate-400 border border-slate-800 shrink-0">
+                      {group.items.length}
+                    </span>
+                  </div>
+
+                  <div className="mb-6">
+                    {i === 0 ? (
+                      <Sparkline title="Динаміка прибутку" />
+                    ) : (
+                      <ConsoleFeed lines={SNIPER_LOG} caption="як спрацьовує правило" />
+                    )}
+                  </div>
+
+                  <div className="grid sm:grid-cols-2 gap-x-8 gap-y-5">
+                    {group.items.map(([name, text]) => (
+                      <div key={name} className="flex gap-3 group">
+                        <span className="w-2 h-2 rounded-full bg-accent-400 shrink-0 mt-2 group-hover:scale-125 transition-transform" />
+                        <div className="min-w-0">
+                          <div className="text-sm font-bold text-slate-100 mb-1 group-hover:text-accent-400 transition-colors">
+                            {name}
+                          </div>
+                          <div className="text-sm text-slate-400 leading-relaxed">{text}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </GlowCard>
+              </Reveal>
+            );
+          })}
+        </div>
+      </Section>
+
       <Section className="pt-8 pb-16">
         <Reveal className="rounded-[2.5rem] border border-slate-800/80 bg-slate-900/80 backdrop-blur-2xl p-8 sm:p-12 flex flex-col sm:flex-row sm:items-center justify-between gap-6 shadow-2xl shadow-accent-500/5">
           <div>
@@ -209,7 +293,7 @@ export default function FeaturesPage() {
             </div>
             <h2 className="text-2xl sm:text-3xl font-bold text-white mb-2 tracking-tight">Побач сканер у дії</h2>
             <p className="text-sm text-slate-400 max-w-md">
-              Безпечний вхід через Telegram. Фількористувацькі налаштування, картки й ліміти синхронізуються автоматично.
+              Безпечний вхід через Telegram. Фільтри, картки й ліміти синхронізуються з ботом — налаштовувати вдруге не треба.
             </p>
           </div>
           <Link

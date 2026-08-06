@@ -8,6 +8,7 @@ import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard, useReveal } from './motion';
 import { Surface, MonoTag } from './surfaces';
+import { StrategyDiagram } from './blocks';
 
 /**
  * Конвеєр обробки — від опитування бірж до алерту.
@@ -55,18 +56,24 @@ const STEPS = [
   },
 ];
 
-const MODES = [
+const MODES: { name: string; kind: 'spread' | 'taker' | 'maker'; text: string; note: string }[] = [
   {
     name: 'Спред',
+    kind: 'spread',
     text: 'Класична зв\'язка: купив дешевше на одній біржі, продав дорожче на іншій. Сканер рахує чистий спред уже після комісій і мережевого переказу.',
+    note: 'SPREAD',
   },
   {
     name: 'Тейкер',
+    kind: 'taker',
     text: 'Полювання на чужі оголошення в один бік — тільки купівля або тільки продаж. Корисно, коли треба зайти або вийти за конкретною ціною.',
+    note: 'TAKER_BUY · TAKER_SELL',
   },
   {
     name: 'Мейкер',
+    kind: 'maker',
     text: 'Порада ціни для власного оголошення. Враховує стінки ліквідності: ставити перед великим обсягом конкурентів немає сенсу, ти просто не продаси.',
+    note: 'MAKER_BUY · MAKER_SELL',
   },
 ];
 
@@ -338,7 +345,7 @@ export default function HowItWorksPage() {
           <SectionHeading
             eyebrow="Стратегії"
             title="Три способи торгівлі"
-            description="Режим перемикається під поточні задачі — сканер по-різному розраховує ліквідність у кожному з них."
+            description="Режим перемикається під поточні задачі — сканер по-різному розраховує ліквідність у кожному з них. У коді це п'ять значень: спред плюс по два напрямки для тейкера й мейкера."
           />
         </Reveal>
 
@@ -346,11 +353,28 @@ export default function HowItWorksPage() {
           {MODES.map((mode, i) => (
             <Reveal key={mode.name} delay={i * 90}>
               <GlowCard className="h-full bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl">
-                <div className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-accent-500/10 border border-accent-500/20 text-accent-400 font-bold mb-4">
-                  0{i + 1}
+                {/*
+                  Схема тут не прикраса: словами різниця між режимами
+                  звучить майже однаково, а на малюнку видно одразу —
+                  коло між біржами, вхід у чужу склянку, власна ціна
+                  перед стінкою.
+                */}
+                <div className="mb-5 -mx-2">
+                  <StrategyDiagram kind={mode.kind} />
                 </div>
-                <h3 className="text-xl font-bold text-white mb-2">{mode.name}</h3>
-                <p className="text-sm text-slate-400 leading-relaxed">{mode.text}</p>
+
+                <div className="flex items-baseline gap-2.5 mb-2">
+                  <span className="tag-mono text-xs font-black text-accent-500/70 tabular-nums">
+                    0{i + 1}
+                  </span>
+                  <h3 className="text-xl font-bold text-white">{mode.name}</h3>
+                </div>
+
+                <p className="text-sm text-slate-400 leading-relaxed mb-4">{mode.text}</p>
+
+                <span className="tag-mono inline-block text-[10px] text-slate-500 px-2 py-1 rounded-md bg-slate-950/80 border border-slate-800">
+                  {mode.note}
+                </span>
               </GlowCard>
             </Reveal>
           ))}

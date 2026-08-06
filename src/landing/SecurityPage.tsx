@@ -2,10 +2,13 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowRight, ScanText, Activity, MessageSquareWarning, Ban, KeyRound, Lock, Server,
+  Users, Brain, Percent, FileText,
 } from 'lucide-react';
+import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
 import { Surface, MonoTag, DataRain } from './surfaces';
+import { BracketMetric } from './blocks';
 
 /**
  * Антифрод і поводження з даними.
@@ -14,6 +17,63 @@ import { Surface, MonoTag, DataRain } from './surfaces';
  * означає, а «шукаємо вимогу чека перед відпуском» — означає. Там, де
  * гарантій немає, так і написано.
  */
+
+/**
+ * Ваги CompositeScorer — рівно ті, що стоять у core/engine/risk_engine.py.
+ *
+ * Показувати їх — свідоме рішення: продукт продає прозорість перевірки,
+ * і найпростіший спосіб довести, що за словами щось є, — надрукувати
+ * коефіцієнти. Вони завантажуються з bot_settings, тож це значення за
+ * замовчуванням.
+ */
+const WEIGHTS = [
+  { key: 'W_REGEX', label: 'Розбір умов', weight: 28, icon: ScanText },
+  { key: 'W_BEHAVIOR', label: 'Поведінка в часі', weight: 22, icon: Activity },
+  { key: 'W_LLM', label: 'Вердикт мовної моделі', weight: 20, icon: Brain },
+  { key: 'W_REVIEWS_PCT', label: 'Частка негативу', weight: 12, icon: Percent },
+  { key: 'W_IDENTITY', label: 'Клон профілю', weight: 10, icon: Users },
+  { key: 'W_REVIEWS_TEXT', label: 'Тексти скарг', weight: 8, icon: FileText },
+];
+
+/**
+ * Смуги вердикту.
+ *
+ * Пороги взяті з CompositeScorer.to_verdict — там їх чотири, а не три,
+ * як було написано на цій сторінці раніше.
+ */
+const BANDS = [
+  {
+    name: 'OK',
+    range: '0–19',
+    tone: 'ok' as const,
+    text: 'Умови чисті, поведінка звичайна, скарг по суті немає. Зв\'язка йде в алерт як є.',
+  },
+  {
+    name: 'WARN',
+    range: '20–44',
+    tone: 'warn' as const,
+    text: 'Один слабкий сигнал: трохи негативу або дрібна нетиповість. Показується з позначкою.',
+  },
+  {
+    name: 'SUSPICIOUS',
+    range: '45–74',
+    tone: 'susp' as const,
+    text: 'Сигнали складаються: липкі ліміти плюс скарги, або підозра на бота. Алерт іде з розгорнутою причиною.',
+  },
+  {
+    name: 'BLOCK',
+    range: '75–100',
+    tone: 'block' as const,
+    text: 'Спрацював жорсткий сигнал — трикутник, вимога чека, підтверджений клон. Оголошення не показується.',
+  },
+];
+
+const BAND_STYLE = {
+  ok: { text: 'text-accent-400', border: 'border-accent-500/30', bar: 'bg-accent-500' },
+  warn: { text: 'text-yellow-400', border: 'border-yellow-500/30', bar: 'bg-yellow-500' },
+  susp: { text: 'text-orange-400', border: 'border-orange-500/30', bar: 'bg-orange-500' },
+  block: { text: 'text-red-400', border: 'border-red-500/30', bar: 'bg-red-500' },
+};
 
 const LAYERS = [
   {
@@ -72,38 +132,80 @@ export default function SecurityPage() {
     <LandingLayout>
       <Section className="pt-16 sm:pt-20">
         <SectionHeading
-          eyebrow="Anti-Scam & Ризик-Движок"
+          eyebrow="Ризик-движок"
           title="Спред без перевірки контрагента — це пастка"
-          description="У P2P арбітражі втрачають не на коливанні курсу, а на трикутниках, фінімоніторингу та скаргах. RiskEngine зводить 4 аналізатори в один hazard score від 0 до 100."
+          description="У P2P втрачають не на коливанні курсу, а на трикутниках, заморожених переказах і скаргах. Шість сигналів зводяться в один бал від 0 до 100, і від нього залежить, чи побачиш ти цю зв'язку взагалі."
         />
 
-        {/* Візуальний індикатор RiskEngine Scorer */}
-        <Reveal delay={40} className="mb-12">
-          <div className="bg-slate-900/80 border border-slate-800/80 backdrop-blur-2xl rounded-3xl p-6 sm:p-8 shadow-2xl">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6 pb-6 border-b border-slate-800/80">
+        {/*
+          Ваги друкуються буквально. Це найсильніший аргумент сторінки:
+          не «розумний алгоритм», а конкретні коефіцієнти, які видно.
+        */}
+        <Reveal className="mb-12">
+          <Surface kind="scan" className="p-6 sm:p-8">
+            <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
               <div>
-                <h3 className="text-lg font-bold text-white mb-1">CompositeScorer: Оцінка рівня небезпеки (0–100)</h3>
-                <p className="text-xs text-slate-400">Автоматичний аналіз умов угоди, клонів профілю та скарг у чаті</p>
+                <div className="mb-3">
+                  <MonoTag>composite_scorer</MonoTag>
+                </div>
+                <h3 className="text-xl font-bold text-white tracking-tight">
+                  З чого складається бал
+                </h3>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">0-25: Безпечно</span>
-                <span className="px-3 py-1 rounded-full text-xs font-bold bg-amber-500/10 text-amber-400 border border-amber-500/30">26-60: Увага</span>
-                <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/10 text-red-400 border border-red-500/30">61+: Блок</span>
-              </div>
+              <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-500">
+                значення за замовчуванням
+              </span>
             </div>
 
-            {/* Прогрес-бар ризиків */}
-            <div className="space-y-4">
-              <div className="space-y-1.5">
-                <div className="flex justify-between text-xs font-bold">
-                  <span className="text-slate-300">Приклад: Перевірка мерчанта Binance</span>
-                  <span className="text-emerald-400">Score 12 / 100 (Низький ризик)</span>
-                </div>
-                <div className="h-3 w-full bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
-                  <div className="h-full bg-gradient-to-r from-emerald-500 via-amber-400 to-red-500 rounded-full transition-all" style={{ width: '12%' }} />
-                </div>
-              </div>
+            {/* Одна смуга з шести часток — видно співвідношення, не читаючи цифр */}
+            <div className="flex h-2 rounded-full overflow-hidden mb-7 gap-px">
+              {WEIGHTS.map((w, i) => (
+                <span
+                  key={w.key}
+                  className="bg-accent-500 transition-opacity"
+                  style={{ width: `${w.weight}%`, opacity: 1 - i * 0.13 }}
+                  aria-hidden
+                />
+              ))}
             </div>
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-4">
+              {WEIGHTS.map(w => {
+                const Icon = w.icon;
+                return (
+                  <div key={w.key} className="flex items-center gap-3">
+                    <Icon className="w-4 h-4 text-accent-400 shrink-0" />
+                    <span className="text-sm text-slate-300 flex-1 min-w-0 truncate">
+                      {w.label}
+                    </span>
+                    <span className="tag-mono text-sm font-bold text-white tabular-nums shrink-0">
+                      {w.weight}%
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </Surface>
+        </Reveal>
+
+        {/* Смуги вердикту — горизонтальна шкала, а не три однакові картки */}
+        <Reveal>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-px bg-slate-800/60 rounded-2xl overflow-hidden mb-12">
+            {BANDS.map(band => {
+              const s = BAND_STYLE[band.tone];
+              return (
+                <div key={band.name} className="bg-slate-950/80 p-5">
+                  <div className={cn('h-1 w-10 rounded-full mb-4', s.bar)} />
+                  <div className="flex items-baseline gap-2 mb-2">
+                    <span className={cn('tag-mono text-sm font-black', s.text)}>{band.name}</span>
+                    <span className="tag-mono text-[11px] text-slate-600 tabular-nums">
+                      {band.range}
+                    </span>
+                  </div>
+                  <p className="text-[13px] text-slate-400 leading-relaxed">{band.text}</p>
+                </div>
+              );
+            })}
           </div>
         </Reveal>
 
@@ -113,7 +215,12 @@ export default function SecurityPage() {
             return (
               <Reveal key={layer.title} delay={(i % 2) * 90}>
                 <GlowCard
-                  className="surface-dots h-full bg-slate-950/70 border border-slate-800/80 rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl"
+                  className={cn(
+                    'h-full border border-slate-800/80 rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl',
+                    // Фактура чергується по діагоналі, щоб чотири однакові
+                    // за структурою картки не читались як одна сітка.
+                    i % 3 === 0 ? 'surface-dots bg-slate-950/70' : 'surface-grid bg-slate-900/50'
+                  )}
                 >
                   <div className="w-12 h-12 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center mb-5 shadow-lg shadow-accent-500/10">
                     <Icon className="w-6 h-6 text-accent-400" />
@@ -124,7 +231,7 @@ export default function SecurityPage() {
                     {layer.examples.map(ex => (
                       <span
                         key={ex}
-                        className="px-2.5 py-1 rounded-lg bg-slate-950/80 border border-slate-800 text-xs font-semibold text-slate-300"
+                        className="tag-mono px-2.5 py-1 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400"
                       >
                         {ex}
                       </span>
@@ -138,50 +245,39 @@ export default function SecurityPage() {
       </Section>
 
       <Section className="pt-0">
-        <SectionHeading
-          eyebrow="Вердикти"
-          title="Три рівня реагування"
-          description="Кожен вердикт супроводжується чітким поясненням причини в алерті Telegram та дашборді."
-        />
-
-        <div className="grid sm:grid-cols-3 gap-6">
-          <Verdict
-            tone="ok"
-            title="OK (0-25)"
-            text="Умови чисті, відгуки без фіксованого криміналу. Спред додається в дашборд і сповіщення."
+        <Reveal>
+          <SectionHeading
+            eyebrow="Конфіденційність"
+            title="Де живуть ключі й дані"
+            description="Коротка відповідь: у тебе. Довга — нижче."
           />
-          <Verdict
-            tone="warn"
-            title="WARNING (26-60)"
-            text="Виявлено нетипову поведінку або свіжі скарги. Алерт надходить із розширеним попередженням."
-          />
-          <Verdict
-            tone="block"
-            title="BLOCK (61-100)"
-            text="Спрацював жорсткий фільтр (вимога фото картки, трикутник, казино). Оголошення відсікається."
-          />
-        </div>
-      </Section>
+        </Reveal>
 
-      <Section className="pt-0">
-        <SectionHeading eyebrow="Конфіденційність" title="Де зберігаються ваші ключі та дані" />
-
-        <div className="space-y-4">
+        {/*
+          Три пункти навмисно різної ваги: перший — найважливіший, тож
+          широкий і з фактурою. Раніше всі три були однаковими рядками,
+          і читались як юридичний дрібний шрифт.
+        */}
+        <div className="grid md:grid-cols-2 gap-5">
           {DATA.map((item, i) => {
             const Icon = item.icon;
+            const isWide = i === 0;
             return (
-              <Reveal key={item.title} delay={i * 80}>
-                <div
-                  className="flex gap-5 p-7 rounded-3xl bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl shadow-xl hover:border-slate-700/80 transition-all"
+              <Reveal key={item.title} delay={i * 80} className={isWide ? 'md:col-span-2' : undefined}>
+                <GlowCard
+                  className={cn(
+                    'h-full flex gap-5 p-6 sm:p-7 rounded-3xl border border-slate-800/80 hover:border-slate-700/80 transition-all',
+                    isWide ? 'surface-scan bg-slate-950/80' : 'bg-slate-900/50'
+                  )}
                 >
-                  <div className="w-10 h-10 rounded-2xl bg-slate-800 border border-slate-700/60 flex items-center justify-center shrink-0">
+                  <div className="w-11 h-11 rounded-2xl bg-slate-800/80 border border-slate-700/60 flex items-center justify-center shrink-0">
                     <Icon className="w-5 h-5 text-accent-400" />
                   </div>
                   <div className="min-w-0">
                     <h3 className="text-lg font-bold text-white mb-1.5">{item.title}</h3>
-                    <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">{item.text}</p>
+                    <p className="text-sm text-slate-400 leading-relaxed">{item.text}</p>
                   </div>
-                </div>
+                </GlowCard>
               </Reveal>
             );
           })}
@@ -189,43 +285,43 @@ export default function SecurityPage() {
       </Section>
 
       <Section className="pt-0 pb-16">
-        <Reveal className="rounded-[2.5rem] border border-amber-500/30 bg-amber-500/5 p-8 sm:p-10 shadow-2xl backdrop-blur-xl">
-          <h2 className="text-xl font-bold text-white mb-3">Чесно про межі захисту</h2>
-          <p className="text-sm text-slate-300 leading-relaxed max-w-3xl mb-5">
-            RiskEngine суттєво мінімізує ризики, але не усуває людський фактор. Контрагент може вперше спробувати нечесні дії, або банк може надіслати запит на джерело коштів через обсяги. Сканер надає максимальну аналітику для вашої безпеки.
-          </p>
-          <Link
-            to="/how-it-works"
-            className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-accent-400 text-sm font-bold transition-all border border-slate-700"
-          >
-            Подивитись покроковий конвеєр
-            <ArrowRight className="w-4 h-4" />
-          </Link>
+        <Reveal>
+          <div className="relative rounded-[2.5rem] border border-amber-500/25 bg-amber-500/5 p-8 sm:p-10 overflow-hidden">
+            <DataRain count={8} />
+            <div className="relative">
+              <h2 className="text-xl font-bold text-white mb-3">Чесно про межі захисту</h2>
+              <p className="text-sm text-slate-300 leading-relaxed max-w-3xl mb-6">
+                {/*
+                  Раніше тут було «суттєво мінімізує ризики» — фраза, що
+                  нічого не означає й водночас звучить як обіцянка. Краще
+                  назвати конкретні дірки: вони існують, і людина, яка
+                  торгує, про них однаково дізнається.
+                */}
+                Перевірки ловлять відомі схеми, а не наміри. Мерчант із чистою історією
+                може повестися нечесно вперше саме з тобою. Банк може попросити
+                джерело коштів через обсяги. Оголошення може змінитись у мить між
+                перевіркою і твоїм натисканням. Сканер зменшує ймовірність — не
+                прибирає її.
+              </p>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-7">
+                <BracketMetric value="6" label="сигналів" hint="Зводяться в один бал" />
+                <BracketMetric value="4" label="смуги" hint="OK, WARN, SUSPICIOUS, BLOCK" />
+                <BracketMetric value="75" label="поріг блоку" hint="Вище — не показується" />
+                <BracketMetric value="0" label="доступ до коштів" hint="Ордер створюєш ти" />
+              </div>
+
+              <Link
+                to="/how-it-works"
+                className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-accent-400 text-sm font-bold transition-all border border-slate-700"
+              >
+                Подивитись покроковий конвеєр
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+            </div>
+          </div>
         </Reveal>
       </Section>
     </LandingLayout>
-  );
-}
-
-function Verdict({
-  tone,
-  title,
-  text,
-}: {
-  tone: 'ok' | 'warn' | 'block';
-  title: string;
-  text: string;
-}) {
-  const style = {
-    ok: 'border-accent-500/30 text-accent-400',
-    warn: 'border-orange-500/30 text-orange-400',
-    block: 'border-red-500/30 text-red-400',
-  }[tone];
-
-  return (
-    <div className={`bg-slate-900/40 border rounded-2xl p-6 ${style.split(' ')[0]}`}>
-      <div className={`text-sm font-black tracking-wider mb-2 ${style.split(' ')[1]}`}>{title}</div>
-      <p className="text-sm text-slate-400 leading-relaxed">{text}</p>
-    </div>
   );
 }
