@@ -28,7 +28,6 @@ PRIORITY_FILES = [
     "src/types.ts",
     "src/App.tsx",
     "src/main.tsx",
-    "src/main.tsx",
     "src/services/api.ts",
     "src/components/Dashboard.tsx",
     "src/components/ApiKeysPanel.tsx",

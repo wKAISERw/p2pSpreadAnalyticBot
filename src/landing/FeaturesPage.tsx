@@ -116,13 +116,20 @@ export default function FeaturesPage() {
           description="Повний перелік інструментів сканування, Anti-Scam перевірки, авто-репрайсера та моніторингу лімітів карт. Керується як з Telegram-бота, так і з сучасного вебдашборду."
         />
 
-        {/* Швидкі метрики системи */}
+        {/*
+          Плитки навмисно містять лише те, що можна перевірити в коді:
+          перелік бірж, кількість шарів перевірки, режими роботи.
+
+          Раніше тут стояло «Захист Anti-Scam — 100%» і «< 1.2s». Перше —
+          обіцянка, яку продукт не може дати й сам спростовує на сусідній
+          сторінці; друге — цифра, яку ніхто не міряв.
+        */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
           {[
-            { label: 'Майданчиків', val: '7+', desc: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
-            { label: 'Швидкість скану', 'val': '< 1.2s', desc: 'Асинхронний паралельний потік' },
-            { label: 'Захист Anti-Scam', val: '100%', desc: 'Regex + Behavioral + LLM Scorer' },
-            { label: 'Авто-Репрайсер', val: 'ТОП-1', desc: 'Утримання позиції оголошення' },
+            { label: 'Майданчиків', val: '7', desc: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
+            { label: 'Шари перевірки', val: '3', desc: 'Розбір умов, поведінка в часі, аналіз відгуків' },
+            { label: 'Режими роботи', val: '3', desc: 'Спред, тейкер в один бік, порада ціни мейкеру' },
+            { label: 'Авто-репрайсер', val: 'Bybit', desc: 'Поки лише Bybit — решта майданчиків у планах' },
           ].map((m, i) => (
             <Reveal key={m.label} delay={i * 40}>
               <div className="bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-2xl p-4 sm:p-5 hover:border-accent-500/30 transition-all">

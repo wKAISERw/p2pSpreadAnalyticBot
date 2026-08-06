@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight } from 'lucide-react';
+import { ArrowRight, TrendingUp } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 /**
@@ -51,13 +51,49 @@ export default function SpreadVisual() {
   const spread = ((frame.sell.price - frame.buy.price) / frame.buy.price) * 100;
 
   return (
-    <div className="relative">
-      <div className="relative bg-slate-900/70 border border-slate-800 rounded-3xl p-6 backdrop-blur-sm shadow-2xl shadow-slate-950/50">
+    /*
+      Ширина обмежена свідомо. Раніше картка розтягувалась на всю колонку
+      й через це читалась як таблиця, а не як обʼєкт — саме тому вона
+      програвала референсу, хоча вміст був той самий.
+
+      Нахил статичний: одна матриця transform, яку композитор рахує раз.
+      Це не та «3D-сцена», від якої я відмовлявся заради швидкості на
+      телефоні, — там був рух на кожен кадр.
+    */
+    <div
+      className="relative mx-auto w-full max-w-sm sm:max-w-md"
+      style={{ perspective: '1600px' }}
+    >
+      {/* Розсіяне світло під карткою — воно і дає той «живий» контур */}
+      <div
+        aria-hidden
+        className="absolute -inset-6 rounded-[2.5rem] opacity-60"
+        style={{
+          background:
+            'radial-gradient(60% 50% at 50% 45%, rgb(var(--accent-rgb) / 0.18), transparent 70%)',
+        }}
+      />
+
+      {/* Натяк на стос: за карткою вгадується наступна зв'язка в черзі */}
+      <div
+        aria-hidden
+        className="absolute inset-x-8 -top-4 h-20 rounded-3xl bg-slate-900/60 border border-slate-800/70"
+        style={{ transform: 'rotateX(8deg)' }}
+      />
+
+      <div
+        className="relative bg-slate-900/85 border border-accent-500/25 rounded-3xl p-6 backdrop-blur-sm"
+        style={{
+          transform: 'rotateX(2deg) rotateY(-3deg)',
+          boxShadow:
+            '0 0 0 1px rgb(var(--accent-rgb) / 0.12), 0 30px 70px -25px rgb(var(--accent-rgb) / 0.4), 0 24px 60px rgb(2 6 23 / 0.7)',
+        }}
+      >
         <div className="flex items-center justify-between mb-6">
-          <span className="text-xs font-bold uppercase tracking-widest text-slate-500">
-            Приклад зв'язки
+          <span className="tag-mono text-[10px] uppercase tracking-[0.2em] text-slate-500">
+            приклад зв'язки
           </span>
-          <span className="flex items-center gap-1.5 text-xs text-slate-500">
+          <span className="flex items-center gap-1.5 text-[11px] text-slate-500">
             <span className="relative flex w-1.5 h-1.5">
               <span className="absolute inline-flex w-full h-full rounded-full bg-accent-500 opacity-75 animate-ping" />
               <span className="relative inline-flex w-1.5 h-1.5 rounded-full bg-accent-500" />
@@ -67,32 +103,20 @@ export default function SpreadVisual() {
         </div>
 
         {/*
-          Спред — головне число на всій сторінці, тому воно стоїть окремо
-          й крупно, а не втиснуте між двома ногами. Раніше всі три
-          елементи були одного розміру, і око не знало, за що чіплятись.
+          Порядок читання як у референсі: спершу «звідки куди», далі ціни,
+          і аж потім різниця — вона тут висновок, а не заголовок.
         */}
-        <div key={`s${index}`} className="animate-tick text-center mb-5">
-          <div className="text-5xl sm:text-6xl font-black text-accent-400 tabular-nums leading-none tracking-tight">
-            +{spread.toFixed(2)}%
-          </div>
-          <div className="tag-mono text-[10px] uppercase tracking-[0.25em] text-slate-500 mt-2">
-            чистий спред
-          </div>
-        </div>
-
-        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
+        <div key={`p${index}`} className="animate-tick grid grid-cols-[1fr_auto_1fr] items-end gap-3">
           <Leg
-            key={`b${index}`}
             label="Купуєш"
             exchange={frame.buy.exchange}
             price={frame.buy.price}
             tone="down"
           />
 
-          <ArrowRight className="w-4 h-4 text-slate-700 shrink-0" />
+          <ArrowRight className="w-4 h-4 text-slate-700 shrink-0 mb-1.5" />
 
           <Leg
-            key={`s2${index}`}
             label="Продаєш"
             exchange={frame.sell.exchange}
             price={frame.sell.price}
@@ -100,8 +124,21 @@ export default function SpreadVisual() {
           />
         </div>
 
+        <div
+          key={`s${index}`}
+          className="animate-tick mt-6 pt-6 border-t border-slate-800/70 flex items-end justify-center gap-2.5"
+        >
+          <TrendingUp className="w-7 h-7 text-accent-400 shrink-0 mb-2.5" />
+          <span className="text-5xl sm:text-6xl font-black text-accent-400 tabular-nums leading-none tracking-tight">
+            +{spread.toFixed(2)}%
+          </span>
+          <span className="tag-mono text-[10px] uppercase tracking-[0.25em] text-slate-500 pb-2">
+            спред
+          </span>
+        </div>
+
         {/* Індикатор циклу — видно, що це стрічка прикладів, а не одне число */}
-        <div className="flex gap-1.5 mt-5">
+        <div className="flex gap-1.5 mt-6">
           {FRAMES.map((_, i) => (
             <span
               key={i}
@@ -130,12 +167,12 @@ const Leg: React.FC<{
   tone: 'up' | 'down';
 }> = ({ label, exchange, price, tone }) => {
   return (
-    <div className={cn('min-w-0 animate-tick', tone === 'up' && 'text-right')}>
-      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{label}</div>
+    <div className={cn('min-w-0', tone === 'up' && 'text-right')}>
+      <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1.5">{label}</div>
       <div className="text-sm font-bold text-white truncate">{exchange}</div>
       <div
         className={cn(
-          'text-lg sm:text-xl font-black tabular-nums',
+          'text-xl font-black tabular-nums',
           tone === 'up' ? 'text-accent-400' : 'text-slate-300'
         )}
       >

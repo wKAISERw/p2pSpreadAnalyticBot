@@ -116,7 +116,8 @@ export const Reveal: React.FC<{
 export const GlowCard: React.FC<{
   children: React.ReactNode;
   className?: string;
-}> = ({ children, className }) => {
+  style?: React.CSSProperties;
+}> = ({ children, className, style }) => {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -135,7 +136,7 @@ export const GlowCard: React.FC<{
   }, []);
 
   return (
-    <div ref={ref} className={cn('glow-card', className)}>
+    <div ref={ref} className={cn('glow-card', className)} style={style}>
       {children}
     </div>
   );
