@@ -1,20 +1,101 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Arbix Quantum — веб-дашборд
 
-# Run and deploy your AI Studio app
+Фронтенд для P2P-сканера. Всі дані бере з HTTP API бота
+(`api/routers/dashboard.py` у репозиторії сканера) — власного бекенда не має.
 
-This contains everything you need to run your app locally.
+## Локальний запуск
 
-View your app in AI Studio: https://ai.studio/apps/766ff038-1d29-4847-b387-66daa2238ec1
+```bash
+npm install
+npm run dev
+```
 
-## Run Locally
+Адреса API задається в `.env` через `VITE_API_URL` (шаблон — `.env.example`).
 
-**Prerequisites:**  Node.js
+API бота захищений спільним секретом: усі запити до `/api/v1/*` вимагають
+заголовок `X-API-Key`. При першому запуску дашборд покаже банер із полем для
+ключа — введи туди значення `API_KEY` з `.env` бота. Ключ зберігається в
+localStorage цього браузера і в бандл не потрапляє.
 
+Якщо в боті `API_KEY` порожній, автентифікація вимкнена і банер не з'явиться.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## Вхід
+
+`X-API-Key` — це секрет оператора: він каже, що клієнту можна стукати в API,
+але нічого не каже про те, хто саме стукає. Особу підтверджує окремий вхід
+через Telegram, і вже з нього бекенд бере `telegram_id` для персональних
+розділів. Раніше цей ID вводився руками в налаштуваннях, тобто будь-хто міг
+вписати чужий і читати чужі картки та баланси.
+
+Два способи увійти:
+
+1. **Код із бота** — надішли боту `/login`, він відповість шестизначним кодом.
+   Працює будь-де, зокрема на `localhost`. Код живе 5 хвилин, спрацьовує раз.
+2. **Telegram Login Widget** — вхід одним кліком. З'являється тільки якщо
+   домен сайту прописаний у BotFather (`/setdomain`); на localhost не працює.
+
+**Google** — не окрема особа, а лише швидкий вхід для вже прив'язаного
+акаунта: сам по собі Google-профіль не вказує на жоден Telegram. Прив'язка
+робиться в «Налаштування → Акаунт» після входу через Telegram, там же
+відв'язується.
+
+Сесія живе 30 днів. Ключ підпису — `SESSION_SECRET` у `.env` бота, або
+похідна від токена бота, якщо змінна порожня.
+
+## Що звідки береться
+
+| Розділ            | Ендпоінт                        |
+|-------------------|---------------------------------|
+| Дашборд           | `/stats`, `/opportunities`, `/exchanges` |
+| Фільтри           | `/user/filters`, `/user/merchant-filters`, `/banks` |
+| Картки            | `/cards`, `/cards/{id}/transactions` |
+| Моніторинг        | `/scanner/state`, `/monitoring/sessions`, `/monitoring/orders`, `/monitoring/queues` |
+| Керування ядром   | `/scanner/start`, `/scanner/stop`, `/scanner/mute` |
+| Керування біржами | `/exchanges/{name}/enable`, `/exchanges/{name}/disable` |
+| Аналітика         | `/stats/detailed?period=N`      |
+| Лог сканера       | `/logs?limit=N`                 |
+| Blacklist         | `/blacklist`                    |
+| Акаунти бірж      | `/accounts/{telegram_id}`       |
+| Ключі бірж        | `/credentials/{exchange}`       |
+| Вивід повідомлень | `/user/display`, `/user/display/auto-cooldown` |
+| Вхід і акаунти    | `/auth/config`, `/auth/telegram/code`, `/auth/telegram/widget`, `/auth/google`, `/auth/link/google` |
+
+Персональні розділи («Фільтри», «Картки», «Моніторинг», «Вивід») беруть
+`telegram_id` із сесії. Явно передати чужий ID може лише адміністратор —
+решті бекенд відповість 403.
+
+Maker-режим (перемикач Taker/Maker на дашборді) працює на демо-даних:
+розрахунки повторюють формули `PriceAdvisor` з бота, але ринкові дані
+синтетичні, а кнопки нічого не надсилають. HTTP-ендпоінта під maker
+у боті поки немає.
+
+## Деплой
+
+Заготівка, на сервер поки не викочувалась.
+
+Дашборд збирається в статику і роздається через nginx, який заодно проксує
+`/api` на контейнер сканера і сам додає `X-API-Key`. Завдяки цьому ключ не
+потрапляє ні в бандл, ні в браузер.
+
+Спершу підніми бота — його compose створює мережу `arbix_net`:
+
+```bash
+docker compose up -d --build
+```
+
+Потім, у каталозі дашборду, поклади в `.env` значення `ARBIX_API_KEY`
+(те саме, що `API_KEY` у бота) і запусти:
+
+```bash
+docker compose up -d --build
+```
+
+Дашборд буде на порту `8080`. Якщо контейнер сканера називається інакше —
+перевизнач `SCANNER_UPSTREAM`.
+
+Поряд на тому ж сервері спокійно живуть інші сайти — це окремий compose-проєкт
+на власному порту. Якщо треба розвести їх по доменах, постав попереду ще один
+nginx з `server_name` на кожен домен.
+
+Для входу одним кліком через Telegram домен дашборду треба прописати боту:
+`/setdomain` у @BotFather. Без цього лишається вхід за кодом `/login`.

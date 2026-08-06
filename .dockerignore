@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.idea
+.venv
+
+# Критично: .env містить VITE_API_URL для локальної розробки. Якщо він
+# потрапить в образ, Vite підхопить його при збірці і переб'є ARG,
+# а зібраний дашборд ходитиме на адресу з ноутбука.
+.env
+.env.*
+!.env.example
+
+frontend_dump.txt
+frontend_dump.py
+*.log

@@ -55,7 +55,7 @@ export function FilterControls({ className }: FilterControlsProps) {
         whileTap={{ scale: 0.95 }}
         onClick={() => setIsOpen(!isOpen)}
         className={cn(
-          "flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
+          "flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-accent-500/50 outline-none",
           hasExclusions 
             ? "bg-orange-500/10 border-orange-500/30 text-orange-400"
             : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700"
@@ -98,7 +98,7 @@ export function FilterControls({ className }: FilterControlsProps) {
             {/* Include Section */}
             <div className="mb-4">
               <div className="flex items-center gap-2 mb-2">
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <Check className="w-3.5 h-3.5 text-accent-400" />
                 <span className="text-xs font-semibold text-slate-400 uppercase tracking-widest">Include</span>
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -113,7 +113,7 @@ export function FilterControls({ className }: FilterControlsProps) {
                       className={cn(
                         "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border",
                         isIncluded
-                          ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+                          ? "bg-accent-500/10 border-accent-500/30 text-accent-400"
                           : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
                       )}
                     >
@@ -179,7 +179,7 @@ export function FilterControls({ className }: FilterControlsProps) {
                   }
                   setExcludedExchanges([]);
                 }}
-                className="flex-1 px-3 py-2 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs font-bold text-emerald-400 hover:bg-emerald-500/20 transition-colors"
+                className="flex-1 px-3 py-2 bg-accent-500/10 border border-accent-500/30 rounded-xl text-xs font-bold text-accent-400 hover:bg-accent-500/20 transition-colors"
               >
                 Reset All
               </motion.button>

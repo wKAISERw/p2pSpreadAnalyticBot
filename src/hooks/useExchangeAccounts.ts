@@ -15,13 +15,13 @@ export interface ExchangeAccount {
 
 export function useExchangeAccounts() {
   // Дістаємо ID користувача з Zustand-стора
-  const userSettings = useAppStore((state) => state.userSettings);
-  const telegramId = userSettings?.telegramUserId;
+  // Особа з підтвердженої сесії, а не з поля вводу в налаштуваннях.
+  const telegramId = useAppStore((state) => state.auth?.telegramId);
 
   // Робимо запит ТІЛЬКИ якщо є telegramId
   const { data, error, isLoading, mutate } = useSWR<ExchangeAccount[]>(
     telegramId ? `/accounts/${telegramId}` : null,
-    () => api.getAccounts(telegramId as string),
+    () => api.getAccounts(telegramId!),
     {
       refreshInterval: 30000, // Автоматично оновлювати баланси кожні 30 секунд
       revalidateOnFocus: true,

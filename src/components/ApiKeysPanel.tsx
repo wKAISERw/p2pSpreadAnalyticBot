@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import useSWR from 'swr';
 import { Key, Eye, EyeOff, CheckCircle2, Trash2 } from 'lucide-react';
 import { ApiKeyConfig } from '../types';
 import { cn } from '../lib/utils';
@@ -11,46 +12,76 @@ import { db, auth } from '../firebase';
 
 export default function ApiKeysPanel() {
   const { userSettings, setUserSettings } = useAppStore();
-  const connectedExchanges = Object.keys(userSettings.apiKeys || {}).map(k => k.toLowerCase());
+  // Особа з підтвердженої сесії, а не з поля вводу в налаштуваннях.
+  const telegramId = useAppStore(state => state.auth?.telegramId);
 
+  // Джерело правди — зашифроване сховище бота, а не браузер.
+  // Список підключених бірж тягнемо з /telegram/sync.
+  const { data: sync, mutate } = useSWR(
+    telegramId ? ['/telegram/sync', telegramId] : null,
+    () => api.syncTelegram(telegramId!),
+    { shouldRetryOnError: false }
+  );
+  const connectedExchanges = (sync?.keys ?? []).map(k => k.toLowerCase());
+
+  /**
+   * Кладе ключі в бота (там вони шифруються Fernet перед записом у БД).
+   *
+   * Раніше виклик api.saveCredentials був закоментований: ключі летіли
+   * в Firestore і до бота не доходили взагалі. Секрети бірж у Firestore
+   * лежали відкритим текстом — тому їх тут більше не зберігаємо.
+   */
   const handleSaveKey = async (exchange: string, config: ApiKeyConfig) => {
-    const newApiKeys = { ...(userSettings.apiKeys || {}), [exchange.toLowerCase()]: config };
-    const newSettings = { ...userSettings, apiKeys: newApiKeys };
-    setUserSettings(newSettings);
-    
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+    if (!telegramId) {
+      toast.error('Спочатку вкажи Telegram ID у налаштуваннях — без нього невідомо, чиї це ключі');
+      throw new Error('telegramUserId is not set');
     }
-    
-    // await api.saveCredentials(exchange, config);
-    toast.success(`Keys for ${exchange} saved successfully`);
+
+    await api.saveCredentials(exchange, config, telegramId);
+    await mutate();
+
+    // Локально лишаємо тільки факт підключення, без секретів.
+    const newApiKeys = { ...(userSettings.apiKeys || {}) };
+    delete newApiKeys[exchange.toLowerCase()];
+    setUserSettings({ ...userSettings, apiKeys: newApiKeys });
+
+    if (auth.currentUser) {
+      await setDoc(doc(db, 'users', auth.currentUser.uid), { apiKeys: newApiKeys }, { merge: true });
+    }
+
+    toast.success(`Ключі ${exchange} збережено в боті`);
   };
 
   const handleDisconnect = async (exchange: string) => {
-    const newApiKeys = { ...(userSettings.apiKeys || {}) };
-    delete newApiKeys[exchange.toLowerCase()];
-    
-    const newSettings = { ...userSettings, apiKeys: newApiKeys };
-    setUserSettings(newSettings);
-    
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
+    if (!telegramId) {
+      toast.error('Немає Telegram ID — нема кого відв\'язувати');
+      return;
     }
-    
-    // await api.deleteCredentials(exchange);
-    toast.success(`Disconnected ${exchange}`);
+
+    try {
+      await api.deleteCredentials(exchange, telegramId);
+      await mutate();
+      toast.success(`${exchange} відв'язано`);
+    } catch (error: any) {
+      if (error?.status === 404) {
+        await mutate();
+        toast.info(`${exchange} і так не був підключений`);
+        return;
+      }
+      toast.error(`Не вдалось відв'язати ${exchange}: ${error?.message ?? 'помилка'}`);
+    }
   };
 
   return (
     <div className="space-y-6">
-      <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-3xl p-6 mb-8">
+      <div className="bg-accent-500/10 border border-accent-500/20 rounded-3xl p-6 mb-8">
         <div className="flex items-start gap-4">
-          <div className="p-2 bg-emerald-500/20 rounded-xl">
-            <Key className="w-6 h-6 text-emerald-400" />
+          <div className="p-2 bg-accent-500/20 rounded-xl">
+            <Key className="w-6 h-6 text-accent-400" />
           </div>
           <div>
-            <h2 className="text-lg font-bold text-emerald-400 mb-1">API Credentials Management</h2>
-            <p className="text-sm text-emerald-500/80 leading-relaxed">
+            <h2 className="text-lg font-bold text-accent-400 mb-1">API Credentials Management</h2>
+            <p className="text-sm text-accent-500/80 leading-relaxed">
               Connect your exchange API keys to enable real-time balance tracking, deep merchant profiling, and automated trading. 
               Keys are encrypted using AES-128-CBC before being stored in the database.
             </p>
@@ -83,6 +114,12 @@ export default function ApiKeysPanel() {
           isConnected={connectedExchanges.includes('mexc')}
           onSave={(config: any) => handleSaveKey('MEXC', config)}
           onDisconnect={() => handleDisconnect('MEXC')}
+        />
+        <ApiKeyCard
+          exchange="BingX"
+          isConnected={connectedExchanges.includes('bingx')}
+          onSave={(config: any) => handleSaveKey('BingX', config)}
+          onDisconnect={() => handleDisconnect('BingX')}
         />
         <ApiKeyCard
           exchange="CryptoBot"
@@ -122,7 +159,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
   return (
     <div className={cn(
       "bg-slate-900 border rounded-3xl p-6 transition-all",
-      isConnected && !isEditing ? "border-emerald-500/30" : "border-slate-800"
+      isConnected && !isEditing ? "border-accent-500/30" : "border-slate-800"
     )}>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
@@ -165,7 +202,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
               type="text"
               value={localKeys.key}
               onChange={(e) => setLocalKeys({ ...localKeys, key: e.target.value })}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all"
               placeholder="Enter API Key"
             />
           </div>
@@ -176,7 +213,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
                 type={showSecret ? "text" : "password"}
                 value={localKeys.secret}
                 onChange={(e) => setLocalKeys({ ...localKeys, secret: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all pr-10"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all pr-10"
                 placeholder="Enter API Secret"
               />
               <button 
@@ -194,7 +231,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
                 type="password"
                 value={localKeys.passphrase}
                 onChange={(e) => setLocalKeys({ ...localKeys, passphrase: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all"
                 placeholder="Enter Passphrase"
               />
             </div>
@@ -215,7 +252,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
               whileTap={{ scale: 0.95 }}
               onClick={handleSave}
               disabled={isSaving || !localKeys.key || !localKeys.secret}
-              className="flex-1 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 focus:ring-2 focus:ring-emerald-500/50 outline-none"
+              className="flex-1 py-2.5 bg-accent-500 hover:bg-accent-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-accent-500/20 disabled:opacity-50 focus:ring-2 focus:ring-accent-500/50 outline-none"
             >
               {isSaving ? 'SAVING...' : 'SAVE KEYS'}
             </motion.button>
@@ -224,12 +261,12 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
       ) : (
         <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+            <CheckCircle2 className="w-5 h-5 text-accent-500" />
             <div className="text-sm font-mono text-slate-400">
               ••••••••••••••••••••
             </div>
           </div>
-          <div className="text-xs font-bold text-emerald-500 uppercase tracking-widest bg-emerald-500/10 px-2 py-1 rounded">
+          <div className="text-xs font-bold text-accent-500 uppercase tracking-widest bg-accent-500/10 px-2 py-1 rounded">
             Active
           </div>
         </div>

@@ -1,5 +1,42 @@
 @import "tailwindcss";
 
+/*
+ * Акцентна гама.
+ *
+ * Раніше emerald був зашитий у сотні класів, тому змінити колір означало
+ * пройтись по всіх компонентах. Тепер відтінки живуть у CSS-змінних, а
+ * Tailwind дивиться на них через @theme inline — тобто `bg-accent-500`
+ * перемальовується миттєво, щойно змінна на :root стала іншою.
+ *
+ * Значення підставляє applyAccent() (src/lib/theme.ts). Тут — дефолт,
+ * щоб до гідратації нічого не блимало.
+ */
+:root {
+  --accent-300: oklch(0.87 0.14 163);
+  --accent-400: oklch(0.79 0.17 163);
+  --accent-500: oklch(0.7 0.17 163);
+  --accent-600: oklch(0.6 0.15 163);
+  --accent-rgb: 16 185 129;
+}
+
+@theme inline {
+  --color-accent-300: var(--accent-300);
+  --color-accent-400: var(--accent-400);
+  --color-accent-500: var(--accent-500);
+  --color-accent-600: var(--accent-600);
+}
+
+/*
+ * Плавність переходу між гамами. Обмежено кольоровими властивостями:
+ * transition: all тут дав би анімацію розмірів при кожному ререндері.
+ */
+:root.accent-switching *,
+:root.accent-switching *::before,
+:root.accent-switching *::after {
+  transition: background-color 220ms ease, border-color 220ms ease,
+    color 220ms ease, fill 220ms ease, stroke 220ms ease;
+}
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -16,4 +53,419 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #334155; /* slate-700 */
+}
+
+/*
+ * Спільні рухи інтерфейсу.
+ *
+ * Задача — щоб поява елементів була однаковою скрізь і швидкою. Все в
+ * межах 160–220 мс: довше вже читається як гальмування, а не як плавність.
+ */
+@keyframes arbix-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes arbix-flash {
+  from {
+    background-color: rgb(var(--accent-rgb) / 0.16);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.animate-rise {
+  animation: arbix-rise 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Підсвіт рядка, який щойно змінився — замість повторної появи картки. */
+.animate-flash {
+  animation: arbix-flash 900ms ease-out both;
+}
+
+/*
+ * Повага до системного налаштування. Для тих, кому рух заважає, анімації
+ * зникають, а не сповільнюються.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-flash {
+    animation: none;
+  }
+
+  :root.accent-switching *,
+  :root.accent-switching *::before,
+  :root.accent-switching *::after {
+    transition: none;
+  }
+}
+
+/* ─── Лендинг: рух ────────────────────────────────────────────────────────
+ *
+ * Усе нижче анімує лише transform, opacity і filter — властивості, які
+ * браузер віддає композитору. Анімувати тут розміри чи позиції означало б
+ * ганяти layout у циклі, і сторінка почала б підгальмовувати саме там,
+ * де вона має справляти враження.
+ */
+
+/* Аврора в герої: дві плями, що повільно розходяться. */
+@keyframes arbix-aurora-a {
+  0%, 100% { transform: translate3d(-6%, -4%, 0) scale(1); }
+  50%      { transform: translate3d(6%, 4%, 0) scale(1.12); }
+}
+
+@keyframes arbix-aurora-b {
+  0%, 100% { transform: translate3d(5%, 3%, 0) scale(1.08); }
+  50%      { transform: translate3d(-5%, -6%, 0) scale(0.95); }
+}
+
+.aurora-a {
+  animation: arbix-aurora-a 18s ease-in-out infinite;
+  will-change: transform;
+}
+
+.aurora-b {
+  animation: arbix-aurora-b 22s ease-in-out infinite;
+  will-change: transform;
+}
+
+/*
+ * Поява при скролі. Початковий стан ставиться класом, а не інлайном, щоб
+ * елемент не блимав у видимому вигляді до того, як спрацює обсервер.
+ */
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 520ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 520ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.reveal-in {
+  opacity: 1;
+  transform: none;
+}
+
+/* Світіння, що йде за курсором. Координати підставляє JS у --mx/--my. */
+.glow-card {
+  position: relative;
+  isolation: isolate;
+}
+
+.glow-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 260ms ease;
+  pointer-events: none;
+  z-index: -1;
+  background: radial-gradient(
+    16rem circle at var(--mx, 50%) var(--my, 50%),
+    rgb(var(--accent-rgb) / 0.16),
+    transparent 60%
+  );
+}
+
+.glow-card:hover::before {
+  opacity: 1;
+}
+
+/* Промальовування лінії конвеєра. */
+@keyframes arbix-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+.draw-line {
+  stroke-dasharray: var(--len, 200);
+  stroke-dashoffset: var(--len, 200);
+}
+
+.draw-line-in {
+  animation: arbix-draw 900ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* Плавна зміна цифри в блоці зв'язки. */
+@keyframes arbix-tick {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.animate-tick {
+  animation: arbix-tick 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora-a,
+  .aurora-b,
+  .draw-line-in,
+  .animate-tick {
+    animation: none;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .draw-line {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* ─── Фонове поле лендингу ────────────────────────────────────────────────
+ *
+ * Три кольорові плями, що повільно розходяться, плюс паралакс при скролі.
+ *
+ * Свідомо БЕЗ filter: blur(). Розмиття на елементі в пів-екрана браузер
+ * перераховує щокадру й тримає окремий буфер у пам'яті GPU — на слабкому
+ * телефоні саме це вбиває плавність, а не рух. Джерело тут radial-gradient,
+ * який і так м'який: розтягнутий колірний стоп дає ту саму розмитість
+ * задарма.
+ *
+ * Шар fixed і pointer-events: none — він не бере участі ані в потоці, ані
+ * в подіях, тому не змушує браузер перераховувати layout при скролі.
+ */
+
+.aurora-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+
+.aurora-blob {
+  position: absolute;
+  border-radius: 9999px;
+  will-change: transform;
+}
+
+/* Плями різного розміру й темпу — інакше рух читається як один зсув. */
+.aurora-blob-1 {
+  top: -18%;
+  left: -12%;
+  width: 68vw;
+  height: 68vw;
+  background: radial-gradient(
+    circle at center,
+    rgb(var(--accent-rgb) / 0.16) 0%,
+    rgb(var(--accent-rgb) / 0.07) 38%,
+    transparent 68%
+  );
+  animation: arbix-drift-1 26s ease-in-out infinite;
+}
+
+.aurora-blob-2 {
+  top: 24%;
+  right: -20%;
+  width: 60vw;
+  height: 60vw;
+  background: radial-gradient(
+    circle at center,
+    rgb(99 102 241 / 0.14) 0%,
+    rgb(99 102 241 / 0.06) 40%,
+    transparent 70%
+  );
+  animation: arbix-drift-2 34s ease-in-out infinite;
+}
+
+.aurora-blob-3 {
+  bottom: -22%;
+  left: 22%;
+  width: 56vw;
+  height: 56vw;
+  background: radial-gradient(
+    circle at center,
+    rgb(var(--accent-rgb) / 0.1) 0%,
+    rgb(var(--accent-rgb) / 0.04) 42%,
+    transparent 72%
+  );
+  animation: arbix-drift-3 30s ease-in-out infinite;
+}
+
+@keyframes arbix-drift-1 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33%      { transform: translate3d(8%, 6%, 0) scale(1.1); }
+  66%      { transform: translate3d(-5%, 10%, 0) scale(0.96); }
+}
+
+@keyframes arbix-drift-2 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1.05); }
+  50%      { transform: translate3d(-10%, -8%, 0) scale(0.92); }
+}
+
+@keyframes arbix-drift-3 {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(0.98); }
+  40%      { transform: translate3d(10%, -6%, 0) scale(1.12); }
+  75%      { transform: translate3d(-6%, 4%, 0) scale(1.04); }
+}
+
+/*
+ * Паралакс. Scroll-driven анімація рахується браузером на композиторі —
+ * на відміну від слухача scroll, який будив би JS на кожен кадр і
+ * гарантовано смикався б на телефоні.
+ *
+ * Де не підтримується (Safari, Firefox на момент написання) — просто
+ * лишається дрейф без паралаксу. Це прогресивне покращення, а не вимога.
+ */
+@supports (animation-timeline: scroll()) {
+  .aurora-parallax {
+    position: absolute;
+    inset: 0;
+    animation: arbix-parallax linear both;
+    animation-timeline: scroll(root block);
+    will-change: transform;
+  }
+
+  @keyframes arbix-parallax {
+    to { transform: translate3d(0, -14%, 0); }
+  }
+}
+
+/* Легка сітка поверх плям — дає відчуття площини, по якій вони пливуть. */
+.aurora-grid {
+  position: absolute;
+  inset: 0;
+  opacity: 0.1;
+  background-image:
+    linear-gradient(rgb(148 163 184 / 0.45) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(148 163 184 / 0.45) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, black, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora-blob,
+  .aurora-parallax {
+    animation: none;
+  }
+}
+
+/* ─── Реакція на скрол ────────────────────────────────────────────────────
+ *
+ * Усе нижче — на CSS scroll-driven анімаціях. Це принципово: класичний
+ * підхід вішає обробник на scroll і рахує позиції в JS на кожен кадр.
+ * Такий обробник спрацьовує частіше за рендер, змушує читати layout
+ * посеред кадру й на телефоні гарантовано смикається. Тут прогрес рахує
+ * сам браузер на композиторі — JS у кадрі не бере участі взагалі.
+ *
+ * Два різні таймлайни:
+ *   scroll() — прогрес прокрутки всієї сторінки (смужка вгорі, фон);
+ *   view()   — прогрес конкретного елемента крізь в'юпорт (поява блоків).
+ *
+ * Усе під @supports: де не підтримується, лишається поведінка на
+ * IntersectionObserver. Це покращення, а не вимога.
+ */
+
+@supports (animation-timeline: view()) {
+  /*
+   * Поява блоків стає прив'язаною до скролу, а не одноразовим переходом:
+   * блок проявляється рівно настільки, наскільки ти його проскролив.
+   * Рухаєш колесо повільно — і він так само повільно виходить.
+   */
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+    animation: arbix-reveal-scroll linear both;
+    animation-timeline: view();
+    animation-range: entry 4% cover 24%;
+  }
+
+  @keyframes arbix-reveal-scroll {
+    from {
+      opacity: 0;
+      transform: translateY(22px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /*
+   * Герой підіймається й тане, поки йде вгору. Діапазон exit — тобто рух
+   * починається лише коли блок реально виходить із кадру, а не одразу.
+   */
+  .hero-drift {
+    animation: arbix-hero-drift linear both;
+    animation-timeline: view();
+    animation-range: exit 0% exit 90%;
+  }
+
+  @keyframes arbix-hero-drift {
+    to {
+      opacity: 0.35;
+      transform: translateY(-36px);
+    }
+  }
+}
+
+/*
+ * Базовий стан смужки — ЗЗОВНІ @supports. Якби scaleX(0) лишився всередині,
+ * у браузерах без scroll-таймлайну (Safari, Firefox) смужка малювалась би
+ * повною лінією під шапкою назавжди: анімації немає, а стискати її нічим.
+ */
+.scroll-progress {
+  transform: scaleX(0);
+  transform-origin: 0 50%;
+}
+
+@supports (animation-timeline: scroll()) {
+  /* Смужка прогресу читання під шапкою. */
+  .scroll-progress {
+    animation: arbix-progress linear both;
+    animation-timeline: scroll(root block);
+  }
+
+  @keyframes arbix-progress {
+    to { transform: scaleX(1); }
+  }
+
+  /*
+   * Шапка ущільнюється після перших кількох сотень пікселів: фон стає
+   * щільнішим, межа виразнішою. Діапазон у пікселях, а не у відсотках —
+   * інакше на довгій сторінці ефект настав би надто пізно.
+   */
+  .header-condense {
+    animation: arbix-header linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 220px;
+  }
+
+  @keyframes arbix-header {
+    to {
+      background-color: rgb(2 6 23 / 0.92);
+      border-bottom-color: rgb(30 41 59 / 0.9);
+      box-shadow: 0 8px 24px rgb(2 6 23 / 0.45);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .hero-drift,
+  .scroll-progress,
+  .header-condense {
+    animation: none;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+
+  .scroll-progress {
+    transform: scaleX(0);
+  }
 }

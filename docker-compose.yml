@@ -1,0 +1,31 @@
+# Заготівка деплою дашборду. Піднімається окремо від бота і чіпляється
+# до його мережі, щоб ходити на сканер по імені контейнера.
+#
+# Перед першим запуском на сервері бот має бути піднятий з мережею arbix_net
+# (див. docker-compose.yml у репозиторії бота).
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Відносний шлях: запити йдуть на той самий origin, далі їх ловить
+        # location /api/ у nginx.
+        VITE_API_URL: /api/v1
+    container_name: arbix_quantum_dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      # Куди проксувати. Ім'я контейнера сканера з compose-файлу бота.
+      SCANNER_UPSTREAM: ${SCANNER_UPSTREAM:-arbix_quantum_scanner:8000}
+      # Те саме значення, що API_KEY у .env бота. Порожнє = бот без захисту.
+      ARBIX_API_KEY: ${ARBIX_API_KEY:-}
+    networks:
+      - arbix_net
+
+networks:
+  arbix_net:
+    external: true
+    name: arbix_net

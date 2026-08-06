@@ -1,3 +1,18 @@
+/**
+ * Моделі maker-режиму. Дзеркалять те, чим оперує бот:
+ *   core/engine/price_advisor.py  — розрахунок рекомендованої ціни
+ *   core/engine/maker_ad_monitor.py — вхідні ордери на власне оголошення
+ *
+ * Реального HTTP-ендпоінта під це ще немає: сторінка працює на демо-даних
+ * (src/data/makerDemo.ts), щоб можна було оцінити UX до підключення.
+ */
+
+export type MakerSide = 'MAKER_BUY' | 'MAKER_SELL';
+
+/** Швидкість продажу: FAST враховує стінки ліквідності, ANY просто перебиває топ-1. */
+export type MakerSpeed = 'FAST' | 'ANY';
+
+/** Конкурент у стакані. */
 export interface CompetitorOrder {
   merchantId: string;
   merchantName: string;
@@ -7,61 +22,74 @@ export interface CompetitorOrder {
   maxLimit: number;
   orderCount: number;
   finishRate: number;
+  isVerified?: boolean;
 }
 
-export interface MakerOpportunity {
-  id: string;
+/** Вихід PriceAdvisor.suggest_buy_price(). */
+export interface BuyAdvice {
+  maxBuyPrice: number;
+  sellBookTop: number;
+  networkFee: number;
+  targetMarginPct: number;
+  estimatedProfitUah: number;
+}
+
+/** Вихід PriceAdvisor.suggest_sell_price() + analyze_sell_depth(). */
+export interface SellAdvice {
+  minSellPrice: number;
+  buyPrice: number;
+  networkFee: number;
+  amountUsdt: number;
+  sellAmountAfterFee: number;
+  minMarginPct: number;
+  profitAtMinUah: number;
+  profitAtMinPct: number;
+  /** З analyze_sell_depth */
+  recommendedPrice: number;
+  absoluteMinSell: number;
+  competitorPrice: number;
+  reason: string;
+  estimatedProfit: number;
+  /** Ціна, перед якою накопичена «стінка» ліквідності. */
+  wallPrice: number;
+  wallVolumeUsdt: number;
+}
+
+/** Вердикт ризик-движка/LLM по контрагенту. */
+export type MerchantVerdict = 'OK' | 'WARN' | 'BLOCK' | 'PENDING';
+
+/** Вхідний ордер на власне оголошення (MakerAdMonitor). */
+export interface IncomingOrder {
+  orderId: string;
+  itemId: string;
   exchange: string;
-  bank: string;
-  side: 'BUY' | 'SELL';
-  suggestedPrice: number;
-  spreadFromBest: number;
-  avgSpread: number;
-  marketCondition: 'favorable' | 'neutral' | 'competitive';
-  competitors: CompetitorOrder[];
-  marketDepth: { price: number; volume: number }[];
-  totalVolume: number;
-  timestamp: number;
-  createAdLink: string;
+  price: number;
+  amountUsdt: number;
+  totalFiat: number;
+  createdAt: number;
+  counterparty: {
+    merchantId: string;
+    merchantName: string;
+    finishRate: number;
+    monthOrderCount: number;
+    isVerified: boolean;
+    riskFlag?: string;
+  };
+  rec: MerchantVerdict;
+  reason: string;
 }
 
-// Mock data generator for development
-export function generateMockMakerOpportunities(): MakerOpportunity[] {
-  const exchanges = ['Binance', 'Bybit', 'OKX', 'MEXC'];
-  const banks = ['43', '14', '64', '48'];
-  const sides: ('BUY' | 'SELL')[] = ['BUY', 'SELL'];
-  const conditions: ('favorable' | 'neutral' | 'competitive')[] = ['favorable', 'neutral', 'competitive'];
-
-  return Array.from({ length: 6 }, (_, i) => {
-    const basePrice = 41.2 + Math.random() * 0.5;
-    const exchange = exchanges[i % exchanges.length];
-    
-    return {
-      id: `maker-${i}`,
-      exchange,
-      bank: banks[i % banks.length],
-      side: sides[i % 2],
-      suggestedPrice: basePrice,
-      spreadFromBest: (Math.random() - 0.3) * 0.5,
-      avgSpread: 0.15 + Math.random() * 0.1,
-      marketCondition: conditions[i % 3],
-      competitors: Array.from({ length: 5 + Math.floor(Math.random() * 5) }, (_, j) => ({
-        merchantId: `merchant-${i}-${j}`,
-        merchantName: `Trader${100 + j}`,
-        price: basePrice + (Math.random() - 0.5) * 0.3,
-        availableAmount: 10000 + Math.random() * 90000,
-        minLimit: 1000,
-        maxLimit: 50000 + Math.random() * 50000,
-        orderCount: 100 + Math.floor(Math.random() * 900),
-        finishRate: 95 + Math.random() * 5,
-      })),
-      marketDepth: Array.from({ length: 8 }, (_, j) => ({
-        price: basePrice - 0.15 + (j * 0.05),
-        volume: 50000 + Math.random() * 200000,
-      })),
-      totalVolume: 500000 + Math.random() * 2000000,
-      timestamp: Date.now() - Math.random() * 60000,
-      createAdLink: `https://p2p.${exchange.toLowerCase()}.com/create-ad`,
-    };
-  });
+/** Стан власного оголошення. */
+export interface MakerAd {
+  itemId: string;
+  exchange: string;
+  side: MakerSide;
+  bank: string;
+  price: number;
+  remainingUsdt: number;
+  totalUsdt: number;
+  isOnline: boolean;
+  /** Позиція в стакані: 1 = найкраща ціна. */
+  bookPosition: number;
+  competitorsAhead: number;
 }

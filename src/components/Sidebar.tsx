@@ -1,28 +1,45 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, LogIn, ShieldAlert, ChevronLeft, ChevronRight, BarChart3, Wallet } from 'lucide-react';
+import { LayoutDashboard, Activity, Key, Settings, ShieldBan, LogOut, ChevronLeft, ChevronRight, BarChart3, Wallet, SlidersHorizontal, CreditCard, MonitorDot, Users } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store';
 
 interface SidebarProps {
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
-  user: any;
-  onLogin: () => void;
+  /** Гасить і сесію дашборду, і Google-сесію, якщо вона є. */
   onLogout: () => void;
 }
 
-export default function Sidebar({ isOpen, setIsOpen, user, onLogin, onLogout }: SidebarProps) {
-  const { isAdmin, setIsAdmin, isConnected } = useAppStore();
+export default function Sidebar({ isOpen, setIsOpen, onLogout }: SidebarProps) {
+  const connection = useAppStore(state => state.connection);
+  const auth = useAppStore(state => state.auth);
+  const setAuth = useAppStore(state => state.setAuth);
+
+  // Раніше стан був бінарним і при обриві зв'язку підписувався як
+  // "Mock Data" — хоча жодних моків уже немає. Розрізняємо 401 і offline:
+  // це різні проблеми з різними діями.
+  const connectionView = {
+    live: { dot: 'bg-accent-500', box: 'bg-accent-500/10 border-accent-500/20 text-accent-400', label: 'Live Data', title: 'Бекенд підключено' },
+    connecting: { dot: 'bg-slate-500 animate-pulse', box: 'bg-slate-800 border-slate-700 text-slate-400', label: 'Connecting...', title: 'Перевіряю зв\'язок' },
+    unauthorized: { dot: 'bg-orange-500', box: 'bg-orange-500/10 border-orange-500/20 text-orange-400', label: 'No API Key', title: 'Бекенд відхилив ключ (401)' },
+    offline: { dot: 'bg-red-500', box: 'bg-red-500/10 border-red-500/20 text-red-400', label: 'Offline', title: 'Бекенд недоступний' },
+    error: { dot: 'bg-red-500', box: 'bg-red-500/10 border-red-500/20 text-red-400', label: 'API Error', title: 'Бекенд повернув помилку' },
+  }[connection];
 
   const navItems = [
-    { id: 'dashboard', path: '/', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'autotrade', path: '/autotrade', label: 'Auto-Trade', icon: Activity },
-    { id: 'accounts', path: '/accounts', label: 'Accounts', icon: Wallet },
-    { id: 'analytics', path: '/analytics', label: 'Analytics', icon: BarChart3 },
-    { id: 'apikeys', path: '/apikeys', label: 'API Keys', icon: Key },
-    { id: 'settings', path: '/settings', label: 'Settings', icon: Settings },
-    { id: 'blacklist', path: '/blacklist', label: 'Blacklist', icon: ShieldBan },
+    { id: 'dashboard', path: '/app', label: 'Дашборд', icon: LayoutDashboard },
+    { id: 'filters', path: '/app/filters', label: 'Фільтри', icon: SlidersHorizontal },
+    { id: 'cards', path: '/app/cards', label: 'Картки', icon: CreditCard },
+    { id: 'monitoring', path: '/app/monitoring', label: 'Моніторинг', icon: MonitorDot },
+    { id: 'autotrade', path: '/app/autotrade', label: 'Логи', icon: Activity },
+    { id: 'accounts', path: '/app/accounts', label: 'Акаунти бірж', icon: Wallet },
+    { id: 'analytics', path: '/app/analytics', label: 'Аналітика', icon: BarChart3 },
+    { id: 'apikeys', path: '/app/apikeys', label: 'Ключі бірж', icon: Key },
+    { id: 'settings', path: '/app/settings', label: 'Налаштування', icon: Settings },
+    { id: 'blacklist', path: '/app/blacklist', label: 'Чорний список', icon: ShieldBan },
+    // Бекенд усе одно перевіряє права — тут лише не показуємо зайвого.
+    ...(auth?.isAdmin ? [{ id: 'users', path: '/app/users', label: 'Користувачі', icon: Users }] : []),
   ];
 
   return (
@@ -42,18 +59,18 @@ export default function Sidebar({ isOpen, setIsOpen, user, onLogin, onLogout }: 
       )}>
         <button 
           onClick={() => setIsOpen(!isOpen)}
-          className="hidden md:flex absolute -right-3 top-8 bg-slate-800 border border-slate-700 rounded-full p-1 text-slate-400 hover:text-white z-50 hover:bg-slate-700 transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none"
+          className="hidden md:flex absolute -right-3 top-8 bg-slate-800 border border-slate-700 rounded-full p-1 text-slate-400 hover:text-white z-50 hover:bg-slate-700 transition-colors focus:ring-2 focus:ring-accent-500/50 outline-none"
         >
           {isOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
 
         <div className={cn("p-6 flex items-center gap-3 border-b border-slate-800", isOpen ? "" : "justify-center px-0")}>
-          <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+          <div className="w-10 h-10 bg-accent-500 rounded-xl flex items-center justify-center shadow-lg shadow-accent-500/20 shrink-0">
             <Activity className="text-slate-950 w-6 h-6" />
           </div>
           {isOpen && (
             <div className="overflow-hidden whitespace-nowrap">
-              <h1 className="text-xl font-bold tracking-tight text-white">ARBIX <span className="text-emerald-500">QUANTUM</span></h1>
+              <h1 className="text-lg font-bold tracking-tight text-white whitespace-nowrap">ARBIX <span className="text-accent-500">QUANTUM</span></h1>
               <p className="text-xs uppercase tracking-widest text-slate-400 font-medium">P2P Engine v5.0</p>
             </div>
           )}
@@ -66,14 +83,20 @@ export default function Sidebar({ isOpen, setIsOpen, user, onLogin, onLogout }: 
               <NavLink
                 key={item.id}
                 to={item.path}
+                end={item.path === '/app'}
                 className={({ isActive }) => cn(
-                  "w-full flex items-center rounded-xl transition-all font-bold text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none",
+                  "w-full flex items-center rounded-xl transition-all font-bold text-sm focus:ring-2 focus:ring-accent-500/50 outline-none",
                   isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center",
                   isActive 
-                    ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
+                    ? "bg-accent-500/10 text-accent-400 border border-accent-500/20" 
                     : "text-slate-400 hover:bg-slate-800 hover:text-white border border-transparent"
                 )}
                 title={!isOpen ? item.label : undefined}
+                // На телефоні меню — оверлей: лишати його відкритим після
+                // переходу означає ховати сторінку, на яку щойно перейшли.
+                onClick={() => {
+                  if (window.innerWidth < 768) setIsOpen(false);
+                }}
               >
                 <Icon className="w-5 h-5 shrink-0" />
                 {isOpen && <span className="whitespace-nowrap">{item.label}</span>}
@@ -83,84 +106,35 @@ export default function Sidebar({ isOpen, setIsOpen, user, onLogin, onLogout }: 
         </nav>
 
         <div className="p-4 border-t border-slate-800 space-y-2 overflow-x-hidden">
-          {user && (
-            <button 
-              onClick={() => setIsAdmin(!isAdmin)}
-              className={cn(
-                "w-full flex items-center rounded-xl transition-all font-bold text-sm border focus:ring-2 focus:ring-orange-500/50 outline-none",
-                isOpen ? "justify-between px-4 py-3" : "justify-center p-3",
-                isAdmin 
-                  ? "bg-orange-500/10 text-orange-400 border-orange-500/20" 
-                  : "bg-slate-800 text-slate-400 border-transparent hover:bg-slate-700"
-              )}
-              title={!isOpen ? "Admin Mode" : undefined}
-            >
-              <div className={cn("flex items-center", isOpen ? "gap-3" : "")}>
-                <ShieldAlert className="w-5 h-5 shrink-0" />
-                {isOpen && <span className="whitespace-nowrap">Admin Mode</span>}
-              </div>
-              {isOpen && (
-                <div className={cn(
-                  "w-8 h-4 rounded-full transition-colors relative shrink-0",
-                  isAdmin ? "bg-orange-500" : "bg-slate-600"
-                )}>
-                  <div className={cn(
-                    "absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all",
-                    isAdmin ? "right-0.5" : "left-0.5"
-                  )} />
-                </div>
-              )}
-            </button>
-          )}
 
-          {user ? (
-            <button 
-              onClick={onLogout}
-              className={cn(
-                "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm focus:ring-2 focus:ring-red-500/50 outline-none",
-                isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
-              )}
-              title={!isOpen ? "Logout" : undefined}
-            >
-              <LogOut className="w-5 h-5 shrink-0" />
-              {isOpen && <span className="whitespace-nowrap">Logout</span>}
-            </button>
-          ) : (
-            <button 
-              onClick={onLogin}
-              className={cn(
-                "w-full flex items-center rounded-xl text-slate-400 hover:bg-emerald-500/10 hover:text-emerald-400 transition-all font-bold text-sm focus:ring-2 focus:ring-emerald-500/50 outline-none",
-                isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
-              )}
-              title={!isOpen ? "Login" : undefined}
-            >
-              <LogIn className="w-5 h-5 shrink-0" />
-              {isOpen && <span className="whitespace-nowrap">Login</span>}
-            </button>
-          )}
+          <button
+            onClick={onLogout}
+            className={cn(
+              "w-full flex items-center rounded-xl text-slate-400 hover:bg-red-500/10 hover:text-red-400 transition-all font-bold text-sm focus:ring-2 focus:ring-red-500/50 outline-none",
+              isOpen ? "px-4 py-3 gap-3" : "p-3 justify-center"
+            )}
+            title={!isOpen ? "Вийти" : undefined}
+          >
+            <LogOut className="w-5 h-5 shrink-0" />
+            {isOpen && <span className="whitespace-nowrap">Вийти</span>}
+          </button>
 
-          <div className={cn(
-            "mt-4 flex items-center justify-center rounded-xl p-3 border transition-all",
-            isConnected === true 
-              ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" 
-              : isConnected === false 
-                ? "bg-red-500/10 border-red-500/20 text-red-400"
-                : "bg-slate-800 border-slate-700 text-slate-400"
-          )}
-          title={isConnected === true ? "Backend Connected" : isConnected === false ? "Backend Disconnected (Using Mock Data)" : "Connecting..."}
+          <div
+            className={cn(
+              "mt-4 flex items-center justify-center rounded-xl p-3 border transition-all",
+              connectionView.box
+            )}
+            title={connectionView.title}
           >
             <div className="relative flex items-center justify-center">
-              <div className={cn(
-                "w-2.5 h-2.5 rounded-full",
-                isConnected === true ? "bg-emerald-500" : isConnected === false ? "bg-red-500" : "bg-slate-500 animate-pulse"
-              )} />
-              {isConnected === true && (
-                <div className="absolute w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping opacity-75" />
+              <div className={cn("w-2.5 h-2.5 rounded-full", connectionView.dot)} />
+              {connection === 'live' && (
+                <div className="absolute w-2.5 h-2.5 rounded-full bg-accent-500 animate-ping opacity-75" />
               )}
             </div>
             {isOpen && (
               <span className="ml-3 text-xs font-bold uppercase tracking-wider whitespace-nowrap">
-                {isConnected === true ? "Live Data" : isConnected === false ? "Mock Data" : "Connecting..."}
+                {connectionView.label}
               </span>
             )}
           </div>

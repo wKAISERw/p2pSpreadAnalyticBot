@@ -37,11 +37,11 @@ export function TradingModeToggle({ className }: TradingModeToggleProps) {
             whileTap={{ scale: 0.95 }}
             onClick={() => setTradingMode(mode.value)}
             className={cn(
-              "relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all focus:ring-2 focus:ring-emerald-500/50 outline-none",
+              "relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all focus:ring-2 focus:ring-accent-500/50 outline-none",
               tradingMode === mode.value
                 ? mode.value === 'maker'
                   ? "bg-purple-500/20 text-purple-400"
-                  : "bg-emerald-500/20 text-emerald-400"
+                  : "bg-accent-500/20 text-accent-400"
                 : "text-slate-500 hover:text-slate-300"
             )}
             title={mode.description}
@@ -53,7 +53,7 @@ export function TradingModeToggle({ className }: TradingModeToggleProps) {
                 layoutId="trading-mode-indicator"
                 className={cn(
                   "absolute inset-0 rounded-lg -z-10",
-                  mode.value === 'maker' ? "bg-purple-500/10" : "bg-emerald-500/10"
+                  mode.value === 'maker' ? "bg-purple-500/10" : "bg-accent-500/10"
                 )}
                 transition={{ type: "spring", duration: 0.3 }}
               />

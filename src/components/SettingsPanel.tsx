@@ -3,149 +3,96 @@ import {
   Settings, ShieldAlert, CheckCircle2, Filter, Shield, Bot, Zap,
   Pin, MessageSquare, Bell, Send, Download, Upload, RefreshCw,
   Volume2, VolumeX, DollarSign, Percent, Building2, Link2, Unlink,
-  ArrowDownToLine, Trash2, AlertTriangle, Users, Database
+  ArrowDownToLine, Trash2, AlertTriangle, Users, Database, Palette, CreditCard, FlaskConical
 } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
 import { useAppStore } from '../store';
 import { api } from '../services/api';
 import { toast } from 'sonner';
-import { doc, setDoc } from 'firebase/firestore';
-import { db, auth } from '../firebase';
 import { GlobalSettings } from '../types';
+import AccountSection from './settings/AccountSection';
+import DisplaySettingsSection from './settings/DisplaySettingsSection';
+import CardDisplaySection from './settings/CardDisplaySection';
+import AppearanceSection from './settings/AppearanceSection';
+import FeaturesSection from './settings/FeaturesSection';
+import BankLimitsSection from './settings/BankLimitsSection';
 
+type TabId = 'account' | 'appearance' | 'alerts' | 'cards' | 'extra' | 'antifraud';
+
+const TABS: { id: TabId; label: string; icon: React.ElementType; adminOnly?: boolean }[] = [
+  { id: 'account', label: 'Акаунт', icon: Users },
+  { id: 'appearance', label: 'Вигляд і звук', icon: Palette },
+  { id: 'alerts', label: 'Сповіщення', icon: Bell },
+  { id: 'cards', label: 'Картки й ліміти', icon: CreditCard },
+  { id: 'extra', label: 'Експеримент', icon: FlaskConical },
+  { id: 'antifraud', label: 'Антифрод', icon: ShieldAlert, adminOnly: true },
+];
+
+/**
+ * Налаштувань стало вісім секцій — суцільною стрічкою це кілька екранів
+ * прокрутки без жодного орієнтиру. Розкладено по вкладках; активна
+ * тримається в URL (?tab=), щоб посилання й перезавантаження не скидали
+ * тебе на початок.
+ */
 export default function SettingsPanel() {
-  const { userSettings, isAdmin } = useAppStore();
-  const isFirstRender = useRef(true);
-  const isUpdatingFromBot = useRef(false); // 🔴 ОСЬ ЦЕЙ ЩИТ РЯТУЄ ВІД ЦИКЛІВ!
+  const isAdmin = useAppStore(state => state.auth?.isAdmin ?? false);
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  // 1. PUSH: САЙТ -> БОТ (Коли юзер крутить повзунки на сайті)
-  useEffect(() => {
-    if (isFirstRender.current) {
-      isFirstRender.current = false;
-      return;
-    }
-
-    if (!userSettings.autoSyncTelegram || !userSettings.telegramUserId) return;
-    if (isUpdatingFromBot.current) {
-      isUpdatingFromBot.current = false;
-      return;
-    }
-
-    const timeoutId = setTimeout(async () => {
-      try {
-        const prefs = userSettings.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
-
-        const botData = await api.syncTelegram(userSettings.telegramUserId!);
-        const botSettings = botData?.settings || {};
-
-        const payloadToBot = {
-          ...userSettings,
-          maxCapital: prefs.capital ? userSettings.maxCapital : (botSettings.maxCapital || userSettings.maxCapital),
-          minSpread: prefs.spread ? userSettings.minSpread : (botSettings.minSpread || userSettings.minSpread),
-          banks: prefs.banks ? userSettings.banks : (botSettings.banks || userSettings.banks),
-          // apiKeys: якщо дозволено — відправляємо, інакше залишаємо те що є в боті
-          apiKeys: prefs.apiKeys ? userSettings.apiKeys : (botSettings.apiKeys || userSettings.apiKeys),
-        };
-
-        await api.updateTelegramSettings(userSettings.telegramUserId, payloadToBot);
-
-        if (auth.currentUser) {
-          await setDoc(doc(db, 'users', auth.currentUser.uid), userSettings, { merge: true });
-        }
-
-        toast.success('Налаштування відправлено в бот 📤', {
-          icon: <RefreshCw className="w-4 h-4 text-blue-400" />
-        });
-      } catch (error) {
-        toast.error('Помилка авто-синхронізації');
-      }
-    }, 1000);
-
-    return () => clearTimeout(timeoutId);
-
-  },[
-    userSettings.minCapital,
-    userSettings.maxCapital,
-    userSettings.minSpread,
-    userSettings.banks,
-    userSettings.merchantFilters,
-    userSettings.autoSyncTelegram,
-    userSettings.apiKeys,
-    userSettings.syncPreferences
-  ]);
-
-  // 2. PULL: БОТ -> САЙТ (Опитування кожні 5 секунд)
-  useEffect(() => {
-    if (!userSettings.telegramUserId || !userSettings.autoSyncTelegram) return;
-
-    const checkBotSettings = async () => {
-      try {
-        const botData = await api.syncTelegram(userSettings.telegramUserId!);
-        if (botData) {
-          const current = useAppStore.getState().userSettings;
-          const botSettings = botData.settings;
-          const prefs = current.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
-
-          let hasChanges = false;
-          const newSettings = { ...current };
-
-          if (prefs.capital && botSettings.maxCapital !== current.maxCapital) {
-            newSettings.maxCapital = botSettings.maxCapital;
-            hasChanges = true;
-          }
-          if (prefs.spread && botSettings.minSpread !== current.minSpread) {
-            newSettings.minSpread = botSettings.minSpread;
-            hasChanges = true;
-          }
-          if (prefs.banks && JSON.stringify(botSettings.banks) !== JSON.stringify(current.banks)) {
-            newSettings.banks = botSettings.banks;
-            hasChanges = true;
-          }
-          // Мердж ключів бірж: не затираємо існуючі — лише додаємо відсутні з бота
-          if (prefs.apiKeys && botSettings.apiKeys) {
-            const mergedKeys = { ...(current.apiKeys || {}) };
-            let keysChanged = false;
-            for (const [exchange, keys] of Object.entries(botSettings.apiKeys as Record<string, any>)) {
-              if (!mergedKeys[exchange]) {
-                mergedKeys[exchange] = keys;
-                keysChanged = true;
-              }
-            }
-            if (keysChanged) {
-              newSettings.apiKeys = mergedKeys;
-              hasChanges = true;
-            }
-          }
-
-          if (hasChanges) {
-            isUpdatingFromBot.current = true;
-            useAppStore.getState().setUserSettings(newSettings);
-
-            if (auth.currentUser) {
-              await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
-            }
-            toast.info('🤖 Налаштування оновлено з Телеграму 📥');
-          }
-        }
-      } catch (e) {
-        // Ignore network errors
-      }
-    };
-
-    const intervalId = setInterval(checkBotSettings, 5000);
-    checkBotSettings();
-
-    return () => clearInterval(intervalId);
-  }, [userSettings.telegramUserId, userSettings.autoSyncTelegram, userSettings.syncPreferences]);
-
+  const visibleTabs = TABS.filter(tab => !tab.adminOnly || isAdmin);
+  const requested = searchParams.get('tab') as TabId | null;
+  const active: TabId = visibleTabs.some(t => t.id === requested) ? requested! : 'account';
 
   return (
-    <div className="space-y-8">
-      <TelegramSync />
-      <SoundSettings />
-      <UserFilters />
-      {isAdmin && <AdminSettings />}
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold text-white">Налаштування</h1>
+        <p className="text-sm text-slate-400">Акаунт, вигляд, сповіщення та керування сканером</p>
+      </div>
+
+      <div className="flex gap-1 overflow-x-auto pb-1 -mx-1 px-1 [&::-webkit-scrollbar]:hidden [scrollbar-width:none]">
+        {visibleTabs.map(tab => {
+          const Icon = tab.icon;
+          const isActive = active === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setSearchParams({ tab: tab.id }, { replace: true })}
+              className={cn(
+                'flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap transition-colors border shrink-0',
+                isActive
+                  ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                  : 'bg-slate-900/50 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+              )}
+            >
+              <Icon className="w-4 h-4" />
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* key на вкладці — щоб перехід між ними мав ту саму появу,
+          що й решта інтерфейсу, а не різкий підмін контенту. */}
+      <div key={active} className="space-y-6 animate-rise">
+        {active === 'account' && <AccountSection />}
+        {active === 'appearance' && (
+          <>
+            <AppearanceSection />
+            <SoundSettings />
+          </>
+        )}
+        {active === 'alerts' && <DisplaySettingsSection />}
+        {active === 'cards' && (
+          <>
+            <CardDisplaySection />
+            <BankLimitsSection />
+          </>
+        )}
+        {active === 'extra' && <FeaturesSection />}
+        {active === 'antifraud' && isAdmin && <AdminSettings />}
+      </div>
     </div>
   );
 }
@@ -153,20 +100,14 @@ export default function SettingsPanel() {
 function SoundSettings() {
   const { userSettings, setUserSettings } = useAppStore();
 
-  const toggleSound = async () => {
-    const newVal = !userSettings.soundEnabled;
-    setUserSettings({ ...userSettings, soundEnabled: newVal });
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), { soundEnabled: newVal }, { merge: true });
-    }
-  };
+  // Пишемо лише в стор: у хмару це поїде через useCloudPrefs, якщо
+  // прив'язаний Google. Раніше тут був прямий запис у Firestore — він
+  // дублював синхронізацію і тягнув firebase у цей чанк статично.
+  const toggleSound = () =>
+    setUserSettings({ ...userSettings, soundEnabled: !userSettings.soundEnabled });
 
-  const changeVolume = async (val: number) => {
+  const changeVolume = (val: number) =>
     setUserSettings({ ...userSettings, soundVolume: val });
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), { soundVolume: val }, { merge: true });
-    }
-  };
 
   return (
     <section className="bg-slate-900/50 border border-slate-800/50 rounded-3xl p-6">
@@ -175,15 +116,15 @@ function SoundSettings() {
           <Volume2 className="w-6 h-6 text-indigo-400" />
         </div>
         <div>
-          <h2 className="text-lg font-bold text-white">Audio Notifications</h2>
-          <p className="text-sm text-slate-400">Manage sound alerts for new opportunities</p>
+          <h2 className="text-lg font-bold text-white">Звук алертів</h2>
+          <p className="text-sm text-slate-400">Сигнал про новий спред</p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm font-bold text-slate-300">Enable Sounds</span>
+            <span className="text-sm font-bold text-slate-300">Увімкнути звук</span>
             <button
               onClick={toggleSound} // <--- ЗМІНЕНО ТУТ
               className={cn(
@@ -198,12 +139,12 @@ function SoundSettings() {
               />
             </button>
           </div>
-          <p className="text-xs text-slate-500">Play a sound when a high-spread opportunity is found.</p>
+          <p className="text-xs text-slate-500">Програється, коли з'являється спред не нижчий за твій мінімум.</p>
         </div>
 
         <div className="bg-slate-950/50 p-4 rounded-2xl border border-slate-800/50">
           <div className="flex items-center justify-between mb-4">
-            <span className="text-sm font-bold text-slate-300">Volume</span>
+            <span className="text-sm font-bold text-slate-300">Гучність</span>
             <span className="text-xs font-medium text-indigo-400 bg-indigo-500/10 px-2 py-1 rounded-md">
               {Math.round((userSettings.soundVolume || 0.5) * 100)}%
             </span>
@@ -228,488 +169,44 @@ function SoundSettings() {
   );
 }
 
-function TelegramSync() {
-  const { userSettings, setUserSettings, setIsAdmin } = useAppStore();
-  const [tgInput, setTgInput] = useState('');
-  const[isConnecting, setIsConnecting] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-
-  // Дефолтні налаштування синхронізації (apiKeys вимкнено за замовчуванням — безпечніше)
-  const prefs = userSettings.syncPreferences || { capital: true, spread: true, banks: true, apiKeys: false };
-
-  const togglePref = async (key: keyof typeof prefs) => {
-    const newPrefs = { ...prefs, [key]: !prefs[key] };
-    const newSettings = { ...userSettings, syncPreferences: newPrefs };
-    setUserSettings(newSettings);
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), { syncPreferences: newPrefs }, { merge: true });
-    }
-  };
-
-  const handleConnect = async () => {
-    if (!tgInput) return;
-    setIsConnecting(true);
-    try {
-      const botData = await api.syncTelegram(tgInput);
-      if (botData) {
-        const newApiKeys = { ...(userSettings.apiKeys || {}) };
-        botData.keys.forEach((k: string) => {
-          if (!newApiKeys[k]) {
-            newApiKeys[k] = { key: 'imported_from_bot', secret: 'imported_from_bot' };
-          }
-        });
-
-        const newSettings = {
-          ...userSettings,
-          ...botData.settings,
-          apiKeys: newApiKeys,
-          telegramUserId: tgInput,
-          isTelegramAdmin: botData.isAdmin,
-          autoSyncTelegram: true
-        };
-
-        setUserSettings(newSettings);
-        setIsAdmin(botData.isAdmin);
-        if (auth.currentUser) {
-          await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
-        }
-        toast.success('Successfully connected to Telegram Bot!');
-      }
-    } catch (error) {
-      toast.error('Failed to connect to Telegram Bot');
-    } finally {
-      setIsConnecting(false);
-    }
-  };
-
-  const handleDisconnectTelegram = async () => {
-    const newSettings = { ...userSettings };
-    delete newSettings.telegramUserId;
-    delete newSettings.isTelegramAdmin;
-    delete newSettings.autoSyncTelegram;
-    setUserSettings(newSettings);
-    setIsAdmin(false);
-    if (auth.currentUser) {
-      await setDoc(doc(db, 'users', auth.currentUser.uid), { telegramUserId: null, isTelegramAdmin: null, autoSyncTelegram: null }, { merge: true });
-    }
-    toast.info('Disconnected from Telegram Bot');
-  };
-
-  const handleSyncFromBot = async () => {
-    if (!userSettings.telegramUserId) return;
-    setIsSyncing(true);
-    try {
-      const botData = await api.syncTelegram(userSettings.telegramUserId);
-      if (botData) {
-        const botSettings = botData.settings;
-
-        // Мердж ключів бірж: не затираємо існуючі — лише додаємо відсутні
-        const mergedKeys = { ...(userSettings.apiKeys || {}) };
-        if (prefs.apiKeys && botSettings.apiKeys) {
-          for (const [exchange, keys] of Object.entries(botSettings.apiKeys as Record<string, any>)) {
-            if (!mergedKeys[exchange]) mergedKeys[exchange] = keys;
-          }
-        }
-
-        const newSettings = {
-          ...userSettings,
-          maxCapital: prefs.capital ? botSettings.maxCapital : userSettings.maxCapital,
-          minSpread: prefs.spread ? botSettings.minSpread : userSettings.minSpread,
-          banks: prefs.banks ? botSettings.banks : userSettings.banks,
-          apiKeys: prefs.apiKeys ? mergedKeys : userSettings.apiKeys,
-          isTelegramAdmin: botData.isAdmin
-        };
-        setUserSettings(newSettings);
-        setIsAdmin(botData.isAdmin);
-        if (auth.currentUser) {
-          await setDoc(doc(db, 'users', auth.currentUser.uid), newSettings, { merge: true });
-        }
-        toast.success('Налаштування стягнуто з бота');
-      }
-    } catch (error) {
-      toast.error('Помилка стягування налаштувань');
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const handleSyncToBot = async () => {
-    if (!userSettings.telegramUserId) return;
-    setIsSyncing(true);
-    try {
-      const botData = await api.syncTelegram(userSettings.telegramUserId);
-      const botSettings = botData?.settings || {};
-
-      const payloadToBot = {
-        ...userSettings,
-        maxCapital: prefs.capital ? userSettings.maxCapital : (botSettings.maxCapital || userSettings.maxCapital),
-        minSpread: prefs.spread ? userSettings.minSpread : (botSettings.minSpread || userSettings.minSpread),
-        banks: prefs.banks ? userSettings.banks : (botSettings.banks || userSettings.banks),
-        apiKeys: prefs.apiKeys ? userSettings.apiKeys : (botSettings.apiKeys || userSettings.apiKeys),
-      };
-
-      await api.updateTelegramSettings(userSettings.telegramUserId, payloadToBot);
-      toast.success('Налаштування відправлено в бот');
-    } catch (error) {
-      toast.error('Помилка відправки налаштувань');
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  const toggleAutoSync = () => {
-    const newVal = !userSettings.autoSyncTelegram;
-    setUserSettings({ ...userSettings, autoSyncTelegram: newVal });
-    if (auth.currentUser) {
-      setDoc(doc(db, 'users', auth.currentUser.uid), { autoSyncTelegram: newVal }, { merge: true });
-    }
-  };
-
-  return (
-    <section className="bg-blue-500/10 border border-blue-500/20 rounded-3xl p-6">
-      {/* ... Верхня частина (input для ID) залишається БЕЗ ЗМІН ... */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-6">
-        <div className="flex items-center gap-4">
-          <div className="p-3 bg-blue-500/20 rounded-xl">
-            <Send className="w-6 h-6 text-blue-400" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-blue-400">Telegram Bot Sync</h2>
-            <p className="text-sm text-blue-500/80">
-              {userSettings.telegramUserId
-                ? `Connected to Telegram ID: ${userSettings.telegramUserId}`
-                : "Connect your Telegram account to sync settings, API keys, and admin rights."}
-            </p>
-          </div>
-        </div>
-
-        {!userSettings.telegramUserId ? (
-          <div className="flex w-full md:w-auto gap-2">
-            <input
-              type="text"
-              placeholder="Enter Telegram ID..."
-              value={tgInput}
-              onChange={(e) => setTgInput(e.target.value)}
-              className="bg-slate-950 border border-blue-500/30 rounded-xl px-4 py-2 text-sm text-white focus:border-blue-500 focus:ring-2 focus:ring-blue-500/50 outline-none w-full md:w-48 transition-all"
-            />
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={handleConnect}
-              disabled={isConnecting || !tgInput}
-              className="flex items-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-400 text-slate-950 font-bold rounded-xl transition-all disabled:opacity-50 whitespace-nowrap focus:ring-2 focus:ring-blue-500/50 outline-none"
-            >
-              <Link2 className="w-4 h-4" />
-              {isConnecting ? 'Connecting...' : 'Connect'}
-            </motion.button>
-          </div>
-        ) : (
-          <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={handleDisconnectTelegram}
-            className="flex items-center gap-2 px-4 py-2 bg-red-500/20 text-red-400 font-bold rounded-xl transition-all border border-red-500/30 hover:bg-red-500/30 whitespace-nowrap focus:ring-2 focus:ring-red-500/50 outline-none"
-          >
-            <Unlink className="w-4 h-4" />
-            Disconnect
-          </motion.button>
-        )}
-      </div>
-
-      {userSettings.telegramUserId && (
-        <div className="flex items-center gap-2 text-sm text-blue-400 mb-4 mt-2">
-          <CheckCircle2 className="w-4 h-4" />
-          Connected · ID: {userSettings.telegramUserId}
-        </div>
-      )}
-
-      {userSettings.telegramUserId && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 border-t border-blue-500/20 pt-6">
-          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Download className="w-4 h-4 text-emerald-400" />
-                <span className="text-sm font-bold text-white">Pull from Bot</span>
-              </div>
-              <p className="text-xs text-slate-400 mb-4">Overwrite site settings with bot data.</p>
-            </div>
-            <motion.button
-              whileHover={{ scale: userSettings.autoSyncTelegram ? 1 : 1.02 }}
-              whileTap={{ scale: userSettings.autoSyncTelegram ? 1 : 0.95 }}
-              onClick={handleSyncFromBot}
-              disabled={isSyncing || !!userSettings.autoSyncTelegram}
-              title={userSettings.autoSyncTelegram ? 'Вимкни Auto-Sync щоб використовувати ручне керування' : undefined}
-              className={cn(
-                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 outline-none",
-                userSettings.autoSyncTelegram
-                  ? "bg-slate-800/50 border-slate-700/50 text-slate-600 cursor-not-allowed"
-                  : "bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border-emerald-500/20 focus:ring-emerald-500/50"
-              )}
-            >
-              {userSettings.autoSyncTelegram ? '🔒 AUTO-SYNC ON' : isSyncing ? 'Syncing...' : 'PULL DATA'}
-            </motion.button>
-          </div>
-
-          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Upload className="w-4 h-4 text-orange-400" />
-                <span className="text-sm font-bold text-white">Push to Bot</span>
-              </div>
-              <p className="text-xs text-slate-400 mb-4">Overwrite bot settings with site data.</p>
-            </div>
-            <motion.button
-              whileHover={{ scale: userSettings.autoSyncTelegram ? 1 : 1.02 }}
-              whileTap={{ scale: userSettings.autoSyncTelegram ? 1 : 0.95 }}
-              onClick={handleSyncToBot}
-              disabled={isSyncing || !!userSettings.autoSyncTelegram}
-              title={userSettings.autoSyncTelegram ? 'Вимкни Auto-Sync щоб використовувати ручне керування' : undefined}
-              className={cn(
-                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 outline-none",
-                userSettings.autoSyncTelegram
-                  ? "bg-slate-800/50 border-slate-700/50 text-slate-600 cursor-not-allowed"
-                  : "bg-orange-500/10 hover:bg-orange-500/20 text-orange-400 border-orange-500/20 focus:ring-orange-500/50"
-              )}
-            >
-              {userSettings.autoSyncTelegram ? '🔒 AUTO-SYNC ON' : isSyncing ? 'Syncing...' : 'PUSH DATA'}
-            </motion.button>
-          </div>
-
-          <div className="bg-slate-900/50 p-4 rounded-2xl border border-slate-800/50 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <RefreshCw className={cn("w-4 h-4 text-blue-400 transition-all", userSettings.autoSyncTelegram && "animate-spin")} />
-                <span className="text-sm font-bold text-white">Auto-Sync</span>
-              </div>
-              <p className="text-xs text-slate-400 mb-4">Automatically push changes to bot.</p>
-            </div>
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={toggleAutoSync}
-              className={cn(
-                "w-full py-2 border rounded-xl text-xs font-bold transition-all focus:ring-2 focus:ring-blue-500/50 outline-none",
-                userSettings.autoSyncTelegram
-                  ? "bg-blue-500/20 border-blue-500/30 text-blue-400"
-                  : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
-              )}
-            >
-              {userSettings.autoSyncTelegram ? 'ENABLED' : 'DISABLED'}
-            </motion.button>
-          </div>
-
-          {/* НОВИЙ БЛОК: Вибір даних для синхронізації */}
-          <div className="col-span-1 md:col-span-3 mt-2 p-4 bg-slate-950/50 rounded-2xl border border-blue-500/10">
-            <h3 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
-              <Filter className="w-4 h-4 text-blue-400" />
-              Що саме синхронізувати:
-            </h3>
-            <div className="flex flex-wrap gap-6">
-               <label className="flex items-center gap-2 cursor-pointer group">
-                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.capital ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
-                    {prefs.capital && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
-                  </div>
-                  <input type="checkbox" checked={prefs.capital} onChange={() => togglePref('capital')} className="hidden" />
-                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Робочий Капітал</span>
-               </label>
-
-               <label className="flex items-center gap-2 cursor-pointer group">
-                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.spread ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
-                    {prefs.spread && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
-                  </div>
-                  <input type="checkbox" checked={prefs.spread} onChange={() => togglePref('spread')} className="hidden" />
-                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Мінімальний Спред</span>
-               </label>
-
-               <label className="flex items-center gap-2 cursor-pointer group">
-                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.banks ? "bg-blue-500 border-blue-500" : "border-slate-600 group-hover:border-blue-500/50")}>
-                    {prefs.banks && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
-                  </div>
-                  <input type="checkbox" checked={prefs.banks} onChange={() => togglePref('banks')} className="hidden" />
-                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">Цільові Банки</span>
-               </label>
-
-               <label className="flex items-center gap-2 cursor-pointer group">
-                  <div className={cn("w-4 h-4 rounded border flex items-center justify-center transition-colors", prefs.apiKeys ? "bg-amber-500 border-amber-500" : "border-slate-600 group-hover:border-amber-500/50")}>
-                    {prefs.apiKeys && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
-                  </div>
-                  <input type="checkbox" checked={prefs.apiKeys} onChange={() => togglePref('apiKeys')} className="hidden" />
-                  <span className="text-xs font-bold text-slate-400 group-hover:text-slate-300 transition-colors">
-                    Ключі Бірж
-                    <span className="ml-1.5 text-[10px] text-amber-500/70 font-semibold uppercase tracking-wider">⚠ sensitive</span>
-                  </span>
-               </label>
-            </div>
-            <p className="text-[10px] text-slate-500 mt-3 font-medium uppercase tracking-wider">
-              Зняті галочки назавжди роз'єднують цей параметр між сайтом та телеграмом.
-            </p>
-          </div>
-
-        </div>
-      )}
-    </section>
-  );
-}
-
-function UserFilters() {
-  const { userSettings, setUserSettings } = useAppStore();
-
-  const toggleBank = (code: string) => {
-    const newBanks = userSettings.banks.includes(code)
-      ? userSettings.banks.filter(b => b !== code)
-      : [...userSettings.banks, code];
-    setUserSettings({ ...userSettings, banks: newBanks });
-  };
-
-  const handleMerchantFilterChange = (key: 'minOrders' | 'minRate', value: number) => {
-    const currentFilters = userSettings.merchantFilters || { minOrders: 0, minRate: 0 };
-    setUserSettings({ ...userSettings, merchantFilters: { ...currentFilters, [key]: value } });
-  };
-
-  const averageCapital = Math.floor((userSettings.minCapital + userSettings.maxCapital) / 2);
-
-  return (
-    <>
-      <section className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-slate-800 rounded-xl">
-            <Settings className="w-5 h-5 text-blue-400" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-white">Особисті фільтри</h2>
-            <p className="text-xs uppercase tracking-widest text-slate-400 font-semibold">Налаштування капіталу та спреду</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          <div className="space-y-6">
-            <div>
-              <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Робочий капітал (UAH)</label>
-              <div className="flex items-center gap-4 mb-3">
-                <div className="flex-1">
-                  <span className="text-xs text-slate-400 uppercase font-bold mb-1 block">Min</span>
-                  <input
-                    type="number"
-                    min="0"
-                    value={userSettings.minCapital}
-                    onChange={(e) => setUserSettings({ ...userSettings, minCapital: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
-                  />
-                </div>
-                <div className="flex-1">
-                  <span className="text-xs text-slate-400 uppercase font-bold mb-1 block">Max</span>
-                  <input
-                    type="number"
-                    min="0"
-                    value={userSettings.maxCapital}
-                    onChange={(e) => setUserSettings({ ...userSettings, maxCapital: parseInt(e.target.value) || 0 })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
-                  />
-                </div>
-              </div>
-              <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex justify-between items-center">
-                <span className="text-xs font-bold text-emerald-500/80">Середня сума угоди:</span>
-                <span className="text-sm font-black text-emerald-400 tabular-nums">{averageCapital.toLocaleString()} ₴</span>
-              </div>
-            </div>
-
-            <div>
-              <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мінімальний спред (%)</label>
-              <div className="grid grid-cols-4 gap-2 mb-3">
-                {[0.3, 0.5, 1.0, 2.0].map(val => (
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    key={val}
-                    onClick={() => setUserSettings({ ...userSettings, minSpread: val })}
-                    className={cn(
-                      "py-2.5 rounded-xl text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums",
-                      userSettings.minSpread === val
-                        ? "bg-emerald-500 border-emerald-400 text-slate-950 shadow-lg shadow-emerald-500/20"
-                        : "bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700"
-                    )}
-                  >
-                    {val}%
-                  </motion.button>
-                ))}
-              </div>
-              <div className="flex items-center gap-3 p-1 bg-slate-950 border border-slate-800 rounded-xl focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/50 transition-all">
-                <span className="text-xs font-bold text-slate-400 pl-3 uppercase tracking-widest">Ручний ввід:</span>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={userSettings.minSpread}
-                  onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
-                  className="flex-1 bg-transparent border-none text-sm font-bold text-white focus:ring-0 outline-none py-2 tabular-nums"
-                />
-                <span className="pr-4 text-slate-400 font-bold">%</span>
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Цільові Банки</label>
-            <div className="space-y-2">
-              <BankToggle label="Monobank" active={(userSettings?.banks || []).includes("43")} onClick={() => toggleBank("43")} />
-              <BankToggle label="PrivatBank" active={(userSettings?.banks || []).includes("14")} onClick={() => toggleBank("14")} />
-              <BankToggle label="PUMB" active={(userSettings?.banks || []).includes("64")} onClick={() => toggleBank("64")} />
-              <BankToggle label="A-Bank" active={(userSettings?.banks || []).includes("48")} onClick={() => toggleBank("48")} />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="p-2 bg-slate-800 rounded-xl">
-            <Filter className="w-5 h-5 text-purple-400" />
-          </div>
-          <div>
-            <h2 className="text-lg font-bold text-white">Фільтри Мерчантів</h2>
-            <p className="text-xs uppercase tracking-widest text-slate-400 font-semibold">Відсіювання ненадійних контрагентів</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div>
-            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мін. угод (за місяць)</label>
-            <input
-              type="number"
-              min="0"
-              value={userSettings.merchantFilters?.minOrders || 0}
-              onChange={(e) => handleMerchantFilterChange('minOrders', parseInt(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
-              placeholder="0 для вимкнення"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs font-semibold text-slate-400 mb-2 block uppercase tracking-tight">Мін. відсоток успішних (%)</label>
-            <input
-              type="number"
-              min="0"
-              max="100"
-              step="0.1"
-              value={userSettings.merchantFilters?.minRate || 0}
-              onChange={(e) => handleMerchantFilterChange('minRate', parseFloat(e.target.value) || 0)}
-              className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm font-bold text-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/50 outline-none transition-all tabular-nums"
-              placeholder="0 для вимкнення"
-            />
-          </div>
-        </div>
-      </section>
-    </>
-  );
-}
-
 function AdminSettings() {
-  const { globalSettings, setGlobalSettings } = useAppStore();
+  const globalSettings = useAppStore(state => state.globalSettings);
+  const globalSettingsLoaded = useAppStore(state => state.globalSettingsLoaded);
+  const patchGlobalSettings = useAppStore(state => state.patchGlobalSettings);
 
+  /**
+   * Пише ОДИН змінений ключ у bot_settings через /settings/global.
+   *
+   * Раніше сюди летів увесь об'єкт globalSettings, який брався з мок-значень
+   * у сторі й ніколи не читався з бекенда: перша ж зміна будь-якого поля
+   * затирала реальний конфіг сканера шістьма значеннями «з голови».
+   */
   const handleGlobalChange = async (key: keyof GlobalSettings, value: any) => {
-    const newSettings = { ...globalSettings, [key]: value };
-    setGlobalSettings(newSettings);
-    await api.updateGlobalSettings(newSettings);
+    const previous = globalSettings[key];
+    patchGlobalSettings({ [key]: value } as Partial<GlobalSettings>);
+
+    try {
+      const result = await api.updateGlobalSettings({ [key]: value } as Partial<GlobalSettings>);
+      if (result.rejected?.length) {
+        patchGlobalSettings({ [key]: previous } as Partial<GlobalSettings>);
+        toast.error(`Бекенд відхилив ключ: ${result.rejected.join(', ')}`);
+      }
+    } catch (error: any) {
+      patchGlobalSettings({ [key]: previous } as Partial<GlobalSettings>);
+      toast.error(`Не збережено: ${error?.message ?? 'помилка запиту'}`);
+    }
   };
+
+  if (!globalSettingsLoaded) {
+    return (
+      <section className="bg-slate-900 border border-orange-500/20 rounded-3xl p-6">
+        <div className="flex items-center gap-3 text-slate-400 text-sm">
+          <RefreshCw className="w-4 h-4 animate-spin" />
+          Читаю глобальні налаштування з бота…
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="bg-slate-900 border border-orange-500/20 rounded-3xl p-6 relative overflow-hidden">
@@ -738,7 +235,7 @@ function AdminSettings() {
           subLabel="risk_mode"
         >
           <select
-            value={globalSettings.riskMode}
+            value={globalSettings.riskMode ?? 'WARNING'}
             onChange={(e) => handleGlobalChange('riskMode', e.target.value)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all"
           >
@@ -757,7 +254,7 @@ function AdminSettings() {
         >
           <input
             type="number"
-            value={globalSettings.behaviorAlertScore}
+            value={globalSettings.behaviorAlertScore ?? 60}
             onChange={(e) => handleGlobalChange('behaviorAlertScore', parseInt(e.target.value) || 0)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
           />
@@ -773,7 +270,7 @@ function AdminSettings() {
           <input
             type="number"
             step="0.1"
-            value={globalSettings.velocitySpikePerHour}
+            value={globalSettings.velocitySpikePerHour ?? 20}
             onChange={(e) => handleGlobalChange('velocitySpikePerHour', parseFloat(e.target.value) || 0)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
           />
@@ -788,7 +285,7 @@ function AdminSettings() {
         >
           <input
             type="number"
-            value={globalSettings.stickyMinChain}
+            value={globalSettings.stickyMinChain ?? 3}
             onChange={(e) => handleGlobalChange('stickyMinChain', parseInt(e.target.value) || 0)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
           />
@@ -804,7 +301,7 @@ function AdminSettings() {
           <input
             type="number"
             step="0.1"
-            value={globalSettings.reviewTtlHours}
+            value={globalSettings.reviewTtlHours ?? 24}
             onChange={(e) => handleGlobalChange('reviewTtlHours', parseFloat(e.target.value) || 0)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
           />
@@ -819,14 +316,149 @@ function AdminSettings() {
         >
           <input
             type="number"
-            value={globalSettings.maxAlertsPerCycle}
+            value={globalSettings.maxAlertsPerCycle ?? 5}
             onChange={(e) => handleGlobalChange('maxAlertsPerCycle', parseInt(e.target.value) || 0)}
             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
           />
         </AdminSettingCard>
         </motion.div>
+
+        {/* Ключі, які вже були в ALLOWED_KEYS, але яких не існувало в UI */}
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Percent className="w-4 h-4 text-accent-400" />}
+          label="Мін. спред сканера (%)"
+          subLabel="min_spread_pct"
+        >
+          <input
+            type="number"
+            step="0.1"
+            value={globalSettings.minSpreadPct ?? 0.5}
+            onChange={(e) => handleGlobalChange('minSpreadPct', parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
+
+        <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }} whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+        <AdminSettingCard
+          icon={<Shield className="w-4 h-4 text-blue-400" />}
+          label="Буфер безпеки (%)"
+          subLabel="safety_buffer_pct"
+        >
+          <input
+            type="number"
+            step="0.1"
+            value={globalSettings.safetyBufferPct ?? 0.3}
+            onChange={(e) => handleGlobalChange('safetyBufferPct', parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+          />
+        </AdminSettingCard>
+        </motion.div>
+
+        <AdminToggleCard
+          icon={<Link2 className="w-4 h-4 text-purple-400" />}
+          label="Вимагати сесії бірж"
+          subLabel="require_sessions"
+          checked={globalSettings.requireSessions ?? false}
+          onChange={(v) => handleGlobalChange('requireSessions', v)}
+        />
+
+        <AdminToggleCard
+          icon={<MessageSquare className="w-4 h-4 text-slate-300" />}
+          label="Логувати знайдені спреди"
+          subLabel="show_spread_logs"
+          checked={globalSettings.showSpreadLogs ?? true}
+          onChange={(v) => handleGlobalChange('showSpreadLogs', v)}
+        />
+
+        <AdminToggleCard
+          icon={<Users className="w-4 h-4 text-orange-400" />}
+          label="Блокувати ФОП / ТОВ"
+          subLabel="block_fop_tov"
+          checked={globalSettings.blockFopTov ?? false}
+          onChange={(v) => handleGlobalChange('blockFopTov', v)}
+        />
+
+        <AdminToggleCard
+          icon={<Database className="w-4 h-4 text-yellow-400" />}
+          label="Блокувати банки/джари"
+          subLabel="block_banka_jar"
+          checked={globalSettings.blockBankaJar ?? false}
+          onChange={(v) => handleGlobalChange('blockBankaJar', v)}
+        />
       </motion.div>
+
+      {/* Ваги ризик-движка. До фіксу в api/routers/dashboard.py ці ключі
+          відхилялись бекендом завжди — через розбіжність регістру. */}
+      <div className="mt-8 pt-6 border-t border-slate-800">
+        <div className="flex items-center gap-2 mb-4">
+          <ShieldAlert className="w-4 h-4 text-orange-400" />
+          <h3 className="text-sm font-bold text-orange-400">Ваги ризик-скорингу</h3>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+          {RISK_WEIGHTS.map(({ key, label }) => (
+            <div key={key} className="bg-slate-950/50 p-3 rounded-xl border border-slate-800/50">
+              <div className="text-[11px] font-bold text-white mb-0.5">{label}</div>
+              <div className="text-[10px] text-slate-500 font-mono mb-2">{key}</div>
+              <input
+                type="number"
+                step="0.1"
+                value={globalSettings[key] ?? 0}
+                onChange={(e) => handleGlobalChange(key, parseFloat(e.target.value) || 0)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm font-bold text-white focus:border-orange-500 focus:ring-2 focus:ring-orange-500/50 outline-none transition-all tabular-nums"
+              />
+            </div>
+          ))}
+        </div>
+      </div>
     </section>
+  );
+}
+
+const RISK_WEIGHTS: { key: keyof GlobalSettings; label: string }[] = [
+  { key: 'WRegex', label: 'Regex' },
+  { key: 'WBehavior', label: 'Поведінка' },
+  { key: 'WReviewsPct', label: 'Відгуки %' },
+  { key: 'WReviewsText', label: 'Відгуки текст' },
+  { key: 'WLlm', label: 'LLM' },
+  { key: 'WIdentity', label: 'Ідентичність' },
+];
+
+function AdminToggleCard({
+  icon, label, subLabel, checked, onChange,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  subLabel: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <motion.div variants={{ hidden: { opacity: 0, y: 16 }, visible: { opacity: 1, y: 0 } }}>
+      <AdminSettingCard icon={icon} label={label} subLabel={subLabel}>
+        <button
+          onClick={() => onChange(!checked)}
+          className={cn(
+            'w-full flex items-center justify-between px-4 py-2.5 rounded-xl border text-sm font-bold transition-all focus:ring-2 focus:ring-orange-500/50 outline-none',
+            checked
+              ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+              : 'bg-slate-950 border-slate-800 text-slate-400'
+          )}
+        >
+          <span>{checked ? 'Увімкнено' : 'Вимкнено'}</span>
+          <span className={cn('w-8 h-4 rounded-full relative transition-colors', checked ? 'bg-accent-500' : 'bg-slate-600')}>
+            <span
+              className={cn(
+                'absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all',
+                checked ? 'right-0.5' : 'left-0.5'
+              )}
+            />
+          </span>
+        </button>
+      </AdminSettingCard>
+    </motion.div>
   );
 }
 
@@ -842,27 +474,5 @@ function AdminSettingCard({ icon, label, subLabel, children }: any) {
       </div>
       {children}
     </div>
-  );
-}
-
-function BankToggle({ label, active, onClick }: any) {
-  return (
-    <motion.button
-      whileHover={{ scale: 1.02 }}
-      whileTap={{ scale: 0.98 }}
-      onClick={onClick}
-      className={cn(
-        "w-full flex items-center justify-between p-3 rounded-2xl border transition-all cursor-pointer focus:ring-2 focus:ring-emerald-500/50 outline-none",
-        active ? "bg-emerald-500/10 border-emerald-500/30" : "bg-slate-950 border-slate-800 hover:border-slate-700"
-      )}
-    >
-      <span className={cn("text-xs font-bold", active ? "text-emerald-400" : "text-slate-400")}>{label}</span>
-      <div className={cn(
-        "w-4 h-4 rounded-full border-2 flex items-center justify-center",
-        active ? "bg-emerald-500 border-emerald-400" : "border-slate-700"
-      )}>
-        {active && <CheckCircle2 className="w-3 h-3 text-slate-950" />}
-      </div>
-    </motion.button>
   );
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers } from 'lucide-react';
+import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers, SlidersHorizontal } from 'lucide-react';
 import { ArbitrageOpportunity, Order } from '../types';
 import { cn } from '../lib/utils';
 import { formatDistanceToNow } from 'date-fns';
@@ -13,9 +13,11 @@ import { api } from '../services/api';
 // Modular components
 import { FilterControls } from './dashboard/FilterControls';
 import { TradingModeToggle } from './dashboard/TradingModeToggle';
-import { MakerOpportunityCard } from './dashboard/MakerOpportunityCard';
+import { ExchangeHealth } from './dashboard/ExchangeHealth';
+import MakerWorkspace from './maker/MakerWorkspace';
+import { useExchanges } from '../hooks/useExchanges';
 import { useSpreadFilters, SortOption } from '../hooks/useSpreadFilters';
-import { useMakerData } from '../hooks/useMakerData';
+import { useChangeFlash } from '../hooks/useChangeFlash';
 
 const BANK_NAMES_MAP: Record<string, string> = {
   "43": "Monobank",
@@ -75,61 +77,49 @@ export default function Dashboard() {
   const isFocusMode = useAppStore(state => state.isFocusMode);
   const setIsFocusMode = useAppStore(state => state.setIsFocusMode);
   const tradingMode = useAppStore(state => state.tradingMode);
+  const isAdmin = useAppStore(state => state.auth?.isAdmin ?? false);
 
   // Data fetching
-  const { data: stats, isLoading: isStatsLoading } = useSWR('/stats', api.getStats, { refreshInterval: 5000 });
-  const { data: opportunities, isLoading: isOppsLoading } = useSWR('/opportunities', api.getOpportunities, { refreshInterval: 5000 });
-  
-  // Maker data (only fetched when in maker mode)
-  const { opportunities: makerOpportunities, isLoading: isMakerLoading } = useMakerData();
+  const { data: stats, isLoading: isStatsLoading, mutate: mutateStats } =
+    useSWR('/stats', () => api.getStats(), { refreshInterval: 5000, shouldRetryOnError: false });
+  const { data: opportunities, isLoading: isOppsLoading } =
+    useSWR('/opportunities', () => api.getOpportunities(), { refreshInterval: 5000, shouldRetryOnError: false });
+
+  const isScannerActive = stats?.isScannerActive ?? false;
+  const [isTogglingScanner, setIsTogglingScanner] = useState(false);
+  const [showTuning, setShowTuning] = useState(false);
+  const { names: exchangeNames } = useExchanges();
+
+  /**
+   * Старт/стоп ядра. Пишемо в is_scanner_active через /settings/global —
+   * саме цей ключ scanner.py перечитує на кожному циклі.
+   */
+  const toggleScanner = async () => {
+    setIsTogglingScanner(true);
+    try {
+      await api.setScannerActive(!isScannerActive);
+      await mutateStats();
+      toast.success(isScannerActive ? 'Ядро сканера зупинено' : 'Ядро сканера запущено');
+    } catch (error: any) {
+      toast.error(`Не вдалось перемкнути сканер: ${error?.message ?? 'помилка'}`);
+    } finally {
+      setIsTogglingScanner(false);
+    }
+  };
   
   // Use custom hook for filtering (Taker mode)
   const { opportunities: activeOpportunities, hasExclusions } = useSpreadFilters(opportunities, { sortBy });
-
-  const prevOppsLength = useRef(opportunities?.length || 0);
-
-  // Audio Notification
-  useEffect(() => {
-    if (opportunities && opportunities.length > prevOppsLength.current) {
-      const newOpps = opportunities.slice(0, opportunities.length - prevOppsLength.current);
-      const hasHighSpread = newOpps.some(opp => opp.netSpread >= userSettings.minSpread);
-      if (hasHighSpread && userSettings.soundEnabled !== false) {
-        try {
-          const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-          const oscillator = audioCtx.createOscillator();
-          const gainNode = audioCtx.createGain();
-          oscillator.connect(gainNode);
-          gainNode.connect(audioCtx.destination);
-          oscillator.type = 'sine';
-          oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
-          oscillator.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.1);
-
-          const volume = userSettings.soundVolume !== undefined ? userSettings.soundVolume : 0.5;
-          gainNode.gain.setValueAtTime(volume * 0.2, audioCtx.currentTime);
-          gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
-
-          oscillator.start(audioCtx.currentTime);
-          oscillator.stop(audioCtx.currentTime + 0.1);
-        } catch (e) {
-          console.error("Audio playback failed", e);
-        }
-      }
-    }
-    prevOppsLength.current = opportunities?.length || 0;
-  }, [opportunities, userSettings.minSpread, userSettings.soundEnabled, userSettings.soundVolume]);
 
   // Hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
-      if (e.code === 'Space') {
-        e.preventDefault();
-        if (userSettings.autoTrade) {
-          setUserSettings({ ...userSettings, autoTrade: { ...userSettings.autoTrade, enabled: !userSettings.autoTrade.enabled } });
-          toast.info(`Scanner ${!userSettings.autoTrade.enabled ? 'Started' : 'Paused'}`);
-        }
-      } else if (e.key === 'Escape') {
+      // Пробіл раніше перемикав локальний прапорець autoTrade і показував
+      // "Scanner Started/Paused", хоча зі сканером це не робило нічого.
+      // Реальний старт/стоп тепер — кнопка біля індикатора Scanner;
+      // вішати на неї пробіл небезпечно: випадкове натискання зупиняє ядро.
+      if (e.key === 'Escape') {
         setUserSettings({ ...userSettings, minSpread: 0.5 });
         toast.info('Filters reset');
       }
@@ -153,30 +143,24 @@ export default function Dashboard() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
-              icon={<TrendingUp className="w-5 h-5 text-emerald-400" />}
+              icon={<TrendingUp className="w-5 h-5 text-accent-400" />}
               label="Active Spreads"
               value={activeOpportunities.length}
-              subValue="Real-time opportunities"
-              trend="+12%"
-              trendUp={true}
+              subValue={`${stats?.opportunitiesFound ?? 0} знайдено за сесію`}
               isLoading={isOppsLoading}
             />
             <StatCard
               icon={<ArrowRightLeft className="w-5 h-5 text-blue-400" />}
               label="Cycles Completed"
               value={stats?.cycles ?? 0}
-              subValue={`${stats?.lastCycleMs ?? 0}ms avg latency`}
-              trend="-5ms"
-              trendUp={true}
+              subValue={`${stats?.lastCycleMs ?? 0}ms останній цикл`}
               isLoading={isStatsLoading}
             />
             <StatCard
               icon={<ShieldAlert className="w-5 h-5 text-orange-400" />}
               label="Bots Detected"
               value={stats?.botsDetectedToday ?? 0}
-              subValue="Today's anomalies"
-              trend="+2"
-              trendUp={false}
+              subValue={`${stats?.totalScanned ?? 0} ордерів проскановано`}
               isLoading={isStatsLoading}
             />
             <GoalProgressCard
@@ -184,152 +168,179 @@ export default function Dashboard() {
               goalCapital={userSettings.goalCapital || 50000}
             />
           </div>
+
+          <ExchangeHealth />
         </>
       )}
 
       <div className="space-y-4">
-        {/* Quick Control Bar */}
-        <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl p-3 md:p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 sticky top-16 md:top-0 z-10 shadow-lg">
-          <div className="flex items-center gap-3 md:gap-4 w-full md:w-auto overflow-x-auto pb-2 md:pb-0 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-            {/* Scanner Status */}
-            <div className="flex items-center gap-2 shrink-0 relative">
-              <motion.div
-                animate={{ scale: userSettings.autoTrade?.enabled ? [1, 1.2, 1] : 1 }}
-                transition={{ repeat: Infinity, duration: 2 }}
-              >
-                <Activity className={cn("w-5 h-5", userSettings.autoTrade?.enabled ? "text-emerald-500" : "text-slate-500")} />
-              </motion.div>
-              <span className="text-sm font-bold text-white">Scanner</span>
-              <div className="absolute -bottom-2 left-0 w-full h-0.5 bg-slate-800 overflow-hidden rounded-full">
-                <motion.div
-                  className={cn("h-full", tradingMode === 'maker' ? "bg-purple-500" : "bg-emerald-500")}
-                  initial={{ width: "0%" }}
-                  animate={{ width: "100%" }}
-                  transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
-                />
-              </div>
-            </div>
-            
-            <div className="h-6 w-px bg-slate-800 shrink-0" />
-            
-            {/* Taker / Maker Toggle */}
-            <TradingModeToggle />
-            
-            <div className="h-6 w-px bg-slate-800 shrink-0" />
-            
-            {/* Min Spread (Taker only) */}
-            {tradingMode === 'taker' && (
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">Min Spread:</span>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={userSettings.minSpread}
-                  onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
-                  className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-emerald-500/50 outline-none tabular-nums"
-                />
-                <span className="text-xs text-slate-400">%</span>
-              </div>
-            )}
-            
-            {/* Maker Mode Label */}
-            {tradingMode === 'maker' && (
-              <div className="flex items-center gap-2 shrink-0">
-                <Layers className="w-4 h-4 text-purple-400" />
-                <span className="text-xs text-purple-400 font-semibold uppercase tracking-widest">Order Book Analysis</span>
-              </div>
-            )}
-            
-            <div className="h-6 w-px bg-slate-800 shrink-0" />
-            
-            {/* Exchange Quick Toggles */}
-            <div className="flex items-center gap-1 shrink-0">
-              {['Binance', 'Bybit', 'OKX', 'MEXC'].map(ex => (
-                <motion.button
-                  whileHover={{ scale: 1.05 }}
-                  whileTap={{ scale: 0.95 }}
-                  key={ex}
-                  onClick={() => toggleExchange(ex)}
+        {/*
+          Панель керування у два яруси.
+
+          Раніше все — режим, поріг, усі біржі, фільтри, сортування, вигляд,
+          фокус — тиснулось в один ряд. На телефоні це була горизонтальна
+          стрічка, де потрібне доводилось шукати прокруткою.
+
+          Верхній ярус — те, що потрібне постійно. Налаштування вибірки
+          (біржі, сортування, фільтри) сховані під кнопку.
+        */}
+        <div className="sticky top-16 md:top-0 z-10 bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl shadow-lg">
+          <div className="p-3 md:p-4 flex flex-wrap items-center gap-3">
+            {/* Стан ядра — реальний із /stats, не локальний прапорець */}
+            <div className="flex items-center gap-2 shrink-0">
+              <motion.span
+                className={cn(
+                  "w-2.5 h-2.5 rounded-full",
+                  isScannerActive ? "bg-accent-500" : "bg-slate-600"
+                )}
+                animate={isScannerActive ? { opacity: [1, 0.35, 1] } : { opacity: 1 }}
+                transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+              />
+              <span className="text-sm font-bold text-white">Сканер</span>
+              {isAdmin && (
+                <button
+                  onClick={toggleScanner}
+                  disabled={isTogglingScanner}
+                  title={isScannerActive ? "Зупинити ядро" : "Запустити ядро"}
                   className={cn(
-                    "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-emerald-500/50 outline-none",
-                    userSettings.autoTrade?.allowedExchanges.includes(ex)
-                      ? tradingMode === 'maker' 
-                        ? "bg-purple-500/10 border-purple-500/30 text-purple-400"
-                        : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-                      : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
+                    "px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider border transition-colors disabled:opacity-50 focus:ring-2 focus:ring-accent-500/50 outline-none",
+                    isScannerActive
+                      ? "bg-red-500/10 border-red-500/30 text-red-400 hover:bg-red-500/20"
+                      : "bg-accent-500/10 border-accent-500/30 text-accent-400 hover:bg-accent-500/20"
                   )}
                 >
-                  {ex}
-                </motion.button>
-              ))}
+                  {isScannerActive ? "Стоп" : "Старт"}
+                </button>
+              )}
+            </div>
+
+            <div className="h-6 w-px bg-slate-800 shrink-0 hidden sm:block" />
+
+            <TradingModeToggle />
+
+            {tradingMode === "taker" && (
+              <>
+                <div className="h-6 w-px bg-slate-800 shrink-0 hidden sm:block" />
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">
+                    Спред від
+                  </span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={userSettings.minSpread}
+                    onChange={(e) => setUserSettings({ ...userSettings, minSpread: parseFloat(e.target.value) || 0 })}
+                    className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-sm text-white focus:ring-2 focus:ring-accent-500/50 outline-none tabular-nums"
+                  />
+                  <span className="text-xs text-slate-400">%</span>
+                </div>
+              </>
+            )}
+
+            <div className="flex items-center gap-2 ml-auto shrink-0">
+              <button
+                onClick={() => setShowTuning(!showTuning)}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors focus:ring-2 focus:ring-accent-500/50 outline-none",
+                  showTuning || hasExclusions
+                    ? "bg-accent-500/10 border-accent-500/30 text-accent-400"
+                    : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                )}
+                title="Біржі, сортування, фільтри"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Вибірка</span>
+                {hasExclusions && <span className="w-1.5 h-1.5 rounded-full bg-accent-400" />}
+              </button>
+
+              <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
+                <button
+                  onClick={() => setViewMode("detailed")}
+                  className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-accent-500/50 outline-none", viewMode === "detailed" ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
+                  title="Детально"
+                >
+                  <LayoutGrid className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setViewMode("compact")}
+                  className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-accent-500/50 outline-none", viewMode === "compact" ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
+                  title="Компактно"
+                >
+                  <LayoutList className="w-4 h-4" />
+                </button>
+              </div>
+
+              <button
+                onClick={() => setIsFocusMode(!isFocusMode)}
+                className={cn(
+                  "p-2 rounded-lg transition-colors border focus:ring-2 focus:ring-accent-500/50 outline-none",
+                  isFocusMode
+                    ? "bg-accent-500/10 border-accent-500/30 text-accent-400"
+                    : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
+                )}
+                title="Режим фокусу"
+              >
+                {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full md:w-auto justify-end border-t border-slate-800 md:border-none pt-3 md:pt-0">
-            {/* Advanced Filter Controls */}
-            <FilterControls />
-            
-            {/* Sort selector (Taker only) */}
-            {tradingMode === 'taker' && (
-              <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
-                <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
-                {(['spread', 'profit', 'deal', 'risk'] as const).map(opt => (
-                  <button
-                    key={opt}
-                    onClick={() => setSortBy(opt)}
-                    className={cn(
-                      "px-2 py-1 rounded-md text-xs font-bold transition-all capitalize",
-                      sortBy === opt
-                        ? opt === 'risk' ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-white"
-                        : "text-slate-500 hover:text-slate-300"
-                    )}
-                  >
-                    {opt}
-                  </button>
-                ))}
-              </div>
+          <AnimatePresence initial={false}>
+            {showTuning && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
+                className="overflow-hidden border-t border-slate-800"
+              >
+                <div className="p-3 md:p-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[11px] text-slate-500 uppercase tracking-wider mr-1">Біржі</span>
+                    {exchangeNames.map(ex => (
+                      <button
+                        key={ex}
+                        onClick={() => toggleExchange(ex)}
+                        className={cn(
+                          "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-accent-500/50 outline-none",
+                          userSettings.autoTrade?.allowedExchanges.includes(ex)
+                            ? "bg-accent-500/10 border-accent-500/30 text-accent-400"
+                            : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
+                        )}
+                      >
+                        {ex}
+                      </button>
+                    ))}
+                  </div>
+
+                  {tradingMode === "taker" && (
+                    <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
+                      <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
+                      {([
+                        ["spread", "спред"], ["profit", "профіт"],
+                        ["deal", "обсяг"], ["risk", "ризик"],
+                      ] as const).map(([opt, label]) => (
+                        <button
+                          key={opt}
+                          onClick={() => setSortBy(opt)}
+                          className={cn(
+                            "px-2 py-1 rounded-md text-xs font-bold transition-all",
+                            sortBy === opt
+                              ? opt === "risk" ? "bg-red-500/20 text-red-400" : "bg-slate-800 text-white"
+                              : "text-slate-500 hover:text-slate-300"
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <FilterControls />
+                </div>
+              </motion.div>
             )}
-            
-            {/* View Mode Toggle */}
-            <div className="flex bg-slate-950 rounded-lg p-1 border border-slate-800">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setViewMode('detailed')}
-                className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'detailed' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
-                title="Detailed View"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </motion.button>
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => setViewMode('compact')}
-                className={cn("p-1.5 rounded-md transition-colors focus:ring-2 focus:ring-emerald-500/50 outline-none", viewMode === 'compact' ? "bg-slate-800 text-white" : "text-slate-500 hover:text-slate-300")}
-                title="Compact View"
-              >
-                <LayoutList className="w-4 h-4" />
-              </motion.button>
-            </div>
-            
-            {/* Focus Mode */}
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setIsFocusMode(!isFocusMode)}
-              className={cn(
-                "p-2 rounded-lg transition-colors border focus:ring-2 focus:ring-emerald-500/50 outline-none",
-                isFocusMode 
-                  ? tradingMode === 'maker'
-                    ? "bg-purple-500/10 border-purple-500/30 text-purple-400"
-                    : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" 
-                  : "bg-slate-950 border-slate-800 text-slate-400 hover:text-white"
-              )}
-              title="Focus Mode"
-            >
-              {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-            </motion.button>
-          </div>
+          </AnimatePresence>
         </div>
 
         {/* Conditional rendering based on trading mode */}
@@ -340,11 +351,7 @@ export default function Dashboard() {
             viewMode={viewMode}
           />
         ) : (
-          <MakerOpportunitiesList
-            opportunities={makerOpportunities}
-            isLoading={isMakerLoading}
-            viewMode={viewMode}
-          />
+          <MakerWorkspace />
         )}
       </div>
     </div>
@@ -398,98 +405,28 @@ function TakerOpportunitiesList({
     );
   }
 
+  // Ключ — стабільний id зі сканера, а не позиція в масиві. З індексом у
+  // ключі кожне перетасування списку виглядало для React як зміна всіх
+  // карток одразу: вони перемонтовувались і програвали анімацію заново.
+  //
+  // Каскад (staggerChildren) теж прибрано: дані оновлюються раз на 5 секунд,
+  // і 50 карток, що виїжджають по черзі, займали більше часу, ніж інтервал
+  // між оновленнями — список ніколи не встигав завмерти.
   return (
-    <AnimatePresence mode="popLayout">
-      <motion.div
-        className="grid gap-4 grid-cols-1"
-        variants={{
-          hidden: { opacity: 0 },
-          show: { opacity: 1, transition: { staggerChildren: 0.1 } }
-        }}
-        initial="hidden"
-        animate="show"
-      >
-        {opportunities.map((opp, index) => (
+    <AnimatePresence mode="popLayout" initial={false}>
+      <div className="grid gap-4 grid-cols-1">
+        {opportunities.map((opp) => (
           <OpportunityCard
-            key={`${opp.buyOrder.id}-${opp.sellOrder.id}-${index}`}
+            key={opp.id ?? `${opp.buyOrder.id}-${opp.sellOrder.id}`}
             opp={opp}
             viewMode={viewMode}
           />
         ))}
-      </motion.div>
-    </AnimatePresence>
-  );
-}
-
-// Maker mode opportunities list
-function MakerOpportunitiesList({ 
-  opportunities, 
-  isLoading, 
-  viewMode 
-}: { 
-  opportunities: ReturnType<typeof useMakerData>['opportunities'];
-  isLoading: boolean;
-  viewMode: 'detailed' | 'compact';
-}) {
-  if (isLoading) {
-    return (
-      <div className="grid gap-4 grid-cols-1">
-        {[1, 2, 3].map((i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="bg-slate-900/80 rounded-3xl p-6 border border-purple-500/30 animate-pulse"
-          >
-            <div className="h-8 bg-slate-800 rounded-lg w-1/3 mb-6" />
-            <div className="grid grid-cols-2 gap-4">
-              <div className="h-40 bg-slate-800 rounded-2xl" />
-              <div className="h-40 bg-slate-800 rounded-2xl" />
-            </div>
-          </motion.div>
-        ))}
       </div>
-    );
-  }
-
-  if (opportunities.length === 0) {
-    return (
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        className="p-12 border-2 border-dashed border-purple-500/30 rounded-3xl flex flex-col items-center justify-center text-slate-400"
-      >
-        <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
-          <Layers className="w-6 h-6 text-purple-400 opacity-40" />
-        </div>
-        <p className="text-purple-400/60">Analyzing order books for maker opportunities...</p>
-      </motion.div>
-    );
-  }
-
-  return (
-    <AnimatePresence mode="popLayout">
-      <motion.div
-        className="grid gap-4 grid-cols-1"
-        variants={{
-          hidden: { opacity: 0 },
-          show: { opacity: 1, transition: { staggerChildren: 0.1 } }
-        }}
-        initial="hidden"
-        animate="show"
-      >
-        {opportunities.map((opp) => (
-          <MakerOpportunityCard
-            key={opp.id}
-            opportunity={opp}
-            viewMode={viewMode}
-          />
-        ))}
-      </motion.div>
     </AnimatePresence>
   );
 }
+
 
 function StatCard({ icon, label, value, subValue, trend, trendUp, isLoading }: any) {
   return (
@@ -500,7 +437,7 @@ function StatCard({ icon, label, value, subValue, trend, trendUp, isLoading }: a
           <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</span>
         </div>
         {trend && (
-          <span className={cn("text-xs font-bold", trendUp ? "text-emerald-400" : "text-red-400")}>
+          <span className={cn("text-xs font-bold", trendUp ? "text-accent-400" : "text-red-400")}>
             {trend}
           </span>
         )}
@@ -564,7 +501,14 @@ function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: num
   );
 }
 
-const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact' }> = ({ opp, viewMode }) => {
+/**
+ * Картка спреду.
+ *
+ * Обгорнута в memo: SWR віддає новий масив кожні 5 секунд, і без цього
+ * перемальовувались усі 50 карток, навіть якщо змінилась одна ціна.
+ * Порівнюємо за полями, які реально видно на картці.
+ */
+const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact' }> = ({ opp, viewMode }) => {
   const isHighRisk = (opp.buyOrder.riskScore || 0) >= 50 || (opp.sellOrder.riskScore || 0) >= 50;
 
   const ageInSeconds = Math.floor((Date.now() - opp.timestamp) / 1000);
@@ -575,10 +519,17 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
     toast.success(`Copied ${label}!`);
   };
 
+  // Поява нової картки: коротка й та сама, що й у решті інтерфейсу
+  // (див. --arbix-rise в index.css). Довший рух читається як гальмування.
   const variants = {
-    hidden: { opacity: 0, y: 20 },
+    hidden: { opacity: 0, y: 8 },
     show: { opacity: 1, y: 0 }
   };
+  const enter = { duration: 0.18, ease: [0.22, 1, 0.36, 1] as const };
+
+  // Спред у наявній картці міг поїхати між оновленнями, і побачити це
+  // було ніяк — цифра просто ставала іншою.
+  const spreadShift = useChangeFlash(opp.netSpread);
 
   if (viewMode === 'compact') {
     return (
@@ -588,9 +539,9 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
         initial="hidden"
         animate="show"
         exit={{ opacity: 0, scale: 0.95 }}
-        transition={{ type: "spring", stiffness: 300, damping: 30 }}
+        transition={enter}
         className={cn(
-          "bg-slate-900/80 backdrop-blur-md overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg relative rounded-xl",
+          "bg-slate-900/80 backdrop-blur-md overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgb(var(--accent-rgb)/0.12)] border-t border-slate-800/50 shadow-lg relative rounded-xl",
           isHighRisk ? "border border-red-500/30" : "border border-slate-800"
         )}
       >
@@ -608,11 +559,11 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
               <ExchangeIcon name={opp.sellOrder.exchange} size="sm" />
             </div>
             <div className="flex items-center gap-2 text-sm font-bold text-white tabular-nums">
-              <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.buyOrder.price, 'Buy Price')}>
+              <span className="cursor-pointer hover:text-accent-400 transition-colors" onClick={() => handleCopy(opp.buyOrder.price, 'Buy Price')}>
                 {opp.buyOrder.price.toFixed(2)}
               </span>
               <span className="text-slate-500">→</span>
-              <span className="cursor-pointer hover:text-emerald-400 transition-colors" onClick={() => handleCopy(opp.sellOrder.price, 'Sell Price')}>
+              <span className="cursor-pointer hover:text-accent-400 transition-colors" onClick={() => handleCopy(opp.sellOrder.price, 'Sell Price')}>
                 {opp.sellOrder.price.toFixed(2)}
               </span>
               <div className="text-xs text-slate-400 font-mono uppercase tracking-widest">
@@ -648,14 +599,23 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
 
           <div className="flex items-center gap-4 justify-end flex-1">
             <div className="text-right">
-              <div className="text-sm font-black text-emerald-400 tabular-nums">+{opp.netSpread.toFixed(2)}%</div>
-              <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest tabular-nums">{opp.netProfit.toFixed(0)} ₴</div>
+              <div
+                className={cn(
+                  'text-lg font-black tabular-nums leading-none transition-colors',
+                  spreadShift === 'up' ? 'text-accent-300'
+                    : spreadShift === 'down' ? 'text-orange-400'
+                    : 'text-accent-400'
+                )}
+              >
+                +{opp.netSpread.toFixed(2)}%
+              </div>
+              <div className="text-xs font-bold text-slate-300 tabular-nums">{opp.netProfit.toFixed(0)} ₴</div>
             </div>
             <div className="flex gap-1">
               <motion.a whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} href={opp.buyOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors">
                 <ExternalLink className="w-3 h-3" />
               </motion.a>
-              <motion.a whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} href={opp.sellOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-lg transition-colors">
+              <motion.a whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.9 }} href={opp.sellOrder.link} target="_blank" rel="noreferrer" className="p-1.5 bg-accent-500 hover:bg-accent-400 text-slate-950 rounded-lg transition-colors">
                 <ExternalLink className="w-3 h-3" />
               </motion.a>
             </div>
@@ -663,7 +623,7 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
         </div>
         <div className="h-0.5 w-full bg-slate-800 absolute bottom-0 left-0">
           <motion.div
-            className="h-full bg-emerald-500"
+            className="h-full bg-accent-500"
             initial={{ width: "100%", backgroundColor: "#10b981" }}
             animate={{ width: "0%", backgroundColor: "#ef4444" }}
             transition={{ duration: 60, ease: "linear" }}
@@ -680,9 +640,9 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
       initial="hidden"
       animate="show"
       exit={{ opacity: 0, scale: 0.95 }}
-      transition={{ type: "spring", stiffness: 300, damping: 30 }}
+      transition={enter}
       className={cn(
-        "bg-slate-900/80 backdrop-blur-md rounded-3xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgba(16,185,129,0.1)] border-t border-slate-800/50 shadow-lg relative",
+        "bg-slate-900/80 backdrop-blur-md rounded-3xl overflow-hidden transition-all hover:scale-[1.01] hover:shadow-[0_4px_20px_rgb(var(--accent-rgb)/0.12)] border-t border-slate-800/50 shadow-lg relative",
         isHighRisk ? "border border-red-500/30" : "border border-slate-800"
       )}
     >
@@ -717,8 +677,33 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
           </div>
 
           <div className="text-left md:text-right border-t border-slate-800/50 md:border-none pt-3 md:pt-0">
-            <div className="text-2xl font-black text-emerald-400 tabular-nums">+{opp.netSpread.toFixed(2)}%</div>
-            <div className="text-xs font-bold text-emerald-500/60 uppercase tracking-widest tabular-nums">Profit: {opp.netProfit.toFixed(0)} ₴</div>
+            <div className="flex items-baseline gap-2 md:justify-end">
+              <span
+                className={cn(
+                  'text-4xl font-black tabular-nums leading-none transition-colors',
+                  spreadShift === 'up' ? 'text-accent-300'
+                    : spreadShift === 'down' ? 'text-orange-400'
+                    : 'text-accent-400'
+                )}
+              >
+                +{opp.netSpread.toFixed(2)}%
+              </span>
+              {spreadShift && (
+                <span
+                  className={cn(
+                    'text-xs font-bold',
+                    spreadShift === 'up' ? 'text-accent-300' : 'text-orange-400'
+                  )}
+                  title="Спред змінився з минулого оновлення"
+                >
+                  {spreadShift === 'up' ? '▲' : '▼'}
+                </span>
+              )}
+            </div>
+            <div className="text-base font-bold text-slate-200 tabular-nums mt-1">
+              {opp.netProfit.toFixed(0)} ₴
+              <span className="text-xs font-medium text-slate-500 ml-1.5">чистими</span>
+            </div>
           </div>
         </div>
 
@@ -731,11 +716,11 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
       <div className="bg-slate-800/30 px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center justify-between border-t border-slate-800 gap-4 md:gap-0">
         <div className="flex items-center justify-between md:justify-start gap-4 w-full md:w-auto">
           <div
-            className="text-xs font-mono cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1 tabular-nums"
+            className="text-xs font-mono cursor-pointer hover:text-accent-400 transition-colors group flex items-center gap-1 tabular-nums"
             onClick={() => handleCopy(opp.dealAmount, 'Deal Amount')}
           >
             <span className="text-slate-400">DEAL:</span>
-            <span className="text-white font-bold group-hover:text-emerald-400">{opp.dealAmount.toFixed(0)} ₴</span>
+            <span className="text-white font-bold group-hover:text-accent-400">{opp.dealAmount.toFixed(0)} ₴</span>
             <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
           </div>
           <div className="text-xs font-mono text-slate-400 flex items-center gap-1">
@@ -762,7 +747,7 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
             href={opp.sellOrder.link}
             target="_blank"
             rel="noreferrer"
-            className="flex-1 md:flex-none justify-center px-4 py-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-xl transition-colors flex items-center gap-2 shadow-lg shadow-emerald-500/20 focus:ring-2 focus:ring-emerald-500/50 outline-none"
+            className="flex-1 md:flex-none justify-center px-4 py-2 bg-accent-500 hover:bg-accent-400 text-slate-950 text-xs font-bold rounded-xl transition-colors flex items-center gap-2 shadow-lg shadow-accent-500/20 focus:ring-2 focus:ring-accent-500/50 outline-none"
           >
             SELL <ExternalLink className="w-3 h-3" />
           </motion.a>
@@ -770,7 +755,7 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
       </div>
       <div className="h-1 w-full bg-slate-800 absolute bottom-0 left-0">
         <motion.div
-          className="h-full bg-emerald-500"
+          className="h-full bg-accent-500"
           initial={{ width: "100%", backgroundColor: "#10b981" }}
           animate={{ width: "0%", backgroundColor: "#ef4444" }}
           transition={{ duration: 60, ease: "linear" }}
@@ -779,6 +764,17 @@ const OpportunityCard: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed
     </motion.div>
   );
 }
+
+const OpportunityCard = React.memo(OpportunityCardBase, (prev, next) =>
+  prev.viewMode === next.viewMode &&
+  prev.opp.netSpread === next.opp.netSpread &&
+  prev.opp.netProfit === next.opp.netProfit &&
+  prev.opp.dealAmount === next.opp.dealAmount &&
+  prev.opp.buyOrder.price === next.opp.buyOrder.price &&
+  prev.opp.sellOrder.price === next.opp.sellOrder.price &&
+  prev.opp.buyOrder.riskFlag === next.opp.buyOrder.riskFlag &&
+  prev.opp.sellOrder.riskFlag === next.opp.sellOrder.riskFlag
+);
 
 function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Order, onCopy: (text: string|number, label: string) => void }) {
   const score = order.riskScore || (order as any).risk_score || 0;
@@ -791,7 +787,7 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
       <div className="flex items-center justify-between mb-3">
         <span className={cn(
           "text-xs font-black px-2 py-0.5 rounded-md tracking-tighter",
-          side === 'BUY' ? "bg-blue-500/20 text-blue-400" : "bg-emerald-500/20 text-emerald-400"
+          side === 'BUY' ? "bg-blue-500/20 text-blue-400" : "bg-accent-500/20 text-accent-400"
         )}>{side}</span>
         <div className="flex items-center gap-1 text-xs font-mono text-slate-400 tabular-nums">
           <span>{order.orderCount} orders</span>
@@ -803,7 +799,7 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
       <div className="flex items-center justify-between mb-2">
         <div className="text-sm font-bold text-white truncate max-w-[120px]">{order.merchantName}</div>
         <div
-          className="text-lg font-black text-white cursor-pointer hover:text-emerald-400 transition-colors group flex items-center gap-1 tabular-nums"
+          className="text-lg font-black text-white cursor-pointer hover:text-accent-400 transition-colors group flex items-center gap-1 tabular-nums"
           onClick={() => onCopy(order.price, `${side} Price`)}
         >
           {(order.price ?? 0).toFixed(2)}

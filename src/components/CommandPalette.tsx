@@ -1,13 +1,33 @@
 import { useEffect, useState } from 'react';
 import { Command } from 'cmdk';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import { useAppStore } from '../store';
+import { api } from '../services/api';
 import { Search, LayoutDashboard, Settings, Key, ShieldBan, Activity, Volume2, VolumeX, Power, PowerOff } from 'lucide-react';
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const { userSettings, setUserSettings, globalSettings, setGlobalSettings, isAdmin } = useAppStore();
+  const { userSettings, setUserSettings, globalSettings, patchGlobalSettings } = useAppStore();
+  const isAdmin = useAppStore(state => state.auth?.isAdmin ?? false);
+
+  /**
+   * Раніше ця команда правила лише локальний стор — на сканер вона
+   * не впливала ніяк. Тепер пише risk_mode у bot_settings.
+   */
+  const toggleRiskMode = async () => {
+    const next = globalSettings.riskMode === 'STRICT' ? 'WARNING' : 'STRICT';
+    const previous = globalSettings.riskMode;
+    patchGlobalSettings({ riskMode: next });
+    try {
+      await api.updateGlobalSettings({ riskMode: next });
+      toast.success(`Рівень антифроду: ${next}`);
+    } catch (error: any) {
+      patchGlobalSettings({ riskMode: previous });
+      toast.error(`Не збережено: ${error?.message ?? 'помилка'}`);
+    }
+  };
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -50,42 +70,42 @@ export function CommandPalette() {
 
           <Command.Group heading="Navigation" className="text-xs font-medium text-zinc-500 px-2 py-1.5">
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/'))}
+              onSelect={() => runCommand(() => navigate('/app'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <LayoutDashboard className="mr-2 h-4 w-4" />
               Dashboard
             </Command.Item>
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/autotrade'))}
+              onSelect={() => runCommand(() => navigate('/app/autotrade'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <Activity className="mr-2 h-4 w-4" />
               Auto-Trade
             </Command.Item>
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/analytics'))}
+              onSelect={() => runCommand(() => navigate('/app/analytics'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <Activity className="mr-2 h-4 w-4" />
               Analytics
             </Command.Item>
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/apikeys'))}
+              onSelect={() => runCommand(() => navigate('/app/apikeys'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <Key className="mr-2 h-4 w-4" />
               API Keys
             </Command.Item>
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/blacklist'))}
+              onSelect={() => runCommand(() => navigate('/app/blacklist'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <ShieldBan className="mr-2 h-4 w-4" />
               Blacklist
             </Command.Item>
             <Command.Item
-              onSelect={() => runCommand(() => navigate('/settings'))}
+              onSelect={() => runCommand(() => navigate('/app/settings'))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               <Settings className="mr-2 h-4 w-4" />
@@ -104,10 +124,10 @@ export function CommandPalette() {
             
             {isAdmin && (
               <Command.Item
-                onSelect={() => runCommand(() => setGlobalSettings({ ...globalSettings, riskMode: globalSettings.riskMode === 'STRICT' ? 'WARNING' : 'STRICT' }))}
+                onSelect={() => runCommand(toggleRiskMode)}
                 className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
               >
-                {globalSettings.riskMode === 'STRICT' ? <PowerOff className="mr-2 h-4 w-4 text-red-400" /> : <Power className="mr-2 h-4 w-4 text-emerald-400" />}
+                {globalSettings.riskMode === 'STRICT' ? <PowerOff className="mr-2 h-4 w-4 text-red-400" /> : <Power className="mr-2 h-4 w-4 text-accent-400" />}
                 {globalSettings.riskMode === 'STRICT' ? 'Relax Risk Mode' : 'Strict Risk Mode'}
               </Command.Item>
             )}
