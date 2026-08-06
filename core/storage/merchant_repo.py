@@ -243,7 +243,11 @@ class MerchantRepo:
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
-        score_delta = VERDICT_SCORE.get(verdict, 0)
+        # Скор ПОТОЧНОГО вердикту, а не приріст. Раніше тут був delta, який
+        # додавався до попереднього значення — через це risk_score ріс від
+        # самого факту перевірки (кожен UNKNOWN +10, кожен SUSPICIOUS +30)
+        # і будь-який мерчант рано чи пізно доповзав до 200.
+        verdict_score = VERDICT_SCORE.get(verdict, 0)
         llm_inc = 1 if (source or "").lower() in LLM_SOURCES else 0
 
         # Валідація trade_recommendation
@@ -265,7 +269,13 @@ class MerchantRepo:
                 verdict = excluded.verdict,
                 risk_type = excluded.risk_type,
                 reason = excluded.reason,
-                risk_score = MIN (merchant_verdict.risk_score + excluded.risk_score, 200),
+                /* Скор поточного вердикту як підлога + згасання історії на 30%
+                   за кожну перевірку. Мерчант, який щойно був BLOCK, не стає
+                   "чистим" з першої ж OK-перевірки (100 -> 70 -> 49 -> 34...),
+                   але й не інфлюється від повторних перевірок: стабільний
+                   SUSPICIOUS назавжди лишається 30, а не росте до 200. */
+                risk_score = MAX(excluded.risk_score,
+                                 CAST(merchant_verdict.risk_score * 0.7 AS INTEGER)),
                 llm_calls_count = merchant_verdict.llm_calls_count + ?,
                 save_count = merchant_verdict.save_count + 1,
                 updated_at = excluded.updated_at,
@@ -281,7 +291,7 @@ class MerchantRepo:
                 verdict,
                 risk_type,
                 reason,
-                score_delta,
+                verdict_score,
                 llm_inc,
                 1,
                 now,

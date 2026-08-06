@@ -25,6 +25,7 @@ from core.storage.merchant_db import MerchantDB
 from core.analysis.behavioral_analyzer import analyze_history
 from core.analysis.identity_analyzer import analyze_identity
 from core.utils.cache import TTLCache
+from core.utils.tasks import spawn
 from config.defaults import (
     MIN_ORDERS, MIN_COMPLETION,
     TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
@@ -326,12 +327,18 @@ class RiskEngine:
         self._db_sem    = asyncio.Semaphore(_ASYNC_ANALYZE_CONCURRENCY)
 
     async def _build_review_flags(self, exchange: str, merchant_id: str) -> list[str]:
+        """
+        Читає зведення відгуків з БД і будує прапори.
+
+        У бойовому шляху не використовується (там summary вже під рукою —
+        див. _async_analyze_inner), лишається як зручна точка для тестів
+        і ручної перевірки конкретного мерчанта.
+        """
         if not self._db:
             return []
         summary = await self._db.get_reviews_summary(exchange, merchant_id)
         return _build_review_flags_from_summary(summary)
 
-        # 🚀 ДОДАЄМО МЕТОД СИНЕРГІЙ ОДРАЗУ ПІСЛЯ __init__
     def _check_synergies(self, order: Order, regex_flags: list[str], behavior_flags: list[str]) -> list[str]:
         synergies = []
         has_api    = any("API_REPLENISH"   in f for f in behavior_flags)
@@ -387,49 +394,46 @@ class RiskEngine:
         behavior_flags = self._behavior(order)
 
         if self._db and order.merchant_id:
-            asyncio.ensure_future(self._async_analyze(order, behavior_flags))
+            spawn(
+                self._async_analyze(order, behavior_flags),
+                f"risk-analyze-{order.exchange}-{order.merchant_id}",
+                logger_=logger,
+            )
             initial_flags = _dedupe_flags(behavior_flags)
             order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
             return order
 
-        result = regex_analyze(
-            order.trade_terms,
-            order.finish_rate_pct,
-            order.month_order_count,
-            order.is_verified,
-        )
-        order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
-        order.regex_score      = int(getattr(result, "score", 0) or 0)
-
-        flags: list[str] = []
-        if result.verdict == "BLOCK":
-            flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
-        elif result.verdict == "NEEDS_LLM":
-            flags.append(_build_pending_flag(result))
-        elif result.reason:
-            flags.append(_build_weak_regex_flag(result))
-
-        flags.extend(behavior_flags)
-        order.risk_flag = _join_flags(_dedupe_flags(flags)) if flags else "OK"
+        self._analyze_sync_fallback(order, behavior_flags)
         return order
+
+    @staticmethod
+    def _apply_custom_blocks(order: Order) -> None:
+        """
+        Дописує метадані-прапори конфігурованих блоків (ФОП/ТОВ, Банка/Сейф),
+        які потім розбирають персональні фільтри юзерів.
+
+        Викликається рівно в одному місці на шлях аналізу. Раніше той самий
+        блок висів і в _async_analyze, і в analyze_for_spread — тобто
+        відпрацьовував двічі на кожен ордер спреду.
+        """
+        from core.analysis.regex_analyzer import check_custom_blocks_metadata
+
+        custom_flags = check_custom_blocks_metadata(order.trade_terms)
+        if not custom_flags:
+            return
+
+        existing = [f.strip() for f in (getattr(order, "risk_flag", "") or "").split(",") if f.strip()]
+        unique: list[str] = []
+        for f in existing + custom_flags:
+            if f in ("OK", "PENDING") or f in unique:
+                continue
+            unique.append(f)
+        order.risk_flag = ",".join(unique) if unique else "OK"
 
     async def _async_analyze(self, order: Order, behavior_flags: list[str]) -> None:
         async with self._db_sem:
             await self._async_analyze_inner(order, behavior_flags)
-            
-            # ── Custom configurable blocks (FOP/TOV and Banka/Jar) ─────────
-            # Runs on-the-fly to append metadata flags for per-user filters
-            from core.analysis.regex_analyzer import check_custom_blocks_metadata
-            custom_flags = check_custom_blocks_metadata(order.trade_terms)
-            if custom_flags:
-                existing = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
-                unique = []
-                for f in existing + custom_flags:
-                    if f not in unique:
-                        if f in ("OK", "PENDING"):
-                            continue
-                        unique.append(f)
-                order.risk_flag = ",".join(unique) if unique else "OK"
+            self._apply_custom_blocks(order)
 
     async def _async_analyze_inner(self, order: Order, behavior_flags: list[str]) -> None:
         try:
@@ -707,6 +711,13 @@ class RiskEngine:
                         "🤖 Підозра на БОТА: %s [%s] — %s",
                         order.merchant_name, exchange, behavior_reason or signature,
                     )
+                    # Лічильник /status: рахуємо унікальні детекти (дедуп по
+                    # сигнатурі вже зробив _should_log_behavior_alert).
+                    try:
+                        from bot.handlers.core import bump_stat
+                        bump_stat("bots_detected_today")
+                    except Exception:
+                        pass
 
             behavior_flags = _dedupe_flags(behavior_flags)
 
@@ -1076,110 +1087,69 @@ class RiskEngine:
                         flags.append("NARROW_SPREAD")
         return flags
 
-    def analyze_batch(self, orders: list[Order]) -> list[Order]:
-        for order in orders:
-            self.analyze(order)
-        return orders
-
     async def analyze_for_spread(self, orders: list[Order]) -> None:
         """
-        Аналізує ордери для спреду ПАРАЛЕЛЬНО і ЧЕКАЄ завершення.
+        Аналізує ордери ПАРАЛЕЛЬНО і ЧЕКАЄ завершення.
 
-        На відміну від analyze() (fire-and-forget), цей метод гарантує що
-        risk_flag встановлено до повернення — кешований LLM вердикт буде
-        у Telegram алерті (а не тільки в наступному циклі).
+        На відміну від analyze() (fire-and-forget), гарантує що risk_flag
+        встановлено до повернення — кешований LLM-вердикт потрапить уже в цей
+        Telegram-алерт, а не тільки в наступний цикл.
 
         LLM scheduling всередині — все ще async (fire and forget).
-        Behavioral sync pre-check виконується синхронно як завжди.
         """
-        tasks = []
-        for order in orders:
-            self._analyzed += 1
-            behavior_flags = self._behavior(order)
-            if self._db and order.merchant_id:
-                # Встановлюємо початковий прапор (синхронно) — бачимо хоча б behavioral
-                initial_flags = _dedupe_flags(behavior_flags)
-                order.risk_flag = _join_flags(initial_flags) if initial_flags else "PENDING"
-                tasks.append(self._async_analyze(order, behavior_flags))
-            else:
-                # fallback: немає DB → sync regex
-                result = regex_analyze(
-                    order.trade_terms,
-                    order.finish_rate_pct,
-                    order.month_order_count,
-                    order.is_verified,
-                )
-                order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
-                order.regex_score      = int(getattr(result, "score", 0) or 0)
-                flags: list[str] = []
-                if result.verdict == "BLOCK":
-                    flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
-                elif result.verdict == "NEEDS_LLM":
-                    flags.append(_build_pending_flag(result))
-                elif result.reason:
-                    flags.append(_build_weak_regex_flag(result))
-                flags.extend(behavior_flags)
-                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
-
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for exc in results:
-                if isinstance(exc, Exception):
-                    logger.error("analyze_for_spread помилка: %s", exc, exc_info=False)
-
-        # ── Custom configurable blocks (FOP/TOV and Banka/Jar) ─────────
-        from core.analysis.regex_analyzer import check_custom_blocks_metadata
-        for order in orders:
-            custom_flags = check_custom_blocks_metadata(order.trade_terms)
-            if custom_flags:
-                existing = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
-                unique = []
-                for f in existing + custom_flags:
-                    if f not in unique:
-                        if f in ("OK", "PENDING"):
-                            continue
-                        unique.append(f)
-                order.risk_flag = ",".join(unique) if unique else "OK"
+        await self._analyze_awaited(orders)
 
     async def analyze_batch_async(self, orders: list[Order]) -> list[Order]:
         """
-        Справжній async batch — всі ордери обробляються паралельно через gather.
-        Попередня версія викликала sync analyze() і ніколи не чекала async аналізу.
+        Те саме, що analyze_for_spread, але повертає список ордерів —
+        зручно для тейкер-шляху. Раніше це були дві майже дослівні копії.
         """
+        await self._analyze_awaited(orders)
+        return orders
+
+    async def _analyze_awaited(self, orders: list[Order]) -> None:
+        """Спільна реалізація для analyze_for_spread / analyze_batch_async."""
         tasks = []
         for order in orders:
             self._analyzed += 1
             behavior_flags = self._behavior(order)
             if self._db and order.merchant_id:
+                # Початковий прапор (синхронно) — видно хоча б behavioral,
+                # поки не завершився async-аналіз.
                 order.risk_flag = _join_flags(_dedupe_flags(behavior_flags)) or "PENDING"
                 tasks.append(self._async_analyze(order, behavior_flags))
             else:
-                # fallback: немає DB → sync regex
-                result = regex_analyze(
-                    order.trade_terms,
-                    order.finish_rate_pct,
-                    order.month_order_count,
-                    order.is_verified,
-                )
-                order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
-                order.regex_score      = int(getattr(result, "score", 0) or 0)
-                flags: list[str] = []
-                if result.verdict == "BLOCK":
-                    flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
-                elif result.verdict == "NEEDS_LLM":
-                    flags.append(_build_pending_flag(result))
-                elif result.reason:
-                    flags.append(_build_weak_regex_flag(result))
-                flags.extend(behavior_flags)
-                order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+                self._analyze_sync_fallback(order, behavior_flags)
 
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for exc in results:
-                if isinstance(exc, Exception):
-                    logger.error("analyze_batch_async помилка: %s", exc, exc_info=False)
+        if not tasks:
+            return
 
-        return orders
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for exc in results:
+            if isinstance(exc, Exception):
+                logger.error("analyze помилка: %s", exc, exc_info=False)
+
+    def _analyze_sync_fallback(self, order: Order, behavior_flags: list[str]) -> None:
+        """Без БД — тільки синхронний regex. Спільно для всіх точок входу."""
+        result = regex_analyze(
+            order.trade_terms,
+            order.finish_rate_pct,
+            order.month_order_count,
+            order.is_verified,
+        )
+        order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
+        order.regex_score      = int(getattr(result, "score", 0) or 0)
+
+        flags: list[str] = []
+        if result.verdict == "BLOCK":
+            flags.append(f"BLOCK:{result.risk_type}:{result.reason}")
+        elif result.verdict == "NEEDS_LLM":
+            flags.append(_build_pending_flag(result))
+        elif result.reason:
+            flags.append(_build_weak_regex_flag(result))
+        flags.extend(behavior_flags)
+        order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
+        self._apply_custom_blocks(order)
 
     def stats(self) -> str:
         return f"RiskEngine: {self._analyzed} analyzed, {self._db_hits} db hits"
