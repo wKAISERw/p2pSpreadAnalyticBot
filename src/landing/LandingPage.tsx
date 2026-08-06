@@ -9,6 +9,7 @@ import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
 import { Surface, DataRain, MonoTag, Metric } from './surfaces';
+import TrustStrip from './TrustStrip';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
 
@@ -129,11 +130,16 @@ export default function LandingPage() {
               return (
                 <Reveal key={pillar.title} delay={i * 90}>
                   <GlowCard className="h-full bg-slate-950/40 border border-slate-800/60 backdrop-blur-sm rounded-3xl px-6 py-8 sm:px-8 hover:border-accent-500/25 hover:bg-slate-950/60 transition-all">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="w-9 h-9 rounded-lg bg-accent-500/15 border border-accent-500/25 flex items-center justify-center shrink-0">
-                        <Icon className="w-4.5 h-4.5 text-accent-400" />
+                    {/*
+                      Плитка іконки навмисно велика й світиться: у сітці з
+                      трьох колонок вона єдина дає вертикальний акцент і
+                      не дає блокам злитись у суцільний текст.
+                    */}
+                    <div className="flex items-start justify-between mb-5">
+                      <div className="w-14 h-14 rounded-2xl bg-accent-500/12 border border-accent-500/25 flex items-center justify-center shrink-0 shadow-lg shadow-accent-500/10">
+                        <Icon className="w-7 h-7 text-accent-400" />
                       </div>
-                      <span className="tag-mono text-[10px] text-slate-600">
+                      <span className="tag-mono text-[10px] text-slate-700">
                         0{i + 1}
                       </span>
                     </div>
@@ -195,6 +201,13 @@ export default function LandingPage() {
               </div>
             </div>
           </Surface>
+        </Reveal>
+      </Section>
+
+      {/* ─── Що саме перевіряється ────────────────────────────────────── */}
+      <Section className="py-12 sm:py-16">
+        <Reveal>
+          <TrustStrip />
         </Reveal>
       </Section>
 

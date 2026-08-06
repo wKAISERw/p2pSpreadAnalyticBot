@@ -37,7 +37,7 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 18px;
+        gap: 22px;
         font-family: 'JetBrains Mono', Consolas, ui-monospace, monospace;
         background: #020617;
       }
@@ -56,9 +56,9 @@
 
       .boot-mark {
         position: relative;
-        width: 46px;
-        height: 46px;
-        border-radius: 13px;
+        width: 76px;
+        height: 76px;
+        border-radius: 22px;
         background: #10b981;
         display: flex;
         align-items: center;
@@ -67,21 +67,22 @@
       }
 
       .boot-mark svg {
-        width: 26px;
-        height: 26px;
+        width: 42px;
+        height: 42px;
       }
 
       .boot-label {
         position: relative;
-        font-size: 11px;
-        letter-spacing: 0.22em;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.3em;
         text-transform: uppercase;
         color: #10b981;
       }
 
       .boot-status {
         position: relative;
-        font-size: 11px;
+        font-size: 12px;
         letter-spacing: 0.08em;
         color: #475569;
       }
@@ -93,6 +94,24 @@
       }
       .boot-status i:nth-child(2) { animation-delay: 0.2s; }
       .boot-status i:nth-child(3) { animation-delay: 0.4s; }
+
+      /*
+        Світло за курсором. Позиція пишеться в CSS-змінні напряму на
+        елементі — ні стану, ні перемальовок; на дотикових пристроях
+        слухач не вішається взагалі, бо курсора там немає.
+      */
+      #boot-glow {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 400ms ease;
+        background: radial-gradient(
+          22rem circle at var(--gx, 50%) var(--gy, 50%),
+          rgb(16 185 129 / 0.16),
+          transparent 65%
+        );
+      }
 
       @keyframes boot-pulse {
         0%, 100% { opacity: 1; transform: scale(1); }
@@ -115,6 +134,7 @@
   <body>
     <div id="root">
       <div id="boot">
+        <div id="boot-glow"></div>
         <span class="boot-mark">
           <svg viewBox="0 0 24 24" fill="none" stroke="#020617" stroke-width="2.5"
                stroke-linecap="round" stroke-linejoin="round">
@@ -127,6 +147,23 @@
         </span>
       </div>
     </div>
+    <script>
+      // Виконується до завантаження бандла, тому все вручну й мінімально.
+      (function () {
+        var glow = document.getElementById('boot-glow');
+        if (!glow || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+
+        window.addEventListener(
+          'pointermove',
+          function (e) {
+            glow.style.opacity = '1';
+            glow.style.setProperty('--gx', e.clientX + 'px');
+            glow.style.setProperty('--gy', e.clientY + 'px');
+          },
+          { passive: true }
+        );
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

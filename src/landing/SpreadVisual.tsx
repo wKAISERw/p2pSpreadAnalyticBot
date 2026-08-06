@@ -66,7 +66,21 @@ export default function SpreadVisual() {
           </span>
         </div>
 
-        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-4">
+        {/*
+          Спред — головне число на всій сторінці, тому воно стоїть окремо
+          й крупно, а не втиснуте між двома ногами. Раніше всі три
+          елементи були одного розміру, і око не знало, за що чіплятись.
+        */}
+        <div key={`s${index}`} className="animate-tick text-center mb-5">
+          <div className="text-5xl sm:text-6xl font-black text-accent-400 tabular-nums leading-none tracking-tight">
+            +{spread.toFixed(2)}%
+          </div>
+          <div className="tag-mono text-[10px] uppercase tracking-[0.25em] text-slate-500 mt-2">
+            чистий спред
+          </div>
+        </div>
+
+        <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
           <Leg
             key={`b${index}`}
             label="Купуєш"
@@ -75,16 +89,7 @@ export default function SpreadVisual() {
             tone="down"
           />
 
-          <div className="flex flex-col items-center gap-1 px-1">
-            <div
-              key={`s${index}`}
-              className="animate-tick text-2xl sm:text-3xl font-black text-accent-400 tabular-nums leading-none"
-            >
-              +{spread.toFixed(2)}%
-            </div>
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">спред</div>
-            <ArrowRight className="w-3.5 h-3.5 text-slate-700 mt-1" />
-          </div>
+          <ArrowRight className="w-4 h-4 text-slate-700 shrink-0" />
 
           <Leg
             key={`s2${index}`}
@@ -125,7 +130,7 @@ const Leg: React.FC<{
   tone: 'up' | 'down';
 }> = ({ label, exchange, price, tone }) => {
   return (
-    <div className="min-w-0 animate-tick">
+    <div className={cn('min-w-0 animate-tick', tone === 'up' && 'text-right')}>
       <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">{label}</div>
       <div className="text-sm font-bold text-white truncate">{exchange}</div>
       <div
