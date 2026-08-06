@@ -655,3 +655,20 @@
     animation: none;
   }
 }
+
+/*
+ * Пробіг підсвічення по плитці біржі. Затримка задається на елементі,
+ * тож сім плиток дають ефект хвилі, що йде зліва направо.
+ */
+@keyframes arbix-scan-sweep {
+  0%, 70%, 100% { opacity: 0; }
+  10%, 25%      { opacity: 1; }
+}
+
+.animate-scan-sweep {
+  animation: arbix-scan-sweep 4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-scan-sweep { animation: none; opacity: 0; }
+}

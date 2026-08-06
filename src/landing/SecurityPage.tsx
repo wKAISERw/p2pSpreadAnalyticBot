@@ -7,8 +7,9 @@ import {
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
-import { Surface, MonoTag, DataRain } from './surfaces';
-import { BracketMetric } from './blocks';
+import { MonoTag, DataRain } from './surfaces';
+import { BracketMetric, RiskSpectrum } from './blocks';
+import ScanField from './ScanField';
 
 /**
  * Антифрод і поводження з даними.
@@ -27,53 +28,49 @@ import { BracketMetric } from './blocks';
  * замовчуванням.
  */
 const WEIGHTS = [
-  { key: 'W_REGEX', label: 'Розбір умов', weight: 28, icon: ScanText },
-  { key: 'W_BEHAVIOR', label: 'Поведінка в часі', weight: 22, icon: Activity },
-  { key: 'W_LLM', label: 'Вердикт мовної моделі', weight: 20, icon: Brain },
-  { key: 'W_REVIEWS_PCT', label: 'Частка негативу', weight: 12, icon: Percent },
-  { key: 'W_IDENTITY', label: 'Клон профілю', weight: 10, icon: Users },
-  { key: 'W_REVIEWS_TEXT', label: 'Тексти скарг', weight: 8, icon: FileText },
+  {
+    key: 'W_REGEX',
+    label: 'Розбір умов',
+    weight: 28,
+    icon: ScanText,
+    text: 'Текст оголошення проти набору правил: треті особи, чек перед відпуском, зовнішні посилання, натяки на готівку й казино.',
+  },
+  {
+    key: 'W_BEHAVIOR',
+    label: 'Поведінка в часі',
+    weight: 22,
+    icon: Activity,
+    text: 'Ліміти, що не рухаються десятки циклів, миттєве поповнення обсягу, аномальна швидкість — сигнатура бота.',
+  },
+  {
+    key: 'W_LLM',
+    label: 'Вердикт моделі',
+    weight: 20,
+    icon: Brain,
+    text: 'Мовна модель читає негатив і формулює, що саме сталось.',
+  },
+  {
+    key: 'W_REVIEWS_PCT',
+    label: 'Частка негативу',
+    weight: 12,
+    icon: Percent,
+    text: 'Кількісний сигнал: 40% негативу дає максимум за цим шаром.',
+  },
+  {
+    key: 'W_IDENTITY',
+    label: 'Клон профілю',
+    weight: 10,
+    icon: Users,
+    text: 'Підтверджений двійник заблокованого мерчанта.',
+  },
+  {
+    key: 'W_REVIEWS_TEXT',
+    label: 'Тексти скарг',
+    weight: 8,
+    icon: FileText,
+    text: 'Одна скарга про кидок важить більше за десять про повільність.',
+  },
 ];
-
-/**
- * Смуги вердикту.
- *
- * Пороги взяті з CompositeScorer.to_verdict — там їх чотири, а не три,
- * як було написано на цій сторінці раніше.
- */
-const BANDS = [
-  {
-    name: 'OK',
-    range: '0–19',
-    tone: 'ok' as const,
-    text: 'Умови чисті, поведінка звичайна, скарг по суті немає. Зв\'язка йде в алерт як є.',
-  },
-  {
-    name: 'WARN',
-    range: '20–44',
-    tone: 'warn' as const,
-    text: 'Один слабкий сигнал: трохи негативу або дрібна нетиповість. Показується з позначкою.',
-  },
-  {
-    name: 'SUSPICIOUS',
-    range: '45–74',
-    tone: 'susp' as const,
-    text: 'Сигнали складаються: липкі ліміти плюс скарги, або підозра на бота. Алерт іде з розгорнутою причиною.',
-  },
-  {
-    name: 'BLOCK',
-    range: '75–100',
-    tone: 'block' as const,
-    text: 'Спрацював жорсткий сигнал — трикутник, вимога чека, підтверджений клон. Оголошення не показується.',
-  },
-];
-
-const BAND_STYLE = {
-  ok: { text: 'text-accent-400', border: 'border-accent-500/30', bar: 'bg-accent-500' },
-  warn: { text: 'text-yellow-400', border: 'border-yellow-500/30', bar: 'bg-yellow-500' },
-  susp: { text: 'text-orange-400', border: 'border-orange-500/30', bar: 'bg-orange-500' },
-  block: { text: 'text-red-400', border: 'border-red-500/30', bar: 'bg-red-500' },
-};
 
 const LAYERS = [
   {
@@ -106,106 +103,182 @@ const LAYERS = [
   },
 ];
 
-const DATA = [
-  {
-    icon: KeyRound,
-    title: 'Ключі бірж шифруються',
-    text:
-      'API-ключі зберігаються в зашифрованому вигляді. Бот при старті перевіряє ключ шифрування і не запускається, якщо не може прочитати збережене — краще не стартувати, ніж працювати з чужими креденшлами.',
-  },
+/**
+ * Шлях даних — від пристрою до сховища.
+ *
+ * У референсі цей блок називався «client-side encryption → zero-knowledge
+ * relay → decentralized vault». Нічого з цього в продукті немає, і
+ * підписати чужу архітектуру під свою було б обманом. Тут — те, що
+ * справді відбувається.
+ */
+const DATA_PATH = [
   {
     icon: Lock,
+    tag: 'ВХІД',
     title: 'Особу підтверджує Telegram',
-    text:
-      'Вхід у дашборд лише через підписаний Telegram: id приходить доведеним, а не введеним у поле. Персональні дані — фільтри, картки, баланси — доступні тільки власнику сесії.',
+    text: 'id приходить підписаним, а не введеним у поле. Сесія прив\'язана до нього, і чужі дані під нею не відкриються.',
+  },
+  {
+    icon: KeyRound,
+    tag: 'КЛЮЧІ',
+    title: 'Ключі бірж шифруються',
+    text: 'API-ключі лежать зашифрованими. Бот при старті перевіряє ключ шифрування і не запускається, якщо не може прочитати збережене.',
   },
   {
     icon: Server,
-    title: 'Дані лишаються в тебе',
-    text:
-      'Це не хмарний сервіс: бот і база живуть на твоєму сервері. Назовні йдуть лише запити до бірж і, якщо ти увімкнув розбір відгуків, знеособлені тексти в мовну модель.',
+    tag: 'СХОВИЩЕ',
+    title: 'База — на твоєму сервері',
+    text: 'Це не хмарний сервіс. Назовні йдуть лише запити до бірж і, якщо ти увімкнув розбір відгуків, знеособлені тексти в мовну модель.',
   },
 ];
 
 export default function SecurityPage() {
+  const top = WEIGHTS[0];
+  const second = WEIGHTS[1];
+  const rest = WEIGHTS.slice(2);
+
   return (
     <LandingLayout>
-      <Section className="pt-16 sm:pt-20">
+      {/*
+        Скануючий промінь за шапкою сторінки. Живе тут, а не в макеті:
+        це сторінка про перевірку, і фон, який безперервно щось «сканує»,
+        тут доречний — на решті сторінок він був би просто шумом.
+
+        Маска гасить його донизу, щоб текст секцій нижче лишався на
+        спокійному фоні.
+      */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-[46rem] overflow-hidden"
+        style={{
+          maskImage: 'linear-gradient(to bottom, black 40%, transparent)',
+          WebkitMaskImage: 'linear-gradient(to bottom, black 40%, transparent)',
+        }}
+        aria-hidden
+      >
+        <ScanField className="w-full h-full opacity-70" />
+      </div>
+
+      <Section className="pt-16 sm:pt-20 relative">
         <SectionHeading
           eyebrow="Ризик-движок"
           title="Спред без перевірки контрагента — це пастка"
           description="У P2P втрачають не на коливанні курсу, а на трикутниках, заморожених переказах і скаргах. Шість сигналів зводяться в один бал від 0 до 100, і від нього залежить, чи побачиш ти цю зв'язку взагалі."
         />
 
+        <div className="mb-4">
+          <MonoTag>composite_scorer</MonoTag>
+        </div>
+
         {/*
-          Ваги друкуються буквально. Це найсильніший аргумент сторінки:
-          не «розумний алгоритм», а конкретні коефіцієнти, які видно.
+          Бенто замість рівного списку: ваги неоднакові, тож і плитки
+          неоднакові. Розбір умов важить 28% — він і займає найбільше
+          місця. Ієрархія на екрані повторює ієрархію в коді.
         */}
-        <Reveal className="mb-12">
-          <Surface kind="scan" className="p-6 sm:p-8">
-            <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
-              <div>
-                <div className="mb-3">
-                  <MonoTag>composite_scorer</MonoTag>
+        <div className="grid lg:grid-cols-3 gap-4 mb-5">
+          <Reveal className="lg:col-span-2 min-w-0">
+            <GlowCard className="h-full surface-scan bg-slate-950/80 border border-accent-500/20 rounded-3xl p-6 sm:p-7">
+              <div className="flex items-start justify-between gap-4 mb-6">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span className="w-10 h-10 rounded-xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shrink-0">
+                    <top.icon className="w-5 h-5 text-accent-400" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-lg font-bold text-white truncate">{top.label}</div>
+                    <div className="tag-mono text-[10px] text-slate-600">{top.key}</div>
+                  </div>
                 </div>
-                <h3 className="text-xl font-bold text-white tracking-tight">
-                  З чого складається бал
-                </h3>
+                <span className="tag-mono text-sm font-black text-accent-400 tabular-nums shrink-0">
+                  {top.weight}%
+                </span>
               </div>
-              <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-500">
-                значення за замовчуванням
-              </span>
-            </div>
 
-            {/* Одна смуга з шести часток — видно співвідношення, не читаючи цифр */}
-            <div className="flex h-2 rounded-full overflow-hidden mb-7 gap-px">
-              {WEIGHTS.map((w, i) => (
-                <span
-                  key={w.key}
-                  className="bg-accent-500 transition-opacity"
-                  style={{ width: `${w.weight}%`, opacity: 1 - i * 0.13 }}
-                  aria-hidden
-                />
-              ))}
-            </div>
+              {/* Усі шість ваг стовпчиками — співвідношення видно одразу */}
+              <div className="flex items-end gap-1.5 h-24 mb-5">
+                {WEIGHTS.map((w, i) => (
+                  <div key={w.key} className="flex-1 flex flex-col justify-end h-full group">
+                    <div
+                      className={cn(
+                        'rounded-t transition-colors',
+                        i === 0 ? 'bg-accent-400' : 'bg-accent-500/35 group-hover:bg-accent-500/60'
+                      )}
+                      style={{ height: `${(w.weight / 28) * 100}%` }}
+                      title={`${w.label} — ${w.weight}%`}
+                    />
+                  </div>
+                ))}
+              </div>
 
-            <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-4">
-              {WEIGHTS.map(w => {
-                const Icon = w.icon;
-                return (
-                  <div key={w.key} className="flex items-center gap-3">
-                    <Icon className="w-4 h-4 text-accent-400 shrink-0" />
-                    <span className="text-sm text-slate-300 flex-1 min-w-0 truncate">
-                      {w.label}
-                    </span>
-                    <span className="tag-mono text-sm font-bold text-white tabular-nums shrink-0">
+              <p className="text-sm text-slate-400 leading-relaxed">{top.text}</p>
+            </GlowCard>
+          </Reveal>
+
+          <Reveal delay={80} className="min-w-0">
+            <GlowCard className="h-full surface-dots bg-slate-950/70 border border-slate-800/80 rounded-3xl p-6 sm:p-7 flex flex-col">
+              <div className="flex items-center gap-3 mb-4">
+                <second.icon className="w-4 h-4 text-accent-400 shrink-0" />
+                <span className="text-sm font-bold text-slate-200">{second.label}</span>
+              </div>
+
+              <div className="text-5xl font-black text-accent-400 tabular-nums leading-none mb-2">
+                {second.weight}%
+              </div>
+              <div className="tag-mono text-[10px] uppercase tracking-widest text-slate-600 mb-4">
+                {second.key}
+              </div>
+
+              <p className="text-[13px] text-slate-400 leading-relaxed mt-auto">{second.text}</p>
+            </GlowCard>
+          </Reveal>
+        </div>
+
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+          {rest.map((w, i) => {
+            const Icon = w.icon;
+            return (
+              <Reveal key={w.key} delay={i * 60} className="min-w-0">
+                <GlowCard className="h-full bg-slate-900/50 border border-slate-800/80 rounded-2xl p-5 hover:border-accent-500/25 transition-colors">
+                  <Icon className="w-5 h-5 text-accent-400 mb-3" />
+                  <div className="flex items-baseline gap-2 mb-1.5">
+                    <span className="text-2xl font-black text-white tabular-nums leading-none">
                       {w.weight}%
                     </span>
                   </div>
-                );
-              })}
-            </div>
-          </Surface>
-        </Reveal>
+                  <div className="text-xs font-bold text-slate-300 mb-1.5">{w.label}</div>
+                  <p className="text-[11px] text-slate-500 leading-snug">{w.text}</p>
+                </GlowCard>
+              </Reveal>
+            );
+          })}
+        </div>
 
-        {/* Смуги вердикту — горизонтальна шкала, а не три однакові картки */}
+        {/*
+          Спектр однією шкалою. Чотири рівні картки приховували головне:
+          смуги різної ширини, і OK — найвужча з них.
+        */}
         <Reveal>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-px bg-slate-800/60 rounded-2xl overflow-hidden mb-12">
-            {BANDS.map(band => {
-              const s = BAND_STYLE[band.tone];
-              return (
-                <div key={band.name} className="bg-slate-950/80 p-5">
-                  <div className={cn('h-1 w-10 rounded-full mb-4', s.bar)} />
-                  <div className="flex items-baseline gap-2 mb-2">
-                    <span className={cn('tag-mono text-sm font-black', s.text)}>{band.name}</span>
-                    <span className="tag-mono text-[11px] text-slate-600 tabular-nums">
-                      {band.range}
-                    </span>
-                  </div>
-                  <p className="text-[13px] text-slate-400 leading-relaxed">{band.text}</p>
+          <div className="rounded-3xl bg-slate-950/80 border border-slate-800/80 p-6 sm:p-8 mb-12">
+            <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6">
+              <h3 className="text-lg font-bold text-white tracking-tight">Куди веде бал</h3>
+              <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-600">
+                to_verdict
+              </span>
+            </div>
+
+            <RiskSpectrum />
+
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-4 mt-6 pt-6 border-t border-slate-800/70">
+              {[
+                ['OK', 'Умови чисті, скарг по суті немає. Зв\'язка йде в алерт як є.'],
+                ['WARN', 'Один слабкий сигнал. Показується з позначкою.'],
+                ['SUSPICIOUS', 'Сигнали складаються: липкі ліміти плюс скарги. Алерт із розгорнутою причиною.'],
+                ['BLOCK', 'Жорсткий сигнал — трикутник, вимога чека, клон. Не показується взагалі.'],
+              ].map(([name, text]) => (
+                <div key={name}>
+                  <div className="tag-mono text-[11px] font-black text-slate-300 mb-1.5">{name}</div>
+                  <p className="text-[13px] text-slate-500 leading-relaxed">{text}</p>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
         </Reveal>
 
@@ -213,12 +286,10 @@ export default function SecurityPage() {
           {LAYERS.map((layer, i) => {
             const Icon = layer.icon;
             return (
-              <Reveal key={layer.title} delay={(i % 2) * 90}>
+              <Reveal key={layer.title} delay={(i % 2) * 90} className="min-w-0">
                 <GlowCard
                   className={cn(
                     'h-full border border-slate-800/80 rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl',
-                    // Фактура чергується по діагоналі, щоб чотири однакові
-                    // за структурою картки не читались як одна сітка.
                     i % 3 === 0 ? 'surface-dots bg-slate-950/70' : 'surface-grid bg-slate-900/50'
                   )}
                 >
@@ -249,35 +320,49 @@ export default function SecurityPage() {
           <SectionHeading
             eyebrow="Конфіденційність"
             title="Де живуть ключі й дані"
-            description="Коротка відповідь: у тебе. Довга — нижче."
+            description="Коротка відповідь: у тебе. Довга — три кроки нижче."
           />
         </Reveal>
 
         {/*
-          Три пункти навмисно різної ваги: перший — найважливіший, тож
-          широкий і з фактурою. Раніше всі три були однаковими рядками,
-          і читались як юридичний дрібний шрифт.
+          Сходинки зі зсувом: видно, що це шлях, а не три рівнозначні
+          пункти. Кутові дужки замість рамки лишають блок відкритим.
         */}
-        <div className="grid md:grid-cols-2 gap-5">
-          {DATA.map((item, i) => {
+        <div className="space-y-3">
+          {DATA_PATH.map((item, i) => {
             const Icon = item.icon;
-            const isWide = i === 0;
             return (
-              <Reveal key={item.title} delay={i * 80} className={isWide ? 'md:col-span-2' : undefined}>
-                <GlowCard
-                  className={cn(
-                    'h-full flex gap-5 p-6 sm:p-7 rounded-3xl border border-slate-800/80 hover:border-slate-700/80 transition-all',
-                    isWide ? 'surface-scan bg-slate-950/80' : 'bg-slate-900/50'
-                  )}
+              <Reveal key={item.title} delay={i * 90}>
+                <div
+                  className="relative"
+                  style={{ paddingLeft: `${i * 24}px` }}
                 >
-                  <div className="w-11 h-11 rounded-2xl bg-slate-800/80 border border-slate-700/60 flex items-center justify-center shrink-0">
-                    <Icon className="w-5 h-5 text-accent-400" />
-                  </div>
-                  <div className="min-w-0">
-                    <h3 className="text-lg font-bold text-white mb-1.5">{item.title}</h3>
-                    <p className="text-sm text-slate-400 leading-relaxed">{item.text}</p>
-                  </div>
-                </GlowCard>
+                  {/* З'єднувач до попереднього кроку */}
+                  {i > 0 && (
+                    <span
+                      className="absolute w-px h-3 -top-3 bg-accent-500/40"
+                      style={{ left: `${i * 24 - 12}px` }}
+                      aria-hidden
+                    />
+                  )}
+
+                  <GlowCard className="relative flex items-start gap-4 p-5 sm:p-6 rounded-2xl bg-slate-950/70 border border-slate-800/80 hover:border-accent-500/25 transition-colors">
+                    <span className="absolute left-0 top-0 w-3 h-3 border-l border-t border-accent-500/40 rounded-tl-2xl" aria-hidden />
+                    <span className="absolute right-0 bottom-0 w-3 h-3 border-r border-b border-accent-500/40 rounded-br-2xl" aria-hidden />
+
+                    <span className="w-10 h-10 rounded-xl bg-accent-500/10 border border-accent-500/25 flex items-center justify-center shrink-0">
+                      <Icon className="w-5 h-5 text-accent-400" />
+                    </span>
+
+                    <div className="min-w-0">
+                      <div className="tag-mono text-[10px] tracking-widest text-accent-500/70 mb-1.5">
+                        {item.tag}
+                      </div>
+                      <h3 className="text-base font-bold text-white mb-1.5">{item.title}</h3>
+                      <p className="text-sm text-slate-400 leading-relaxed">{item.text}</p>
+                    </div>
+                  </GlowCard>
+                </div>
               </Reveal>
             );
           })}
@@ -290,18 +375,11 @@ export default function SecurityPage() {
             <DataRain count={8} />
             <div className="relative">
               <h2 className="text-xl font-bold text-white mb-3">Чесно про межі захисту</h2>
-              <p className="text-sm text-slate-300 leading-relaxed max-w-3xl mb-6">
-                {/*
-                  Раніше тут було «суттєво мінімізує ризики» — фраза, що
-                  нічого не означає й водночас звучить як обіцянка. Краще
-                  назвати конкретні дірки: вони існують, і людина, яка
-                  торгує, про них однаково дізнається.
-                */}
+              <p className="text-sm text-slate-300 leading-relaxed max-w-3xl mb-7">
                 Перевірки ловлять відомі схеми, а не наміри. Мерчант із чистою історією
-                може повестися нечесно вперше саме з тобою. Банк може попросити
-                джерело коштів через обсяги. Оголошення може змінитись у мить між
-                перевіркою і твоїм натисканням. Сканер зменшує ймовірність — не
-                прибирає її.
+                може повестися нечесно вперше саме з тобою. Банк може попросити джерело
+                коштів через обсяги. Оголошення може змінитись у мить між перевіркою і
+                твоїм натисканням. Сканер зменшує ймовірність — не прибирає її.
               </p>
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-7">
