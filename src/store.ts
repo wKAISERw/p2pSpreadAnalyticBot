@@ -14,7 +14,16 @@ interface AppState {
    * розділи більше не питають ID руками.
    */
   auth: Omit<AuthSession, 'token'> | null;
+  /**
+   * Чи вже перевірено токен із localStorage на бекенді.
+   *
+   * Потрібен, щоб сторінки не приймали рішень до відповіді /auth/me:
+   * без нього AppShell бачив auth === null і встигав відкинути на
+   * /login ще до того, як сесія відновиться.
+   */
+  authRestored: boolean;
   setAuth: (session: AuthSession | null) => void;
+  setAuthRestored: (restored: boolean) => void;
   setIdentities: (identities: LinkedIdentity[]) => void;
 
   userSettings: UserSettings;
@@ -47,6 +56,7 @@ export const useAppStore = create<AppState>()(
   persist(
     (set) => ({
       auth: null,
+      authRestored: false,
       setAuth: (session) => {
         // Токен живе в localStorage окремо: його підставляє інтерцептор
         // axios, а в сторі тримати секрет ні до чого.
@@ -57,6 +67,8 @@ export const useAppStore = create<AppState>()(
             : null,
         });
       },
+      setAuthRestored: (authRestored) => set({ authRestored }),
+
       setIdentities: (identities) =>
         set((state) => ({ auth: state.auth ? { ...state.auth, identities } : null })),
 

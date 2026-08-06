@@ -8,7 +8,7 @@ import Dashboard from './Dashboard';
 import { CommandPalette } from './CommandPalette';
 import ApiAccessBanner from './ApiAccessBanner';
 import { useAppStore } from '../store';
-import { api, authApi, checkConnection, getSessionToken, setSessionToken } from '../services/api';
+import { api, checkConnection } from '../services/api';
 import { signOutGoogle } from '../lib/google';
 import { useCloudPrefs } from '../hooks/useCloudPrefs';
 import { useSpreadAlerts } from '../hooks/useSpreadAlerts';
@@ -80,12 +80,19 @@ export default function AppShell() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(
     () => typeof window === 'undefined' || window.innerWidth >= 768
   );
-  const [isRestoringSession, setIsRestoringSession] = useState(true);
+  // Відновлення сесії робить App — воно потрібне на всіх сторінках,
+  // а не лише всередині дашборду.
+  const authRestored = useAppStore(state => state.authRestored);
 
+  // Прив'язаний Google дає налаштуванням сайту переїжджати між браузерами.
   const hasGoogleLink = Boolean(auth?.identities?.some(i => i.provider === 'google'));
   useCloudPrefs(hasGoogleLink);
+
+  // Звук про новий спред живе тут: у Dashboard він замовкав на будь-якій
+  // іншій сторінці разом із розмонтованим компонентом.
   useSpreadAlerts(Boolean(auth) && connection === 'live');
 
+  // Вихід гасить обидві сесії: нашу і Google, якщо він був задіяний.
   const handleLogout = async () => {
     setAuth(null);
     try {
@@ -95,24 +102,6 @@ export default function AppShell() {
     }
     navigate('/');
   };
-
-  // Токен у localStorage міг протухнути або бути підписаним іншим ботом —
-  // перевіряємо його на бекенді, а не віримо самому факту наявності.
-  useEffect(() => {
-    const token = getSessionToken();
-    if (!token) {
-      setIsRestoringSession(false);
-      return;
-    }
-
-    authApi
-      .me()
-      .then(me =>
-        setAuth({ token, telegramId: me.telegramId, isAdmin: me.isAdmin, identities: me.identities })
-      )
-      .catch(() => setSessionToken(''))
-      .finally(() => setIsRestoringSession(false));
-  }, [setAuth]);
 
   useEffect(() => {
     const checkConn = async () => setConnection(await checkConnection());
@@ -128,7 +117,7 @@ export default function AppShell() {
     api.getGlobalSettings().then(setGlobalSettings).catch(() => {});
   }, [connection, setGlobalSettings]);
 
-  if (isRestoringSession) {
+  if (!authRestored) {
     return (
       <div className="flex items-center justify-center h-screen bg-slate-950 text-slate-500 text-sm">
         Відновлюю сесію…

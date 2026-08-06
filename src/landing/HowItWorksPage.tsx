@@ -4,6 +4,7 @@ import { ArrowRight, Search, Filter, ShieldCheck, Send, Wallet } from 'lucide-re
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard, useReveal } from './motion';
+import { Surface, MonoTag, DataRain } from './surfaces';
 
 /**
  * Конвеєр обробки — від опитування бірж до алерту.
@@ -84,7 +85,7 @@ const Step: React.FC<{
       className={cn('reveal', shown && 'reveal-in')}
       style={{ transitionDelay: `${index * 70}ms` }}
     >
-      <GlowCard className="relative flex gap-5 p-5 sm:p-6 rounded-3xl bg-slate-900/40 border border-slate-800/60 hover:border-accent-500/25 transition-colors">
+      <GlowCard className="surface-dots relative flex gap-5 p-5 sm:p-6 rounded-3xl bg-slate-950/60 border border-slate-800/60 hover:border-accent-500/25 transition-colors">
         <div className="flex flex-col items-center shrink-0">
           <div className="w-11 h-11 rounded-2xl bg-accent-500/10 border border-accent-500/20 flex items-center justify-center">
             <Icon className="w-5 h-5 text-accent-400" />

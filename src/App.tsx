@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import { Toaster } from 'sonner';
 
 import { useAppStore } from './store';
+import { authApi, getSessionToken, setSessionToken } from './services/api';
 import { applyAccent, resolveHue } from './lib/theme';
 
 // Публічний сайт — окремі чанки. Людині, що прийшла на лендинг, не
@@ -24,6 +25,36 @@ function PageFallback() {
 }
 
 export default function App() {
+  const setAuth = useAppStore(state => state.setAuth);
+  const setAuthRestored = useAppStore(state => state.setAuthRestored);
+
+  /*
+   * Відновлення сесії живе тут, а не в AppShell.
+   *
+   * Раніше воно спрацьовувало тільки на /app/*, тож людина, яка
+   * поверталась на головну, бачила в хедері «Увійти» — токен у
+   * localStorage лежав, але ніхто його не перевіряв. Виглядало це рівно
+   * як «сесія не зберігається», хоча сесія була жива.
+   *
+   * Токен усе одно перевіряємо на бекенді: він міг протухнути або бути
+   * підписаним іншим ботом, і сама його наявність нічого не гарантує.
+   */
+  useEffect(() => {
+    const token = getSessionToken();
+    if (!token) {
+      setAuthRestored(true);
+      return;
+    }
+
+    authApi
+      .me()
+      .then(me =>
+        setAuth({ token, telegramId: me.telegramId, isAdmin: me.isAdmin, identities: me.identities })
+      )
+      .catch(() => setSessionToken(''))
+      .finally(() => setAuthRestored(true));
+  }, [setAuth, setAuthRestored]);
+
   // Гама застосовується до першого кадру і при кожній зміні — зокрема
   // коли налаштування приїхали з іншого пристрою через хмару.
   const accentColor = useAppStore(state => state.userSettings.accentColor);

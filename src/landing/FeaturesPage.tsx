@@ -151,8 +151,10 @@ export default function FeaturesPage() {
               >
                 <GlowCard
                   className={cn(
-                    'h-full bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-3xl p-6 sm:p-8 hover:border-slate-700/80 transition-all shadow-xl shadow-slate-950/50',
-                    isWide && 'md:bg-slate-900/75'
+                    'h-full border border-slate-800/80 rounded-3xl p-6 sm:p-8 hover:border-slate-700/80 transition-all shadow-xl shadow-slate-950/50',
+                    // Фактура підказує ієрархію: широкі блоки — суть
+                    // продукту, вузькі — доповнення.
+                    isWide ? 'surface-dots bg-slate-950/70' : 'surface-grid bg-slate-900/50'
                   )}
                 >
                   <div className="flex items-center justify-between gap-4 mb-6 pb-4 border-b border-slate-800/80">

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
+import { Surface, MonoTag, DataRain } from './surfaces';
 
 /**
  * Антифрод і поводження з даними.
@@ -112,7 +113,7 @@ export default function SecurityPage() {
             return (
               <Reveal key={layer.title} delay={(i % 2) * 90}>
                 <GlowCard
-                  className="h-full bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl"
+                  className="surface-dots h-full bg-slate-950/70 border border-slate-800/80 rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl"
                 >
                   <div className="w-12 h-12 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center mb-5 shadow-lg shadow-accent-500/10">
                     <Icon className="w-6 h-6 text-accent-400" />
