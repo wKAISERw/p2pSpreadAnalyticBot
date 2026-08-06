@@ -4,6 +4,7 @@ import {
   ArrowRight, ShieldCheck, Radar, CreditCard, Bell, Brain, LineChart,
   Layers, Bot, Clock,
 } from 'lucide-react';
+import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
@@ -14,18 +15,23 @@ const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'Crypto
 const PILLARS = [
   {
     icon: Radar,
+    // Дрібні візуалізації під кожну опору: голий текст у трьох колонках
+    // читається як список, а не як три різні можливості.
+    visual: 'exchanges' as const,
     title: 'Сканує сім майданчиків',
     text:
       'Одночасно тримає в полі зору P2P-склянки всіх підключених бірж і шукає зв\'язки, де різниця курсів перекриває комісії й мережевий переказ.',
   },
   {
     icon: ShieldCheck,
+    visual: 'risk' as const,
     title: 'Перевіряє контрагента',
     text:
       'Кожен мерчант проходить перевірку до того, як ти побачиш алерт: текст умов, поведінка, відгуки, чорні списки. Спред без цього — половина картини.',
   },
   {
     icon: CreditCard,
+    visual: 'limits' as const,
     title: 'Пам\'ятає про ліміти карток',
     text:
       'Знає добові й місячні ліміти твоїх банків і не пропонує обсяг, який ти фізично не проведеш. Monobank підключається вебхуком і сам звіряє надходження.',
@@ -133,7 +139,8 @@ export default function LandingPage() {
                       </span>
                     </div>
                     <h3 className="text-lg font-bold text-white mb-2">{pillar.title}</h3>
-                    <p className="text-sm text-slate-400 leading-relaxed">{pillar.text}</p>
+                    <p className="text-sm text-slate-400 leading-relaxed mb-5">{pillar.text}</p>
+                    <PillarVisual kind={pillar.visual} />
                   </div>
                 </Reveal>
               );
@@ -225,6 +232,28 @@ export default function LandingPage() {
           })}
         </div>
 
+        <Reveal className="mt-6">
+          <Surface kind="grid" className="p-6 sm:p-8">
+            <div className="grid lg:grid-cols-[1fr_auto] gap-8 items-center">
+              <div>
+                <div className="mb-4">
+                  <MonoTag>alert_preview</MonoTag>
+                </div>
+                <h3 className="text-xl font-bold text-white mb-2">
+                  Ось так виглядає знахідка
+                </h3>
+                <p className="text-sm text-slate-400 leading-relaxed max-w-md">
+                  Кожен алерт приходить уже з вердиктом по обох мерчантах,
+                  порахованим чистим спредом і кнопками просто в застосунок
+                  біржі. Нічого перевіряти руками не треба.
+                </p>
+              </div>
+
+              <AlertPreview />
+            </div>
+          </Surface>
+        </Reveal>
+
         <Reveal className="mt-8">
           <Link
             to="/features"
@@ -261,6 +290,129 @@ export default function LandingPage() {
         </Reveal>
       </Section>
     </LandingLayout>
+  );
+}
+
+/**
+ * Превʼю алерта. Не скріншот, а верстка: масштабується, тримає гаму й
+ * важить нуль. Дані ілюстративні — підпис це говорить прямо.
+ */
+function AlertPreview() {
+  return (
+    <div className="w-full lg:w-80 shrink-0 bg-slate-950/90 border border-slate-800 rounded-2xl p-4 shadow-2xl shadow-slate-950/60">
+      <div className="flex items-center justify-between mb-3 pb-3 border-b border-slate-800">
+        <span className="tag-mono text-[10px] text-slate-500">приклад алерта</span>
+        <span className="text-lg font-black text-accent-400 tabular-nums leading-none">
+          +1.61%
+        </span>
+      </div>
+
+      <div className="space-y-2.5">
+        {[
+          ['Купівля', 'Bybit', '41.02 ₴', 'ok'],
+          ['Продаж', 'OKX', '41.68 ₴', 'warn'],
+        ].map(([side, ex, price, verdict]) => (
+          <div key={side as string} className="flex items-center gap-2.5">
+            <span className="tag-mono text-[10px] text-slate-600 w-14 shrink-0">{side}</span>
+            <span className="text-xs font-bold text-slate-200 flex-1 truncate">{ex}</span>
+            <span className="text-xs tabular-nums text-slate-300">{price}</span>
+            <span
+              className={cn(
+                'w-1.5 h-1.5 rounded-full shrink-0',
+                verdict === 'ok' ? 'bg-accent-500' : 'bg-orange-500'
+              )}
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between text-[11px]">
+        <span className="text-slate-500">Чистими</span>
+        <span className="font-bold text-slate-200 tabular-nums">+412 ₴</span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <div className="text-center py-2 rounded-lg bg-accent-500/10 border border-accent-500/25 text-[11px] font-bold text-accent-400">
+          Відкрити
+        </div>
+        <div className="text-center py-2 rounded-lg bg-slate-900 border border-slate-800 text-[11px] font-bold text-slate-400">
+          Бан
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Міні-візуалізація опори. Показує предмет розмови замість того, щоб
+ * описувати його ще одним реченням: сім назв бірж, шкалу ризику,
+ * заповнені ліміти.
+ */
+function PillarVisual({ kind }: { kind: 'exchanges' | 'risk' | 'limits' }) {
+  if (kind === 'exchanges') {
+    return (
+      <div className="flex flex-wrap gap-1.5">
+        {EXCHANGES.map(name => (
+          <span
+            key={name}
+            className="tag-mono px-2 py-1 rounded-md bg-slate-900 border border-slate-800 text-[10px] text-slate-400"
+          >
+            {name}
+          </span>
+        ))}
+      </div>
+    );
+  }
+
+  if (kind === 'risk') {
+    return (
+      <div className="space-y-2">
+        {[
+          ['Умови', 82],
+          ['Поведінка', 64],
+          ['Відгуки', 45],
+          ['Списки', 96],
+        ].map(([label, pct]) => (
+          <div key={label as string} className="flex items-center gap-2.5">
+            <span className="tag-mono text-[10px] text-slate-500 w-20 shrink-0">{label}</span>
+            <div className="flex-1 h-1 bg-slate-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent-500/70 rounded-full"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2.5">
+      {[
+        ['monobank', 68],
+        ['privatbank', 34],
+        ['пумб', 91],
+      ].map(([bank, pct]) => (
+        <div key={bank as string}>
+          <div className="flex justify-between text-[10px] mb-1">
+            <span className="tag-mono text-slate-500">{bank}</span>
+            <span className={cn('tabular-nums', (pct as number) > 85 ? 'text-orange-400' : 'text-slate-500')}>
+              {pct}%
+            </span>
+          </div>
+          <div className="h-1 bg-slate-800 rounded-full overflow-hidden">
+            <div
+              className={cn(
+                'h-full rounded-full',
+                (pct as number) > 85 ? 'bg-orange-500/80' : 'bg-accent-500/60'
+              )}
+              style={{ width: `${pct}%` }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

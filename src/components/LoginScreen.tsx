@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { Send, KeyRound, Loader2, Info } from 'lucide-react';
+import { Send, KeyRound, Loader2, Info, Activity } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { authApi } from '../services/api';
@@ -8,6 +8,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../store';
 import { AuthConfig, TelegramWidgetPayload } from '../types';
 import { signInWithGoogle as googlePopup } from '../lib/google';
+import { Surface, MonoTag } from '../landing/surfaces';
 
 declare global {
   interface Window {
@@ -78,19 +79,23 @@ export default function LoginScreen() {
         className="w-full max-w-md"
       >
         <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-accent-500/20 border border-accent-500/30 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-accent-500/10">
-            <div className="w-8 h-8 bg-accent-500 rounded-xl" />
+          <div className="w-16 h-16 bg-accent-500/15 border border-accent-500/30 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-accent-500/10 pixel-frame">
+            <Activity className="w-7 h-7 text-accent-400" />
           </div>
-          <h1 className="text-2xl font-bold text-white mb-2">
+          <h1 className="text-2xl font-bold text-white mb-3">
             ARBIX <span className="text-accent-400">QUANTUM</span>
           </h1>
-          <p className="text-sm text-slate-400 max-w-xs mx-auto">
+          <div className="flex justify-center mb-4">
+            <MonoTag>secure_login</MonoTag>
+          </div>
+          <p className="text-sm text-slate-400 max-w-xs mx-auto leading-relaxed">
             Увійди тим самим Telegram, у якому користуєшся ботом — фільтри,
             картки й баланси підтягнуться самі.
           </p>
         </div>
 
-        <div className="bg-slate-900/80 border border-slate-800/80 backdrop-blur-2xl rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl shadow-slate-950/80">
+        <Surface kind="scan" noise className="p-6 sm:p-8 space-y-6 shadow-2xl shadow-slate-950/80">
+          <div className="relative z-10 space-y-6">
           {config?.widgetAvailable && (
             <div>
               <SectionLabel icon={<Send className="w-4 h-4 text-blue-400" />} text="Вхід одним кліком" />
@@ -151,7 +156,8 @@ export default function LoginScreen() {
               </span>
             </div>
           </div>
-        </div>
+          </div>
+        </Surface>
       </motion.div>
     </div>
   );
@@ -215,7 +221,18 @@ function TelegramWidget({
 
   return (
     <div>
-      <div ref={containerRef} className={cn('flex justify-center', failed && 'hidden')} />
+      {/*
+        Віджет малює Telegram, його кольори нам не підвладні. Тому даємо
+        йому власну оправу в нашій гамі — інакше яскраво-синя кнопка
+        вибивається з усього екрана як чужа наліпка.
+      */}
+      <div
+        className={cn(
+          'flex justify-center rounded-2xl border border-slate-800 bg-slate-950/60 p-3',
+          failed && 'hidden'
+        )}
+        ref={containerRef}
+      />
       {failed && (
         <p className="text-xs text-slate-500">
           Віджет не завантажився — скористайся входом за кодом нижче.

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
-import { Activity, Menu, X, ArrowUpRight } from 'lucide-react';
+import { Activity, Menu, X, ArrowUpRight, User } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store';
 import AuroraField from './AuroraField';
@@ -21,7 +21,8 @@ export const NAV = [
 export default function LandingLayout({ children }: { children: React.ReactNode }) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const { pathname } = useLocation();
-  const isLoggedIn = Boolean(useAppStore(state => state.auth));
+  const auth = useAppStore(state => state.auth);
+  const isLoggedIn = Boolean(auth);
 
   // Перехід між сторінками не має лишати відкрите мобільне меню
   // і зберігати позицію прокрутки попередньої сторінки.
@@ -81,6 +82,24 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
               {isLoggedIn ? 'До дашборду' : 'Увійти'}
               <ArrowUpRight className="w-4 h-4" />
             </Link>
+
+            {/*
+              Профіль поруч із кнопкою: показує, під ким ти зайшов, і веде
+              одразу в налаштування акаунта. Для адміна — окрема позначка,
+              бо переплутати робочий і адмінський вхід дорого.
+            */}
+            {isLoggedIn && (
+              <Link
+                to="/app/settings?tab=account"
+                title={`Telegram ID ${auth?.telegramId}${auth?.isAdmin ? ' · адміністратор' : ''}`}
+                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-700 transition-colors relative"
+              >
+                <User className="w-4.5 h-4.5" />
+                {auth?.isAdmin && (
+                  <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-orange-500 border-2 border-slate-950" />
+                )}
+              </Link>
+            )}
 
             <button
               onClick={() => setIsMenuOpen(!isMenuOpen)}
