@@ -21,6 +21,20 @@ import React, { useEffect, useRef } from 'react';
  *     звичайний фон.
  */
 
+/*
+ * highp там, де він є, з відкатом на mediump.
+ *
+ * У mediump діапазон float близько ±65504 з десятком біт мантиси, а
+ * класичний хеш-трюк множить синус на 43758.5453 — тобто вилітає за
+ * точність і дає сміття, іноді NaN. NaN у gl_FragColor це невизначена
+ * поведінка: на одній відеокарті виходить нуль, на іншій біла заливка на
+ * весь шар.
+ *
+ * Пояснення живе тут, а не в тексті шейдера, і це принципово: GLSL ES
+ * 1.00 допускає обмежений набір символів, і частина драйверів відхиляє
+ * не-ASCII навіть усередині коментарів. Кирилиця в шейдері — це той
+ * самий клас помилок «залежить від відеокарти», який ми щойно ловили.
+ */
 const VERT = `attribute vec2 a_position;
 varying vec2 v_uv;
 void main() {
@@ -33,18 +47,7 @@ void main() {
  * у референсі колір був зашитий, і при зміні акценту сторінка
  * розповзалась на два різних зелених.
  */
-const FRAG = `/*
- * highp там, де є. У mediump діапазон float близько +-65504 з десятком
- * біт мантиси, а класичний хеш-трюк множить синус на 43758.5453 — тобто
- * вилітає за точність і дає сміття, іноді NaN. NaN у gl_FragColor —
- * невизначена поведінка: на одній відеокарті виходить нуль, на іншій
- * біла заливка на весь шар. Саме звідси бралась пелена, якої я не міг
- * відтворити в себе.
- *
- * Константи хеша заразом зменшені: навіть під highp немає сенсу
- * балансувати на межі.
- */
-#ifdef GL_FRAGMENT_PRECISION_HIGH
+const FRAG = `#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 #else
 precision mediump float;
@@ -72,8 +75,6 @@ void main() {
   float pulse = smoothstep(0.28, 0.0, distance(uv, m));
 
   float a = clamp(noise * 0.05 + scan * 0.34 + grid * 0.06 + pulse * 0.20, 0.0, 1.0);
-  // Колір уже помножений на альфу: полотно віддається браузеру як
-  // premultiplied, і будь-яке інше узгодження дає каламутну плівку.
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -85,18 +86,7 @@ void main() {
  * підходив сторінці про перевірку; тут потрібне відчуття безперервного
  * обходу майданчиків, а не одноразового просвічування.
  */
-const FRAG_FLOW = `/*
- * highp там, де є. У mediump діапазон float близько +-65504 з десятком
- * біт мантиси, а класичний хеш-трюк множить синус на 43758.5453 — тобто
- * вилітає за точність і дає сміття, іноді NaN. NaN у gl_FragColor —
- * невизначена поведінка: на одній відеокарті виходить нуль, на іншій
- * біла заливка на весь шар. Саме звідси бралась пелена, якої я не міг
- * відтворити в себе.
- *
- * Константи хеша заразом зменшені: навіть під highp немає сенсу
- * балансувати на межі.
- */
-#ifdef GL_FRAGMENT_PRECISION_HIGH
+const FRAG_FLOW = `#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 #else
 precision mediump float;
@@ -112,16 +102,13 @@ float hash(float x) { return fract(sin(x * 12.9898) * 137.51); }
 void main() {
   vec2 uv = v_uv;
 
-  // Доріжки по 40 px: кожна зі своєю швидкістю й фазою
   float lane = floor(uv.x * u_resolution.x / 40.0);
   float speed = 0.10 + hash(lane) * 0.35;
   float phase = hash(lane + 7.0);
 
   float head = fract(uv.y + u_time * speed + phase);
-  // Короткий яскравий хвіст, а не рівна смуга: інакше це просто градієнт
   float packet = pow(1.0 - head, 26.0);
 
-  // Не всі доріжки живі одночасно — суцільна стіна читалась би як шум
   float alive = step(0.55, hash(lane + floor(u_time * 0.25) * 13.0));
 
   float grid = smoothstep(0.035, 0.0, fract(uv.x * u_resolution.x / 40.0));
@@ -139,6 +126,9 @@ function compile(gl: WebGLRenderingContext, type: number, src: string) {
   gl.shaderSource(shader, src);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    // Мовчазна невдача тут коштувала кількох невірних діагнозів: шейдер
+    // не збирався, а сторінка про це ніяк не повідомляла.
+    console.warn('[ScanField] шейдер не зібрався:', gl.getShaderInfoLog(shader));
     gl.deleteShader(shader);
     return null;
   }
@@ -191,6 +181,14 @@ export default function ScanField({
     });
     if (!gl) return;
 
+    // Підстраховка: якщо контекст усе ж загублено (переповнення ліміту
+    // вкладки, скидання драйвера), малювати нічого — і про це має бути
+    // видно, а не тиша.
+    if (gl.isContextLost()) {
+      console.warn('[ScanField] контекст втрачено, фон не малюється');
+      return;
+    }
+
     const vs = compile(gl, gl.VERTEX_SHADER, VERT);
     const fs = compile(gl, gl.FRAGMENT_SHADER, variant === 'flow' ? FRAG_FLOW : FRAG);
     if (!vs || !fs) return;
@@ -200,7 +198,10 @@ export default function ScanField({
     gl.attachShader(program, vs);
     gl.attachShader(program, fs);
     gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.warn('[ScanField] програма не злінкувалась:', gl.getProgramInfoLog(program));
+      return;
+    }
     gl.useProgram(program);
 
     const buffer = gl.createBuffer();
@@ -301,9 +302,21 @@ export default function ScanField({
       themeObserver.disconnect();
       window.removeEventListener('pointermove', onMove);
       document.removeEventListener('visibilitychange', onVisibility);
-      // Явно віддаємо контекст: браузер тримає обмежену кількість
-      // живих WebGL-контекстів на вкладку.
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
+      // Контекст НЕ вбиваємо. Спокуса була саме така — мовляв, браузер
+      // тримає обмежену кількість живих контекстів на вкладку, тож
+      // віддамо свій явно. Але полотно має рівно один контекст на весь
+      // свій вік: після loseContext() повторний getContext() повертає
+      // той самий, уже мертвий. А ефект перезапускається легко —
+      // подвійне монтування в StrictMode, HMR, зміна variant.
+      //
+      // Наслідок був такий: перше монтування малює, cleanup убиває
+      // контекст, друге отримує труп — і далі мовчки не працює нічого.
+      // Шейдери «не збираються» з порожнім логом, полотно лишається
+      // невизначеним, а що саме покаже композитор — залежить від
+      // драйвера. Звідси й те, що в мене виходила порожнеча, а в
+      // користувача світла пелена.
+      //
+      // Контекст і так звільниться разом із полотном при розмонтуванні.
     };
   }, [variant]);
 
