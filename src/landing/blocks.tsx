@@ -666,7 +666,15 @@ export const DataFlow: React.FC = () => {
     },
     {
       title: 'Виходить у мережу',
-      tone: 'muted' as const,
+      /*
+       * Бурштин, а не чорний. Спершу друга колонка стояла на
+       * slate-950/80 — поруч із зеленою вона читалась не як інший бік
+       * порівняння, а як недомальована картка. Бурштин на сайті вже
+       * означає «зверни увагу, але це не помилка» (межі захисту, чого
+       * сканер не робить), і тут значення те саме: те, що йде назовні,
+       * не є проблемою, але про нього треба знати.
+       */
+      tone: 'warn' as const,
       items: [
         'Запити до бірж — ті самі, що робить твій браузер',
         'Тексти відгуків без імен, якщо ти увімкнув їх розбір',
@@ -683,13 +691,13 @@ export const DataFlow: React.FC = () => {
             'rounded-2xl border p-4 sm:p-5',
             side.tone === 'accent'
               ? 'bg-accent-500/[0.06] border-accent-500/25'
-              : 'bg-slate-950/80 border-slate-800'
+              : 'bg-amber-500/[0.05] border-amber-500/25'
           )}
         >
           <div
             className={cn(
               'tag-mono text-[10px] uppercase tracking-[0.18em] mb-3',
-              side.tone === 'accent' ? 'text-accent-400' : 'text-slate-400'
+              side.tone === 'accent' ? 'text-accent-400' : 'text-amber-400'
             )}
           >
             {side.title}
@@ -701,7 +709,7 @@ export const DataFlow: React.FC = () => {
                 <span
                   className={cn(
                     'w-1.5 h-1.5 rounded-full shrink-0 mt-1.5',
-                    side.tone === 'accent' ? 'bg-accent-400' : 'bg-slate-500'
+                    side.tone === 'accent' ? 'bg-accent-400' : 'bg-amber-400'
                   )}
                   aria-hidden
                 />

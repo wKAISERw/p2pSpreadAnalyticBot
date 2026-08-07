@@ -71,10 +71,22 @@ export default function SpreadVisual() {
       className="relative mx-auto w-full max-w-sm sm:max-w-md"
       style={{ perspective: '1600px' }}
     >
-      {/* Розсіяне світло під стосом — воно і дає той «живий» контур */}
+      {/*
+        Розсіяне світло під стосом — воно і дає той «живий» контур.
+
+        По горизонталі воно виходить за контейнер лише з lg, і це не
+        косметика. На мобільному стос займає всю ширину колонки, тож при
+        -inset-6 світіння тяглося від -8px до 375px, а обгортка секції
+        (relative overflow-hidden) обрізає на 0 і 367 — виходив помітний
+        прямий зріз по обидва боки. З lg макет стає двоколонковим, стос
+        іде у праву колонку й до краю не дістає, тому там розліт можна
+        лишити.
+
+        По вертикалі обрізання немає: секція значно вища за стос.
+      */}
       <div
         aria-hidden
-        className="absolute -inset-6 rounded-[2.5rem] opacity-60"
+        className="absolute -inset-y-6 inset-x-0 lg:-inset-x-6 rounded-[2.5rem] opacity-60"
         style={{
           background:
             'radial-gradient(60% 50% at 50% 45%, rgb(var(--accent-rgb) / 0.18), transparent 70%)',
