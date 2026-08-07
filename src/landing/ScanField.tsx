@@ -218,18 +218,13 @@ export default function ScanField({
     const canvas = ref.current;
     if (!canvas) return;
 
-    // Гейт по ширині й типу вказівника. Раніше тут була ще вимога
-    // hover: hover — але цю ознаку віддалені й вбудовані браузери
-    // повідомляють ненадійно, і ефект мовчки не стартував там, де мав.
-    // Змістовна умова — саме pointer: coarse: вона відсікає телефони й
-    // планшети, де фонова анімація коштує батареї.
-    if (
-      window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
-      window.matchMedia('(pointer: coarse)').matches ||
-      window.innerWidth < 1024
-    ) {
-      return;
-    }
+    // Єдина умова, за якої фон не малюється взагалі, — вимкнений рух.
+    // Раніше тут відсікались ще й телефони: фонова анімація там коштує
+    // батареї. Але вимикати ефект цілком заради цього — надто грубо, тож
+    // на дотикових пристроях він тепер просто дешевший (див. нижче).
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+    const lite = window.matchMedia('(pointer: coarse)').matches;
 
     const gl = canvas.getContext('webgl', {
       alpha: true,
@@ -291,11 +286,13 @@ export default function ScanField({
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    // Половинна роздільність: це розмитий фон, різниці не видно, а
-    // пікселів для зафарбовування вчетверо менше.
+    // Понижена роздільність: це розмитий фон, різниці не видно, а
+    // пікселів для зафарбовування менше в рази. На телефоні ділимо на
+    // чотири — там і екран щільніший, і GPU слабший.
+    const scale = lite ? 4 : 2;
     const sync = () => {
-      const w = Math.max(1, Math.round(canvas.clientWidth / 2));
-      const h = Math.max(1, Math.round(canvas.clientHeight / 2));
+      const w = Math.max(1, Math.round(canvas.clientWidth / scale));
+      const h = Math.max(1, Math.round(canvas.clientHeight / scale));
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
@@ -313,7 +310,8 @@ export default function ScanField({
       mouse.x = (e.clientX - rect.left) / rect.width;
       mouse.y = 1 - (e.clientY - rect.top) / rect.height;
     };
-    window.addEventListener('pointermove', onMove, { passive: true });
+    // Пульс за курсором існує лише там, де курсор є.
+    if (!lite) window.addEventListener('pointermove', onMove, { passive: true });
 
     let accent = readAccent();
     // Зміна теми пише --accent-rgb на <html>: перечитуємо звідти, а не
@@ -329,9 +327,16 @@ export default function ScanField({
     let frame = 0;
     let visible = !document.hidden;
 
+    // На телефоні 30 кадрів замість 60: фон повільний, різниці не видно,
+    // а роботи для GPU вдвічі менше.
+    const minFrameMs = lite ? 33 : 0;
+    let lastDraw = 0;
+
     const render = (t: number) => {
       frame = requestAnimationFrame(render);
       if (!visible) return;
+      if (t - lastDraw < minFrameMs) return;
+      lastDraw = t;
 
       gl.viewport(0, 0, canvas.width, canvas.height);
 
@@ -360,7 +365,7 @@ export default function ScanField({
       cancelAnimationFrame(frame);
       ro.disconnect();
       themeObserver.disconnect();
-      window.removeEventListener('pointermove', onMove);
+      if (!lite) window.removeEventListener('pointermove', onMove);
       document.removeEventListener('visibilitychange', onVisibility);
       // Контекст НЕ вбиваємо. Спокуса була саме така — мовляв, браузер
       // тримає обмежену кількість живих контекстів на вкладку, тож

@@ -101,35 +101,38 @@ export default function LandingPage() {
               */}
               <div className="flex items-center gap-4 mb-6">
                 <BrandMark />
-                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-800 text-xs text-slate-400 backdrop-blur-sm">
-                  <span className="w-1.5 h-1.5 rounded-full bg-accent-500" />
-                  P2P-арбітраж для українського ринку
+                <div className="tag-mono inline-flex items-center gap-2 text-[10px] sm:text-[11px] uppercase tracking-[0.18em] text-accent-400">
+                  <span className="w-1.5 h-1.5 bg-accent-500 shrink-0" />
+                  P2P-арбітраж · Україна
                 </div>
               </div>
 
-              <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white tracking-tight leading-[1.05] mb-6">
+              <h1 className="text-[2.6rem] sm:text-5xl lg:text-6xl font-bold text-white tracking-tight leading-[1.03] mb-5">
                 Спред видно всім.
                 <br />
                 <span className="text-accent-400">Ризик — ні.</span>
               </h1>
 
-              <p className="text-lg text-slate-400 leading-relaxed mb-8 max-w-lg">
+              <p className="text-base sm:text-lg text-slate-400 leading-relaxed mb-8 max-w-lg">
                 Arbix Quantum знаходить різницю курсів між P2P-майданчиками
                 й одразу перевіряє, з ким тобі пропонують торгувати. Алерт
                 приходить у Telegram, коли зв'язка пройшла обидві перевірки.
               </p>
 
-              <div className="flex flex-wrap gap-3">
+              {/* На телефоні кнопки на всю ширину й у стовпчик: поруч вони
+                  виходили вузькими, і головна дія переставала виглядати
+                  головною. З sm повертаємось у рядок. */}
+              <div className="flex flex-col sm:flex-row sm:flex-wrap gap-3">
                 <Link
                   to="/login"
-                  className="pulse-cta group inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-colors shadow-lg shadow-accent-500/25"
+                  className="pulse-cta group inline-flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-4 sm:py-3.5 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-colors shadow-lg shadow-accent-500/25"
                 >
                   Почати
                   <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-0.5" />
                 </Link>
                 <Link
                   to="/how-it-works"
-                  className="inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-white font-bold transition-colors"
+                  className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-6 py-4 sm:py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-white font-bold transition-colors"
                 >
                   Як це працює
                 </Link>
