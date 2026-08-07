@@ -316,18 +316,49 @@ export default function ScanField({
     // Понижена роздільність: це розмитий фон, різниці не видно, а
     // пікселів для зафарбовування менше в рази. На телефоні ділимо на
     // чотири — там і екран щільніший, і GPU слабший.
+    /*
+     * Розміри беремо з того, що дав спостерігач, а не читаємо з елемента.
+     *
+     * Було canvas.clientWidth усередині колбека ResizeObserver — і це
+     * змушувало браузер рахувати розкладку заново там, де цифри вже
+     * лежать у entry.contentRect. Lighthouse показував це як примусове
+     * перекомпонування на 93 мс, і після переїзду з LandingLayout воно
+     * лишилось єдиним таким місцем.
+     *
+     * Останні відомі розміри тримаємо в змінних: зміна сходинки якості
+     * теж викликає перерахунок, а елемент на той момент ніхто не міряв.
+     */
+    let boxW = 0;
+    let boxH = 0;
+
     const sync = () => {
+      if (!boxW || !boxH) return;
       const scale = QUALITY[tier].scale;
-      const w = Math.max(1, Math.round(canvas.clientWidth / scale));
-      const h = Math.max(1, Math.round(canvas.clientHeight / scale));
+      const w = Math.max(1, Math.round(boxW / scale));
+      const h = Math.max(1, Math.round(boxH / scale));
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
       }
     };
-    sync();
 
-    const ro = new ResizeObserver(sync);
+    // Один замір на старті: покладатись лише на перший колбек спостерігача
+    // виявилось ненадійно — полотно лишалось нерозміреним. Дорого коштували
+    // саме ПОВТОРНІ читання на кожен колбек, разове на ініціалізації ні.
+    {
+      const box = canvas.getBoundingClientRect();
+      boxW = box.width;
+      boxH = box.height;
+      sync();
+    }
+
+    const ro = new ResizeObserver(entries => {
+      const box = entries[0]?.contentRect;
+      if (!box) return;
+      boxW = box.width;
+      boxH = box.height;
+      sync();
+    });
     ro.observe(canvas);
 
     const mouse = { x: 0.5, y: 0.5 };
