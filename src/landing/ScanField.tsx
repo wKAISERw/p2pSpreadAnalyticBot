@@ -224,7 +224,31 @@ export default function ScanField({
     // на дотикових пристроях він тепер просто дешевший (див. нижче).
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
-    const lite = window.matchMedia('(pointer: coarse)').matches;
+    const coarse = window.matchMedia('(pointer: coarse)').matches;
+
+    /*
+     * Стартова якість.
+     *
+     * Характеристики дають лише підказку, з чого почати: ядра й пам'ять
+     * корелюють зі швидкістю GPU погано, і покладатись на них як на
+     * вирок не можна. Тому вони тільки обирають початкову сходинку, а
+     * далі рішення приймають виміряні кадри.
+     *
+     * QUALITY[0] — десктоп, [1] — телефон, [2] — слабкий пристрій.
+     * Далі цього — вимкнення.
+     */
+    const QUALITY = [
+      { scale: 2, minFrameMs: 0 },
+      { scale: 4, minFrameMs: 33 },
+      { scale: 6, minFrameMs: 50 },
+    ];
+
+    const cores = navigator.hardwareConcurrency ?? 4;
+    const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4;
+    let tier = coarse ? 1 : 0;
+    if (coarse && (cores <= 4 || memory <= 2)) tier = 2;
+
+    const lite = coarse;
 
     const gl = canvas.getContext('webgl', {
       alpha: true,
@@ -289,8 +313,8 @@ export default function ScanField({
     // Понижена роздільність: це розмитий фон, різниці не видно, а
     // пікселів для зафарбовування менше в рази. На телефоні ділимо на
     // чотири — там і екран щільніший, і GPU слабший.
-    const scale = lite ? 4 : 2;
     const sync = () => {
+      const scale = QUALITY[tier].scale;
       const w = Math.max(1, Math.round(canvas.clientWidth / scale));
       const h = Math.max(1, Math.round(canvas.clientHeight / scale));
       if (canvas.width !== w || canvas.height !== h) {
@@ -327,16 +351,54 @@ export default function ScanField({
     let frame = 0;
     let visible = !document.hidden;
 
-    // На телефоні 30 кадрів замість 60: фон повільний, різниці не видно,
-    // а роботи для GPU вдвічі менше.
-    const minFrameMs = lite ? 33 : 0;
     let lastDraw = 0;
+
+    /*
+     * Самоналаштування за фактом, а не за паспортом.
+     *
+     * Рахуємо, скільки часу пішло на кожен намальований кадр. Якщо
+     * протягом вибірки ми стабільно не вкладаємось у бюджет — знижуємо
+     * сходинку якості. Коли знижувати вже нікуди, фон вимикається
+     * зовсім: на дуже слабкому пристрої він не вартий того, щоб через
+     * нього гальмувала прокрутка.
+     *
+     * Вибірка починається заново після кожного зниження, щоб рішення
+     * приймалось уже за новою якістю, а не за старими вимірами.
+     */
+    const SAMPLE = 45;
+    let samples = 0;
+    let slowFrames = 0;
+
+    const judge = (drawMs: number) => {
+      // Бюджет: третина інтервалу між кадрами. Більше означає, що фон
+      // з'їдає час, потрібний прокрутці й анімаціям сторінки.
+      const budget = QUALITY[tier].minFrameMs ? QUALITY[tier].minFrameMs / 3 : 5;
+      if (drawMs > budget) slowFrames++;
+      if (++samples < SAMPLE) return;
+
+      const slowShare = slowFrames / samples;
+      samples = 0;
+      slowFrames = 0;
+      if (slowShare < 0.35) return;
+
+      if (tier >= QUALITY.length - 1) {
+        // Нижче вже нікуди — прибираємо фон і перестаємо малювати.
+        cancelAnimationFrame(frame);
+        frame = 0;
+        canvas.style.display = 'none';
+        return;
+      }
+      tier++;
+      sync();
+    };
 
     const render = (t: number) => {
       frame = requestAnimationFrame(render);
       if (!visible) return;
-      if (t - lastDraw < minFrameMs) return;
+      if (t - lastDraw < QUALITY[tier].minFrameMs) return;
       lastDraw = t;
+
+      const drawStart = performance.now();
 
       gl.viewport(0, 0, canvas.width, canvas.height);
 
@@ -352,6 +414,8 @@ export default function ScanField({
       gl.uniform2f(uMouse, mouse.x * canvas.width, mouse.y * canvas.height);
       gl.uniform3f(uAccent, accent[0], accent[1], accent[2]);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      judge(performance.now() - drawStart);
     };
 
     const onVisibility = () => {
