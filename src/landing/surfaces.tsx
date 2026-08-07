@@ -230,7 +230,7 @@ export function Metric({
       <div className="text-[11px] font-bold uppercase tracking-wider text-accent-400 mb-1">
         {label}
       </div>
-      {hint && <div className="text-[11px] text-slate-500 leading-snug">{hint}</div>}
+      {hint && <div className="text-[11px] text-slate-400 leading-snug">{hint}</div>}
     </div>
   );
 }

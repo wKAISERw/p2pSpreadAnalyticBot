@@ -481,6 +481,128 @@ export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
   </div>
 );
 
+/* ───────────────────── Мініатюри шарів перевірки ───────────────────── */
+
+/**
+ * Спільна рамка для мініатюр усередині картки.
+ *
+ * Мініатюри стоять у чотирьох різних картках і мусять читатись як один
+ * тип об'єкта, інакше блок знову розсипається. Тому поверхня та сама, що
+ * в решти заглиблених панелей на сайті: slate-950/80 + slate-800.
+ */
+const MiniPanel: React.FC<{ caption: string; children: React.ReactNode }> = ({
+  caption,
+  children,
+}) => (
+  <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3">
+    <div className="tag-mono text-[9px] uppercase tracking-[0.18em] text-slate-400 mb-2.5">
+      {caption}
+    </div>
+    {children}
+  </div>
+);
+
+/**
+ * Що движок бачить у тексті умов.
+ *
+ * Найпряміший спосіб пояснити, чому розбір умов важить найбільше з усіх
+ * шарів: показати саме оголошення з підсвіченими збігами. Три підсвітки —
+ * це три реальні категорії правил, названі в тексті картки поруч: треті
+ * особи, чек перед відпуском, зовнішні посилання.
+ */
+const Hit: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="rounded px-1 py-0.5 bg-red-500/15 text-red-300 border-b border-red-500/50">
+    {children}
+  </span>
+);
+
+export const ConditionScan: React.FC = () => (
+  <MiniPanel caption="умови оголошення">
+    <p className="text-[11px] leading-[1.9] text-slate-400">
+      Оплата лише з <Hit>картки третьої особи</Hit>, перед відпуском надішліть{' '}
+      <Hit>чек у PDF</Hit>, зв'язок <Hit>за посиланням</Hit>.
+    </p>
+  </MiniPanel>
+);
+
+/**
+ * Липкі ліміти проти живого мерчанта.
+ *
+ * Словами «ліміти не рухаються десятки циклів» звучить абстрактно. Дві
+ * лінії поруч роблять різницю очевидною за пів секунди: рівна — та, що
+ * має насторожити.
+ */
+export const BehaviorTrace: React.FC = () => {
+  const flat = 'M0 10 H120';
+  const live = 'M0 14 L15 9 L30 12 L45 5 L60 11 L75 6 L90 13 L105 8 L120 10';
+
+  return (
+    <MiniPanel caption="рух лімітів у часі">
+      <div className="space-y-2.5">
+        {[
+          { d: flat, tone: 'stroke-orange-400', label: 'липкий', note: '40 циклів' },
+          { d: live, tone: 'stroke-accent-400', label: 'звичайний', note: 'рухається' },
+        ].map(r => (
+          <div key={r.label} className="flex items-center gap-2.5">
+            <span className="text-[10px] text-slate-400 w-16 shrink-0">{r.label}</span>
+            <svg viewBox="0 0 120 20" className="flex-1 h-4 min-w-0" preserveAspectRatio="none" aria-hidden>
+              <path d={r.d} fill="none" strokeWidth="1.5" className={r.tone} vectorEffect="non-scaling-stroke" />
+            </svg>
+            <span className="tag-mono text-[9px] text-slate-400 w-16 text-right shrink-0">{r.note}</span>
+          </div>
+        ))}
+      </div>
+    </MiniPanel>
+  );
+};
+
+/**
+ * Склад відгуків однією смугою.
+ *
+ * Позначка на 40% не декоративна: у боті саме ця частка негативу дає
+ * максимум за шаром відгуків, тож шкала показує, де закінчується
+ * зростання штрафу.
+ */
+export const ReviewSplit: React.FC = () => (
+  <MiniPanel caption="склад відгуків">
+    <div className="relative flex h-2.5 rounded-full overflow-hidden gap-px mb-2.5">
+      <span className="bg-accent-500" style={{ width: '68%' }} aria-hidden />
+      <span className="bg-slate-600" style={{ width: '14%' }} aria-hidden />
+      <span className="bg-red-500" style={{ width: '18%' }} aria-hidden />
+    </div>
+
+    <div className="flex items-center justify-between gap-2">
+      <span className="tag-mono text-[9px] text-slate-400">68 / 14 / 18</span>
+      <span className="tag-mono text-[9px] text-slate-400">максимум шару — 40% негативу</span>
+    </div>
+  </MiniPanel>
+);
+
+/** Три режими списку — рівно ті, що є в боті. */
+export const ListModes: React.FC = () => (
+  <MiniPanel caption="що робити зі знайденим">
+    <div className="flex gap-1.5">
+      {[
+        { name: 'блокувати', on: true },
+        { name: 'ховати', on: false },
+        { name: 'показувати', on: false },
+      ].map(m => (
+        <span
+          key={m.name}
+          className={cn(
+            'tag-mono flex-1 text-center text-[9px] py-1.5 px-1 rounded-lg border',
+            m.on
+              ? 'bg-accent-500/15 border-accent-500/40 text-accent-400'
+              : 'bg-slate-900/60 border-slate-800 text-slate-400'
+          )}
+        >
+          {m.name}
+        </span>
+      ))}
+    </div>
+  </MiniPanel>
+);
+
 /* ────────────────────────── Маршрут зв'язки ────────────────────────── */
 
 /**
@@ -515,6 +637,152 @@ export const RouteLine: React.FC<{
     <span className="tag-mono text-[11px] font-bold text-slate-200 shrink-0">{to}</span>
   </div>
 );
+
+/* ──────────────────────────── Шлях даних ───────────────────────────── */
+
+/**
+ * Що лишається в тебе, а що виходить у мережу.
+ *
+ * Спершу тут був ланцюжок «Telegram → сервер → база». Він повторював три
+ * кроки, що стоять просто над ним, і додавав рівно нічого — та ще й
+ * називав речі мовою розробника («локальна БД»), якої читач не зобов'язаний
+ * знати.
+ *
+ * Питання, яке людина насправді ставить, звучить інакше: що з мого
+ * лишається вдома, а що кудись їде. Тому дві колонки, а не схема:
+ * порівняння списків відповідає на це за один погляд, і в ньому немає
+ * жодного слова, яке треба пояснювати.
+ */
+export const DataFlow: React.FC = () => {
+  const sides = [
+    {
+      title: 'Лишається у тебе',
+      tone: 'accent' as const,
+      items: [
+        'Ключі від бірж — у зашифрованому вигляді',
+        'Твої фільтри, картки й ліміти',
+        'Історія знайдених зв\'язок',
+      ],
+    },
+    {
+      title: 'Виходить у мережу',
+      tone: 'muted' as const,
+      items: [
+        'Запити до бірж — ті самі, що робить твій браузер',
+        'Тексти відгуків без імен, якщо ти увімкнув їх розбір',
+      ],
+    },
+  ];
+
+  return (
+    <div className="grid sm:grid-cols-2 gap-3">
+      {sides.map(side => (
+        <div
+          key={side.title}
+          className={cn(
+            'rounded-2xl border p-4 sm:p-5',
+            side.tone === 'accent'
+              ? 'bg-accent-500/[0.06] border-accent-500/25'
+              : 'bg-slate-950/80 border-slate-800'
+          )}
+        >
+          <div
+            className={cn(
+              'tag-mono text-[10px] uppercase tracking-[0.18em] mb-3',
+              side.tone === 'accent' ? 'text-accent-400' : 'text-slate-400'
+            )}
+          >
+            {side.title}
+          </div>
+
+          <ul className="space-y-2.5">
+            {side.items.map(item => (
+              <li key={item} className="flex gap-2.5 text-[13px] text-slate-300 leading-snug">
+                <span
+                  className={cn(
+                    'w-1.5 h-1.5 rounded-full shrink-0 mt-1.5',
+                    side.tone === 'accent' ? 'bg-accent-400' : 'bg-slate-500'
+                  )}
+                  aria-hidden
+                />
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/* ──────────────────────── Склянка з вердиктами ─────────────────────── */
+
+/**
+ * Чому найкращий курс не завжди той, що зверху.
+ *
+ * Теза сторінки одним малюнком: верхній рядок справді найвигідніший за
+ * ціною — і саме він має BLOCK. Око зчитує це швидше, ніж будь-який
+ * абзац, бо порівняння вертикальне: ціна росте вниз, безпека теж.
+ *
+ * Числа ілюстративні й підписані як приклад; вердикти — реальні
+ * значення движка.
+ */
+export const OrderBook: React.FC = () => {
+  const rows: { price: string; vol: string; verdict?: Verdict; picked?: boolean }[] = [
+    { price: '40.85', vol: '120 000', verdict: 'BLOCK' },
+    { price: '41.02', vol: '86 000', verdict: 'WARN' },
+    { price: '41.15', vol: '54 000', verdict: 'OK', picked: true },
+    { price: '41.28', vol: '31 000' },
+    { price: '41.40', vol: '18 000' },
+  ];
+
+  return (
+    <div className="rounded-2xl bg-slate-950/80 border border-slate-800 overflow-hidden">
+      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 border-b border-slate-800/80">
+        <span className="tag-mono text-[9px] uppercase tracking-[0.18em] text-slate-400">
+          склянка · купівля
+        </span>
+        <span className="tag-mono text-[9px] uppercase tracking-[0.18em] text-slate-400">приклад</span>
+      </div>
+
+      <div className="p-2 space-y-1">
+        {rows.map(r => {
+          const s = r.verdict ? VERDICT_STYLE[r.verdict] : null;
+
+          return (
+            <div
+              key={r.price}
+              className={cn(
+                'relative flex items-center gap-3 rounded-lg pl-3 pr-2 py-1.5 min-w-0',
+                r.picked ? 'bg-accent-500/10 border border-accent-500/30' : 'border border-transparent'
+              )}
+            >
+              {s && <span className={cn('absolute left-0 inset-y-1 w-0.5 rounded-full', s.rail)} aria-hidden />}
+
+              <span className="tag-mono text-xs font-bold text-slate-200 tabular-nums shrink-0">
+                {r.price}
+              </span>
+              <span className="tag-mono text-[10px] text-slate-400 tabular-nums flex-1 min-w-0 truncate">
+                {r.vol} ₴
+              </span>
+
+              {r.verdict && (
+                <span className={cn('tag-mono text-[9px] font-bold px-1.5 py-0.5 rounded border shrink-0', s!.badge)}>
+                  {r.verdict}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <p className="text-[11px] text-slate-400 leading-snug px-3.5 pb-3">
+        Найкраща ціна — зверху, і саме вона заблокована. Сканер віддає третій рядок:
+        дешевше з тих, що пройшли перевірку.
+      </p>
+    </div>
+  );
+};
 
 /* ───────────────────────── Біжуча смуга ────────────────────────────── */
 
@@ -573,7 +841,11 @@ export const Ticker: React.FC<{ label: string; items: ScanItem[] }> = ({ label, 
               <span className="tag-mono text-xs uppercase tracking-[0.14em] text-slate-400 whitespace-nowrap">
                 {item.name}
               </span>
-              <span className="ml-5 sm:ml-6 mr-5 sm:mr-6 text-[10px] text-accent-400/50" aria-hidden>
+              {/* /70, а не /50: роздільник декоративний і aria-hidden, але
+                  на slate-950 п'ятдесят відсотків дають 3.37:1 — нижче
+                  порога для дрібного тексту. Різниця на око майже не
+                  помітна, а двозначності більше немає. */}
+              <span className="ml-5 sm:ml-6 mr-5 sm:mr-6 text-[10px] text-accent-400/70" aria-hidden>
                 ▲
               </span>
             </li>

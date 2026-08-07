@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import {
   ArrowRight, Search, Filter, ShieldCheck, Send, Wallet,
   Clock, Landmark, SplitSquareHorizontal, ExternalLink,
+  TrendingDown, WalletMinimal, UserRoundX,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
@@ -26,6 +27,13 @@ const STEPS = [
     text:
       'Сканер знімає P2P-склянки з усіх увімкнених бірж. Біржа, яка почала відмовляти, автоматично йде в cooldown, щоб не тягнути за собою весь цикл.',
     detail: 'усі біржі паралельно',
+    /*
+     * Скільки лишається після кроку. Числа — ті самі, що в лійці на
+     * «Можливостях», тож дві сторінки не розходяться. Крок звірки з
+     * картками кількість не змінює: він ріже ОБСЯГ, і показувати там
+     * число означало б вигадати відсів, якого немає.
+     */
+    left: 1240,
   },
   {
     icon: Filter,
@@ -33,13 +41,15 @@ const STEPS = [
     text:
       'З усього обсягу лишається те, що підходить під твій капітал, банки, пороги мерчанта й режим роботи. Це відсіює переважну більшість ордерів ще до дорогих перевірок.',
     detail: 'капітал · банки · пороги',
+    left: 186,
   },
   {
     icon: ShieldCheck,
     title: 'Перевірка контрагента',
     text:
-      'Кандидати йдуть у ризик-движок: розбір тексту умов, поведінка в часі, відгуки, чорні списки. Результат — вердикт OK, SUSPICIOUS або BLOCK і бал ризику.',
-    detail: 'regex · поведінка · LLM',
+      'Кандидати йдуть у ризик-движок: розбір тексту умов, поведінка в часі, відгуки, чорні списки. Результат — оцінка ризику від 0 до 100 і вердикт: чисто, підозріло або заблоковано.',
+    detail: 'правила · поведінка · ШІ',
+    left: 14,
   },
   {
     icon: Wallet,
@@ -47,6 +57,7 @@ const STEPS = [
     text:
       'Обсяг зіставляється з реальними лімітами твоїх банків: добовими, місячними й на одну транзакцію. Те, що не проходить, або зменшується, або відсікається.',
     detail: 'ліміти · залишки',
+    volumeOnly: true,
   },
   {
     icon: Send,
@@ -54,8 +65,12 @@ const STEPS = [
     text:
       'Те, що пройшло всі етапи, приходить у Telegram з кнопками просто в застосунок біржі. Однакові зв\'язки схлопуються, щоб не заливати чат.',
     detail: 'Telegram · дашборд',
+    left: 3,
   },
 ];
+
+/** Найбільше значення лійки — від нього рахуються всі частки. */
+const FUNNEL_TOP = 1240;
 
 const MODES: { name: string; kind: 'spread' | 'taker' | 'maker'; text: string; note: string }[] = [
   {
@@ -188,7 +203,43 @@ const Step: React.FC<{
 
           <p className="text-sm text-slate-400 leading-relaxed">{step.text}</p>
 
-          <div className="mt-4">
+          {/*
+            Смуга відсіву.
+
+            Перша версія була незрозумілою, і це справедливий закид: смуга
+            з підписом «лишається 14» праворуч не каже ні від чого
+            рахується, ні чому сусідня заповнена інакше. Тепер підпис
+            стоїть ПЕРЕД смугою й називає обидва числа — «14 із 1240», —
+            а крок, що ріже не кількість, а суму, і сформульований інакше,
+            без смуги взагалі: однакова смуга з іншим значенням і була
+            головним джерелом плутанини.
+          */}
+          <div className="mt-4 rounded-lg bg-slate-950/70 border border-slate-800 px-3 py-2.5">
+            {step.volumeOnly ? (
+              <div className="text-[11px] text-slate-400 leading-snug">
+                Кількість зв'язок не змінюється — ріжеться{' '}
+                <span className="text-slate-200 font-bold">сума кожної</span> під те, що
+                лишилось на картках.
+              </div>
+            ) : (
+              <>
+                <div className="flex items-baseline justify-between gap-2 mb-1.5">
+                  <span className="text-[11px] text-slate-400">лишається пропозицій</span>
+                  <span className="tag-mono text-[11px] text-slate-200 tabular-nums shrink-0">
+                    {step.left} із {FUNNEL_TOP}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-slate-900 overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-accent-500"
+                    style={{ width: `${Math.max(1.5, ((step.left ?? 0) / FUNNEL_TOP) * 100)}%` }}
+                  />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="tag-mono inline-block text-[10px] text-slate-400 px-2 py-1 rounded-md bg-slate-950/80 border border-slate-800">
               {step.detail}
             </span>
@@ -324,7 +375,7 @@ export default function HowItWorksPage() {
         <SectionHeading
           eyebrow="Як це працює"
           title="Шлях від склянки до алерту"
-          description="П'ять етапів асинхронного конвеєра. Дешеві перевірки йдуть першими й зрізають основний обсяг, щоб важкий розбір мерчанта запускався лише на тому, що вже пройшло твої фільтри."
+          description="П'ять етапів. Дешеві перевірки йдуть першими й зрізають основний обсяг, щоб важкий розбір мерчанта запускався лише на тому, що вже пройшло твої фільтри. Число в кожному кроці показує, скільки пропозицій лишається після нього — на прикладі одного циклу з 1240 знайдених."
         />
 
         <div className="mt-4">
@@ -424,37 +475,53 @@ export default function HowItWorksPage() {
       <Section className="pt-0 pb-16">
         <Reveal>
           <Surface kind="scan" className="p-8 sm:p-12">
-            <h2 className="text-2xl font-bold text-white mb-4">Чого сканер не робить</h2>
-            <ul className="space-y-3 text-sm text-slate-300 leading-relaxed max-w-2xl">
-              <li className="flex gap-3">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 mt-2" />
-                <span>
-                  <strong className="text-white">Не гарантує прибуток.</strong> Спред живе секунди.
-                  Поки ти відкриваєш ордер, ціна на біржі може змінитись або оголошення зникне.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 mt-2" />
-                <span>
-                  <strong className="text-white">Не рухає твої гроші.</strong> Сканер не має доступу
-                  до переказів: ордер створюєш і підтверджуєш ти сам.
-                </span>
-              </li>
-              <li className="flex gap-3">
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 mt-2" />
-                <span>
-                  {/*
-                    Тут раніше стояло «відсіює 99% шахрайських схем». Такої
-                    метрики ніхто не міряв, і поставити вигадану цифру саме
-                    в абзац про чесність — найгірше місце з можливих.
-                  */}
-                  <strong className="text-white">Не робить контрагента чесним.</strong> Перевірки
-                  ловлять відомі схеми: боти, підміну умов, скарги в відгуках, чорні списки. Мерчант
-                  із чистою історією може повестися нечесно вперше саме з тобою — останнє рішення
-                  лишається за тобою.
-                </span>
-              </li>
-            </ul>
+            <h2 className="text-2xl font-bold text-white mb-6">Чого сканер не робить</h2>
+
+            {/*
+              Три межі однаково важливі, тож і ваги мають бути однакові.
+              Маркований список цього не давав: очі бігли по ньому як по
+              дрібному шрифту, хоча це найчесніша частина сторінки.
+
+              Іконка перекреслена — знак заборони читається швидше за
+              будь-яке «не» на початку речення.
+
+              Текст свідомо без цифр. Тут раніше стояло «відсіює 99%
+              шахрайських схем»: такої метрики ніхто не міряв, і вигадане
+              число саме в абзаці про чесність — найгірше місце з можливих.
+            */}
+            <div className="grid sm:grid-cols-3 gap-4">
+              {[
+                {
+                  icon: TrendingDown,
+                  title: 'Не гарантує прибуток',
+                  text: 'Спред живе секунди. Поки ти відкриваєш ордер, ціна може змінитись або оголошення зникне.',
+                },
+                {
+                  icon: WalletMinimal,
+                  title: 'Не рухає твої гроші',
+                  text: 'Доступу до переказів немає: ордер створюєш і підтверджуєш ти сам.',
+                },
+                {
+                  icon: UserRoundX,
+                  title: 'Не робить контрагента чесним',
+                  text: 'Ловить відомі схеми — боти, підміну умов, скарги, чорні списки. Чиста історія не гарантує нічого.',
+                },
+              ].map(item => {
+                const Icon = item.icon;
+                return (
+                  <div
+                    key={item.title}
+                    className="rounded-2xl bg-slate-950/60 border border-amber-500/20 p-5"
+                  >
+                    <span className="relative w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center mb-4">
+                      <Icon className="w-5 h-5 text-amber-400" />
+                    </span>
+                    <h3 className="text-sm font-bold text-white mb-1.5">{item.title}</h3>
+                    <p className="text-[13px] text-slate-400 leading-relaxed">{item.text}</p>
+                  </div>
+                );
+              })}
+            </div>
 
             <Link
               to="/security"

@@ -8,7 +8,10 @@ import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal } from './motion';
 import { MonoTag, DataRain, Card, GroupHead } from './surfaces';
-import { BracketMetric, RiskSpectrum } from './blocks';
+import {
+  BracketMetric, RiskSpectrum, DataFlow,
+  ConditionScan, BehaviorTrace, ReviewSplit, ListModes,
+} from './blocks';
 import ScanField from './ScanField';
 
 /**
@@ -75,6 +78,7 @@ const WEIGHTS = [
 const LAYERS = [
   {
     icon: ScanText,
+    visual: ConditionScan,
     title: 'Розбір умов',
     text:
       'Текст оголошення проганяється через набір правил: вимога чека перед відпуском, оплата з чужих реквізитів, посилання назовні, натяки на казино чи обмін готівкою.',
@@ -82,6 +86,7 @@ const LAYERS = [
   },
   {
     icon: Activity,
+    visual: BehaviorTrace,
     title: 'Поведінка в часі',
     text:
       'Сканер пам\'ятає, як мерчант поводився раніше. Ліміти, що не рухаються десятки циклів, миттєве поповнення обсягу, аномальна швидкість угод — типова сигнатура бота.',
@@ -89,6 +94,7 @@ const LAYERS = [
   },
   {
     icon: MessageSquareWarning,
+    visual: ReviewSplit,
     title: 'Відгуки',
     text:
       'Негативні відгуки збираються й читаються мовною моделлю: важливо не «скільки мінусів», а що саме сталось — заморозка, рефанд через банк чи просто повільна відповідь.',
@@ -96,6 +102,7 @@ const LAYERS = [
   },
   {
     icon: Ban,
+    visual: ListModes,
     title: 'Чорні списки',
     text:
       'Спільний список тих, хто вже відзначився, плюс твій власний. Для кожного можна обрати: блокувати, ховати чи показувати з позначкою.',
@@ -318,15 +325,28 @@ export default function SecurityPage() {
         <div className="grid md:grid-cols-2 gap-6">
           {LAYERS.map((layer, i) => {
             const Icon = layer.icon;
+            const Visual = layer.visual;
+
             return (
               <Reveal key={layer.title} delay={(i % 2) * 90} className="min-w-0">
-                <Card className="h-full p-7 shadow-xl">
+                <Card className="h-full p-7 shadow-xl flex flex-col">
                   <div className="w-12 h-12 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center mb-5 shadow-lg shadow-accent-500/10">
                     <Icon className="w-6 h-6 text-accent-400" />
                   </div>
                   <h3 className="text-xl font-bold text-white mb-2">{layer.title}</h3>
                   <p className="text-sm text-slate-400 leading-relaxed mb-5">{layer.text}</p>
-                  <div className="flex flex-wrap gap-2">
+
+                  {/*
+                    Мініатюра показує саме те, чого не скаже абзац: не «ми
+                    аналізуємо умови», а які слова підсвічуються; не «ліміти
+                    не рухаються», а як виглядає рівна лінія поруч із живою.
+                    Стоїть перед чипами — чипи це вже підсумок.
+                  */}
+                  <div className="mb-5">
+                    <Visual />
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mt-auto">
                     {layer.examples.map(ex => (
                       <span
                         key={ex}
@@ -397,6 +417,16 @@ export default function SecurityPage() {
             );
           })}
         </div>
+
+        {/*
+          Схема під кроками, а не замість них. Кроки пояснюють кожну ланку
+          словами, схема показує ланцюг цілком — і головне, скільки з нього
+          стрілок дивиться назовні. Заяву «база на твоєму сервері» абзац
+          лише повторює, а перелічуваність стрілок її доводить.
+        */}
+        <Reveal className="mt-6">
+          <DataFlow />
+        </Reveal>
       </Section>
 
       <Rule />

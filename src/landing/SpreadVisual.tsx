@@ -165,10 +165,10 @@ const Card: React.FC<{
   return (
     <>
       <div className="flex items-center justify-between mb-6">
-        <span className="tag-mono text-[10px] uppercase tracking-[0.2em] text-slate-500">
+        <span className="tag-mono text-[10px] uppercase tracking-[0.2em] text-slate-400">
           приклад зв'язки
         </span>
-        <span className="flex items-center gap-1.5 text-[11px] text-slate-500">
+        <span className="flex items-center gap-1.5 text-[11px] text-slate-400">
           <span className="relative flex w-1.5 h-1.5">
             {active && (
               <span className="absolute inline-flex w-full h-full rounded-full bg-accent-500 opacity-75 animate-ping" />
@@ -194,7 +194,7 @@ const Card: React.FC<{
         <span className="text-5xl sm:text-6xl font-black text-accent-400 tabular-nums leading-none tracking-tight">
           +{spread.toFixed(2)}%
         </span>
-        <span className="tag-mono text-[10px] uppercase tracking-[0.25em] text-slate-500 pb-2">
+        <span className="tag-mono text-[10px] uppercase tracking-[0.25em] text-slate-400 pb-2">
           спред
         </span>
       </div>
@@ -228,7 +228,7 @@ const Leg: React.FC<{
   tone: 'up' | 'down';
 }> = ({ label, exchange, price, tone }) => (
   <div className={cn('min-w-0', tone === 'up' && 'text-right')}>
-    <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1.5">{label}</div>
+    <div className="text-[10px] uppercase tracking-widest text-slate-400 mb-1.5">{label}</div>
     <div className="text-sm font-bold text-white truncate">{exchange}</div>
     <div
       className={cn(

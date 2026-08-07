@@ -12,7 +12,9 @@ import { Surface, DataRain, MonoTag, Excerpt } from './surfaces';
 import TrustStrip from './TrustStrip';
 import Faq from './Faq';
 import ScanField from './ScanField';
-import { VerdictRow, BracketMetric, SweepFrame, BrandMark, Ticker, type ScanItem } from './blocks';
+import {
+  VerdictRow, BracketMetric, SweepFrame, BrandMark, Ticker, OrderBook, type ScanItem,
+} from './blocks';
 
 /* Склад — з ALL_EXCHANGES (core/engine/exchange_manager.py), сім штук. */
 const EXCHANGES: ScanItem[] = [
@@ -196,7 +198,9 @@ export default function LandingPage() {
                       <div className="w-14 h-14 rounded-2xl bg-accent-500/12 border border-accent-500/25 flex items-center justify-center shrink-0 shadow-lg shadow-accent-500/10">
                         <Icon className="w-7 h-7 text-accent-400" />
                       </div>
-                      <span className="tag-mono text-[10px] text-slate-700">
+                      {/* slate-700 давав 1.95:1 — номер був майже невидимий.
+                          Нумерація опор має читатись, інакше вона просто шум. */}
+                      <span className="tag-mono text-[10px] text-slate-400">
                         0{i + 1}
                       </span>
                     </div>
@@ -250,6 +254,16 @@ export default function LandingPage() {
                   Як влаштований антифрод
                   <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-0.5" />
                 </Link>
+
+                {/*
+                  Склянка доводить тезу заголовка буквально: найкраща ціна
+                  стоїть зверху й саме вона заблокована. Абзац поруч це
+                  стверджує, малюнок — показує, і порівняння вертикальне,
+                  тож читається за пів секунди.
+                */}
+                <div className="mt-7">
+                  <OrderBook />
+                </div>
               </div>
 
               <div className="space-y-3 min-w-0">
@@ -391,7 +405,7 @@ function AlertPreview() {
   return (
     <div className="w-full lg:w-80 shrink-0 bg-slate-950/90 border border-slate-800 rounded-2xl p-4 shadow-2xl shadow-slate-950/60">
       <div className="flex items-center justify-between mb-3 pb-3 border-b border-slate-800">
-        <span className="tag-mono text-[10px] text-slate-500">приклад алерта</span>
+        <span className="tag-mono text-[10px] text-slate-400">приклад алерта</span>
         <span className="text-lg font-black text-accent-400 tabular-nums leading-none">
           +1.61%
         </span>
@@ -403,7 +417,7 @@ function AlertPreview() {
           ['Продаж', 'OKX', '41.68 ₴', 'warn'],
         ].map(([side, ex, price, verdict]) => (
           <div key={side as string} className="flex items-center gap-2.5">
-            <span className="tag-mono text-[10px] text-slate-600 w-14 shrink-0">{side}</span>
+            <span className="tag-mono text-[10px] text-slate-400 w-14 shrink-0">{side}</span>
             <span className="text-xs font-bold text-slate-200 flex-1 truncate">{ex}</span>
             <span className="text-xs tabular-nums text-slate-300">{price}</span>
             <span
@@ -417,7 +431,7 @@ function AlertPreview() {
       </div>
 
       <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between text-[11px]">
-        <span className="text-slate-500">Чистими</span>
+        <span className="text-slate-400">Чистими</span>
         <span className="font-bold text-slate-200 tabular-nums">+412 ₴</span>
       </div>
 
@@ -464,7 +478,7 @@ function PillarVisual({ kind }: { kind: 'exchanges' | 'risk' | 'limits' }) {
           ['Списки', 96],
         ].map(([label, pct]) => (
           <div key={label as string} className="flex items-center gap-2.5">
-            <span className="tag-mono text-[10px] text-slate-500 w-20 shrink-0">{label}</span>
+            <span className="tag-mono text-[10px] text-slate-400 w-20 shrink-0">{label}</span>
             <div className="flex-1 h-1 bg-slate-800 rounded-full overflow-hidden">
               <div
                 className="h-full bg-accent-500/70 rounded-full"
@@ -486,8 +500,8 @@ function PillarVisual({ kind }: { kind: 'exchanges' | 'risk' | 'limits' }) {
       ].map(([bank, pct]) => (
         <div key={bank as string}>
           <div className="flex justify-between text-[10px] mb-1">
-            <span className="tag-mono text-slate-500">{bank}</span>
-            <span className={cn('tabular-nums', (pct as number) > 85 ? 'text-orange-400' : 'text-slate-500')}>
+            <span className="tag-mono text-slate-400">{bank}</span>
+            <span className={cn('tabular-nums', (pct as number) > 85 ? 'text-orange-400' : 'text-slate-400')}>
               {pct}%
             </span>
           </div>

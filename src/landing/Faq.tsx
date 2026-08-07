@@ -153,7 +153,7 @@ const Item: React.FC<{ item: (typeof ITEMS)[number]; index: number }> = ({ item,
 
         <Plus
           className={cn(
-            'w-4 h-4 text-slate-500 shrink-0 mt-1 transition-transform duration-300',
+            'w-4 h-4 text-slate-400 shrink-0 mt-1 transition-transform duration-300',
             open && 'rotate-45 text-accent-400'
           )}
         />

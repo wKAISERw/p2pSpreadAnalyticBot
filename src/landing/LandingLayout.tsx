@@ -222,30 +222,82 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
 
       <main className="relative z-10">{children}</main>
 
+      {/*
+        Футер несе те, що людина шукає саме внизу: чим це є, що всередині,
+        куди йти далі й чого не варто очікувати. Раніше тут були лише
+        абзац і три посилання — половина висоти витрачалась намарно, хоч
+        це остання нагода щось пояснити.
+
+        Числа ті самі, що на сторінках, і всі звірені з кодом бота.
+      */}
       <footer className="relative z-10 border-t border-slate-800/60 mt-24">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 py-12">
-          <div className="flex flex-col md:flex-row md:items-start justify-between gap-8">
-            <div className="max-w-sm">
+          <div className="grid gap-10 md:grid-cols-[1.4fr_1fr_1fr]">
+            <div className="max-w-sm min-w-0">
               <div className="flex items-center gap-2.5 mb-3">
                 <span className="w-8 h-8 rounded-lg bg-accent-500 flex items-center justify-center">
                   <Activity className="w-4 h-4 text-slate-950" />
                 </span>
                 <span className="font-bold text-white">ARBIX QUANTUM</span>
               </div>
-              <p className="text-sm text-slate-400 leading-relaxed">
+              <p className="text-sm text-slate-400 leading-relaxed mb-5">
                 Сканер P2P-спредів із антифрод-аналізом контрагентів.
                 Знаходить різницю курсів між біржами й перевіряє, з ким ти
                 збираєшся торгувати.
               </p>
+
+              <div className="flex flex-wrap gap-2">
+                {[
+                  ['7', 'майданчиків'],
+                  ['6', 'сигналів ризику'],
+                  ['5', 'режимів'],
+                ].map(([n, label]) => (
+                  <span
+                    key={label}
+                    className="tag-mono inline-flex items-baseline gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900/70 border border-slate-800"
+                  >
+                    <span className="text-[11px] font-bold text-accent-400 tabular-nums">{n}</span>
+                    <span className="text-[10px] text-slate-400">{label}</span>
+                  </span>
+                ))}
+              </div>
             </div>
 
-            <nav className="flex flex-col gap-2">
-              {NAV.map(item => (
-                <Link key={item.to} to={item.to} className="text-sm text-slate-400 hover:text-white transition-colors">
-                  {item.label}
+            <div className="min-w-0">
+              <div className="tag-mono text-[10px] uppercase tracking-[0.18em] text-slate-400 mb-3.5">
+                Розділи
+              </div>
+              <nav className="flex flex-col gap-2.5">
+                {NAV.map(item => (
+                  <Link
+                    key={item.to}
+                    to={item.to}
+                    className="text-sm text-slate-400 hover:text-white transition-colors"
+                  >
+                    {item.label}
+                  </Link>
+                ))}
+              </nav>
+            </div>
+
+            <div className="min-w-0">
+              <div className="tag-mono text-[10px] uppercase tracking-[0.18em] text-slate-400 mb-3.5">
+                Почати
+              </div>
+              <div className="flex flex-col gap-2.5 items-start">
+                <Link
+                  to={isLoggedIn ? '/app' : '/login'}
+                  className="inline-flex items-center gap-1.5 text-sm font-bold text-accent-400 hover:text-accent-300 transition-colors"
+                >
+                  {isLoggedIn ? 'До дашборду' : 'Вхід через Telegram'}
+                  <ArrowUpRight className="w-3.5 h-3.5" />
                 </Link>
-              ))}
-            </nav>
+                <p className="text-[13px] text-slate-400 leading-relaxed">
+                  Пароля немає: особу підтверджує Telegram. Налаштування
+                  спільні з ботом — заповнювати вдруге не треба.
+                </p>
+              </div>
+            </div>
           </div>
 
           <p className="mt-10 pt-6 border-t border-slate-800/60 text-xs text-slate-400 leading-relaxed">
