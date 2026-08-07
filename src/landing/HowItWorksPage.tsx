@@ -6,8 +6,8 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
-import { Reveal, GlowCard, useReveal, useScrollDraw } from './motion';
-import { Surface, MonoTag } from './surfaces';
+import { Reveal, useReveal, useScrollDraw } from './motion';
+import { Surface, MonoTag, Card } from './surfaces';
 import { StrategyDiagram } from './blocks';
 import ScanField from './ScanField';
 
@@ -165,18 +165,22 @@ const Step: React.FC<{
           onLeft ? 'lg:col-start-1' : 'lg:col-start-3'
         )}
       >
-        <GlowCard
+        {/*
+          Фактура через крок тут була, і саме вона робила рейку строкатою:
+          кроки 02 і 05 мали крапки, решта — ні, хоча всі п'ять рівнозначні.
+          Поверхня тепер спільна (див. `Card`), а вирізняє крок те, що й
+          має, — номер, іконка на осі й підсвітка при прокрутці.
+        */}
+        <Card
           ref={cardRef}
           className={cn(
-            'pipe-card reveal inline-block w-full p-5 sm:p-6 rounded-3xl',
-            'bg-slate-950/60 border',
-            index % 3 === 1 && 'surface-dots',
+            'pipe-card reveal inline-block w-full p-5 sm:p-6',
             shown && 'reveal-in'
           )}
           style={{ transitionDelay: `${index * 60}ms` }}
         >
           <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-2">
-            <span className="tag-mono text-xs font-black text-accent-500/70 tabular-nums">
+            <span className="tag-mono text-xs font-black text-accent-500 tabular-nums">
               0{index + 1}
             </span>
             <h3 className="text-lg font-bold text-white">{step.title}</h3>
@@ -185,11 +189,11 @@ const Step: React.FC<{
           <p className="text-sm text-slate-400 leading-relaxed">{step.text}</p>
 
           <div className="mt-4">
-            <span className="tag-mono inline-block text-[10px] text-slate-500 px-2 py-1 rounded-md bg-slate-900/80 border border-slate-800">
+            <span className="tag-mono inline-block text-[10px] text-slate-400 px-2 py-1 rounded-md bg-slate-950/80 border border-slate-800">
               {step.detail}
             </span>
           </div>
-        </GlowCard>
+        </Card>
       </div>
     </div>
   );
@@ -198,7 +202,7 @@ const Step: React.FC<{
 /** Рядок у прев'ю алерта — щоб не повторювати ту саму розмітку п'ять разів. */
 const Row: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className="flex items-center justify-between gap-3">
-    <span className="text-slate-500">{label}</span>
+    <span className="text-slate-400">{label}</span>
     <span className="text-right">{children}</span>
   </div>
 );
@@ -220,7 +224,7 @@ const AlertPreview: React.FC = () => (
         </span>
         <span className="text-xs font-bold text-slate-200 truncate">P2PTraderInfo_bot</span>
       </div>
-      <span className="tag-mono text-[10px] text-slate-500 flex items-center gap-1 shrink-0">
+      <span className="tag-mono text-[10px] text-slate-400 flex items-center gap-1 shrink-0">
         <Clock className="w-3 h-3" />
         18:42
       </span>
@@ -229,21 +233,21 @@ const AlertPreview: React.FC = () => (
     <div className="p-4 space-y-3.5 text-xs">
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-xl font-black text-accent-400 tabular-nums">+2.15%</span>
-        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-500">
+        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
           спред
         </span>
       </div>
 
       <div className="grid grid-cols-2 gap-px bg-slate-800 rounded-xl overflow-hidden">
         <div className="bg-slate-900/90 p-3">
-          <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Купівля · OKX</div>
+          <div className="text-[9px] uppercase tracking-wider text-slate-400 mb-1">Купівля · OKX</div>
           <div className="text-sm font-bold text-slate-200 tabular-nums">41.15 ₴</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Taker · ПриватБанк</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Taker · ПриватБанк</div>
         </div>
         <div className="bg-slate-900/90 p-3">
-          <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">Продаж · Binance</div>
+          <div className="text-[9px] uppercase tracking-wider text-slate-400 mb-1">Продаж · Binance</div>
           <div className="text-sm font-bold text-slate-200 tabular-nums">42.03 ₴</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Taker · monobank</div>
+          <div className="text-[10px] text-slate-400 mt-0.5">Taker · monobank</div>
         </div>
       </div>
 
@@ -348,7 +352,7 @@ export default function HowItWorksPage() {
               const Icon = note.icon;
               return (
                 <Reveal key={note.title} delay={i * 90}>
-                  <GlowCard className="flex gap-4 p-5 sm:p-6 rounded-3xl bg-slate-900/50 border border-slate-800/70 hover:border-accent-500/40 transition-colors">
+                  <Card className="flex gap-4 p-5 sm:p-6">
                     <span className="w-10 h-10 rounded-xl bg-accent-500/10 border border-accent-500/20 flex items-center justify-center shrink-0">
                       <Icon className="w-5 h-5 text-accent-400" />
                     </span>
@@ -356,7 +360,7 @@ export default function HowItWorksPage() {
                       <h3 className="text-base font-bold text-white mb-1.5">{note.title}</h3>
                       <p className="text-sm text-slate-400 leading-relaxed">{note.text}</p>
                     </div>
-                  </GlowCard>
+                  </Card>
                 </Reveal>
               );
             })}
@@ -378,7 +382,7 @@ export default function HowItWorksPage() {
         <div className="grid md:grid-cols-3 gap-6">
           {MODES.map((mode, i) => (
             <Reveal key={mode.name} delay={i * 90}>
-              <GlowCard className="h-full bg-slate-900/60 border border-slate-800/80 backdrop-blur-xl rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl">
+              <Card className="h-full p-7 backdrop-blur-xl shadow-xl">
                 {/*
                   Схема тут не прикраса: словами різниця між режимами
                   звучить майже однаково, а на малюнку видно одразу —
@@ -390,7 +394,7 @@ export default function HowItWorksPage() {
                 </div>
 
                 <div className="flex items-baseline gap-2.5 mb-2">
-                  <span className="tag-mono text-xs font-black text-accent-500/70 tabular-nums">
+                  <span className="tag-mono text-xs font-black text-accent-500 tabular-nums">
                     0{i + 1}
                   </span>
                   <h3 className="text-xl font-bold text-white">{mode.name}</h3>
@@ -398,10 +402,10 @@ export default function HowItWorksPage() {
 
                 <p className="text-sm text-slate-400 leading-relaxed mb-4">{mode.text}</p>
 
-                <span className="tag-mono inline-block text-[10px] text-slate-500 px-2 py-1 rounded-md bg-slate-950/80 border border-slate-800">
+                <span className="tag-mono inline-block text-[10px] text-slate-400 px-2 py-1 rounded-md bg-slate-950/80 border border-slate-800">
                   {mode.note}
                 </span>
-              </GlowCard>
+              </Card>
             </Reveal>
           ))}
         </div>

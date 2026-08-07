@@ -3,7 +3,9 @@ import { Link } from 'react-router-dom';
 import { ArrowRight } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
-import { Reveal, GlowCard } from './motion';
+import { Reveal } from './motion';
+import { Card } from './surfaces';
+import ScanField from './ScanField';
 import {
   BracketMetric, ConsoleFeed, Sparkline, VerdictRow, ScanStrip, FilterFunnel,
   LimitBars, SessionStatus, RiskSpectrum, SweepFrame,
@@ -170,38 +172,38 @@ const TileHead: React.FC<{
 );
 
 /**
- * Обгортка плитки. Одна поверхня на всі дев'ять.
- *
- * Раніше фактура задавалась зовні, щоб сусідні плитки не збігались:
- * бенто було плоским, і чергування dots/grid/scan було єдиним, що
- * розбивало сіру стрічку. Тепер порядок несуть групи 01–03, і різні
- * фактури з ними конкурують — три фони й чотири фактури на дев'ять
- * карток читались як різнобій, а не як ритм. Відмінності лишились там,
- * де вони щось означають: усередині плиток.
- *
- * Ховер один на всю сторінку — рамка. Ані чипи, ані панелі всередині
- * своїх станів не мають: коли підсвічується все, не підсвічується ніщо.
+ * Плитка модуля. Поверхня спільна для всіх публічних сторінок — див.
+ * `Card` у surfaces.tsx; тут лише розтягування на висоту ряду, щоб
+ * сусіди в сітці стояли врівень.
  */
 const Tile: React.FC<{
   className?: string;
   children: React.ReactNode;
 }> = ({ className, children }) => (
-  <GlowCard
-    className={cn(
-      'h-full min-w-0 rounded-3xl p-6 sm:p-7',
-      'bg-slate-900/60 border border-slate-800/80',
-      'hover:border-accent-500/40 transition-colors',
-      className
-    )}
-  >
-    {children}
-  </GlowCard>
+  <Card className={cn('h-full', className)}>{children}</Card>
 );
 
 export default function FeaturesPage() {
   return (
     <LandingLayout>
-      <Section className="pt-16 sm:pt-20">
+      {/*
+        Фон за шапкою — як на решті публічних сторінок. Тут саме `mesh`, а
+        не `flow` чи `scan`: ті прив'язані до змісту своїх сторінок —
+        конвеєр тече вниз, антифрод сканує. Ця сторінка не про один
+        процес, а про набір модулів, тож поле вузлів підходить, а промінь
+        обіцяв би рух, якого на ній немає.
+
+        Шар aria-hidden і без подій, висота обмежена: нижні секції мають
+        лишатись на спокійному тлі, інакше текст читається гірше.
+      */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-[42rem] overflow-hidden"
+        aria-hidden
+      >
+        <ScanField variant="mesh" className="w-full h-full opacity-60" />
+      </div>
+
+      <Section className="pt-16 sm:pt-20 relative">
         <SectionHeading
           eyebrow="Можливості"
           title="Що вміє Arbix Quantum"

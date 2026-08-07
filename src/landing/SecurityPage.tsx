@@ -6,8 +6,8 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
-import { Reveal, GlowCard } from './motion';
-import { MonoTag, DataRain } from './surfaces';
+import { Reveal } from './motion';
+import { MonoTag, DataRain, Card } from './surfaces';
 import { BracketMetric, RiskSpectrum } from './blocks';
 import ScanField from './ScanField';
 
@@ -172,7 +172,13 @@ export default function SecurityPage() {
         */}
         <div className="grid lg:grid-cols-3 gap-4 mb-5">
           <Reveal className="lg:col-span-2 min-w-0">
-            <GlowCard className="h-full surface-scan bg-slate-950/80 border border-accent-500/20 rounded-3xl p-6 sm:p-7">
+            {/*
+              Ця картка була єдиною без ховера — на неї одну рамка не
+              реагувала, і це читалось як несправність, а не як акцент.
+              Вагу їй дає col-span-2, стовпчики й найбільший відсоток, а
+              не окрема поверхня.
+            */}
+            <Card className="h-full">
               <div className="flex items-start justify-between gap-4 mb-6">
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="w-10 h-10 rounded-xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shrink-0">
@@ -180,7 +186,7 @@ export default function SecurityPage() {
                   </span>
                   <div className="min-w-0">
                     <div className="text-lg font-bold text-white truncate">{top.label}</div>
-                    <div className="tag-mono text-[10px] text-slate-600">{top.key}</div>
+                    <div className="tag-mono text-[10px] text-slate-400">{top.key}</div>
                   </div>
                 </div>
                 <span className="tag-mono text-sm font-black text-accent-400 tabular-nums shrink-0">
@@ -205,11 +211,11 @@ export default function SecurityPage() {
               </div>
 
               <p className="text-sm text-slate-400 leading-relaxed">{top.text}</p>
-            </GlowCard>
+            </Card>
           </Reveal>
 
           <Reveal delay={80} className="min-w-0">
-            <GlowCard className="h-full surface-dots bg-slate-950/70 border border-slate-800/80 rounded-3xl p-6 sm:p-7 flex flex-col hover:border-accent-500/40 transition-colors">
+            <Card className="h-full flex flex-col">
               <div className="flex items-center gap-3 mb-4">
                 <second.icon className="w-4 h-4 text-accent-400 shrink-0" />
                 <span className="text-sm font-bold text-slate-200">{second.label}</span>
@@ -218,12 +224,12 @@ export default function SecurityPage() {
               <div className="text-5xl font-black text-accent-400 tabular-nums leading-none mb-2">
                 {second.weight}%
               </div>
-              <div className="tag-mono text-[10px] uppercase tracking-widest text-slate-600 mb-4">
+              <div className="tag-mono text-[10px] uppercase tracking-widest text-slate-400 mb-4">
                 {second.key}
               </div>
 
               <p className="text-[13px] text-slate-400 leading-relaxed mt-auto">{second.text}</p>
-            </GlowCard>
+            </Card>
           </Reveal>
         </div>
 
@@ -232,7 +238,9 @@ export default function SecurityPage() {
             const Icon = w.icon;
             return (
               <Reveal key={w.key} delay={i * 60} className="min-w-0">
-                <GlowCard className="h-full bg-slate-900/50 border border-slate-800/80 rounded-2xl p-5 hover:border-accent-500/40 transition-colors">
+                {/* Менший радіус тут за розміром картки, а не за примхою:
+                    вона вчетверо дрібніша за сусідні. */}
+                <Card className="h-full rounded-2xl p-5">
                   <Icon className="w-5 h-5 text-accent-400 mb-3" />
                   <div className="flex items-baseline gap-2 mb-1.5">
                     <span className="text-2xl font-black text-white tabular-nums leading-none">
@@ -240,8 +248,8 @@ export default function SecurityPage() {
                     </span>
                   </div>
                   <div className="text-xs font-bold text-slate-300 mb-1.5">{w.label}</div>
-                  <p className="text-[11px] text-slate-500 leading-snug">{w.text}</p>
-                </GlowCard>
+                  <p className="text-[11px] text-slate-400 leading-snug">{w.text}</p>
+                </Card>
               </Reveal>
             );
           })}
@@ -252,10 +260,10 @@ export default function SecurityPage() {
           смуги різної ширини, і OK — найвужча з них.
         */}
         <Reveal>
-          <div className="rounded-3xl bg-slate-950/80 border border-slate-800/80 p-6 sm:p-8 mb-12 hover:border-accent-500/40 transition-colors">
+          <Card className="p-6 sm:p-8 mb-12">
             <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6">
               <h3 className="text-lg font-bold text-white tracking-tight">Куди веде бал</h3>
-              <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-600">
+              <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
                 to_verdict
               </span>
             </div>
@@ -271,11 +279,11 @@ export default function SecurityPage() {
               ].map(([name, text]) => (
                 <div key={name}>
                   <div className="tag-mono text-[11px] font-black text-slate-300 mb-1.5">{name}</div>
-                  <p className="text-[13px] text-slate-500 leading-relaxed">{text}</p>
+                  <p className="text-[13px] text-slate-400 leading-relaxed">{text}</p>
                 </div>
               ))}
             </div>
-          </div>
+          </Card>
         </Reveal>
 
         <div className="grid md:grid-cols-2 gap-6">
@@ -283,12 +291,7 @@ export default function SecurityPage() {
             const Icon = layer.icon;
             return (
               <Reveal key={layer.title} delay={(i % 2) * 90} className="min-w-0">
-                <GlowCard
-                  className={cn(
-                    'h-full border border-slate-800/80 rounded-3xl p-7 hover:border-accent-500/40 transition-all shadow-xl',
-                    i % 3 === 0 ? 'surface-dots bg-slate-950/70' : 'surface-grid bg-slate-900/50'
-                  )}
-                >
+                <Card className="h-full p-7 shadow-xl">
                   <div className="w-12 h-12 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center mb-5 shadow-lg shadow-accent-500/10">
                     <Icon className="w-6 h-6 text-accent-400" />
                   </div>
@@ -304,7 +307,7 @@ export default function SecurityPage() {
                       </span>
                     ))}
                   </div>
-                </GlowCard>
+                </Card>
               </Reveal>
             );
           })}
@@ -344,7 +347,7 @@ export default function SecurityPage() {
                     />
                   )}
 
-                  <GlowCard className="relative flex items-start gap-4 p-5 sm:p-6 rounded-2xl bg-slate-950/70 border border-slate-800/80 hover:border-accent-500/40 transition-colors">
+                  <Card className="relative flex items-start gap-4 p-5 sm:p-6 rounded-2xl">
                     <span className="absolute left-0 top-0 w-3 h-3 border-l border-t border-accent-500/40 rounded-tl-2xl" aria-hidden />
                     <span className="absolute right-0 bottom-0 w-3 h-3 border-r border-b border-accent-500/40 rounded-br-2xl" aria-hidden />
 
@@ -353,13 +356,13 @@ export default function SecurityPage() {
                     </span>
 
                     <div className="min-w-0">
-                      <div className="tag-mono text-[10px] tracking-widest text-accent-500/70 mb-1.5">
+                      <div className="tag-mono text-[10px] tracking-widest text-accent-500 mb-1.5">
                         {item.tag}
                       </div>
                       <h3 className="text-base font-bold text-white mb-1.5">{item.title}</h3>
                       <p className="text-sm text-slate-400 leading-relaxed">{item.text}</p>
                     </div>
-                  </GlowCard>
+                  </Card>
                 </div>
               </Reveal>
             );
