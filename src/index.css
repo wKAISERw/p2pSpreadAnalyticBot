@@ -672,3 +672,57 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-scan-sweep { animation: none; opacity: 0; }
 }
+
+/*
+ * Промінь, що проходить згори вниз крізь ряд метрик.
+ *
+ * Один на весь ряд, а не по одному в кожній плитці: чотири незалежні
+ * смуги читались би як чотири віджети, а так це один сканер, що йде по
+ * показниках. М'яка смуга плюс тонка яскрава лінія на її середині —
+ * без лінії пляма розмазується й ефекту не видно.
+ *
+ * Анімується лише transform, тож усе лишається на композиторі.
+ */
+@keyframes arbix-sweep-down {
+  0%        { transform: translateY(-160%); opacity: 0; }
+  10%, 55%  { opacity: 1; }
+  100%      { transform: translateY(160%); opacity: 0; }
+}
+
+.sweep-down {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 40%;
+  pointer-events: none;
+  will-change: transform;
+  animation: arbix-sweep-down 6s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgb(var(--accent-rgb) / 0.06) 40%,
+    rgb(var(--accent-rgb) / 0.14) 50%,
+    rgb(var(--accent-rgb) / 0.06) 60%,
+    transparent
+  );
+}
+
+.sweep-down::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  top: 50%;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(var(--accent-rgb) / 0.5) 20%,
+    rgb(var(--accent-rgb) / 0.5) 80%,
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep-down { display: none; }
+}

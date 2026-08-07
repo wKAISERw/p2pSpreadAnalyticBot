@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading } from './LandingLayout';
-import { Reveal, GlowCard, useReveal } from './motion';
+import { Reveal, GlowCard, useReveal, useScrollDraw } from './motion';
 import { Surface, MonoTag } from './surfaces';
 import { StrategyDiagram } from './blocks';
 
@@ -95,6 +95,7 @@ const Step: React.FC<{
 }> = ({ step, index, isLast }) => {
   const Icon = step.icon;
   const { ref, shown } = useReveal<HTMLDivElement>();
+  const { trackRef, fillRef, litRef } = useScrollDraw<HTMLDivElement>();
   const onLeft = index % 2 === 0;
 
   return (
@@ -102,42 +103,49 @@ const Step: React.FC<{
       ref={ref}
       className="grid grid-cols-[auto_1fr] lg:grid-cols-[1fr_auto_1fr] gap-x-5 lg:gap-x-10"
     >
-      {/* Вузол на осі */}
-      <div className="relative col-start-1 lg:col-start-2 row-start-1 flex flex-col items-center">
-        <div
-          className={cn(
-            'relative z-10 w-12 h-12 lg:w-14 lg:h-14 rounded-2xl flex items-center justify-center shrink-0',
-            'bg-slate-950 border transition-colors duration-500',
-            shown ? 'border-accent-500/50' : 'border-slate-800'
-          )}
-          style={
-            shown
-              ? { boxShadow: '0 0 0 6px rgb(var(--accent-rgb) / 0.06), 0 0 30px rgb(var(--accent-rgb) / 0.25)' }
-              : undefined
-          }
-        >
-          <Icon
-            className={cn(
-              'w-5 h-5 lg:w-6 lg:h-6 transition-colors duration-500',
-              shown ? 'text-accent-400' : 'text-slate-600'
-            )}
-          />
+      {/*
+        Колонка осі — вона ж мірило прогресу. Заповнення рахується від її
+        власного положення у вікні, а не від індексу кроку: картки різної
+        висоти, і рівні частки розсинхронізували б лінію з іконками.
+      */}
+      <div
+        ref={trackRef}
+        className="relative col-start-1 lg:col-start-2 row-start-1 flex flex-col items-center"
+      >
+        <div className="relative z-10 w-12 h-12 lg:w-14 lg:h-14 rounded-2xl flex items-center justify-center shrink-0 bg-slate-950 border border-slate-800">
+          <Icon className="w-5 h-5 lg:w-6 lg:h-6 text-slate-700" />
+
+          {/*
+            Увімкнений стан — окремий шар поверх згаслого. Так прогрес
+            пишеться в opacity напряму, без стану React: інакше кожен
+            кадр прокрутки давав би ререндер п'яти кроків.
+          */}
+          <span
+            ref={litRef}
+            className="absolute inset-0 rounded-2xl border border-accent-500/50 flex items-center justify-center opacity-0 transition-opacity duration-500"
+            style={{
+              boxShadow:
+                '0 0 0 6px rgb(var(--accent-rgb) / 0.06), 0 0 30px rgb(var(--accent-rgb) / 0.25)',
+            }}
+            aria-hidden
+          >
+            <Icon className="w-5 h-5 lg:w-6 lg:h-6 text-accent-400" />
+          </span>
         </div>
 
         {/*
-          Відрізок осі до наступного вузла. Росте через scaleY, тобто
-          анімується композитором і не викликає перерахунку розкладки.
+          Відрізок до наступного вузла. Росте через scaleY — це transform,
+          тож кадр малює композитор і розкладка не перераховується.
         */}
         {!isLast && (
           <div className="relative flex-1 w-px my-2 bg-slate-800/70 overflow-hidden">
             <div
-              className={cn(
-                'absolute inset-0 origin-top transition-transform duration-700 ease-out',
-                shown ? 'scale-y-100' : 'scale-y-0'
-              )}
+              ref={fillRef as React.RefObject<HTMLDivElement>}
+              className="absolute inset-0 origin-top"
               style={{
+                transform: 'scaleY(0)',
                 background:
-                  'linear-gradient(to bottom, rgb(var(--accent-rgb) / 0.7), rgb(var(--accent-rgb) / 0.15))',
+                  'linear-gradient(to bottom, rgb(var(--accent-rgb) / 0.75), rgb(var(--accent-rgb) / 0.2))',
               }}
             />
           </div>

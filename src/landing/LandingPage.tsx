@@ -10,7 +10,7 @@ import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
 import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
-import { VerdictRow, BracketMetric } from './blocks';
+import { VerdictRow, BracketMetric, SweepFrame } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
 
@@ -223,12 +223,14 @@ export default function LandingPage() {
       {/* ─── Можливості ───────────────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
-            <BracketMetric value="7" label="майданчиків" hint="Скануються одночасно" />
-            <BracketMetric value="6" label="сигналів ризику" hint="Умови, поведінка, LLM, негатив, тексти, клони" />
-            <BracketMetric value="5" label="режимів" hint="Спред, тейкер ×2, мейкер ×2" />
-            <BracketMetric value="8" label="лімітів на банк" hint="Добові, місячні, разові, кількість" />
-          </div>
+          <SweepFrame className="mb-12 rounded-2xl">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <BracketMetric value="7" label="майданчиків" hint="Скануються одночасно" />
+              <BracketMetric value="6" label="сигналів ризику" hint="Умови, поведінка, LLM, негатив, тексти, клони" />
+              <BracketMetric value="5" label="режимів" hint="Спред, тейкер ×2, мейкер ×2" />
+              <BracketMetric value="8" label="лімітів на банк" hint="Добові, місячні, разові, кількість" />
+            </div>
+          </SweepFrame>
 
           <SectionHeading
             eyebrow="Що всередині"

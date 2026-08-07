@@ -141,3 +141,73 @@ export const GlowCard: React.FC<{
     </div>
   );
 };
+
+/* ─────────────────── Малювання лінії за прокруткою ─────────────────── */
+
+/**
+ * Заповнює відрізок лінії залежно від того, де він зараз відносно вікна.
+ *
+ * Прогрес пишеться прямо в стиль вузла, без стану React: інакше кожен
+ * кадр прокрутки давав би ререндер компонента, а їх на сторінці п'ять.
+ *
+ * Якірна лінія — трохи нижче середини екрана. Так заповнення йде трохи
+ * попереду очей: коли читаєш крок, лінія до нього вже дійшла.
+ *
+ * Слухач свій на кожен виклик, а не спільний реєстр на всіх. Спільний
+ * тут уже був: він додавав слухача, коли набір підписок порожній, і
+ * знімав, коли він порожніє знову. Під подвійним монтуванням у
+ * StrictMode ця пара розліталась — підписки лишались, а слухача на вікні
+ * вже не було, і лінія завмирала на значенні, порахованому при монтуванні.
+ * Кілька пасивних слухачів із власним rAF коштують незмірно менше, ніж
+ * така крихкість.
+ */
+export function useScrollDraw<Track extends HTMLElement>() {
+  const trackRef = useRef<Track>(null);
+  const fillRef = useRef<HTMLElement>(null);
+  const litRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const track = trackRef.current;
+    if (!track) return;
+
+    const apply = (value: number) => {
+      if (fillRef.current) fillRef.current.style.transform = `scaleY(${value})`;
+      if (litRef.current) litRef.current.style.opacity = value > 0.02 ? '1' : '0';
+    };
+
+    // За вимкненого руху лінія просто намальована: прокрутка не має бути
+    // умовою побачити зміст.
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      apply(1);
+      return;
+    }
+
+    let frame = 0;
+
+    const measure = () => {
+      frame = 0;
+      const rect = track.getBoundingClientRect();
+      if (!rect.height) return;
+      const anchor = window.innerHeight * 0.62;
+      apply(Math.min(1, Math.max(0, (anchor - rect.top) / rect.height)));
+    };
+
+    // Подій прокрутки більше, ніж кадрів: без цієї заслінки ми міряли б
+    // геометрію по кілька разів на кадр і самі собі влаштували layout thrash.
+    const schedule = () => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    };
+
+    window.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule, { passive: true });
+    measure();
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+    };
+  }, []);
+
+  return { trackRef, fillRef, litRef };
+}

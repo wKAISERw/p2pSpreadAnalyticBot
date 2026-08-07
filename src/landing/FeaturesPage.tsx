@@ -9,7 +9,7 @@ import LandingLayout, { Section, SectionHeading } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
 import {
   BracketMetric, ConsoleFeed, Sparkline, VerdictRow, ScanStrip, FilterFunnel,
-  LimitBars, SessionStatus, StrategyDiagram, type LogLine,
+  LimitBars, SessionStatus, StrategyDiagram, SweepFrame, type LogLine,
 } from './blocks';
 
 /**
@@ -131,18 +131,20 @@ export default function FeaturesPage() {
           майданчиків, _SCANNER_MODES — п'ять режимів, user_bank_limits —
           вісім полів ліміту, ваги CompositeScorer — шість сигналів.
         */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-12">
-          {[
-            { value: '7', label: 'майданчиків', hint: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
-            { value: '6', label: 'сигналів ризику', hint: 'Умови, поведінка, LLM, негатив, тексти, клони' },
-            { value: '5', label: 'режимів', hint: 'Спред, тейкер ×2, мейкер ×2' },
-            { value: '8', label: 'лімітів на банк', hint: 'Добові, місячні, разові, кількість, кулдаун' },
-          ].map((m, i) => (
-            <Reveal key={m.label} delay={i * 40}>
-              <BracketMetric {...m} />
-            </Reveal>
-          ))}
-        </div>
+        <SweepFrame className="mb-12 rounded-2xl">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+            {[
+              { value: '7', label: 'майданчиків', hint: 'Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot' },
+              { value: '6', label: 'сигналів ризику', hint: 'Умови, поведінка, LLM, негатив, тексти, клони' },
+              { value: '5', label: 'режимів', hint: 'Спред, тейкер ×2, мейкер ×2' },
+              { value: '8', label: 'лімітів на банк', hint: 'Добові, місячні, разові, кількість, кулдаун' },
+            ].map((m, i) => (
+              <Reveal key={m.label} delay={i * 40}>
+                <BracketMetric {...m} />
+              </Reveal>
+            ))}
+          </div>
+        </SweepFrame>
 
         {/* ── Бенто ────────────────────────────────────────────────────── */}
         <div className="grid lg:grid-cols-3 gap-5">

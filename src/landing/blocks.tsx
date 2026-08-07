@@ -533,3 +533,25 @@ export const SessionStatus: React.FC<{
     ))}
   </div>
 );
+
+/* ────────────────────── Промінь по ряду метрик ─────────────────────── */
+
+/**
+ * Смуга світла, що проходить згори вниз крізь усе, що всередині.
+ *
+ * Один промінь на весь ряд, а не по одному в кожній плитці: чотири
+ * незалежні смуги читались би як чотири віджети, а так це один сканер,
+ * що йде по показниках — рівно те, чим займається продукт.
+ *
+ * Промінь лежить під вмістом, щоб не гасити цифри: він підсвічує тло й
+ * дужки, а не перекриває текст.
+ */
+export const SweepFrame: React.FC<{
+  children: React.ReactNode;
+  className?: string;
+}> = ({ children, className }) => (
+  <div className={cn('relative overflow-hidden', className)}>
+    <span className="sweep-down" aria-hidden />
+    <div className="relative">{children}</div>
+  </div>
+);
