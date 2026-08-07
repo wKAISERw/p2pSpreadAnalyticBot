@@ -241,7 +241,7 @@ export default function ScanField({
      * Далі цього — вимкнення.
      */
     const QUALITY = [
-      { scale: 3, minFrameMs: 33 },
+      { scale: 3, minFrameMs: 0 },
       { scale: 4, minFrameMs: 33 },
       { scale: 6, minFrameMs: 50 },
     ];
@@ -375,7 +375,7 @@ export default function ScanField({
     const judge = (drawMs: number) => {
       // Бюджет: третина інтервалу між кадрами. Більше означає, що фон
       // з'їдає час, потрібний прокрутці й анімаціям сторінки.
-      const budget = QUALITY[tier].minFrameMs ? QUALITY[tier].minFrameMs / 3 : 5;
+      const budget = QUALITY[tier].minFrameMs ? QUALITY[tier].minFrameMs / 3 : 4;
       if (drawMs > budget) slowFrames++;
       if (++samples < SAMPLE) return;
 

@@ -104,7 +104,7 @@ export default function LandingPage() {
               </div>
 
               <h1 className="text-[2.6rem] sm:text-5xl lg:text-6xl font-bold text-white tracking-tight leading-[1.03] mb-5">
-                Спред видно всім.
+                Спред видно всім.{' '}
                 <br />
                 <span className="text-accent-400">Ризик — ні.</span>
               </h1>
