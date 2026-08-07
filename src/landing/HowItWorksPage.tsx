@@ -8,7 +8,7 @@ import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal, useReveal, useScrollDraw } from './motion';
 import { Surface, MonoTag, Card } from './surfaces';
-import { StrategyDiagram } from './blocks';
+import { StrategyDiagram, RouteLine } from './blocks';
 import ScanField from './ScanField';
 
 /**
@@ -237,6 +237,14 @@ const AlertPreview: React.FC = () => (
           спред
         </span>
       </div>
+
+      {/*
+        Маршрут окремим рядком над колонками. З самих колонок напрямок
+        доводилось збирати очима: «Купівля · OKX» ліворуч, «Продаж ·
+        Binance» праворуч — тобто читач мав здогадатись, що це одна
+        зв'язка, а не два незалежні рядки.
+      */}
+      <RouteLine from="OKX" to="Binance" />
 
       <div className="grid grid-cols-2 gap-px bg-slate-800 rounded-xl overflow-hidden">
         <div className="bg-slate-900/90 p-3">

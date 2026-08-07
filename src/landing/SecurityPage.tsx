@@ -251,14 +251,28 @@ export default function SecurityPage() {
               <Reveal key={w.key} delay={i * 60} className="min-w-0">
                 {/* Менший радіус тут за розміром картки, а не за примхою:
                     вона вчетверо дрібніша за сусідні. */}
+                {/*
+                  Іконка ліворуч, вага праворуч і великою — перше, що має
+                  впасти в око, це саме число: картки стоять у ряд, і
+                  порівнюють їх за вагою, а не за назвою. Доти відсоток
+                  був того ж розміру, що й підпис, і ряд читався як
+                  чотири однакові плитки.
+
+                  Менший радіус — за розміром картки, а не за примхою:
+                  вона вчетверо дрібніша за сусідні.
+                */}
                 <Card className="h-full rounded-2xl p-5">
-                  <Icon className="w-5 h-5 text-accent-400 mb-3" />
-                  <div className="flex items-baseline gap-2 mb-1.5">
-                    <span className="text-2xl font-black text-white tabular-nums leading-none">
-                      {w.weight}%
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <span className="w-9 h-9 rounded-xl bg-accent-500/10 border border-accent-500/25 flex items-center justify-center shrink-0">
+                      <Icon className="w-4 h-4 text-accent-400" />
+                    </span>
+                    <span className="text-3xl font-black text-accent-400 tabular-nums leading-none">
+                      {w.weight}
+                      <span className="text-lg align-top">%</span>
                     </span>
                   </div>
-                  <div className="text-xs font-bold text-slate-300 mb-1.5">{w.label}</div>
+
+                  <div className="text-xs font-bold text-slate-200 mb-1.5">{w.label}</div>
                   <p className="text-[11px] text-slate-400 leading-snug">{w.text}</p>
                 </Card>
               </Reveal>

@@ -8,7 +8,7 @@ import { Card, GroupHead } from './surfaces';
 import ScanField from './ScanField';
 import {
   BracketMetric, ConsoleFeed, Sparkline, VerdictRow, ScanStrip, FilterFunnel,
-  LimitBars, SessionStatus, RiskSpectrum, SweepFrame,
+  LimitBars, SessionStatus, RiskSpectrum, SweepFrame, RouteLine,
   type LogLine, type ScanItem,
 } from './blocks';
 
@@ -404,10 +404,12 @@ export default function FeaturesPage() {
                       ×3
                     </span>
                   </div>
-                  <div className="text-lg font-black text-accent-400 tabular-nums leading-none mb-1.5">
+                  <div className="text-lg font-black text-accent-400 tabular-nums leading-none mb-2.5">
                     +2.15%
                   </div>
-                  <div className="tag-mono text-[10px] text-slate-400">OKX → Binance · 24 000 ₴</div>
+
+                  <RouteLine from="OKX" to="Binance" className="mb-2" />
+                  <div className="tag-mono text-[10px] text-slate-400 tabular-nums">24 000 ₴</div>
                 </div>
                 <p className="text-[11px] text-slate-400 leading-snug mt-3 mb-6">
                   Позначка ×3 означає, що три однакові зв'язки схлопнулись в одне повідомлення.

@@ -481,6 +481,41 @@ export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
   </div>
 );
 
+/* ────────────────────────── Маршрут зв'язки ────────────────────────── */
+
+/**
+ * Куди й звідки — одним рядком.
+ *
+ * До цього маршрут писався текстом: «OKX → Binance». Стрілка в тексті
+ * читається як розділовий знак, а не як рух, і напрямок губиться серед
+ * решти моношрифту. Тут напрямок несе сама лінія: крапка на старті,
+ * вістря на фініші, згасання від першої біржі до другої.
+ *
+ * Лінія — flex-1, тож рядок стискається до будь-якої ширини, а назви
+ * лишаються цілими: у вузькій колонці краще коротка лінія, ніж обрізана
+ * назва біржі.
+ */
+export const RouteLine: React.FC<{
+  from: string;
+  to: string;
+  className?: string;
+}> = ({ from, to, className }) => (
+  <div className={cn('flex items-center gap-2.5 min-w-0', className)}>
+    <span className="tag-mono text-[11px] font-bold text-slate-200 shrink-0">{from}</span>
+
+    <span
+      className="relative flex-1 min-w-[24px] h-px bg-gradient-to-r from-accent-500/70 to-accent-500/20"
+      aria-hidden
+    >
+      <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-accent-500" />
+      {/* Вістря зібране з рамок: трикутник без зайвого svg на кожен рядок */}
+      <span className="absolute right-0 top-1/2 -translate-y-1/2 border-y-[3px] border-y-transparent border-l-[5px] border-l-accent-400" />
+    </span>
+
+    <span className="tag-mono text-[11px] font-bold text-slate-200 shrink-0">{to}</span>
+  </div>
+);
+
 /* ───────────────────────── Біжуча смуга ────────────────────────────── */
 
 /**
