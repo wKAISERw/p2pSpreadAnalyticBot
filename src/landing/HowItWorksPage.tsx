@@ -5,7 +5,7 @@ import {
   Clock, Landmark, SplitSquareHorizontal, ExternalLink,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import LandingLayout, { Section, SectionHeading } from './LandingLayout';
+import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal, GlowCard, useReveal, useScrollDraw } from './motion';
 import { Surface, MonoTag } from './surfaces';
 import { StrategyDiagram } from './blocks';
@@ -308,6 +308,8 @@ export default function HowItWorksPage() {
         </div>
       </Section>
 
+      <Rule />
+
       <Section className="pt-0">
         <Reveal>
           <SectionHeading
@@ -347,6 +349,8 @@ export default function HowItWorksPage() {
           </div>
         </div>
       </Section>
+
+      <Rule />
 
       <Section className="pt-0">
         <Reveal>
@@ -388,6 +392,8 @@ export default function HowItWorksPage() {
           ))}
         </div>
       </Section>
+
+      <Rule />
 
       <Section className="pt-0 pb-16">
         <Reveal>

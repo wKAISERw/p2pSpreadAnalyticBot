@@ -46,15 +46,21 @@ function getObserver(): IntersectionObserver | null {
   return observer;
 }
 
-export function useReveal<T extends HTMLElement>() {
+/**
+ * @param alwaysObserve Не довіряти CSS-таймлайну й вести появу через
+ *   обсервер. Потрібно тим, кого view() обслужити не може: у елемента
+ *   висотою в піксель діапазон «входу у в'юпорт» вироджується в мить, і
+ *   анімація просто клацає замість того, щоб іти за скролом.
+ */
+export function useReveal<T extends HTMLElement>(alwaysObserve = false) {
   const ref = useRef<T>(null);
   // Під CSS-таймлайном початковий стан не має значення: анімація
   // перебиває його. Ставимо true, щоб без JS нічого не лишилось прихованим.
-  const [shown, setShown] = useState(HAS_VIEW_TIMELINE);
+  const [shown, setShown] = useState(HAS_VIEW_TIMELINE && !alwaysObserve);
 
   useEffect(() => {
     // Сучасний браузер веде появу сам — не спостерігаємо взагалі.
-    if (HAS_VIEW_TIMELINE) return;
+    if (HAS_VIEW_TIMELINE && !alwaysObserve) return;
 
     const node = ref.current;
     if (!node) return;
@@ -80,7 +86,7 @@ export function useReveal<T extends HTMLElement>() {
       io.unobserve(node);
       callbacks.delete(node);
     };
-  }, []);
+  }, [alwaysObserve]);
 
   return { ref, shown };
 }

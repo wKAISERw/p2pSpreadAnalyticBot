@@ -4,6 +4,7 @@ import { Activity, Menu, X, ArrowUpRight, User } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store';
 import AuroraField from './AuroraField';
+import { useReveal } from './motion';
 
 export const NAV = [
   { to: '/features', label: 'Можливості' },
@@ -237,7 +238,13 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
   );
 }
 
-/** Спільна обгортка секції — щоб відступи й ширина не розповзались. */
+/**
+ * Спільна обгортка секції — щоб відступи й ширина не розповзались.
+ *
+ * На дуже широких екранах контейнер розтягується до 1440px. З 1280px на
+ * моніторі 2125px (а це звичайні 1920 при масштабі 90%) з боків лишалось
+ * по 423px порожнечі — сторінка виглядала вузькою смужкою посередині.
+ */
 export function Section({
   children,
   className,
@@ -248,9 +255,41 @@ export function Section({
   id?: string;
 }) {
   return (
-    <section id={id} className={cn('mx-auto max-w-7xl px-4 sm:px-6 py-16 sm:py-24', className)}>
+    <section
+      id={id}
+      className={cn('mx-auto max-w-7xl 2xl:max-w-[90rem] px-4 sm:px-6 py-16 sm:py-24', className)}
+    >
       {children}
     </section>
+  );
+}
+
+/**
+ * Наскрізна лінія між секціями.
+ *
+ * До неї сторінка була стрічкою блоків, що просто йшли один за одним:
+ * межі вгадувались лише за відступами. Лінія на всю ширину дає ритм і
+ * відчуття специфікації, а не рекламної сторінки.
+ *
+ * Промальовується від центру, коли до неї доскролили — інакше це просто
+ * ще одна статична смуга.
+ */
+export function Rule() {
+  const { ref, shown } = useReveal<HTMLDivElement>(true);
+
+  return (
+    <div ref={ref} className="relative h-px w-full bg-slate-800/40" aria-hidden>
+      <span
+        className={cn(
+          'absolute inset-0 origin-center transition-transform duration-1000 ease-out',
+          shown ? 'scale-x-100' : 'scale-x-0'
+        )}
+        style={{
+          background:
+            'linear-gradient(90deg, transparent, rgb(var(--accent-rgb) / 0.35) 30%, rgb(var(--accent-rgb) / 0.35) 70%, transparent)',
+        }}
+      />
+    </div>
   );
 }
 
@@ -258,16 +297,24 @@ export function SectionHeading({
   eyebrow,
   title,
   description,
+  num,
 }: {
   eyebrow?: string;
   title: string;
   description?: string;
+  /** Порядковий номер секції — «/03». Дає сторінці відчуття документа. */
+  num?: string;
 }) {
   return (
     <div className="max-w-2xl mb-12">
       {eyebrow && (
-        <div className="text-xs font-bold uppercase tracking-[0.2em] text-accent-400 mb-3">
-          {eyebrow}
+        <div className="flex items-baseline gap-2.5 mb-3">
+          {num && (
+            <span className="tag-mono text-xs font-bold text-slate-600 tabular-nums">/{num}</span>
+          )}
+          <span className="text-xs font-bold uppercase tracking-[0.2em] text-accent-400">
+            {eyebrow}
+          </span>
         </div>
       )}
       <h2 className="text-3xl sm:text-4xl font-bold text-white tracking-tight mb-4">{title}</h2>

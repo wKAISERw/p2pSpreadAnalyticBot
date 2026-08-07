@@ -5,7 +5,7 @@ import {
   Users, Brain, Percent, FileText,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import LandingLayout, { Section, SectionHeading } from './LandingLayout';
+import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
 import { MonoTag, DataRain } from './surfaces';
 import { BracketMetric, RiskSpectrum } from './blocks';
@@ -315,6 +315,8 @@ export default function SecurityPage() {
         </div>
       </Section>
 
+      <Rule />
+
       <Section className="pt-0">
         <Reveal>
           <SectionHeading
@@ -368,6 +370,8 @@ export default function SecurityPage() {
           })}
         </div>
       </Section>
+
+      <Rule />
 
       <Section className="pt-0 pb-16">
         <Reveal>

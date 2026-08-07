@@ -51,7 +51,8 @@ export default function TrustStrip() {
   return (
     <Surface kind="grid" className="p-6 sm:p-10">
       <div className="mb-8">
-        <div className="mb-4">
+        <div className="flex items-center gap-3 mb-4">
+          <span className="tag-mono text-xs font-bold text-slate-600 tabular-nums">/02</span>
           <MonoTag>what_is_checked</MonoTag>
         </div>
         <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight mb-3">

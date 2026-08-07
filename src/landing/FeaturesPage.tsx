@@ -5,7 +5,7 @@ import {
   Layers, Crosshair, MonitorDot, Users, ReceiptText, Bot, CircleCheck, Send,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import LandingLayout, { Section, SectionHeading } from './LandingLayout';
+import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal, GlowCard } from './motion';
 import {
   BracketMetric, ConsoleFeed, Sparkline, VerdictRow, ScanStrip, FilterFunnel,
@@ -364,6 +364,8 @@ export default function FeaturesPage() {
           </Reveal>
         </div>
       </Section>
+
+      <Rule />
 
       <Section className="pt-10 pb-16">
         <Reveal className="rounded-[2.5rem] border border-slate-800/80 bg-slate-900/80 backdrop-blur-2xl p-8 sm:p-12 flex flex-col sm:flex-row sm:items-center justify-between gap-6 shadow-2xl shadow-accent-500/5">

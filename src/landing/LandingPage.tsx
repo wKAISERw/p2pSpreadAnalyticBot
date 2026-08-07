@@ -5,11 +5,12 @@ import {
   Layers, Bot, Clock, Users, ReceiptText, CircleCheck,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import LandingLayout, { Section, SectionHeading } from './LandingLayout';
+import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
 import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
+import Faq from './Faq';
 import { VerdictRow, BracketMetric, SweepFrame } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
@@ -167,6 +168,8 @@ export default function LandingPage() {
         </div>
       </Section>
 
+      <Rule />
+
       {/* ─── Чому не просто «найдешевше й найдорожче» ──────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
@@ -188,6 +191,7 @@ export default function LandingPage() {
                   <MonoTag>risk_engine</MonoTag>
                 </div>
                 <SectionHeading
+                  num="01"
                   eyebrow="Головна відмінність"
                   title="Найкращий курс часто найнебезпечніший"
                   description="Верх склянки — це не завжди вигода. Там регулярно стоять ті, хто працює з чужих реквізитів, вимагає чек перед відпуском або тисне апеляцією. Сканер розбирає умови, поведінку й відгуки мерчанта до того, як ти побачиш зв'язку."
@@ -213,12 +217,16 @@ export default function LandingPage() {
         </Reveal>
       </Section>
 
+      <Rule />
+
       {/* ─── Що саме перевіряється ────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
           <TrustStrip />
         </Reveal>
       </Section>
+
+      <Rule />
 
       {/* ─── Можливості ───────────────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
@@ -233,6 +241,7 @@ export default function LandingPage() {
           </SweepFrame>
 
           <SectionHeading
+            num="03"
             eyebrow="Що всередині"
             title="Не тільки пошук спредів"
             description="Сканер, ризик-движок, облік карток і аналітика працюють як одна система — і керуються з Telegram або з вебдашборду."
@@ -286,6 +295,15 @@ export default function LandingPage() {
           </Link>
         </Reveal>
       </Section>
+
+      <Rule />
+
+      {/* ─── FAQ ──────────────────────────────────────────────────────── */}
+      <Section className="py-12 sm:py-16">
+        <Faq />
+      </Section>
+
+      <Rule />
 
       {/* ─── Заклик ───────────────────────────────────────────────────── */}
       <Section className="py-12 sm:py-16">
