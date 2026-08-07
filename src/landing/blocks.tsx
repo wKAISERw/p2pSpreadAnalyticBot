@@ -35,7 +35,12 @@ export const BracketMetric: React.FC<{
     <div className="tag-mono text-[10px] uppercase tracking-[0.2em] text-slate-300 mb-1.5">
       {label}
     </div>
-    <div className="text-[11px] text-slate-500 leading-snug">{hint}</div>
+    {/*
+      slate-400, а не slate-500: на тлі slate-950 п'ятисотий дає 4.24:1 при
+      порозі 4.5:1 для дрібного тексту. Це стосується всіх підписів у файлі —
+      вони скрізь дрібні, тож пільги для великого тексту не діє.
+    */}
+    <div className="text-[11px] text-slate-400 leading-snug">{hint}</div>
   </div>
 );
 
@@ -72,7 +77,8 @@ export const VerdictRow: React.FC<{
   verdict: Verdict;
   title: string;
   note: string;
-  icon: React.ElementType;
+  /** Без іконки рядок стає вужчим — так він і стоїть у щільних колонках. */
+  icon?: React.ElementType;
 }> = ({ verdict, title, note, icon: Icon }) => {
   const s = VERDICT_STYLE[verdict];
 
@@ -80,13 +86,15 @@ export const VerdictRow: React.FC<{
     <div className="relative flex items-center gap-3.5 pl-4 pr-3 py-3 rounded-xl bg-slate-900/70 border border-slate-800/80 overflow-hidden min-w-0">
       <span className={cn('absolute left-0 inset-y-0 w-0.5', s.rail)} aria-hidden />
 
-      <span className={cn('w-9 h-9 rounded-lg border flex items-center justify-center shrink-0', s.icon)}>
-        <Icon className="w-4 h-4" />
-      </span>
+      {Icon && (
+        <span className={cn('w-9 h-9 rounded-lg border flex items-center justify-center shrink-0', s.icon)}>
+          <Icon className="w-4 h-4" />
+        </span>
+      )}
 
       <div className="min-w-0 flex-1">
         <div className="text-sm font-bold text-slate-100 truncate">{title}</div>
-        <div className="text-[11px] text-slate-500 truncate">{note}</div>
+        <div className="text-[11px] text-slate-400 truncate">{note}</div>
       </div>
 
       <span
@@ -152,7 +160,7 @@ export const ConsoleFeed: React.FC<{ lines: LogLine[]; caption?: string }> = ({
     <div className="rounded-2xl bg-slate-950/90 border border-slate-800 overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-800/80">
         <span className="w-1.5 h-1.5 rounded-full bg-accent-500 animate-pulse" />
-        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-500">
+        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
           {caption ?? 'приклад роботи'}
         </span>
       </div>
@@ -230,7 +238,7 @@ export const Sparkline: React.FC<{ title: string }> = ({ title }) => {
     <div className="rounded-2xl bg-slate-950/90 border border-slate-800 p-4">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-bold text-slate-200">{title}</span>
-        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-600">
+        <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
           приклад
         </span>
       </div>
@@ -296,7 +304,7 @@ export const StrategyDiagram: React.FC<{ kind: 'spread' | 'taker' | 'maker' }> =
           <text x="100" y="30" textAnchor="middle" fill={stroke} fontSize="10" fontFamily="monospace">
             купівля
           </text>
-          <text x="100" y="74" textAnchor="middle" fill="#64748b" fontSize="10" fontFamily="monospace">
+          <text x="100" y="74" textAnchor="middle" fill="#94a3b8" fontSize="10" fontFamily="monospace">
             продаж
           </text>
         </>
@@ -341,7 +349,7 @@ export const StrategyDiagram: React.FC<{ kind: 'spread' | 'taker' | 'maker' }> =
           {/* Твоє оголошення стає перед стінкою, а не за нею */}
           <rect x="20" y="40" width="52" height="8" rx="2" fill={stroke} />
           <path d="M150 44 H80" stroke={stroke} strokeWidth="1.5" strokeDasharray="3 3" markerEnd={`url(#${ar})`} />
-          <text x="150" y="34" textAnchor="end" fill="#64748b" fontSize="10" fontFamily="monospace">
+          <text x="150" y="34" textAnchor="end" fill="#94a3b8" fontSize="10" fontFamily="monospace">
             стінка
           </text>
         </>
@@ -372,7 +380,11 @@ export const StrategyDiagram: React.FC<{ kind: 'spread' | 'taker' | 'maker' }> =
  */
 export const RiskSpectrum: React.FC<{ marker?: number }> = ({ marker }) => {
   const bands = [
-    { name: 'OK', from: 0, to: 20, color: 'rgb(16 185 129)' },
+    // OK бере акцент теми, а не сталий зелений: інакше при зміні
+    // --accent-rgb смуга розходиться з рештою сторінки й із бейджем OK у
+    // VerdictRow, який на акценті. Жовтий/оранжевий/червоний лишаються
+    // сталими — це попередження, а не брендові кольори.
+    { name: 'OK', from: 0, to: 20, color: 'rgb(var(--accent-rgb))' },
     { name: 'WARN', from: 20, to: 45, color: 'rgb(234 179 8)' },
     { name: 'SUSPICIOUS', from: 45, to: 75, color: 'rgb(249 115 22)' },
     { name: 'BLOCK', from: 75, to: 100, color: 'rgb(239 68 68)' },
@@ -409,7 +421,7 @@ export const RiskSpectrum: React.FC<{ marker?: number }> = ({ marker }) => {
             <span className="tag-mono text-[10px] font-bold" style={{ color: b.color }}>
               {b.name}
             </span>
-            <span className="tag-mono text-[10px] text-slate-600 tabular-nums">
+            <span className="tag-mono text-[10px] text-slate-400 tabular-nums">
               {b.from}
             </span>
           </div>
@@ -426,20 +438,44 @@ export const RiskSpectrum: React.FC<{ marker?: number }> = ({ marker }) => {
  *
  * Показує те, чого не скажеш списком: біржі опитуються не по черзі, а
  * разом, і будь-яка може випасти в cooldown, не зупиняючи решту.
+ *
+ * `code` — двобуквений монограм на плашці зліва. Він необов'язковий саме
+ * тому, що вигляд чипа — справа сторінки, а не компонента: там, де
+ * потрібен щільний ряд без плашок, поле просто не передають. Це дешевше,
+ * ніж тримати другу копію смуги заради однієї деталі.
  */
-export const ScanStrip: React.FC<{ items: string[] }> = ({ items }) => (
+export interface ScanItem {
+  name: string;
+  code?: string;
+}
+
+export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
   <div className="flex flex-wrap gap-2">
-    {items.map((name, i) => (
+    {items.map((item, i) => (
       <span
-        key={name}
-        className="tag-mono relative text-[11px] px-2.5 py-1.5 rounded-lg bg-slate-950/80 border border-slate-800 text-slate-400 overflow-hidden"
+        key={item.name}
+        className={cn(
+          'tag-mono relative flex items-center gap-2 text-[11px] rounded-lg',
+          'bg-slate-950/80 border border-slate-800 text-slate-400 overflow-hidden',
+          item.code ? 'py-1 pl-1 pr-3' : 'px-2.5 py-1.5'
+        )}
       >
         <span
           className="absolute inset-0 bg-accent-500/15 animate-scan-sweep"
           style={{ animationDelay: `${i * 0.18}s` }}
           aria-hidden
         />
-        <span className="relative">{name}</span>
+
+        {item.code && (
+          <span
+            className="relative w-[22px] h-[22px] rounded-md bg-accent-500/15 border border-accent-500/30 flex items-center justify-center text-[9px] font-bold text-accent-400 shrink-0"
+            aria-hidden
+          >
+            {item.code}
+          </span>
+        )}
+
+        <span className="relative font-semibold text-xs">{item.name}</span>
       </span>
     ))}
   </div>
@@ -462,7 +498,7 @@ export const FilterFunnel: React.FC<{
     <div className="space-y-2.5">
       {steps.map((s, i) => (
         <div key={s.label} className="flex items-center gap-3">
-          <span className="text-[11px] text-slate-500 w-28 shrink-0 truncate">{s.label}</span>
+          <span className="text-[11px] text-slate-400 w-28 shrink-0 truncate">{s.label}</span>
 
           <div className="flex-1 h-6 rounded bg-slate-950/80 overflow-hidden min-w-0">
             <div
@@ -500,7 +536,7 @@ export const LimitBars: React.FC<{
         <div key={r.bank}>
           <div className="flex items-baseline justify-between mb-1.5">
             <span className="text-xs text-slate-300">{r.bank}</span>
-            <span className="tag-mono text-[10px] text-slate-500 tabular-nums">
+            <span className="tag-mono text-[10px] text-slate-400 tabular-nums">
               {(r.used / 1000).toFixed(0)}k / {(r.limit / 1000).toFixed(0)}k ₴
             </span>
           </div>
@@ -529,7 +565,7 @@ export const SessionStatus: React.FC<{
           className={cn('w-1.5 h-1.5 rounded-full shrink-0', r.ok ? 'bg-accent-500' : 'bg-orange-500')}
         />
         <span className="text-xs font-bold text-slate-200 flex-1 min-w-0 truncate">{r.name}</span>
-        <span className="tag-mono text-[10px] text-slate-500 shrink-0">{r.note}</span>
+        <span className="tag-mono text-[10px] text-slate-400 shrink-0">{r.note}</span>
       </div>
     ))}
   </div>
