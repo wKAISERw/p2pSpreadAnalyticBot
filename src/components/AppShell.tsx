@@ -131,7 +131,7 @@ export default function AppShell() {
   if (!auth) return <Navigate to="/login" replace />;
 
   return (
-        <div className="page-enter flex h-screen bg-slate-950 text-slate-200 font-sans selection:bg-accent-500/30 overflow-hidden relative">
+        <div className="flex h-screen bg-slate-950 text-slate-200 font-sans selection:bg-accent-500/30 overflow-hidden relative">
       {!isFocusMode && (
         <div className="md:hidden absolute top-0 left-0 right-0 h-16 bg-slate-900 border-b border-slate-800 flex items-center px-4 z-30 gap-4">
           <button

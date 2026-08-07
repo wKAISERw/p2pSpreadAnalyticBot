@@ -73,16 +73,34 @@ export function useReveal<T extends HTMLElement>() {
     // Без обсервера нічого не ховаємо — хай буде без анімації, ніж ніяк.
     if (!io) return;
 
-    // Те, що вже в кадрі, не ховаємо: анімувати щойно побачене нема сенсу.
-    if (node.getBoundingClientRect().top < window.innerHeight) return;
-
-    setShown(false);
+    /*
+     * Геометрію тут більше не міряємо.
+     *
+     * Був виклик getBoundingClientRect() у layout-ефекті — по одному на
+     * кожен блок, а їх на головній за тридцять. Кожен змушує браузер
+     * порахувати розкладку негайно, і Lighthouse показував 75 мс
+     * примусового перекомпонування саме тут.
+     *
+     * Тепер рішення приймає сам обсервер: він знає перетин без нашого
+     * запиту й повідомляє асинхронно. Блок, який уже в кадрі, отримає
+     * колбек одразу й лишиться видимим; той, що нижче згину, сховається
+     * на кадр пізніше — але його однаково ніхто не бачить, бо він за
+     * межами екрана.
+     */
     callbacks.set(node, () => setShown(true));
     io.observe(node);
+
+    // Ховаємо в наступному кадрі, щоб не тримати блок прихованим до
+    // першого колбека обсервера.
+    const arm = requestAnimationFrame(() => {
+      if (!callbacks.has(node)) return;
+      setShown(false);
+    });
 
     const failsafe = window.setTimeout(() => setShown(true), REVEAL_FAILSAFE_MS);
 
     return () => {
+      cancelAnimationFrame(arm);
       window.clearTimeout(failsafe);
       io.unobserve(node);
       callbacks.delete(node);
