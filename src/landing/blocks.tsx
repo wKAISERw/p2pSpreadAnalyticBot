@@ -502,7 +502,7 @@ export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
  * Рухається лише transform, тож кадр малює композитор. За вимкненого
  * руху анімація знімається, і смуга просто стоїть.
  */
-export const Ticker: React.FC<{ label: string; items: string[] }> = ({ label, items }) => (
+export const Ticker: React.FC<{ label: string; items: ScanItem[] }> = ({ label, items }) => (
   <div className="flex w-full min-w-0 items-center gap-4 sm:gap-6 rounded-2xl border border-slate-800/80 bg-slate-950/60 backdrop-blur-sm px-4 sm:px-5 py-3.5">
     <span className="tag-mono text-[10px] uppercase tracking-[0.22em] text-slate-400 whitespace-nowrap shrink-0">
       {label}
@@ -521,16 +521,24 @@ export const Ticker: React.FC<{ label: string; items: string[] }> = ({ label, it
     <div className="relative flex-1 min-w-0 overflow-hidden [contain:inline-size] [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)] [-webkit-mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">
       <ul role="list" className="flex w-max items-center animate-marquee">
         {[0, 1].map(copy =>
-          items.map(name => (
+          items.map(item => (
             <li
-              key={`${copy}-${name}`}
-              className="flex items-center shrink-0"
+              key={`${copy}-${item.name}`}
+              className="flex items-center gap-2 shrink-0"
               aria-hidden={copy === 1 || undefined}
             >
+              {item.code && (
+                <span
+                  className="tag-mono w-5 h-5 rounded shrink-0 bg-accent-500/15 border border-accent-500/30 flex items-center justify-center text-[8px] font-bold text-accent-400"
+                  aria-hidden
+                >
+                  {item.code}
+                </span>
+              )}
               <span className="tag-mono text-xs uppercase tracking-[0.14em] text-slate-400 whitespace-nowrap">
-                {name}
+                {item.name}
               </span>
-              <span className="mx-5 sm:mx-6 text-[10px] text-accent-400/50" aria-hidden>
+              <span className="ml-5 sm:ml-6 mr-5 sm:mr-6 text-[10px] text-accent-400/50" aria-hidden>
                 ▲
               </span>
             </li>

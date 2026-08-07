@@ -1,4 +1,6 @@
 import React from 'react';
+import { Link } from 'react-router-dom';
+import { ArrowUpRight } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { GlowCard } from './motion';
 
@@ -95,6 +97,55 @@ export function Card({
     >
       {children}
     </GlowCard>
+  );
+}
+
+/**
+ * Витяг: блок головної, повна версія якого живе на іншій сторінці.
+ *
+ * На головній картки навмисно різні — там короткі вижимки з посиланнями,
+ * і зводити їх до однієї поверхні, як на решті сайту, немає сенсу. Але з
+ * самої різниці не читалось, ЧОМУ блок інакший: виглядало як
+ * непослідовність, а не як «це анонс, детальніше там».
+ *
+ * Рейка ліворуч — та сама ідіома, що в цитаті: текст, узятий з іншого
+ * джерела. Плюс моно-позначка з назвою сторінки. Разом вони кажуть те,
+ * чого не скаже жоден фон сам по собі: блок неповний за задумом.
+ *
+ * Рейка згасає донизу градієнтом — суцільна лінія на всю висоту
+ * перетворювала б блок на ще одну картку з бордером, а треба саме
+ * «початок звідси».
+ */
+export function Excerpt({
+  to,
+  label,
+  className,
+  children,
+}: {
+  /** Куди веде повна версія. */
+  to: string;
+  /** Назва розділу — те, що людина побачить на тій сторінці. */
+  label: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={cn('relative pl-5 sm:pl-6', className)}>
+      <span
+        className="absolute left-0 top-0 bottom-0 w-[3px] rounded-full bg-gradient-to-b from-accent-500/70 via-accent-500/25 to-transparent"
+        aria-hidden
+      />
+
+      <Link
+        to={to}
+        className="tag-mono group inline-flex items-center gap-2 mb-4 text-[10px] uppercase tracking-[0.18em] text-accent-400 hover:text-accent-300 transition-colors"
+      >
+        <span>витяг · {label}</span>
+        <ArrowUpRight className="w-3 h-3 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+      </Link>
+
+      {children}
+    </div>
   );
 }
 

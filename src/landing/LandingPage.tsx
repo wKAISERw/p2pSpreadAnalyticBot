@@ -8,13 +8,22 @@ import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import SpreadVisual from './SpreadVisual';
 import { Reveal, GlowCard } from './motion';
-import { Surface, DataRain, MonoTag } from './surfaces';
+import { Surface, DataRain, MonoTag, Excerpt } from './surfaces';
 import TrustStrip from './TrustStrip';
 import Faq from './Faq';
 import ScanField from './ScanField';
-import { VerdictRow, BracketMetric, SweepFrame, BrandMark, Ticker } from './blocks';
+import { VerdictRow, BracketMetric, SweepFrame, BrandMark, Ticker, type ScanItem } from './blocks';
 
-const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
+/* Склад — з ALL_EXCHANGES (core/engine/exchange_manager.py), сім штук. */
+const EXCHANGES: ScanItem[] = [
+  { name: 'Binance', code: 'BI' },
+  { name: 'Bybit', code: 'BY' },
+  { name: 'OKX', code: 'OK' },
+  { name: 'MEXC', code: 'MX' },
+  { name: 'Wallet', code: 'WL' },
+  { name: 'BingX', code: 'BX' },
+  { name: 'CryptoBot', code: 'CB' },
+];
 
 /**
  * Приклад того, що ризик-движок бачить в одному мерчанті.
@@ -206,6 +215,7 @@ export default function LandingPage() {
       {/* ─── Чому не просто «найдешевше й найдорожче» ──────────────────── */}
       <Section className="py-12 sm:py-16">
         <Reveal>
+          <Excerpt to="/security" label="Безпека">
           <Surface kind="scan" className="p-7 sm:p-14" noise>
             <DataRain count={16} />
             {/* Червоний натяк під блоком про ризик — рівно щоб змінити
@@ -251,6 +261,7 @@ export default function LandingPage() {
               </div>
             </div>
           </Surface>
+          </Excerpt>
         </Reveal>
       </Section>
 
@@ -277,12 +288,14 @@ export default function LandingPage() {
             </div>
           </SweepFrame>
 
-          <SectionHeading
-            num="03"
-            eyebrow="Що всередині"
-            title="Не тільки пошук спредів"
-            description="Сканер, ризик-движок, облік карток і аналітика працюють як одна система — і керуються з Telegram або з вебдашборду."
-          />
+          <Excerpt to="/features" label="Можливості">
+            <SectionHeading
+              num="03"
+              eyebrow="Що всередині"
+              title="Не тільки пошук спредів"
+              description="Сканер, ризик-движок, облік карток і аналітика працюють як одна система — і керуються з Telegram або з вебдашборду."
+            />
+          </Excerpt>
         </Reveal>
 
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -429,12 +442,12 @@ function PillarVisual({ kind }: { kind: 'exchanges' | 'risk' | 'limits' }) {
   if (kind === 'exchanges') {
     return (
       <div className="flex flex-wrap gap-1.5">
-        {EXCHANGES.map(name => (
+        {EXCHANGES.map(x => (
           <span
-            key={name}
+            key={x.name}
             className="tag-mono px-2 py-1 rounded-md bg-slate-900 border border-slate-800 text-[10px] text-slate-400"
           >
-            {name}
+            {x.name}
           </span>
         ))}
       </div>
