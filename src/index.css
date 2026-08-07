@@ -776,6 +776,30 @@
 }
 
 /*
+ * Біжуча стрічка інтеграцій.
+ *
+ * Зсув рівно до -50%: список у розмітці задубльований, тож на цій позиції
+ * друга копія стоїть точно там, де починалась перша. Петля замикається
+ * без стрибка, і жодного JS для цього не треба.
+ *
+ * linear, а не ease: будь-яке пом'якшення дало б помітне пригальмовування
+ * на стику циклу — саме там, де рух має бути рівним.
+ */
+@keyframes arbix-marquee {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+.animate-marquee {
+  animation: arbix-marquee 32s linear infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee { animation: none; }
+}
+
+/*
  * Пульс навколо головної кнопки.
  *
  * Кільце, що розходиться й тане, а не блимання самої кнопки: миготіння

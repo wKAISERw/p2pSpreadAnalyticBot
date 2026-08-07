@@ -183,6 +183,57 @@ void main() {
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
+/*
+ * Четвертий варіант — плетиво з підсвіченими вузлами.
+ *
+ * Три попередні мають кожен свій силует: промінь іде горизонтально
+ * (scan), доріжки — вертикально (flow), крапки стоять решіткою (mesh).
+ * Сторінці можливостей потрібен був четвертий, бо на ній стояв mesh — той
+ * самий, що на головній, і дві сторінки поспіль виглядали однаково.
+ *
+ * Тут дві діагональні системи ліній ідуть назустріч одна одній, а
+ * яскраве лишається тільки на перетинах. Малюнок читається як набір
+ * зчеплених вузлів, а не як один процес, — рівно те, чим є сторінка:
+ * дев'ять модулів, а не один конвеєр.
+ *
+ * Ліній мало, alpha низька, усе на fract() без квантованого часу — тож
+ * циклу не видно й важчим за сусідів шейдер не є.
+ */
+const FRAG_WEAVE = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 v_uv;
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform vec2  u_mouse;
+uniform vec3  u_accent;
+
+void main() {
+  vec2 uv = v_uv;
+  vec2 px = uv * u_resolution;
+
+  float band = 64.0;
+  float d1 = (px.x + px.y) / band + u_time * 0.13;
+  float d2 = (px.x - px.y) / band - u_time * 0.09;
+
+  // Тонка світла нитка на кожній смузі, а не суцільна заливка
+  float l1 = smoothstep(0.93, 1.0, fract(d1));
+  float l2 = smoothstep(0.95, 1.0, fract(d2));
+
+  // Вузол горить лише там, де нитки перетнулись
+  float node = l1 * l2;
+
+  vec2 m = u_mouse / u_resolution;
+  float near = smoothstep(0.32, 0.0, distance(uv, m));
+
+  float a = clamp(l1 * 0.09 + l2 * 0.06 + node * 0.55 + near * 0.10, 0.0, 1.0);
+  a *= smoothstep(0.0, 0.45, uv.y);
+  gl_FragColor = vec4(u_accent * a, a);
+}`;
+
 function compile(gl: WebGLRenderingContext, type: number, src: string) {
   const shader = gl.createShader(type);
   if (!shader) return null;
@@ -213,7 +264,7 @@ export default function ScanField({
   variant = 'scan',
 }: {
   className?: string;
-  variant?: 'scan' | 'flow' | 'mesh';
+  variant?: 'scan' | 'flow' | 'mesh' | 'weave';
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
 
@@ -272,7 +323,8 @@ export default function ScanField({
     }
 
     const vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, variant === 'flow' ? FRAG_FLOW : variant === 'mesh' ? FRAG_MESH : FRAG);
+    const SHADERS = { flow: FRAG_FLOW, mesh: FRAG_MESH, weave: FRAG_WEAVE, scan: FRAG };
+    const fs = compile(gl, gl.FRAGMENT_SHADER, SHADERS[variant] ?? FRAG);
     if (!vs || !fs) return;
 
     const program = gl.createProgram();

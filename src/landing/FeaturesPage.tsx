@@ -120,27 +120,27 @@ const Items: React.FC<{ items: string[][]; cols?: boolean }> = ({ items, cols })
 /**
  * Середній час циклу.
  *
- * Кільце замкнене, і це головне в ньому. Спершу тут була часткова дуга —
- * як у макеті, тільки без обертання. Але часткова дуга це ідіома
- * завантаження: незакрите коло читається як прогрес, що зупинився, тобто
- * як зламаний спінер. Замкнене коло з підписом читається тим, чим є, —
- * позначкою зі сталим числом.
+ * Кола тут більше немає, і це третя спроба. Спочатку була дуга, що
+ * крутиться (з макета), потім статична дуга, потім замкнене кільце. Усі
+ * три читались як індикатор: коло з числом усередині — надто сильна
+ * ідіома завантаження, і статичне воно виглядає застиглим незалежно від
+ * того, замкнене чи ні. Особливо на телефоні, де дрібний зелений кружок
+ * ні з чим іншим не сплутаєш.
  *
- * Анімації тут немає свідомо: сторінка публічна й нічого не опитує, тож
- * рухомий індикатор показував би вимір, якого не існує.
+ * Тому просто плашка, така сама, як лічильник пунктів поруч. Число з
+ * підписом ніхто не сплутає з процесом, що йде.
  *
  * Весь вузол aria-hidden: те саме число словами стоїть в абзаці нижче,
  * тож для читалки це дубль.
  */
 const CycleStat: React.FC<{ value: string }> = ({ value }) => (
-  <div className="flex items-center gap-2.5 shrink-0" aria-hidden>
-    <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400 hidden sm:inline">
-      цикл
-    </span>
-    <span className="w-11 h-11 rounded-full border-2 border-accent-500/40 bg-accent-500/10 flex items-center justify-center shrink-0">
-      <span className="tag-mono text-[9px] font-bold text-accent-400">{value}</span>
-    </span>
-  </div>
+  <span
+    className="tag-mono flex items-center gap-2 shrink-0 text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-950/80 border border-slate-800"
+    aria-hidden
+  >
+    <span className="uppercase tracking-widest text-slate-400 hidden sm:inline">цикл</span>
+    <span className="font-bold text-accent-400 tabular-nums whitespace-nowrap">{value}</span>
+  </span>
 );
 
 /** Шапка плитки: монограма, назва, довільний бік, кількість пунктів. */
@@ -187,11 +187,14 @@ export default function FeaturesPage() {
   return (
     <LandingLayout>
       {/*
-        Фон за шапкою — як на решті публічних сторінок. Тут саме `mesh`, а
-        не `flow` чи `scan`: ті прив'язані до змісту своїх сторінок —
-        конвеєр тече вниз, антифрод сканує. Ця сторінка не про один
-        процес, а про набір модулів, тож поле вузлів підходить, а промінь
-        обіцяв би рух, якого на ній немає.
+        Фон за шапкою — як на решті публічних сторінок, але власний.
+
+        Спершу тут стояв `mesh`, і це була помилка: той самий шейдер
+        працює на головній, тож дві сторінки поспіль виглядали однаково.
+        `flow` і `scan` теж зайняті й прив'язані до змісту своїх сторінок
+        — конвеєр тече вниз, антифрод сканує. Тому `weave`: діагональне
+        плетиво з підсвіченими перетинами. Сторінка не про один процес, а
+        про дев'ять зчеплених модулів — і фон каже те саме.
 
         Шар aria-hidden і без подій, висота обмежена: нижні секції мають
         лишатись на спокійному тлі, інакше текст читається гірше.
@@ -200,7 +203,7 @@ export default function FeaturesPage() {
         className="pointer-events-none absolute inset-x-0 top-0 h-[42rem] overflow-hidden"
         aria-hidden
       >
-        <ScanField variant="mesh" className="w-full h-full opacity-60" />
+        <ScanField variant="weave" className="w-full h-full opacity-60" />
       </div>
 
       <Section className="pt-16 sm:pt-20 relative">
@@ -240,7 +243,7 @@ export default function FeaturesPage() {
                 mark="SC"
                 title="Сканування"
                 count={4}
-                aside={<CycleStat value="0.6s" />}
+                aside={<CycleStat value="0.6–0.7 с" />}
               />
 
               <div className="grid lg:grid-cols-[1fr_1.1fr] gap-7 items-start">

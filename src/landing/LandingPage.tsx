@@ -12,7 +12,7 @@ import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
 import Faq from './Faq';
 import ScanField from './ScanField';
-import { VerdictRow, BracketMetric, SweepFrame, BrandMark } from './blocks';
+import { VerdictRow, BracketMetric, SweepFrame, BrandMark, Ticker } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
 
@@ -134,20 +134,15 @@ export default function LandingPage() {
                 </Link>
               </div>
 
+              {/*
+                Було: підпис «Майданчики» плюс сім статичних чипів. Сім
+                однакових прямокутників не додавали нічого до тексту
+                поруч, а підпис на slate-600 ще й не проходив контраст.
+                Стрічка, що їде, каже те саме одним рядком і читається як
+                «з цим воно з'єднане».
+              */}
               <div className="mt-9">
-                <div className="text-[11px] uppercase tracking-widest text-slate-600 mb-3">
-                  Майданчики
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {EXCHANGES.map(name => (
-                    <span
-                      key={name}
-                      className="px-3 py-1.5 rounded-lg bg-slate-900/70 border border-slate-800 text-xs font-medium text-slate-400 hover:border-accent-500/40 hover:text-slate-300 transition-colors"
-                    >
-                      {name}
-                    </span>
-                  ))}
-                </div>
+                <Ticker label="Працює з" items={EXCHANGES} />
               </div>
             </div>
 

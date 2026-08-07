@@ -481,6 +481,56 @@ export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
   </div>
 );
 
+/* ───────────────────────── Біжуча смуга ────────────────────────────── */
+
+/**
+ * Стрічка інтеграцій, що їде справа наліво.
+ *
+ * До неї майданчики стояли статичними чипами під підписом «Майданчики» —
+ * сім однакових прямокутників, які нічого не додавали до тексту поруч.
+ * Рядок, що рухається, читається як «система з чимось з'єднана», а не як
+ * перелік, і забирає один рядок замість двох.
+ *
+ * Механіка петлі: список дублюється рівно двічі, а зсув іде до -50%. У
+ * момент, коли перша копія повністю пішла, друга стоїть точно на її
+ * початковому місці — тож стрибка на стику немає. Друга копія
+ * aria-hidden: візуально вона потрібна, а читалці — ні.
+ *
+ * Маска з країв гасить текст у прозорість, інакше літери обрізались би
+ * на межі контейнера впритул.
+ *
+ * Рухається лише transform, тож кадр малює композитор. За вимкненого
+ * руху анімація знімається, і смуга просто стоїть.
+ */
+export const Ticker: React.FC<{ label: string; items: string[] }> = ({ label, items }) => (
+  <div className="flex items-center gap-4 sm:gap-6 rounded-2xl border border-slate-800/80 bg-slate-950/60 backdrop-blur-sm px-4 sm:px-5 py-3.5">
+    <span className="tag-mono text-[10px] uppercase tracking-[0.22em] text-slate-400 whitespace-nowrap shrink-0">
+      {label}
+    </span>
+
+    <div className="relative flex-1 min-w-0 overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)] [-webkit-mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">
+      <ul role="list" className="flex w-max items-center animate-marquee">
+        {[0, 1].map(copy =>
+          items.map(name => (
+            <li
+              key={`${copy}-${name}`}
+              className="flex items-center shrink-0"
+              aria-hidden={copy === 1 || undefined}
+            >
+              <span className="tag-mono text-xs uppercase tracking-[0.14em] text-slate-400 whitespace-nowrap">
+                {name}
+              </span>
+              <span className="mx-5 sm:mx-6 text-[10px] text-accent-400/50" aria-hidden>
+                ▲
+              </span>
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
+  </div>
+);
+
 /* ────────────────────────── Лійка фільтрів ─────────────────────────── */
 
 /**
