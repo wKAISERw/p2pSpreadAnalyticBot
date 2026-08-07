@@ -213,7 +213,7 @@ export default function SecurityPage() {
           </Reveal>
 
           <Reveal delay={80} className="min-w-0">
-            <GlowCard className="h-full surface-dots bg-slate-950/70 border border-slate-800/80 rounded-3xl p-6 sm:p-7 flex flex-col">
+            <GlowCard className="h-full surface-dots bg-slate-950/70 border border-slate-800/80 rounded-3xl p-6 sm:p-7 flex flex-col hover:border-accent-500/40 transition-colors">
               <div className="flex items-center gap-3 mb-4">
                 <second.icon className="w-4 h-4 text-accent-400 shrink-0" />
                 <span className="text-sm font-bold text-slate-200">{second.label}</span>
@@ -236,7 +236,7 @@ export default function SecurityPage() {
             const Icon = w.icon;
             return (
               <Reveal key={w.key} delay={i * 60} className="min-w-0">
-                <GlowCard className="h-full bg-slate-900/50 border border-slate-800/80 rounded-2xl p-5 hover:border-accent-500/25 transition-colors">
+                <GlowCard className="h-full bg-slate-900/50 border border-slate-800/80 rounded-2xl p-5 hover:border-accent-500/40 transition-colors">
                   <Icon className="w-5 h-5 text-accent-400 mb-3" />
                   <div className="flex items-baseline gap-2 mb-1.5">
                     <span className="text-2xl font-black text-white tabular-nums leading-none">
@@ -256,7 +256,7 @@ export default function SecurityPage() {
           смуги різної ширини, і OK — найвужча з них.
         */}
         <Reveal>
-          <div className="rounded-3xl bg-slate-950/80 border border-slate-800/80 p-6 sm:p-8 mb-12">
+          <div className="rounded-3xl bg-slate-950/80 border border-slate-800/80 p-6 sm:p-8 mb-12 hover:border-accent-500/40 transition-colors">
             <div className="flex flex-wrap items-baseline justify-between gap-3 mb-6">
               <h3 className="text-lg font-bold text-white tracking-tight">Куди веде бал</h3>
               <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-600">
@@ -348,7 +348,7 @@ export default function SecurityPage() {
                     />
                   )}
 
-                  <GlowCard className="relative flex items-start gap-4 p-5 sm:p-6 rounded-2xl bg-slate-950/70 border border-slate-800/80 hover:border-accent-500/25 transition-colors">
+                  <GlowCard className="relative flex items-start gap-4 p-5 sm:p-6 rounded-2xl bg-slate-950/70 border border-slate-800/80 hover:border-accent-500/40 transition-colors">
                     <span className="absolute left-0 top-0 w-3 h-3 border-l border-t border-accent-500/40 rounded-tl-2xl" aria-hidden />
                     <span className="absolute right-0 bottom-0 w-3 h-3 border-r border-b border-accent-500/40 rounded-br-2xl" aria-hidden />
 

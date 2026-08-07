@@ -146,7 +146,7 @@ export default function LandingPage() {
                   {EXCHANGES.map(name => (
                     <span
                       key={name}
-                      className="px-3 py-1.5 rounded-lg bg-slate-900/70 border border-slate-800 text-xs font-medium text-slate-400 hover:border-accent-500/30 hover:text-slate-300 transition-colors"
+                      className="px-3 py-1.5 rounded-lg bg-slate-900/70 border border-slate-800 text-xs font-medium text-slate-400 hover:border-accent-500/40 hover:text-slate-300 transition-colors"
                     >
                       {name}
                     </span>
@@ -173,7 +173,7 @@ export default function LandingPage() {
               const Icon = pillar.icon;
               return (
                 <Reveal key={pillar.title} delay={i * 90}>
-                  <GlowCard className="h-full bg-slate-950/40 border border-slate-800/60 backdrop-blur-sm rounded-3xl px-6 py-8 sm:px-8 hover:border-accent-500/25 hover:bg-slate-950/60 transition-all">
+                  <GlowCard className="h-full bg-slate-950/40 border border-slate-800/60 backdrop-blur-sm rounded-3xl px-6 py-8 sm:px-8 hover:border-accent-500/40 hover:bg-slate-950/60 transition-all">
                     {/*
                       Плитка іконки навмисно велика й світиться: у сітці з
                       трьох колонок вона єдина дає вертикальний акцент і
@@ -286,7 +286,7 @@ export default function LandingPage() {
             const Icon = feature.icon;
             return (
               <Reveal key={feature.title} delay={(i % 3) * 80}>
-                <GlowCard className="h-full bg-slate-900/40 border border-slate-800/60 rounded-2xl p-5 hover:bg-slate-900/70 transition-colors">
+                <GlowCard className="h-full bg-slate-900/40 border border-slate-800/60 rounded-2xl p-5 hover:border-accent-500/40 hover:bg-slate-900/70 transition-colors">
                   <Icon className="w-5 h-5 text-accent-400 mb-3" />
                   <h3 className="font-bold text-white mb-1.5">{feature.title}</h3>
                   <p className="text-sm text-slate-400 leading-relaxed">{feature.text}</p>

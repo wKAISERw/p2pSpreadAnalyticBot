@@ -100,7 +100,7 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
               <Link
                 to="/app/settings?tab=account"
                 title={`Telegram ID ${auth?.telegramId}${auth?.isAdmin ? ' · адміністратор' : ''}`}
-                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:border-slate-700 transition-colors relative"
+                className="hidden sm:flex items-center justify-center w-10 h-10 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:border-accent-500/40 transition-colors relative"
               >
                 <User className="w-4.5 h-4.5" />
                 {auth?.isAdmin && (

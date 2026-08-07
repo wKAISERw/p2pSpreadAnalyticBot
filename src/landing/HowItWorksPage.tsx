@@ -352,7 +352,7 @@ export default function HowItWorksPage() {
               const Icon = note.icon;
               return (
                 <Reveal key={note.title} delay={i * 90}>
-                  <GlowCard className="flex gap-4 p-5 sm:p-6 rounded-3xl bg-slate-900/50 border border-slate-800/70 hover:border-accent-500/25 transition-colors">
+                  <GlowCard className="flex gap-4 p-5 sm:p-6 rounded-3xl bg-slate-900/50 border border-slate-800/70 hover:border-accent-500/40 transition-colors">
                     <span className="w-10 h-10 rounded-xl bg-accent-500/10 border border-accent-500/20 flex items-center justify-center shrink-0">
                       <Icon className="w-5 h-5 text-accent-400" />
                     </span>

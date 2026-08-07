@@ -107,7 +107,7 @@ const Tile: React.FC<{
   <GlowCard
     className={cn(
       'h-full min-w-0 border border-slate-800/80 rounded-3xl p-6 sm:p-7',
-      'hover:border-accent-500/25 transition-colors',
+      'hover:border-accent-500/40 transition-colors',
       texture,
       className
     )}
@@ -368,7 +368,7 @@ export default function FeaturesPage() {
       <Rule />
 
       <Section className="pt-10 pb-16">
-        <Reveal className="rounded-[2.5rem] border border-slate-800/80 bg-slate-900/80 backdrop-blur-2xl p-8 sm:p-12 flex flex-col sm:flex-row sm:items-center justify-between gap-6 shadow-2xl shadow-accent-500/5">
+        <Reveal className="rounded-[2.5rem] border border-slate-800/80 bg-slate-900/80 backdrop-blur-2xl p-8 sm:p-12 hover:border-accent-500/40 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-6 shadow-2xl shadow-accent-500/5">
           <div>
             <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-accent-500/10 border border-accent-500/20 text-accent-400 text-xs font-bold uppercase tracking-wider mb-3">
               Готовий до запуску
