@@ -58,8 +58,10 @@ void main() {
   vec2 m = u_mouse / u_resolution;
   float pulse = smoothstep(0.28, 0.0, distance(uv, m));
 
-  float amount = noise * 0.08 + scan * 0.30 + grid * 0.05 + pulse * 0.18;
-  gl_FragColor = vec4(u_accent * amount, amount * 0.9);
+  float a = clamp(noise * 0.06 + scan * 0.26 + grid * 0.04 + pulse * 0.16, 0.0, 1.0);
+  // Колір уже помножений на альфу: полотно віддається браузеру як
+  // premultiplied, і будь-яке інше узгодження дає каламутну плівку.
+  gl_FragColor = vec4(u_accent * a, a);
 }`;
 
 /*
@@ -99,8 +101,8 @@ void main() {
   vec2 m = u_mouse / u_resolution;
   float pulse = smoothstep(0.3, 0.0, distance(uv, m));
 
-  float amount = packet * alive * 0.55 + grid * 0.04 + pulse * 0.12;
-  gl_FragColor = vec4(u_accent * amount, amount * 0.85);
+  float a = clamp(packet * alive * 0.5 + grid * 0.035 + pulse * 0.1, 0.0, 1.0);
+  gl_FragColor = vec4(u_accent * a, a);
 }`;
 
 function compile(gl: WebGLRenderingContext, type: number, src: string) {
@@ -178,8 +180,7 @@ export default function ScanField({
     gl.enableVertexAttribArray(aPos);
     gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.BLEND);
 
     const uTime = gl.getUniformLocation(program, 'u_time');
     const uRes = gl.getUniformLocation(program, 'u_resolution');

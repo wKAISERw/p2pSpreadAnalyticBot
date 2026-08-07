@@ -42,12 +42,17 @@ export default function SpreadVisual() {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
-    // 3.4 с — встигаєш прочитати цифри, і воно ще не набридає.
-    const timer = setInterval(() => setIndex(i => (i + 1) % FRAMES.length), 3400);
-    return () => clearInterval(timer);
-  }, []);
+    // 3.8 с — встигаєш прочитати цифри, і воно ще не набридає.
+    // setTimeout, а не setInterval: після ручного кліку відлік має
+    // початись заново, інакше наступна зміна прийде майже одразу.
+    const timer = setTimeout(() => setIndex(i => (i + 1) % FRAMES.length), 3800);
+    return () => clearTimeout(timer);
+  }, [index]);
+
+  const advance = () => setIndex(i => (i + 1) % FRAMES.length);
 
   const frame = FRAMES[index];
+  const next = FRAMES[(index + 1) % FRAMES.length];
   const spread = ((frame.sell.price - frame.buy.price) / frame.buy.price) * 100;
 
   return (
@@ -74,15 +79,29 @@ export default function SpreadVisual() {
         }}
       />
 
-      {/* Натяк на стос: за карткою вгадується наступна зв'язка в черзі */}
+      {/*
+        Задній шар — наступна зв'язка в черзі, і на ньому видно її біржі.
+        Раніше це була порожня плашка «для об'єму»; тепер зміна кадру
+        читається як просування стосу, бо те, що визирало ззаду, справді
+        виходить наперед.
+      */}
       <div
+        key={`b${index}`}
         aria-hidden
-        className="absolute inset-x-8 -top-4 h-20 rounded-3xl bg-slate-900/60 border border-slate-800/70"
+        className="card-behind absolute inset-x-8 -top-4 h-20 rounded-3xl bg-slate-900/60 border border-slate-800/70 px-5 pt-2.5 overflow-hidden"
         style={{ transform: 'rotateX(8deg)' }}
-      />
+      >
+        <div className="tag-mono text-[10px] uppercase tracking-widest text-slate-600 truncate">
+          далі · {next.buy.exchange} → {next.sell.exchange}
+        </div>
+      </div>
 
-      <div
-        className="relative bg-slate-900/85 border border-accent-500/25 rounded-3xl p-6 backdrop-blur-sm"
+      <button
+        type="button"
+        onClick={advance}
+        aria-label="Наступна зв'язка"
+        key={`f${index}`}
+        className="card-advance relative block w-full text-left bg-slate-900/85 border border-accent-500/25 rounded-3xl p-6 backdrop-blur-sm cursor-pointer"
         style={{
           transform: 'rotateX(2deg) rotateY(-3deg)',
           boxShadow:
@@ -155,7 +174,7 @@ export default function SpreadVisual() {
             <Check key={`${index}-${i}`} label={label} delay={i * 80} />
           ))}
         </div>
-      </div>
+      </button>
     </div>
   );
 }
