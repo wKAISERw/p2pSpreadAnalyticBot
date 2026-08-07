@@ -303,13 +303,9 @@ export default function HowItWorksPage() {
       */}
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-[40rem] overflow-hidden"
-        style={{
-          maskImage: 'linear-gradient(to bottom, black 35%, transparent)',
-          WebkitMaskImage: 'linear-gradient(to bottom, black 35%, transparent)',
-        }}
         aria-hidden
       >
-        <ScanField variant="flow" className="w-full h-full opacity-60 mix-blend-screen" />
+        <ScanField variant="flow" className="w-full h-full opacity-60" />
       </div>
 
       <Section className="pt-16 sm:pt-20 relative">

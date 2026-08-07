@@ -74,13 +74,9 @@ export default function LandingPage() {
       */}
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-[44rem] overflow-hidden"
-        style={{
-          maskImage: 'linear-gradient(to bottom, black 45%, transparent)',
-          WebkitMaskImage: 'linear-gradient(to bottom, black 45%, transparent)',
-        }}
         aria-hidden
       >
-        <ScanField variant="mesh" className="w-full h-full opacity-60 mix-blend-screen" />
+        <ScanField variant="mesh" className="w-full h-full opacity-60" />
       </div>
 
       {/* ─── Герой ─────────────────────────────────────────────────────── */}

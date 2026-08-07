@@ -75,6 +75,7 @@ void main() {
   float pulse = smoothstep(0.28, 0.0, distance(uv, m));
 
   float a = clamp(noise * 0.05 + scan * 0.34 + grid * 0.06 + pulse * 0.20, 0.0, 1.0);
+  a *= smoothstep(0.0, 0.45, uv.y);
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -134,6 +135,7 @@ void main() {
   float pulse = smoothstep(0.3, 0.0, distance(uv, m));
 
   float a = clamp(packet * alive * 0.6 + grid * 0.05 + pulse * 0.14, 0.0, 1.0);
+  a *= smoothstep(0.0, 0.5, uv.y);
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -177,6 +179,7 @@ void main() {
   float near = smoothstep(0.34, 0.0, md);
 
   float a = clamp(dot_a + ring * near * 0.30 + near * 0.05, 0.0, 1.0);
+  a *= smoothstep(0.0, 0.4, uv.y);
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -238,7 +241,7 @@ export default function ScanField({
      * Далі цього — вимкнення.
      */
     const QUALITY = [
-      { scale: 2, minFrameMs: 0 },
+      { scale: 3, minFrameMs: 33 },
       { scale: 4, minFrameMs: 33 },
       { scale: 6, minFrameMs: 50 },
     ];

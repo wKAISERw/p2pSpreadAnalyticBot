@@ -149,13 +149,9 @@ export default function SecurityPage() {
       */}
       <div
         className="pointer-events-none absolute inset-x-0 top-0 h-[46rem] overflow-hidden"
-        style={{
-          maskImage: 'linear-gradient(to bottom, black 40%, transparent)',
-          WebkitMaskImage: 'linear-gradient(to bottom, black 40%, transparent)',
-        }}
         aria-hidden
       >
-        <ScanField className="w-full h-full opacity-70 mix-blend-screen" />
+        <ScanField className="w-full h-full opacity-70" />
       </div>
 
       <Section className="pt-16 sm:pt-20 relative">
