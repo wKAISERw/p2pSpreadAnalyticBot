@@ -4,7 +4,7 @@ import { ArrowRight } from 'lucide-react';
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal } from './motion';
-import { Card } from './surfaces';
+import { Card, GroupHead } from './surfaces';
 import ScanField from './ScanField';
 import {
   BracketMetric, ConsoleFeed, Sparkline, VerdictRow, ScanStrip, FilterFunnel,
@@ -86,21 +86,6 @@ const SESSIONS = [
 ];
 
 /* ────────────────────────── Каркас сторінки ────────────────────────── */
-
-/**
- * Заголовок групи модулів.
- *
- * Номер + назва + волосяна лінія на решту ширини. Лінія тут не окраса:
- * без неї заголовок губиться між двома картками, бо за розміром він
- * менший за їхні шапки.
- */
-const GroupHead: React.FC<{ num: string; title: string }> = ({ num, title }) => (
-  <div className="flex items-center gap-4 mb-6">
-    <span className="tag-mono text-[13px] font-bold text-accent-400 tabular-nums">{num}</span>
-    <h2 className="text-xl font-bold text-white tracking-tight">{title}</h2>
-    <span className="flex-1 h-px bg-slate-800/60" aria-hidden />
-  </div>
-);
 
 /** Список пунктів модуля — спільний для всіх плиток. */
 const Items: React.FC<{ items: string[][]; cols?: boolean }> = ({ items, cols }) => (

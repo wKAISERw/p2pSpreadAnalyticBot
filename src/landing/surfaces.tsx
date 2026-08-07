@@ -99,6 +99,27 @@ export function Card({
 }
 
 /**
+ * Заголовок групи блоків усередині секції.
+ *
+ * Номер + назва + волосяна лінія на решту ширини. Лінія не окраса: без
+ * неї заголовок губиться між двома картками, бо за розміром він менший
+ * за їхні шапки.
+ *
+ * Потрібен там, де секція містить кілька різних за суттю блоків.
+ * SectionHeading для цього завеликий — він відкриває тему, а не ділить
+ * її всередині.
+ */
+export function GroupHead({ num, title }: { num: string; title: string }) {
+  return (
+    <div className="flex items-center gap-4 mb-6">
+      <span className="tag-mono text-[13px] font-bold text-accent-400 tabular-nums">{num}</span>
+      <h2 className="text-xl font-bold text-white tracking-tight">{title}</h2>
+      <span className="flex-1 h-px bg-slate-800/60" aria-hidden />
+    </div>
+  );
+}
+
+/**
  * Потік «даних» у фоні блока. Кількість смуг мала свідомо: це акцент,
  * а не заставка, і кожна смуга — окремий елемент, що анімується.
  */

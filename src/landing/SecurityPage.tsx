@@ -7,7 +7,7 @@ import {
 import { cn } from '../lib/utils';
 import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal } from './motion';
-import { MonoTag, DataRain, Card } from './surfaces';
+import { MonoTag, DataRain, Card, GroupHead } from './surfaces';
 import { BracketMetric, RiskSpectrum } from './blocks';
 import ScanField from './ScanField';
 
@@ -161,6 +161,17 @@ export default function SecurityPage() {
           description="У P2P втрачають не на коливанні курсу, а на трикутниках, заморожених переказах і скаргах. Шість сигналів зводяться в один бал від 0 до 100, і від нього залежить, чи побачиш ти цю зв'язку взагалі."
         />
 
+        {/*
+          Секція була однією купою: під одним заголовком ішли чотири різні
+          за суттю блоки — ваги сигналів, дрібні плитки ваг, шкала
+          вердикту й шари перевірки. Читалось як довга стрічка без
+          зупинок, хоча це три окремі теми.
+
+          Групи нумеровані так само, як на «Можливостях», — той самий
+          GroupHead із surfaces.tsx.
+        */}
+        <GroupHead num="01" title="З чого складається бал" />
+
         <div className="mb-4">
           <MonoTag>composite_scorer</MonoTag>
         </div>
@@ -255,6 +266,8 @@ export default function SecurityPage() {
           })}
         </div>
 
+        <GroupHead num="02" title="Куди веде бал" />
+
         {/*
           Спектр однією шкалою. Чотири рівні картки приховували головне:
           смуги різної ширини, і OK — найвужча з них.
@@ -285,6 +298,8 @@ export default function SecurityPage() {
             </div>
           </Card>
         </Reveal>
+
+        <GroupHead num="03" title="Шари перевірки" />
 
         <div className="grid md:grid-cols-2 gap-6">
           {LAYERS.map((layer, i) => {
