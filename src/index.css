@@ -880,14 +880,24 @@
   animation: arbix-mark-breathe 3.6s ease-in-out infinite;
 }
 
-/* Відблиск, що раз на кілька секунд проходить по знаку навскіс */
+/*
+ * Відблиск, що раз на кілька секунд проходить по знаку навскіс.
+ *
+ * Відсотки в translateX рахуються від ширини САМОГО елемента, а не від
+ * плитки. Смуга завширшки 24px при translateX(160%) проходить лише 38px
+ * — тобто чверть плитки в 56px, і там завмирає до кінця циклу. Саме це
+ * читалось як «дійшов до половини й різко став».
+ *
+ * Щоб перетнути плитку повністю, дорога має бути: власна ширина плюс
+ * ширина плитки плюс запас на вихід. Звідси 430% замість 160%.
+ */
 @keyframes arbix-mark-sheen {
-  0%, 62%  { transform: translateX(-140%) skewX(-18deg); }
-  78%, 100% { transform: translateX(160%) skewX(-18deg); }
+  0%, 55%   { transform: translateX(-60%) skewX(-18deg); }
+  82%, 100% { transform: translateX(430%) skewX(-18deg); }
 }
 
 .mark-sheen {
-  animation: arbix-mark-sheen 5.2s cubic-bezier(0.4, 0, 0.3, 1) infinite;
+  animation: arbix-mark-sheen 5.6s cubic-bezier(0.45, 0, 0.25, 1) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
