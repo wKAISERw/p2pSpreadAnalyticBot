@@ -12,7 +12,7 @@ import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
 import Faq from './Faq';
 import ScanField from './ScanField';
-import { VerdictRow, BracketMetric, SweepFrame } from './blocks';
+import { VerdictRow, BracketMetric, SweepFrame, BrandMark } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
 
@@ -93,9 +93,18 @@ export default function LandingPage() {
         <Section className="enter-rise relative pt-14 sm:pt-20 pb-10">
           <div className="hero-drift grid lg:grid-cols-2 gap-10 lg:gap-16 items-center">
             <div className="animate-rise">
-              <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-800 text-xs text-slate-400 mb-6 backdrop-blur-sm">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-500" />
-                P2P-арбітраж для українського ринку
+              {/*
+                Знак і ярлик в одному рядку. Знак узятий зі сторінки
+                входу — там кутові дужки виявились найвдалішою деталлю
+                всього оформлення, тож їм місце й на першому екрані, а не
+                тільки за формою логіна.
+              */}
+              <div className="flex items-center gap-4 mb-6">
+                <BrandMark />
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-800 text-xs text-slate-400 backdrop-blur-sm">
+                  <span className="w-1.5 h-1.5 rounded-full bg-accent-500" />
+                  P2P-арбітраж для українського ринку
+                </div>
               </div>
 
               <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white tracking-tight leading-[1.05] mb-6">

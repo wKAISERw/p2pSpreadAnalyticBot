@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { Activity } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 /**
@@ -553,5 +554,40 @@ export const SweepFrame: React.FC<{
   <div className={cn('relative overflow-hidden', className)}>
     <span className="sweep-down" aria-hidden />
     <div className="relative">{children}</div>
+  </div>
+);
+
+/* ─────────────────────────── Фірмовий знак ─────────────────────────── */
+
+/**
+ * Знак із кутовими дужками — той самий, що на сторінці входу.
+ *
+ * Там він вийшов вдалим саме через дужки: плитка не замкнена в рамку, а
+ * ніби взята в приціл. Тут те саме, лише більше й із диханням — знак
+ * стоїть поруч із заголовком, тож світиться рівно настільки, щоб його
+ * помітили, і не настільки, щоб він перебивав текст.
+ */
+export const BrandMark: React.FC<{ className?: string }> = ({ className }) => (
+  <div className={cn('relative inline-flex shrink-0', className)}>
+    {/* Ореол живе під плиткою й не бере участі в подіях */}
+    <span
+      aria-hidden
+      className="mark-halo absolute -inset-3 rounded-[1.75rem] pointer-events-none"
+      style={{ background: 'radial-gradient(circle, rgb(var(--accent-rgb) / 0.5), transparent 70%)' }}
+    />
+
+    <span className="pixel-frame relative w-14 h-14 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shadow-lg shadow-accent-500/10 overflow-hidden">
+      <Activity className="relative z-10 w-6 h-6 text-accent-400" />
+
+      {/* Відблиск: вузька світла смуга, що проходить навскіс */}
+      <span
+        aria-hidden
+        className="mark-sheen absolute inset-y-0 -left-6 w-6 pointer-events-none"
+        style={{
+          background:
+            'linear-gradient(90deg, transparent, rgb(var(--accent-rgb) / 0.45), transparent)',
+        }}
+      />
+    </span>
   </div>
 );

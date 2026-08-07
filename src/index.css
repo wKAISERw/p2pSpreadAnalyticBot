@@ -863,3 +863,35 @@
   .card-advance,
   .card-behind { animation: none; }
 }
+
+/*
+ * Ореол навколо фірмового знака.
+ *
+ * Дихання, а не миготіння: знак стоїть поруч із заголовком, і різкий
+ * пульс перетягував би на себе увагу з тексту, заради якого сюди й
+ * прийшли. Анімуються тільки transform і opacity — обидва на композиторі.
+ */
+@keyframes arbix-mark-breathe {
+  0%, 100% { transform: scale(1);    opacity: 0.35; }
+  50%      { transform: scale(1.18); opacity: 0.12; }
+}
+
+.mark-halo {
+  animation: arbix-mark-breathe 3.6s ease-in-out infinite;
+}
+
+/* Відблиск, що раз на кілька секунд проходить по знаку навскіс */
+@keyframes arbix-mark-sheen {
+  0%, 62%  { transform: translateX(-140%) skewX(-18deg); }
+  78%, 100% { transform: translateX(160%) skewX(-18deg); }
+}
+
+.mark-sheen {
+  animation: arbix-mark-sheen 5.2s cubic-bezier(0.4, 0, 0.3, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mark-halo,
+  .mark-sheen { animation: none; }
+  .mark-sheen { opacity: 0; }
+}
