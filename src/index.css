@@ -911,3 +911,22 @@
   .mark-sheen { animation: none; }
   .mark-sheen { opacity: 0; }
 }
+
+/*
+ * Пульс знака в індикаторі завантаження — той самий ритм, що в
+ * бут-лоадері з index.html. Повторення навмисне: людина вже бачила цей
+ * рух при першому відкритті, тож він читається як «той самий продукт
+ * думає», а не як чужий спінер.
+ */
+@keyframes arbix-boot-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.65; transform: scale(0.94); }
+}
+
+.animate-boot-pulse {
+  animation: arbix-boot-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-boot-pulse { animation: none; }
+}

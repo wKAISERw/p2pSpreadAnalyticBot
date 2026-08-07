@@ -5,6 +5,7 @@ import { Toaster } from 'sonner';
 import { useAppStore } from './store';
 import { authApi, getSessionToken, setSessionToken } from './services/api';
 import { applyAccent, resolveHue } from './lib/theme';
+import LoadingVeil from './components/LoadingVeil';
 
 // Публічний сайт — окремі чанки. Людині, що прийшла на лендинг, не
 // потрібні ані панелі дашборду, ані клієнт API.
@@ -28,31 +29,18 @@ const LoginScreen = lazy(() => import('./components/LoginScreen'));
  * під заголовок, сітка блоків. Людина розуміє, що щось вантажиться, а не
  * зламалось.
  */
+/**
+ * Заглушка на час підвантаження роутового чанка.
+ *
+ * Скелет зі смуг тут не підходив: він імітує розкладку сторінки, якої
+ * ще немає, тож на кожному переході блимала чужа геометрія. Простий
+ * знак, що думає, чесніший — і з'являється лише коли чекати справді
+ * доводиться.
+ */
 function PageFallback() {
   return (
-    <div className="min-h-screen bg-slate-950" aria-busy="true" aria-label="Завантаження">
-      <div className="h-16 border-b border-slate-800/60 flex items-center px-4 sm:px-6 gap-3">
-        <div className="w-9 h-9 rounded-xl bg-slate-800 animate-pulse" />
-        <div className="h-4 w-36 rounded bg-slate-800 animate-pulse" />
-      </div>
-
-      <div className="mx-auto max-w-6xl px-4 sm:px-6 py-16 space-y-8">
-        <div className="space-y-4">
-          <div className="h-3 w-28 rounded bg-slate-800/80 animate-pulse" />
-          <div className="h-10 w-2/3 max-w-lg rounded-lg bg-slate-800 animate-pulse" />
-          <div className="h-4 w-full max-w-xl rounded bg-slate-900 animate-pulse" />
-        </div>
-
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[0, 1, 2, 3, 4, 5].map(i => (
-            <div
-              key={i}
-              className="h-36 rounded-2xl bg-slate-900/70 border border-slate-800/60 animate-pulse"
-              style={{ animationDelay: `${i * 80}ms` }}
-            />
-          ))}
-        </div>
-      </div>
+    <div className="min-h-screen bg-slate-950">
+      <LoadingVeil />
     </div>
   );
 }
