@@ -76,7 +76,7 @@ export const VerdictRow: React.FC<{
   const s = VERDICT_STYLE[verdict];
 
   return (
-    <div className="relative flex items-center gap-3.5 pl-4 pr-3 py-3 rounded-xl bg-slate-900/70 border border-slate-800/80 overflow-hidden">
+    <div className="relative flex items-center gap-3.5 pl-4 pr-3 py-3 rounded-xl bg-slate-900/70 border border-slate-800/80 overflow-hidden min-w-0">
       <span className={cn('absolute left-0 inset-y-0 w-0.5', s.rail)} aria-hidden />
 
       <span className={cn('w-9 h-9 rounded-lg border flex items-center justify-center shrink-0', s.icon)}>

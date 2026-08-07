@@ -73,7 +73,7 @@ export default function LandingPage() {
           каркаса. Три великі blur-шари поверх нього були б подвійною
           роботою для GPU за той самий візуальний результат.
         */}
-        <Section className="relative pt-14 sm:pt-20 pb-10">
+        <Section className="enter-rise relative pt-14 sm:pt-20 pb-10">
           <div className="hero-drift grid lg:grid-cols-2 gap-10 lg:gap-16 items-center">
             <div className="animate-rise">
               <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-900/80 border border-slate-800 text-xs text-slate-400 mb-6 backdrop-blur-sm">
@@ -186,7 +186,11 @@ export default function LandingPage() {
             />
 
             <div className="relative z-10 grid lg:grid-cols-2 gap-10 items-center">
-              <div>
+              {/* min-w-0 на обох колонках: на мобілці сітка в одну колонку,
+                  і ширину треку задає найширший вміст. Рядки вердикту з
+                  нерозривними бейджами розпирали його, через що різало і
+                  бейджі, і абзац у сусідній колонці. */}
+              <div className="min-w-0">
                 <div className="mb-5">
                   <MonoTag>risk_engine</MonoTag>
                 </div>
@@ -205,7 +209,7 @@ export default function LandingPage() {
                 </Link>
               </div>
 
-              <div className="space-y-3">
+              <div className="space-y-3 min-w-0">
                 {RISK_SIGNALS.map((row, i) => (
                   <Reveal key={row.title} delay={i * 80}>
                     <VerdictRow {...row} />

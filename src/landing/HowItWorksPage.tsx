@@ -9,6 +9,7 @@ import LandingLayout, { Section, SectionHeading, Rule } from './LandingLayout';
 import { Reveal, GlowCard, useReveal, useScrollDraw } from './motion';
 import { Surface, MonoTag } from './surfaces';
 import { StrategyDiagram } from './blocks';
+import ScanField from './ScanField';
 
 /**
  * Конвеєр обробки — від опитування бірж до алерту.
@@ -95,7 +96,7 @@ const Step: React.FC<{
 }> = ({ step, index, isLast }) => {
   const Icon = step.icon;
   const { ref, shown } = useReveal<HTMLDivElement>();
-  const { trackRef, fillRef, litRef } = useScrollDraw<HTMLDivElement>();
+  const { trackRef, fillRef, litRef, cardRef } = useScrollDraw<HTMLDivElement>();
   const onLeft = index % 2 === 0;
 
   return (
@@ -165,9 +166,10 @@ const Step: React.FC<{
         )}
       >
         <GlowCard
+          ref={cardRef}
           className={cn(
-            'reveal inline-block w-full p-5 sm:p-6 rounded-3xl',
-            'bg-slate-950/60 border border-slate-800/60 hover:border-accent-500/25 transition-colors',
+            'pipe-card reveal inline-block w-full p-5 sm:p-6 rounded-3xl',
+            'bg-slate-950/60 border',
             index % 3 === 1 && 'surface-dots',
             shown && 'reveal-in'
           )}
@@ -294,7 +296,23 @@ const ALERT_NOTES = [
 export default function HowItWorksPage() {
   return (
     <LandingLayout>
-      <Section className="pt-16 sm:pt-20">
+      {/*
+        Потік даних за шапкою. Тут доречний саме він, а не скануючий
+        промінь із безпеки: сторінка про рух даних конвеєром, і фон має
+        текти вниз разом із ним.
+      */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-[40rem] overflow-hidden"
+        style={{
+          maskImage: 'linear-gradient(to bottom, black 35%, transparent)',
+          WebkitMaskImage: 'linear-gradient(to bottom, black 35%, transparent)',
+        }}
+        aria-hidden
+      >
+        <ScanField variant="flow" className="w-full h-full opacity-60" />
+      </div>
+
+      <Section className="pt-16 sm:pt-20 relative">
         <SectionHeading
           eyebrow="Як це працює"
           title="Шлях від склянки до алерту"

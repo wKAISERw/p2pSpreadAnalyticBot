@@ -1,11 +1,31 @@
 <!doctype html>
 <html lang="uk">
   <head>
-    <link rel="icon" href="data:," />
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#020617" />
-    <title>Arbix Quantum</title>
+
+    <!--
+      Іконка вкладки — інлайновий SVG, а не файл: знак простий, і окремий
+      запит за ним коштував би дорожче за самі байти. Тут стояло
+      href="data:," — тобто порожньо, через що браузер малював глобус.
+    -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%228%22%20fill%3D%22%2310b981%22%2F%3E%3Cpath%20d%3D%22M27%2016h-5l-3.5%209L12%207l-3%209H5%22%20fill%3D%22none%22%20stroke%3D%22%23020617%22%20stroke-width%3D%222.6%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E" />
+    <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%228%22%20fill%3D%22%2310b981%22%2F%3E%3Cpath%20d%3D%22M27%2016h-5l-3.5%209L12%207l-3%209H5%22%20fill%3D%22none%22%20stroke%3D%22%23020617%22%20stroke-width%3D%222.6%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%2F%3E%3C%2Fsvg%3E" />
+
+    <title>Arbix Quantum — P2P-сканер спредів зі скорингом мерчантів</title>
+    <meta
+      name="description"
+      content="Сканер P2P-спредів на семи майданчиках із перевіркою контрагента: розбір умов, поведінка в часі, відгуки й чорні списки зводяться в один бал ризику. Алерти в Telegram."
+    />
+
+    <!-- Прев'ю для посилань у месенджерах -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Arbix Quantum — P2P-сканер спредів" />
+    <meta
+      property="og:description"
+      content="Сім майданчиків, шість сигналів ризику, ліміти карток. Алерт приходить уже з вердиктом по контрагенту."
+    />
 
     <!--
       Стилі завантажувача живуть тут, а не в бандлі, і це принципово.

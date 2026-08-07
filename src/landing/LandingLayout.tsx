@@ -41,7 +41,7 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
   }, [isMenuOpen]);
 
   return (
-    <div className="relative min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-accent-500/30">
+    <div className="page-enter relative min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-accent-500/30">
       {/* Фон живе під усім вмістом і не бере участі в потоці */}
       <AuroraField />
 

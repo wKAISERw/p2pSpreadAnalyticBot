@@ -62,6 +62,47 @@ void main() {
   gl_FragColor = vec4(u_accent * amount, amount * 0.9);
 }`;
 
+/*
+ * Другий варіант — потік даних, що стікає донизу.
+ *
+ * Той самий кістяк, інший малюнок: вертикальні доріжки різної швидкості
+ * плюс рідкі яскраві «пакети», що падають ними. Скануючий промінь
+ * підходив сторінці про перевірку; тут потрібне відчуття безперервного
+ * обходу майданчиків, а не одноразового просвічування.
+ */
+const FRAG_FLOW = `precision mediump float;
+varying vec2 v_uv;
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform vec2  u_mouse;
+uniform vec3  u_accent;
+
+float hash(float x) { return fract(sin(x * 127.1) * 43758.5453); }
+
+void main() {
+  vec2 uv = v_uv;
+
+  // Доріжки по 40 px: кожна зі своєю швидкістю й фазою
+  float lane = floor(uv.x * u_resolution.x / 40.0);
+  float speed = 0.10 + hash(lane) * 0.35;
+  float phase = hash(lane + 7.0);
+
+  float head = fract(uv.y + u_time * speed + phase);
+  // Короткий яскравий хвіст, а не рівна смуга: інакше це просто градієнт
+  float packet = pow(1.0 - head, 26.0);
+
+  // Не всі доріжки живі одночасно — суцільна стіна читалась би як шум
+  float alive = step(0.55, hash(lane + floor(u_time * 0.25) * 13.0));
+
+  float grid = smoothstep(0.035, 0.0, fract(uv.x * u_resolution.x / 40.0));
+
+  vec2 m = u_mouse / u_resolution;
+  float pulse = smoothstep(0.3, 0.0, distance(uv, m));
+
+  float amount = packet * alive * 0.55 + grid * 0.04 + pulse * 0.12;
+  gl_FragColor = vec4(u_accent * amount, amount * 0.85);
+}`;
+
 function compile(gl: WebGLRenderingContext, type: number, src: string) {
   const shader = gl.createShader(type);
   if (!shader) return null;
@@ -84,7 +125,13 @@ function readAccent(): [number, number, number] {
   return [parts[0] / 255, parts[1] / 255, parts[2] / 255];
 }
 
-export default function ScanField({ className }: { className?: string }) {
+export default function ScanField({
+  className,
+  variant = 'scan',
+}: {
+  className?: string;
+  variant?: 'scan' | 'flow';
+}) {
   const ref = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -109,7 +156,7 @@ export default function ScanField({ className }: { className?: string }) {
     if (!gl) return;
 
     const vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
+    const fs = compile(gl, gl.FRAGMENT_SHADER, variant === 'flow' ? FRAG_FLOW : FRAG);
     if (!vs || !fs) return;
 
     const program = gl.createProgram();
@@ -214,7 +261,7 @@ export default function ScanField({ className }: { className?: string }) {
       // живих WebGL-контекстів на вкладку.
       gl.getExtension('WEBGL_lose_context')?.loseContext();
     };
-  }, []);
+  }, [variant]);
 
   return <canvas ref={ref} className={className} aria-hidden />;
 }

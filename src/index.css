@@ -753,3 +753,51 @@
 @media (prefers-reduced-motion: reduce) {
   .pulse-cta::before { animation: none; opacity: 0; }
 }
+
+/*
+ * Поява сторінки при завантаженні.
+ *
+ * Лише opacity, без transform. Це не косметичне обмеження: transform на
+ * предку створює containing block для position: fixed, а на цьому ж корені
+ * живе мобільне меню — воно б відкривалось у коробку хедера замість екрана.
+ * Той самий капкан уже ловив мене тут раніше.
+ */
+@keyframes arbix-page-enter {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.page-enter {
+  animation: arbix-page-enter 420ms ease-out both;
+}
+
+/* Вміст першого екрана піднімається — тут transform безпечний, бо це
+   вкладений блок, а не корінь із фіксованим меню. */
+@keyframes arbix-enter-rise {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.enter-rise {
+  animation: arbix-enter-rise 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: 120ms;
+}
+
+/*
+ * Картка кроку конвеєра світлішає разом із лінією.
+ *
+ * --lit пише JS тим самим проходом, що рахує заповнення відрізка, тож
+ * картка й лінія не можуть розійтись. Усе інтерполюється з однієї змінної:
+ * поки лінія доходить до вузла, сусідня картка встигає розгорітись.
+ */
+.pipe-card {
+  border-color: rgb(30 41 59 / calc(0.6 + var(--lit, 0) * 0.4));
+  box-shadow: 0 0 0 1px rgb(var(--accent-rgb) / calc(var(--lit, 0) * 0.18)),
+    0 18px 40px -24px rgb(var(--accent-rgb) / calc(var(--lit, 0) * 0.55));
+  transition: border-color 200ms linear, box-shadow 200ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .enter-rise { animation: none; }
+}

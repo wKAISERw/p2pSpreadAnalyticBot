@@ -124,7 +124,9 @@ export const GlowCard: React.FC<{
   children: React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
-}> = ({ children, className, style }) => {
+  /** Зовнішній ref: картці буває треба, щоб на неї писали ще й ззовні. */
+  ref?: React.Ref<HTMLElement>;
+}> = ({ children, className, style, ref: outerRef }) => {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -143,7 +145,18 @@ export const GlowCard: React.FC<{
   }, []);
 
   return (
-    <div ref={ref} className={cn('glow-card', className)} style={style}>
+    <div
+      // Фігурні дужки навмисно: у React 19 значення, повернуте з
+      // ref-колбека, трактується як функція очищення, тож повертати
+      // результат присвоєння не можна.
+      ref={node => {
+        ref.current = node;
+        if (typeof outerRef === 'function') outerRef(node);
+        else if (outerRef) (outerRef as React.RefObject<HTMLElement | null>).current = node;
+      }}
+      className={cn('glow-card', className)}
+      style={style}
+    >
       {children}
     </div>
   );
@@ -172,6 +185,7 @@ export function useScrollDraw<Track extends HTMLElement>() {
   const trackRef = useRef<Track>(null);
   const fillRef = useRef<HTMLElement>(null);
   const litRef = useRef<HTMLElement>(null);
+  const cardRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const track = trackRef.current;
@@ -180,6 +194,9 @@ export function useScrollDraw<Track extends HTMLElement>() {
     const apply = (value: number) => {
       if (fillRef.current) fillRef.current.style.transform = `scaleY(${value})`;
       if (litRef.current) litRef.current.style.opacity = value > 0.02 ? '1' : '0';
+      // Картка розгоряється разом із лінією й з того самого числа —
+      // тож вони не можуть розійтися між собою.
+      if (cardRef.current) cardRef.current.style.setProperty('--lit', value.toFixed(3));
     };
 
     // За вимкненого руху лінія просто намальована: прокрутка не має бути
@@ -216,5 +233,5 @@ export function useScrollDraw<Track extends HTMLElement>() {
     };
   }, []);
 
-  return { trackRef, fillRef, litRef };
+  return { trackRef, fillRef, litRef, cardRef };
 }
