@@ -1,0 +1,8 @@
+# Лендінг відкритий повністю; закритий лише дашборд — там за посиланням
+# усе одно нічого немає без входу через Telegram.
+User-agent: *
+Allow: /
+Disallow: /app
+Disallow: /login
+
+Sitemap: https://arbixquantum.com/sitemap.xml

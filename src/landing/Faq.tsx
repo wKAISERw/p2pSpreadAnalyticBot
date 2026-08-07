@@ -143,7 +143,7 @@ const Item: React.FC<{ item: (typeof ITEMS)[number]; index: number }> = ({ item,
         aria-expanded={open}
         className="w-full flex items-start gap-4 py-5 text-left group"
       >
-        <span className="tag-mono text-[11px] text-slate-600 tabular-nums pt-1 shrink-0">
+        <span className="tag-mono text-[11px] text-slate-400 tabular-nums pt-1 shrink-0">
           {String(index + 1).padStart(2, '0')}
         </span>
 
@@ -185,7 +185,7 @@ export default function Faq() {
     <div className="grid lg:grid-cols-[1fr_1.4fr] gap-10 lg:gap-16 items-start">
       <div className="lg:sticky lg:top-28">
         <div className="flex items-baseline gap-2.5 mb-3">
-          <span className="tag-mono text-xs font-bold text-slate-600 tabular-nums">/04</span>
+          <span className="tag-mono text-xs font-bold text-slate-400 tabular-nums">/04</span>
           <span className="text-xs font-bold uppercase tracking-[0.2em] text-accent-400">
             питання
           </span>

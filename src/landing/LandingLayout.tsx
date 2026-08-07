@@ -248,7 +248,7 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
             </nav>
           </div>
 
-          <p className="mt-10 pt-6 border-t border-slate-800/60 text-xs text-slate-500 leading-relaxed">
+          <p className="mt-10 pt-6 border-t border-slate-800/60 text-xs text-slate-400 leading-relaxed">
             Arbix Quantum — інструмент аналізу ринку, а не інвестиційна порада.
             Спред, який показує сканер, не гарантує прибутку: ціни й доступні
             обсяги змінюються, а частина ризику лежить на стороні контрагента
@@ -332,7 +332,7 @@ export function SectionHeading({
       {eyebrow && (
         <div className="flex items-baseline gap-2.5 mb-3">
           {num && (
-            <span className="tag-mono text-xs font-bold text-slate-600 tabular-nums">/{num}</span>
+            <span className="tag-mono text-xs font-bold text-slate-400 tabular-nums">/{num}</span>
           )}
           <span className="text-xs font-bold uppercase tracking-[0.2em] text-accent-400">
             {eyebrow}

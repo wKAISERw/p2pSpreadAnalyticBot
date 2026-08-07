@@ -183,7 +183,7 @@ export default function LandingPage() {
                         0{i + 1}
                       </span>
                     </div>
-                    <h3 className="text-lg font-bold text-white mb-2">{pillar.title}</h3>
+                    <h2 className="text-lg font-bold text-white mb-2">{pillar.title}</h2>
                     <p className="text-sm text-slate-400 leading-relaxed mb-5">{pillar.text}</p>
                     <PillarVisual kind={pillar.visual} />
                   </GlowCard>
