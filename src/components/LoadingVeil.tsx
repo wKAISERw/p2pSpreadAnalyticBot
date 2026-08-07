@@ -16,7 +16,14 @@ import React, { useEffect, useState } from 'react';
 
 const REVEAL_DELAY_MS = 220;
 
-export default function LoadingVeil({ label = 'Завантаження' }: { label?: string }) {
+export default function LoadingVeil({
+  label = 'Завантаження',
+  compact = false,
+}: {
+  label?: string;
+  /** Для панелей усередині дашборду: не займає весь екран. */
+  compact?: boolean;
+}) {
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
@@ -26,7 +33,10 @@ export default function LoadingVeil({ label = 'Завантаження' }: { la
 
   return (
     <div
-      className="min-h-[70vh] flex flex-col items-center justify-center gap-6"
+      className={cnv(
+        'flex flex-col items-center justify-center gap-6',
+        compact ? 'min-h-[320px]' : 'min-h-[70vh]'
+      )}
       aria-busy="true"
       aria-live="polite"
       aria-label={label}
@@ -38,7 +48,12 @@ export default function LoadingVeil({ label = 'Завантаження' }: { la
         )}
       >
         {/* Той самий знак, що в бут-лоадері: пульс на смарагдовому квадраті */}
-        <span className="relative w-16 h-16 rounded-2xl bg-accent-500 flex items-center justify-center animate-boot-pulse">
+        <span
+          className={cnv(
+            'relative rounded-2xl bg-accent-500 flex items-center justify-center animate-boot-pulse',
+            compact ? 'w-12 h-12' : 'w-16 h-16'
+          )}
+        >
           <svg
             viewBox="0 0 24 24"
             fill="none"
@@ -46,7 +61,7 @@ export default function LoadingVeil({ label = 'Завантаження' }: { la
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
-            className="w-8 h-8"
+            className={compact ? 'w-6 h-6' : 'w-8 h-8'}
             aria-hidden
           >
             <path d="M22 12h-4l-3 9L9 3l-3 9H2" />

@@ -8,6 +8,7 @@ import Dashboard from './Dashboard';
 import { CommandPalette } from './CommandPalette';
 import ApiAccessBanner from './ApiAccessBanner';
 import { useAppStore } from '../store';
+import LoadingVeil from './LoadingVeil';
 import { api, checkConnection } from '../services/api';
 import { signOutGoogle } from '../lib/google';
 import { useCloudPrefs } from '../hooks/useCloudPrefs';
@@ -29,14 +30,16 @@ const CardsPanel = lazy(() => import('./CardsPanel'));
 const MonitoringPanel = lazy(() => import('./MonitoringPanel'));
 const AdminUsersPanel = lazy(() => import('./AdminUsersPanel'));
 
+/**
+ * Заглушка на час підвантаження панелі дашборду.
+ *
+ * Раніше тут був скелет із трьох смуг — своя мова, не схожа ні на
+ * бут-лоадер, ні на заглушку публічних сторінок. Тепер усі три місця
+ * показують одне й те саме, і з тією ж затримкою: панель, що приїхала за
+ * 50 мс, не встигне блимнути завантажувачем.
+ */
 function RouteFallback() {
-  return (
-    <div className="space-y-4 animate-pulse" aria-busy="true">
-      <div className="h-8 w-48 bg-slate-900 rounded-lg" />
-      <div className="h-32 bg-slate-900/70 rounded-3xl" />
-      <div className="h-32 bg-slate-900/70 rounded-3xl" />
-    </div>
-  );
+  return <LoadingVeil compact label="Готуємо панель" />;
 }
 
 function ErrorFallback({ error, resetErrorBoundary }: { error: Error; resetErrorBoundary: () => void }) {
