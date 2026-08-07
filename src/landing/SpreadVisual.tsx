@@ -41,11 +41,16 @@ const FRAMES: Frame[] = [
  * Нахил у кожної свій і в різні боки — саме це відрізняє стос карт у
  * руці від рівної стопки паперу. Задні ще й зсунуті вбік, щоб визирали
  * не тільки верхнім краєм.
+ *
+ * Зсуви й нахили навмисно великі. З дрібними (10px, 1.6°) рух виходив
+ * майже вертикальним, і картка читалась як така, що вистрибнула на
+ * місці. Щоб було видно саме тасування, карта має помітно піти вбік і
+ * повернутись — траєкторія має бути дугою, а не рискою.
  */
 const SLOTS = [
   { y: 0, x: 0, scale: 1, rot: 0, opacity: 1, z: 30 },
-  { y: -20, x: 10, scale: 0.95, rot: 1.6, opacity: 0.55, z: 20 },
-  { y: -36, x: -8, scale: 0.9, rot: -1.8, opacity: 0.28, z: 10 },
+  { y: -22, x: 26, scale: 0.94, rot: 3.4, opacity: 0.6, z: 20 },
+  { y: -40, x: -22, scale: 0.88, rot: -3.8, opacity: 0.3, z: 10 },
 ];
 
 export default function SpreadVisual() {
@@ -55,7 +60,7 @@ export default function SpreadVisual() {
     // setTimeout із залежністю від індексу, а не setInterval: після
     // ручного кліку відлік має початись заново, інакше автоматична зміна
     // прилетіла б майже одразу після натискання.
-    const timer = setTimeout(() => setIndex(i => (i + 1) % FRAMES.length), 5400);
+    const timer = setTimeout(() => setIndex(i => (i + 1) % FRAMES.length), 6200);
     return () => clearTimeout(timer);
   }, [index]);
 
@@ -110,7 +115,7 @@ export default function SpreadVisual() {
             className={cn(
               'absolute inset-x-0 top-0 block w-full text-left rounded-3xl p-6',
               'bg-slate-900/85 border border-accent-500/25 backdrop-blur-sm',
-              'transition-[transform,opacity]',
+              'transition-[transform,opacity,box-shadow]',
               isFront ? 'cursor-pointer' : 'pointer-events-none'
             )}
             style={{
@@ -127,9 +132,9 @@ export default function SpreadVisual() {
                 одною. Саме різниця в кілька десятків мілісекунд і робить
                 із перестановки тасування.
               */
-              transitionDuration: '1150ms',
-              transitionDelay: `${slot * 70}ms`,
-              transitionTimingFunction: 'cubic-bezier(0.16, 0.8, 0.24, 1)',
+              transitionDuration: '1450ms',
+              transitionDelay: `${slot * 130}ms`,
+              transitionTimingFunction: 'cubic-bezier(0.24, 0.9, 0.2, 1)',
               boxShadow: isFront
                 ? '0 0 0 1px rgb(var(--accent-rgb) / 0.12), 0 30px 70px -25px rgb(var(--accent-rgb) / 0.4), 0 24px 60px rgb(2 6 23 / 0.7)'
                 : '0 18px 40px rgb(2 6 23 / 0.5)',

@@ -447,10 +447,18 @@
    * щільнішим, межа виразнішою. Діапазон у пікселях, а не у відсотках —
    * інакше на довгій сторінці ефект настав би надто пізно.
    */
-  .header-condense {
-    animation: arbix-header linear both;
-    animation-timeline: scroll(root block);
-    animation-range: 0 220px;
+  /*
+   * Тільки з планшета вгору. Анімація background-color на липкому
+   * елементі змушує браузер перемальовувати композитний шар шапки на
+   * кожен кадр прокрутки — на телефоні це найгірший момент для зайвої
+   * роботи, і саме там ловились артефакти кольору.
+   */
+  @media (min-width: 768px) {
+    .header-condense {
+      animation: arbix-header linear both;
+      animation-timeline: scroll(root block);
+      animation-range: 0 220px;
+    }
   }
 
   @keyframes arbix-header {

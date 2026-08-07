@@ -86,6 +86,19 @@ void main() {
  * підходив сторінці про перевірку; тут потрібне відчуття безперервного
  * обходу майданчиків, а не одноразового просвічування.
  */
+/*
+ * Стик між станами доріжок.
+ *
+ * Було: alive = step(порiг, hash(lane + floor(time * 0.25) * 13.0)).
+ * floor() робить час східчастим, тож раз на чотири секунди ВСІ доріжки
+ * одночасно перемикались - падаючі прямокутники стрибали з одного
+ * положення в інше. Саме це й читалось як зациклений короткий ролик без
+ * м'якого стику.
+ *
+ * Стало: беремо стан поточного кроку й наступного і переливаємо між ними
+ * за дробовою частиною того самого часу. Перемикання лишається, але воно
+ * розмазане по всьому інтервалу, а не стається в один кадр.
+ */
 const FRAG_FLOW = `#ifdef GL_FRAGMENT_PRECISION_HIGH
 precision highp float;
 #else
@@ -109,7 +122,11 @@ void main() {
   float head = fract(uv.y + u_time * speed + phase);
   float packet = pow(1.0 - head, 26.0);
 
-  float alive = step(0.55, hash(lane + floor(u_time * 0.25) * 13.0));
+  float slot = floor(u_time * 0.25);
+  float k = fract(u_time * 0.25);
+  float a0 = step(0.55, hash(lane + slot * 13.0));
+  float a1 = step(0.55, hash(lane + (slot + 1.0) * 13.0));
+  float alive = mix(a0, a1, smoothstep(0.0, 1.0, k));
 
   float grid = smoothstep(0.035, 0.0, fract(uv.x * u_resolution.x / 40.0));
 
@@ -117,6 +134,49 @@ void main() {
   float pulse = smoothstep(0.3, 0.0, distance(uv, m));
 
   float a = clamp(packet * alive * 0.6 + grid * 0.05 + pulse * 0.14, 0.0, 1.0);
+  gl_FragColor = vec4(u_accent * a, a);
+}`;
+
+/*
+ * Третій варіант - сітка вузлів, що дихає.
+ *
+ * Точки на регулярній решітці повільно пульсують хвилею, яка йде по
+ * діагоналі, плюс кільце розходиться від курсора. Ні різких перемикань,
+ * ні квантованого часу: усе крутиться на синусах, тож циклу як такого не
+ * видно взагалі - саме те, чого бракувало потоку даних.
+ */
+const FRAG_MESH = `
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 v_uv;
+uniform float u_time;
+uniform vec2  u_resolution;
+uniform vec2  u_mouse;
+uniform vec3  u_accent;
+
+void main() {
+  vec2 uv = v_uv;
+  vec2 px = uv * u_resolution;
+
+  float step_px = 34.0;
+  vec2 cell = mod(px, step_px) - step_px * 0.5;
+  vec2 id = floor(px / step_px);
+
+  float d = length(cell);
+
+  float wave = sin((id.x + id.y) * 0.35 - u_time * 0.9) * 0.5 + 0.5;
+  float radius = 1.1 + wave * 1.9;
+  float dot_a = smoothstep(radius, radius - 1.2, d) * (0.10 + wave * 0.22);
+
+  vec2 m = u_mouse / u_resolution;
+  float md = distance(uv, m);
+  float ring = smoothstep(0.03, 0.0, abs(md - fract(u_time * 0.18) * 0.45));
+  float near = smoothstep(0.34, 0.0, md);
+
+  float a = clamp(dot_a + ring * near * 0.30 + near * 0.05, 0.0, 1.0);
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -150,7 +210,7 @@ export default function ScanField({
   variant = 'scan',
 }: {
   className?: string;
-  variant?: 'scan' | 'flow';
+  variant?: 'scan' | 'flow' | 'mesh';
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
 
@@ -190,7 +250,7 @@ export default function ScanField({
     }
 
     const vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, variant === 'flow' ? FRAG_FLOW : FRAG);
+    const fs = compile(gl, gl.FRAGMENT_SHADER, variant === 'flow' ? FRAG_FLOW : variant === 'mesh' ? FRAG_MESH : FRAG);
     if (!vs || !fs) return;
 
     const program = gl.createProgram();

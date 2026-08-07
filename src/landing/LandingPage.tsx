@@ -11,6 +11,7 @@ import { Reveal, GlowCard } from './motion';
 import { Surface, DataRain, MonoTag } from './surfaces';
 import TrustStrip from './TrustStrip';
 import Faq from './Faq';
+import ScanField from './ScanField';
 import { VerdictRow, BracketMetric, SweepFrame } from './blocks';
 
 const EXCHANGES = ['Binance', 'Bybit', 'OKX', 'MEXC', 'Wallet', 'BingX', 'CryptoBot'];
@@ -66,6 +67,22 @@ const FEATURES = [
 export default function LandingPage() {
   return (
     <LandingLayout>
+      {/*
+        Сітка вузлів за героєм. Третій малюнок на третій сторінці —
+        промінь для безпеки, потік для конвеєра, дихаюча сітка тут.
+        Однаковий фон на всіх зводив би нанівець сам сенс його мати.
+      */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-[44rem] overflow-hidden"
+        style={{
+          maskImage: 'linear-gradient(to bottom, black 45%, transparent)',
+          WebkitMaskImage: 'linear-gradient(to bottom, black 45%, transparent)',
+        }}
+        aria-hidden
+      >
+        <ScanField variant="mesh" className="w-full h-full opacity-60 mix-blend-screen" />
+      </div>
+
       {/* ─── Герой ─────────────────────────────────────────────────────── */}
       <div className="relative overflow-hidden">
         {/*
