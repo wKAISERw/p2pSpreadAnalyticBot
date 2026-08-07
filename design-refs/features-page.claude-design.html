@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    body{margin:0}
+    *{box-sizing:border-box}
+    a{color:inherit;text-decoration:none}
+    a:hover{color:rgb(var(--accent-rgb, 16 185 129))}
+    ::selection{background:rgb(var(--accent-rgb, 16 185 129) / 0.3)}
+    @keyframes sweepDown{0%{transform:translateY(-160%);opacity:0}10%,55%{opacity:1}100%{transform:translateY(160%);opacity:0}}
+    @keyframes scanSweep{0%,70%,100%{opacity:0}10%,25%{opacity:1}}
+    @keyframes ctaPulse{0%{transform:scale(1);opacity:.5}70%{transform:scale(1.28);opacity:0}100%{transform:scale(1.28);opacity:0}}
+    @keyframes riseIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+    @keyframes bgSweep{0%{transform:translateY(-100vh)}60%,100%{transform:translateY(100vh)}}
+    @keyframes ringSpin{to{transform:rotate(360deg)}}
+  </style>
+</helmet>
+
+<div ref="{{ setRoot }}" style="position:relative;min-height:100vh;background:#020617;color:#cbd5e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;overflow-x:hidden;--accent-rgb:16 185 129">
+
+  <div aria-hidden="true" style="position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.12;background-image:linear-gradient(rgba(148,163,184,0.5) 1px,transparent 1px),linear-gradient(90deg,rgba(148,163,184,0.5) 1px,transparent 1px);background-size:64px 64px;mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,black,transparent)"></div>
+  <div aria-hidden="true" style="position:fixed;inset:0;z-index:0;pointer-events:none;overflow:hidden;mask-image:radial-gradient(ellipse 90% 60% at 50% 0%,black,transparent)">
+    <span style="position:absolute;left:0;right:0;height:180px;background:linear-gradient(to bottom,transparent,rgb(var(--accent-rgb) / 0.05) 45%,rgb(var(--accent-rgb) / 0.1) 50%,rgb(var(--accent-rgb) / 0.05) 55%,transparent);animation:bgSweep 9s cubic-bezier(.45,0,.2,1) infinite"></span>
+  </div>
+  <div aria-hidden="true" style="position:fixed;top:-10%;right:-10%;width:640px;height:640px;border-radius:50%;background:radial-gradient(circle,rgb(var(--accent-rgb) / 0.08),transparent 70%);pointer-events:none;z-index:0"></div>
+
+  <header style="position:sticky;top:0;z-index:40;border-bottom:1px solid rgba(30,41,59,0.8);background:#020617">
+    <div style="position:relative;z-index:10;max-width:1280px;margin:0 auto;padding:0 24px;min-height:64px;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap">
+      <a href="#" style="display:flex;align-items:center;gap:10px;flex-shrink:0;padding:12px 0">
+        <span style="width:36px;height:36px;border-radius:12px;background:rgb(var(--accent-rgb));display:flex;align-items:center;justify-content:center;box-shadow:0 8px 20px rgb(var(--accent-rgb) / 0.25)">
+          <span style="width:13px;height:13px;border-radius:3px;background:#020617"></span>
+        </span>
+        <span style="font-weight:700;letter-spacing:-0.01em;color:#fff;font-size:17px">ARBIX <span style="color:rgb(var(--accent-rgb))">QUANTUM</span></span>
+      </a>
+      <nav style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+        <a href="#" style="padding:8px 16px;border-radius:12px;font-size:14px;font-weight:600;color:rgb(var(--accent-rgb));background:rgb(var(--accent-rgb) / 0.1);border:1px solid rgb(var(--accent-rgb) / 0.2)">Можливості</a>
+        <a href="#" style="padding:8px 16px;border-radius:12px;font-size:14px;font-weight:600;color:#cbd5e1">Як це працює</a>
+        <a href="#" style="padding:8px 16px;border-radius:12px;font-size:14px;font-weight:600;color:#cbd5e1">Безпека</a>
+      </nav>
+      <a href="#" style="display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:12px;background:rgb(var(--accent-rgb));color:#020617;font-size:14px;font-weight:700;margin:10px 0">Увійти →</a>
+    </div>
+  </header>
+
+  <main style="position:relative;z-index:10">
+    <section style="max-width:1280px;margin:0 auto;padding:64px 24px 40px">
+
+      <div style="max-width:640px;margin-bottom:48px">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:12px">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#94a3b8">/02</span>
+          <span style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:0.2em;color:rgb(var(--accent-rgb))">Можливості</span>
+        </div>
+        <h1 style="font-size:40px;font-weight:700;color:#fff;letter-spacing:-0.02em;margin:0 0 16px;line-height:1.1">Що вміє Arbix Quantum</h1>
+        <p style="color:#94a3b8;line-height:1.7;margin:0;font-size:16px">Сканер, ризик-движок, облік карток і аналітика — одна система, керована з Telegram або з вебдашборду. Три групи нижче: що шукає угоди, що їх перевіряє, і що ними керує.</p>
+      </div>
+
+      <sc-if value="{{ showStats }}" hint-placeholder-val="{{ true }}">
+      <div style="position:relative;overflow:hidden;border-radius:20px;margin-bottom:72px;background:#0f172a;border:1px solid rgba(30,41,59,0.8)">
+        <span aria-hidden="true" style="position:absolute;left:0;right:0;top:0;height:40%;pointer-events:none;animation:sweepDown 6s cubic-bezier(.45,0,.2,1) infinite;background:linear-gradient(to bottom,transparent,rgb(var(--accent-rgb) / 0.06) 40%,rgb(var(--accent-rgb) / 0.14) 50%,rgb(var(--accent-rgb) / 0.06) 60%,transparent)"></span>
+        <div style="position:relative;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+          <div style="padding:28px 20px;text-align:center">
+            <div style="font-size:40px;font-weight:800;color:rgb(var(--accent-rgb));line-height:1;margin-bottom:10px;font-variant-numeric:tabular-nums">7</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.2em;color:#cbd5e1;margin-bottom:6px">майданчиків</div>
+            <div style="font-size:11px;color:#64748b;line-height:1.4">Binance, Bybit, OKX, MEXC, Wallet, BingX, CryptoBot</div>
+          </div>
+          <div style="padding:28px 20px;text-align:center;border-left:1px solid rgba(30,41,59,0.6)">
+            <div style="font-size:40px;font-weight:800;color:rgb(var(--accent-rgb));line-height:1;margin-bottom:10px;font-variant-numeric:tabular-nums">6</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.2em;color:#cbd5e1;margin-bottom:6px">сигналів ризику</div>
+            <div style="font-size:11px;color:#64748b;line-height:1.4">Умови, поведінка, LLM, негатив, тексти, клони</div>
+          </div>
+          <div style="padding:28px 20px;text-align:center;border-left:1px solid rgba(30,41,59,0.6)">
+            <div style="font-size:40px;font-weight:800;color:rgb(var(--accent-rgb));line-height:1;margin-bottom:10px;font-variant-numeric:tabular-nums">5</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.2em;color:#cbd5e1;margin-bottom:6px">режимів</div>
+            <div style="font-size:11px;color:#64748b;line-height:1.4">Спред, тейкер ×2, мейкер ×2</div>
+          </div>
+          <div style="padding:28px 20px;text-align:center;border-left:1px solid rgba(30,41,59,0.6)">
+            <div style="font-size:40px;font-weight:800;color:rgb(var(--accent-rgb));line-height:1;margin-bottom:10px;font-variant-numeric:tabular-nums">8</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.2em;color:#cbd5e1;margin-bottom:6px">лімітів на банк</div>
+            <div style="font-size:11px;color:#64748b;line-height:1.4">Добові, місячні, разові, кількість, кулдаун</div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ── Група 01: Ядро сканування ─────────────────────────────── -->
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:rgb(var(--accent-rgb))">01</span>
+        <h2 style="font-size:20px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Ядро сканування</h2>
+        <span style="flex:1;height:1px;background:rgba(30,41,59,0.6)"></span>
+      </div>
+
+      <div style="display:grid;gap:20px;margin-bottom:80px">
+        <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:28px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">SC</span>
+              </div>
+              <h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Сканування</h3>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="position:relative;width:44px;height:44px;flex-shrink:0" title="середній час циклу">
+                <div style="position:absolute;inset:0;border-radius:50%;border:3px solid rgba(30,41,59,0.8)"></div>
+                <div style="position:absolute;inset:0;border-radius:50%;border:3px solid transparent;border-top-color:rgb(var(--accent-rgb));animation:ringSpin 1.6s linear infinite"></div>
+                <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"><span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">0.6s</span></div>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">5</span>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:28px;align-items:start">
+            <div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.15em;color:#475569;margin-bottom:12px">один цикл — усі майданчики</div>
+              <div style="display:flex;flex-wrap:wrap;gap:10px">
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:0s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">BI</span><span style="position:relative;font-size:12px;font-weight:600">Binance</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:.18s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">BY</span><span style="position:relative;font-size:12px;font-weight:600">Bybit</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:.36s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">OK</span><span style="position:relative;font-size:12px;font-weight:600">OKX</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:.54s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">MX</span><span style="position:relative;font-size:12px;font-weight:600">MEXC</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:.72s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">WL</span><span style="position:relative;font-size:12px;font-weight:600">Wallet</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:.9s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">BX</span><span style="position:relative;font-size:12px;font-weight:600">BingX</span></span>
+                <span style="position:relative;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border-radius:10px;background:rgba(2,6,23,0.8);border:1px solid #1e293b;color:#94a3b8"><span style="position:absolute;inset:0;background:rgb(var(--accent-rgb) / 0.15);animation:scanSweep 4s ease-in-out infinite;animation-delay:1.08s"></span><span style="position:relative;width:22px;height:22px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:rgb(var(--accent-rgb))">CB</span><span style="position:relative;font-size:12px;font-weight:600">CryptoBot</span></span>
+              </div>
+              <p style="font-size:13px;color:#64748b;line-height:1.6;margin:16px 0 0">Біржі опитуються паралельно, а не по черзі. Та, що почала відмовляти, виходить у cooldown і не тримає решту — повний обхід займає 0.6–0.7 с.</p>
+            </div>
+            <div style="display:grid;gap:16px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Чистий спред</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Різниця рахується після комісій біржі й мережевого переказу, а не «на око».</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Симуляція склянки</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Ціна перевіряється на кількох обсягах — верхній ордер часто не тягне суму.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Автоматичний cooldown</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Біржа, що почала відмовляти, тимчасово виходить із циклу.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Швидкість циклу</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">0.6–0.7 с у середньому, до 1.2 с коли майданчик гальмує.</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px">
+          <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:12px">
+                <div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">MD</span></div>
+                <h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Режими роботи</h3>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+            </div>
+            <div style="display:flex;gap:8px;margin-bottom:20px">
+              <span style="flex:1;text-align:center;padding:10px 6px;border-radius:10px;background:rgba(2,6,23,0.6);border:1px solid rgba(30,41,59,0.6);font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">СПРЕД</span>
+              <span style="flex:1;text-align:center;padding:10px 6px;border-radius:10px;background:rgba(2,6,23,0.6);border:1px solid rgba(30,41,59,0.6);font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">ТЕЙКЕР</span>
+              <span style="flex:1;text-align:center;padding:10px 6px;border-radius:10px;background:rgba(2,6,23,0.6);border:1px solid rgba(30,41,59,0.6);font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">МЕЙКЕР</span>
+            </div>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Спред</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Повна зв'язка купівля → продаж між майданчиками.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Тейкер Buy / Sell</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Односторонній пошук зі своїми ціновими стратегіями.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Мейкер</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Порада ціни з урахуванням стінок ліквідності.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Швидкість</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">FAST вимагає всю суму, ANY — мінімальний ліміт.</div></div></div>
+            </div>
+          </div>
+
+          <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:12px">
+                <div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">SN</span></div>
+                <h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Снайпер</h3>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">2</span>
+            </div>
+            <div style="border-radius:16px;background:rgba(2,6,23,0.9);border:1px solid #1e293b;overflow:hidden;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(30,41,59,0.8)">
+                <span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb))"></span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;text-transform:uppercase;letter-spacing:0.15em;color:#64748b">як спрацьовує правило</span>
+              </div>
+              <div style="padding:14px;display:grid;gap:9px">
+                <div style="display:flex;gap:10px;align-items:baseline;animation:riseIn 300ms ease both;animation-delay:0ms"><span style="width:6px;height:6px;border-radius:50%;background:#475569;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">правило озброєне · спред ≥ 1.5% · обсяг ≥ 20 000 ₴</span></div>
+                <div style="display:flex;gap:10px;align-items:baseline;animation:riseIn 300ms ease both;animation-delay:80ms"><span style="width:6px;height:6px;border-radius:50%;background:#475569;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">цикл: Bybit · OKX · Binance · MEXC · Wallet</span></div>
+                <div style="display:flex;gap:10px;align-items:baseline;animation:riseIn 300ms ease both;animation-delay:160ms"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgb(var(--accent-rgb));font-weight:700">OKX → Binance · 1.84% · 24 000 ₴</span></div>
+                <div style="display:flex;gap:10px;align-items:baseline;animation:riseIn 300ms ease both;animation-delay:240ms"><span style="width:6px;height:6px;border-radius:50%;background:#475569;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#94a3b8">мерчант: 1840 угод · скарг немає · вердикт OK</span></div>
+                <div style="display:flex;gap:10px;align-items:baseline;animation:riseIn 300ms ease both;animation-delay:320ms"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgb(var(--accent-rgb))">алерт надіслано в Telegram</span></div>
+              </div>
+            </div>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Пробиття тиші</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Правило з порогами спреду й обсягу спрацює навіть під час паузи.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">За біржами</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Окреме правило для кожного майданчика й напрямку.</div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Група 02: Захист і фільтрація ─────────────────────────── -->
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:rgb(var(--accent-rgb))">02</span>
+        <h2 style="font-size:20px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Захист і фільтрація</h2>
+        <span style="flex:1;height:1px;background:rgba(30,41,59,0.6)"></span>
+      </div>
+
+      <div style="display:grid;grid-template-columns:minmax(340px,2fr) minmax(260px,1fr);gap:20px;margin-bottom:80px">
+        <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">AF</span></div>
+              <h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Антифрод</h3>
+            </div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:16px;padding:14px 16px;border-radius:14px;background:rgba(2,6,23,0.6);border:1px solid rgba(30,41,59,0.7);margin-bottom:20px">
+            <div style="position:relative;width:60px;height:60px;flex-shrink:0">
+              <div style="width:60px;height:60px;border-radius:50%;background:conic-gradient(rgb(var(--accent-rgb)) 0% 14%, rgba(30,41,59,0.9) 14% 100%)"></div>
+              <div style="position:absolute;inset:6px;border-radius:50%;background:#0f172a;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                <span style="font-size:15px;font-weight:800;color:#fff;line-height:1">14</span>
+                <span style="font-size:7px;color:#64748b;letter-spacing:0.05em">/100</span>
+              </div>
+            </div>
+            <div>
+              <div style="font-size:13px;font-weight:700;color:#f1f5f9;margin-bottom:3px">Ризик-скор мерчанта</div>
+              <div style="font-size:12px;color:#64748b;line-height:1.5">Приклад для профілю з 1840 угодами й вердиктом OK — низький ризик, четверо сигналів нижче.</div>
+            </div>
+          </div>
+
+          <div style="display:grid;gap:8px;margin-bottom:24px">
+            <div style="position:relative;display:flex;align-items:center;gap:14px;padding:11px 12px 11px 16px;border-radius:12px;background:rgba(15,23,42,0.7);border:1px solid rgba(30,41,59,0.8);overflow:hidden">
+              <span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#ef4444"></span>
+              <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#f1f5f9">Оплата з чужих реквізитів</div><div style="font-size:11px;color:#64748b">Правило на текст умов</div></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;background:rgba(239,68,68,0.15);color:#f87171;border:1px solid rgba(239,68,68,0.3);flex-shrink:0">BLOCK</span>
+            </div>
+            <div style="position:relative;display:flex;align-items:center;gap:14px;padding:11px 12px 11px 16px;border-radius:12px;background:rgba(15,23,42,0.7);border:1px solid rgba(30,41,59,0.8);overflow:hidden">
+              <span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#f97316"></span>
+              <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#f1f5f9">Чек перед відпуском</div><div style="font-size:11px;color:#64748b">Тиск на апеляцію</div></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;background:rgba(249,115,22,0.15);color:#fb923c;border:1px solid rgba(249,115,22,0.3);flex-shrink:0">WARN</span>
+            </div>
+            <div style="position:relative;display:flex;align-items:center;gap:14px;padding:11px 12px 11px 16px;border-radius:12px;background:rgba(15,23,42,0.7);border:1px solid rgba(30,41,59,0.8);overflow:hidden">
+              <span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:#f97316"></span>
+              <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#f1f5f9">Липкі ліміти, 40 циклів</div><div style="font-size:11px;color:#64748b">Поведінковий аналіз</div></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;background:rgba(249,115,22,0.15);color:#fb923c;border:1px solid rgba(249,115,22,0.3);flex-shrink:0">WARN</span>
+            </div>
+            <div style="position:relative;display:flex;align-items:center;gap:14px;padding:11px 12px 11px 16px;border-radius:12px;background:rgba(15,23,42,0.7);border:1px solid rgba(30,41,59,0.8);overflow:hidden">
+              <span style="position:absolute;left:0;top:0;bottom:0;width:3px;background:rgb(var(--accent-rgb))"></span>
+              <div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;color:#f1f5f9">1840 угод, скарг немає</div><div style="font-size:11px;color:#64748b">Відгуки прочитані</div></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:4px 8px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);color:rgb(var(--accent-rgb));border:1px solid rgb(var(--accent-rgb) / 0.3);flex-shrink:0">OK</span>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:24px 32px">
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Розбір умов</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Треті особи, чек перед відпуском, зовнішні посилання.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Поведінка</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Липкі ліміти, сплески швидкості, миттєве поповнення.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Аналіз відгуків</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Модель читає негатив і каже, що саме сталось.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Чорні списки</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Спільний і персональний: блокувати, ховати, показувати.</div></div></div>
+          </div>
+        </div>
+
+        <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">FL</span></div>
+              <h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Фільтри</h3>
+            </div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+          </div>
+
+          <div style="display:grid;gap:10px;margin-bottom:6px">
+            <div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#64748b;width:100px;flex-shrink:0">У склянках</span><div style="flex:1;height:24px;border-radius:6px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:6px;width:100%;background:rgb(var(--accent-rgb) / 0.18)"></div></div><span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#e2e8f0;width:36px;text-align:right">1240</span></div>
+            <div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#64748b;width:100px;flex-shrink:0">Твої фільтри</span><div style="flex:1;height:24px;border-radius:6px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:6px;width:15%;background:rgb(var(--accent-rgb) / 0.38)"></div></div><span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#e2e8f0;width:36px;text-align:right">186</span></div>
+            <div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#64748b;width:100px;flex-shrink:0">Ризик-движок</span><div style="flex:1;height:24px;border-radius:6px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:6px;width:4%;background:rgb(var(--accent-rgb) / 0.58)"></div></div><span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#e2e8f0;width:36px;text-align:right">14</span></div>
+            <div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#64748b;width:100px;flex-shrink:0">В алерт</span><div style="flex:1;height:24px;border-radius:6px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:6px;width:4%;background:rgb(var(--accent-rgb) / 0.78)"></div></div><span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#e2e8f0;width:36px;text-align:right">3</span></div>
+          </div>
+          <p style="font-size:11px;color:#475569;line-height:1.5;margin:0 0 24px">Приклад одного циклу. Скільки саме відсіється — залежить від твоїх порогів.</p>
+
+          <div style="display:grid;gap:14px">
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Пороги мерчанта</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Угоди, рейтинг, % позитивних, вік, офлайн.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Окремо по біржах</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Власні пороги перебивають загальні.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Банки</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Різні набори для купівлі й продажу.</div></div></div>
+            <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Капітал</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Вручну або з балансу карток.</div></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Група 03: Керування та облік ───────────────────────────── -->
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:rgb(var(--accent-rgb))">03</span>
+        <h2 style="font-size:20px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Керування та облік</h2>
+        <span style="flex:1;height:1px;background:rgba(30,41,59,0.6)"></span>
+      </div>
+
+      <div style="display:grid;gap:20px;margin-bottom:64px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px">
+          <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">CL</span></div><h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Картки й ліміти</h3></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+            </div>
+            <div style="display:grid;gap:12px;margin-bottom:6px">
+              <div><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:#cbd5e1">monobank</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">48k / 150k ₴</span></div><div style="height:6px;border-radius:3px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:3px;width:32%;background:rgb(var(--accent-rgb))"></div></div></div>
+              <div><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:#cbd5e1">ПриватБанк</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">112k / 150k ₴</span></div><div style="height:6px;border-radius:3px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:3px;width:75%;background:#f97316"></div></div></div>
+              <div><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span style="font-size:12px;color:#cbd5e1">ABank</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">141k / 150k ₴</span></div><div style="height:6px;border-radius:3px;background:rgba(2,6,23,0.8);overflow:hidden"><div style="height:100%;border-radius:3px;width:94%;background:#ef4444"></div></div></div>
+            </div>
+            <p style="font-size:11px;color:#475569;line-height:1.5;margin:0 0 24px">Приклад добових лімітів. Обсяг зв'язки ріжеться під те, що лишилось.</p>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Ліміти банків</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Добові, місячні, разові, кількість, пауза.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Власні ліміти картки</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Перебивають банківські значення.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Monobank</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Вебхук звіряє транзакції з P2P-ордерами.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Непрогріті картки</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Окремий поріг, поки немає обігу.</div></div></div>
+            </div>
+          </div>
+
+          <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">AL</span></div><h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Сповіщення</h3></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+            </div>
+            <div style="border-radius:14px;background:rgba(2,6,23,0.9);border:1px solid #1e293b;padding:14px;margin-bottom:6px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">18:42</span>
+                <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;padding:2px 6px;border-radius:6px;background:rgb(var(--accent-rgb) / 0.15);color:rgb(var(--accent-rgb))">×3</span>
+              </div>
+              <div style="font-size:19px;font-weight:800;color:rgb(var(--accent-rgb));line-height:1;margin-bottom:6px;font-variant-numeric:tabular-nums">+2.15%</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">OKX → Binance · 24 000 ₴</div>
+            </div>
+            <p style="font-size:11px;color:#475569;line-height:1.5;margin:0 0 24px">Позначка ×3 означає, що три однакові зв'язки схлопнулись в одне повідомлення.</p>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Гнучкий вивід</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Що показувати: умови, логіку AI, реквізити, вердикт.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Групування</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Однакові зв'язки схлопуються в одне повідомлення.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Авто-затримка</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">При напливі пауза між алертами росте драбинкою.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Пауза</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Приглушити на годину, чотири або до ручного вмикання.</div></div></div>
+            </div>
+          </div>
+
+          <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+              <div style="display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">AN</span></div><h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Аналітика</h3></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">4</span>
+            </div>
+            <div style="border-radius:14px;background:rgba(2,6,23,0.9);border:1px solid #1e293b;padding:14px;margin-bottom:20px">
+              <div style="display:flex;justify-content:space-between;margin-bottom:10px"><span style="font-size:12px;font-weight:700;color:#e2e8f0">Динаміка прибутку</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#475569">приклад</span></div>
+              <svg viewbox="0 0 300 70" style="width:100%;height:64px" preserveAspectRatio="none" aria-hidden="true">
+                <path d="M 0 62 L 25 56 L 50 60 L 75 51 L 100 53 L 125 44 L 150 47 L 175 36 L 200 39 L 225 28 L 250 23 L 275 25 L 300 15 L 300 70 L 0 70 Z" fill="rgb(var(--accent-rgb) / 0.22)"></path>
+                <path d="M 0 62 L 25 56 L 50 60 L 75 51 L 100 53 L 125 44 L 150 47 L 175 36 L 200 39 L 225 28 L 250 23 L 275 25 L 300 15" fill="none" stroke="rgb(var(--accent-rgb))" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+              </svg>
+            </div>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Прибуток по днях</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Динаміка й накопичений результат за період.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Топ бірж і банків</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Де реально йде обіг, а де лише здається.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Теплова карта</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Години й дні, коли зв'язок найбільше.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Історія пропозицій</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Що сканер знаходив, поки тебе не було.</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div data-glow="1" style="position:relative;isolation:isolate;border-radius:24px;padding:24px;background:rgba(15,23,42,0.6);border:1px solid rgba(30,41,59,0.8)" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(16rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.16), transparent 60%)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px">
+            <div style="display:flex;align-items:center;gap:12px"><div style="width:40px;height:40px;border-radius:12px;background:rgb(var(--accent-rgb) / 0.15);border:1px solid rgb(var(--accent-rgb) / 0.3);display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:rgb(var(--accent-rgb))">CT</span></div><h3 style="font-size:17px;font-weight:700;color:#fff;margin:0;letter-spacing:-0.01em">Контроль</h3></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;padding:4px 8px;border-radius:8px;background:rgba(2,6,23,0.8);color:#64748b;border:1px solid #1e293b">3</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:28px;align-items:start">
+            <div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(2,6,23,0.7);border:1px solid rgba(30,41,59,0.8)"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0"></span><span style="font-size:12px;font-weight:700;color:#e2e8f0;flex:1">Binance</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">жива</span></div>
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(2,6,23,0.7);border:1px solid rgba(30,41,59,0.8)"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0"></span><span style="font-size:12px;font-weight:700;color:#e2e8f0;flex:1">Bybit</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">жива</span></div>
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(2,6,23,0.7);border:1px solid rgba(30,41,59,0.8)"><span style="width:6px;height:6px;border-radius:50%;background:#f97316;flex-shrink:0"></span><span style="font-size:12px;font-weight:700;color:#e2e8f0;flex:1">OKX</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">протухла</span></div>
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:8px;background:rgba(2,6,23,0.7);border:1px solid rgba(30,41,59,0.8)"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0"></span><span style="font-size:12px;font-weight:700;color:#e2e8f0;flex:1">MEXC</span><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#64748b">жива</span></div>
+              </div>
+              <p style="font-size:11px;color:#475569;line-height:1.5;margin:12px 0 0">Протухла сесія — найчастіша причина, чому біржа раптом замовкла.</p>
+            </div>
+            <div style="display:grid;gap:14px">
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Стан ядра</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Старт і стоп сканера просто з дашборду.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Незавершені угоди</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Що зараз під наглядом монітора ордерів.</div></div></div>
+              <div style="display:flex;gap:12px"><span style="width:6px;height:6px;border-radius:50%;background:rgb(var(--accent-rgb));flex-shrink:0;margin-top:8px"></span><div><div style="font-size:14px;font-weight:700;color:#f1f5f9;margin-bottom:2px">Черги</div><div style="font-size:13px;color:#94a3b8;line-height:1.5">Скільки завдань чекає на відгуки й мовну модель.</div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div aria-hidden="true" style="height:1px;background:linear-gradient(90deg,transparent,rgb(var(--accent-rgb) / 0.35) 30%,rgb(var(--accent-rgb) / 0.35) 70%,transparent);margin-bottom:64px"></div>
+
+      <div data-glow="1" style="position:relative;isolation:isolate;border-radius:32px;border:1px solid rgba(30,41,59,0.8);background:rgba(15,23,42,0.8);padding:40px;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:24px" style-hover="border-color: rgb(var(--accent-rgb) / 0.4)" style-before="content:'';position:absolute;inset:-1px;border-radius:inherit;pointer-events:none;z-index:-1;opacity:var(--glow-o,0);transition:opacity 260ms ease;background:radial-gradient(20rem circle at var(--mx,50%) var(--my,50%), rgb(var(--accent-rgb) / 0.18), transparent 60%)">
+        <div>
+          <div style="display:inline-flex;align-items:center;gap:8px;padding:4px 12px;border-radius:999px;background:rgb(var(--accent-rgb) / 0.1);border:1px solid rgb(var(--accent-rgb) / 0.2);color:rgb(var(--accent-rgb));font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:14px">Готовий до запуску</div>
+          <h2 style="font-size:26px;font-weight:700;color:#fff;margin:0 0 8px;letter-spacing:-0.01em">Побач сканер у дії</h2>
+          <p style="font-size:14px;color:#94a3b8;margin:0;max-width:420px">Безпечний вхід через Telegram. Фільтри, картки й ліміти синхронізуються з ботом — налаштовувати вдруге не треба.</p>
+        </div>
+        <a href="#" style="position:relative;isolation:isolate;display:inline-flex;align-items:center;gap:10px;padding:16px 32px;border-radius:16px;background:rgb(var(--accent-rgb));color:#020617;font-weight:700;font-size:15px;flex-shrink:0">
+          <span aria-hidden="true" style="position:absolute;inset:0;z-index:-1;border-radius:inherit;background:rgb(var(--accent-rgb) / 0.55);animation:ctaPulse 2.8s cubic-bezier(.2,0,.4,1) infinite"></span>
+          Увійти в дашборд →
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer style="position:relative;z-index:10;border-top:1px solid rgba(30,41,59,0.6);margin-top:64px">
+    <div style="max-width:1280px;margin:0 auto;padding:48px 24px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;gap:32px">
+        <div style="max-width:360px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span style="width:28px;height:28px;border-radius:8px;background:rgb(var(--accent-rgb));display:flex;align-items:center;justify-content:center"><span style="width:10px;height:10px;border-radius:2px;background:#020617"></span></span>
+            <span style="font-weight:700;color:#fff;font-size:14px">ARBIX QUANTUM</span>
+          </div>
+          <p style="font-size:14px;color:#94a3b8;line-height:1.6;margin:0">Сканер P2P-спредів із антифрод-аналізом контрагентів. Знаходить різницю курсів між біржами й перевіряє, з ким ти збираєшся торгувати.</p>
+        </div>
+        <nav style="display:flex;flex-direction:column;gap:8px">
+          <a href="#" style="font-size:14px;color:#94a3b8">Можливості</a>
+          <a href="#" style="font-size:14px;color:#94a3b8">Як це працює</a>
+          <a href="#" style="font-size:14px;color:#94a3b8">Безпека</a>
+        </nav>
+      </div>
+      <p style="margin:40px 0 0;padding-top:24px;border-top:1px solid rgba(30,41,59,0.6);font-size:12px;color:#94a3b8;line-height:1.6">Arbix Quantum — інструмент аналізу ринку, а не інвестиційна порада. Спред, який показує сканер, не гарантує прибутку: ціни й доступні обсяги змінюються, а частина ризику лежить на стороні контрагента й банку. Рішення про кожну угоду приймаєш ти.</p>
+    </div>
+  </footer>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;$preview&quot;: {&quot;width&quot;: 1440, &quot;height&quot;: 1500},
+  &quot;accentColor&quot;: {&quot;editor&quot;: &quot;color&quot;, &quot;default&quot;: &quot;#10b981&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;options&quot;: [&quot;#10b981&quot;, &quot;#6366f1&quot;, &quot;#f59e0b&quot;, &quot;#f43f5e&quot;], &quot;section&quot;: &quot;Тема&quot;},
+  &quot;showStats&quot;: {&quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Розділи&quot;}
+}">
+class Component extends DCLogic {
+  ACCENT_DEFAULT = '16 185 129';
+
+  hexToRgbStr(hex) {
+    if (!hex) return this.ACCENT_DEFAULT;
+    const h = hex.replace('#', '');
+    const r = parseInt(h.substring(0, 2), 16);
+    const g = parseInt(h.substring(2, 4), 16);
+    const b = parseInt(h.substring(4, 6), 16);
+    if ([r, g, b].some((n) => Number.isNaN(n))) return this.ACCENT_DEFAULT;
+    return `${r} ${g} ${b}`;
+  }
+
+  getAccentRgbStr() {
+    return this.hexToRgbStr(this.props.accentColor ?? '#10b981');
+  }
+
+  setRoot = (el) => {
+    this.rootEl = el;
+    this.applyAccent();
+  };
+
+  applyAccent() {
+    if (this.rootEl) this.rootEl.style.setProperty('--accent-rgb', this.getAccentRgbStr());
+  }
+
+  componentDidUpdate() {
+    this.applyAccent();
+  }
+
+  componentDidMount() {
+    if (!this.rootEl || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+    this._glowCards = Array.from(this.rootEl.querySelectorAll('[data-glow]'));
+    this._glowHandlers = this._glowCards.map((card) => {
+      const onMove = (e) => {
+        const rect = card.getBoundingClientRect();
+        card.style.setProperty('--mx', `${e.clientX - rect.left}px`);
+        card.style.setProperty('--my', `${e.clientY - rect.top}px`);
+      };
+      const onEnter = () => card.style.setProperty('--glow-o', '1');
+      const onLeave = () => card.style.setProperty('--glow-o', '0');
+      card.addEventListener('pointermove', onMove);
+      card.addEventListener('pointerenter', onEnter);
+      card.addEventListener('pointerleave', onLeave);
+      return { card, onMove, onEnter, onLeave };
+    });
+  }
+
+  componentWillUnmount() {
+    (this._glowHandlers || []).forEach(({ card, onMove, onEnter, onLeave }) => {
+      card.removeEventListener('pointermove', onMove);
+      card.removeEventListener('pointerenter', onEnter);
+      card.removeEventListener('pointerleave', onLeave);
+    });
+  }
+
+  renderVals() {
+    return {
+      setRoot: this.setRoot,
+      showStats: this.props.showStats ?? true,
+    };
+  }
+}
+</script>
+</body>
+</html>
