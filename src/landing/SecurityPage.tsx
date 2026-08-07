@@ -155,7 +155,7 @@ export default function SecurityPage() {
         }}
         aria-hidden
       >
-        <ScanField className="w-full h-full opacity-70" />
+        <ScanField className="w-full h-full opacity-70 mix-blend-screen" />
       </div>
 
       <Section className="pt-16 sm:pt-20 relative">

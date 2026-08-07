@@ -309,7 +309,7 @@ export default function HowItWorksPage() {
         }}
         aria-hidden
       >
-        <ScanField variant="flow" className="w-full h-full opacity-60" />
+        <ScanField variant="flow" className="w-full h-full opacity-60 mix-blend-screen" />
       </div>
 
       <Section className="pt-16 sm:pt-20 relative">

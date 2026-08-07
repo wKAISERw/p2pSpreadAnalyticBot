@@ -187,6 +187,15 @@ export default function ScanField({
     const uMouse = gl.getUniformLocation(program, 'u_mouse');
     const uAccent = gl.getUniformLocation(program, 'u_accent');
 
+    // Невстановлена уніформа лишається нулем — тобто чорним кольором на
+    // весь екран. Краще не малювати взагалі, ніж малювати навмання.
+    if (!uTime || !uRes || !uMouse || !uAccent) return;
+
+    // Чистимо одразу: до першого кадру буфер містить те, що лишив
+    // драйвер, і композитор може встигнути показати цей сміттєвий вміст.
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
     // Половинна роздільність: це розмитий фон, різниці не видно, а
     // пікселів для зафарбовування вчетверо менше.
     const sync = () => {
