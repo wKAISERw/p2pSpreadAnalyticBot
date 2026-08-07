@@ -157,7 +157,7 @@ export const ConsoleFeed: React.FC<{ lines: LogLine[]; caption?: string }> = ({
   }, [visible, lines.length]);
 
   return (
-    <div className="rounded-2xl bg-slate-950/90 border border-slate-800 overflow-hidden">
+    <div className="rounded-2xl bg-slate-950/80 border border-slate-800 overflow-hidden">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-800/80">
         <span className="w-1.5 h-1.5 rounded-full bg-accent-500 animate-pulse" />
         <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
@@ -235,7 +235,7 @@ export const Sparkline: React.FC<{ title: string }> = ({ title }) => {
     .join(' ');
 
   return (
-    <div className="rounded-2xl bg-slate-950/90 border border-slate-800 p-4">
+    <div className="rounded-2xl bg-slate-950/80 border border-slate-800 p-4">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-bold text-slate-200">{title}</span>
         <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400">
@@ -559,7 +559,7 @@ export const SessionStatus: React.FC<{
     {rows.map(r => (
       <div
         key={r.name}
-        className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-950/70 border border-slate-800/80"
+        className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-slate-950/80 border border-slate-800"
       >
         <span
           className={cn('w-1.5 h-1.5 rounded-full shrink-0', r.ok ? 'bg-accent-500' : 'bg-orange-500')}

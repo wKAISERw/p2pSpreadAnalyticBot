@@ -116,35 +116,27 @@ const Items: React.FC<{ items: string[][]; cols?: boolean }> = ({ items, cols })
 );
 
 /**
- * Час циклу дугою.
+ * Середній час циклу.
  *
- * Свідомо статична. У макеті дуга крутилась нескінченно, і поруч зі
- * сталим «0.6s» це читалось як живий вимір — якого тут немає й бути не
- * може: сторінка публічна й нічого не опитує. Правило по всьому лендингу
- * одне — ілюстративне не вдає живе.
+ * Кільце замкнене, і це головне в ньому. Спершу тут була часткова дуга —
+ * як у макеті, тільки без обертання. Але часткова дуга це ідіома
+ * завантаження: незакрите коло читається як прогрес, що зупинився, тобто
+ * як зламаний спінер. Замкнене коло з підписом читається тим, чим є, —
+ * позначкою зі сталим числом.
+ *
+ * Анімації тут немає свідомо: сторінка публічна й нічого не опитує, тож
+ * рухомий індикатор показував би вимір, якого не існує.
  *
  * Весь вузол aria-hidden: те саме число словами стоїть в абзаці нижче,
  * тож для читалки це дубль.
  */
-const CycleRing: React.FC<{ label: string }> = ({ label }) => (
-  <div className="relative w-11 h-11 shrink-0" title="середній час циклу" aria-hidden>
-    <svg viewBox="0 0 44 44" className="w-full h-full -rotate-90">
-      <circle cx="22" cy="22" r="19" fill="none" stroke="rgb(30 41 59 / 0.8)" strokeWidth="3" />
-      <circle
-        cx="22"
-        cy="22"
-        r="19"
-        fill="none"
-        stroke="rgb(var(--accent-rgb))"
-        strokeWidth="3"
-        strokeLinecap="round"
-        /* Довжина кола ≈ 119: третина дуги вистачає, щоб кільце читалось
-           як заповнене частково, а не як обрізане. */
-        strokeDasharray="34 85"
-      />
-    </svg>
-    <span className="absolute inset-0 flex items-center justify-center tag-mono text-[9px] font-bold text-accent-400">
-      {label}
+const CycleStat: React.FC<{ value: string }> = ({ value }) => (
+  <div className="flex items-center gap-2.5 shrink-0" aria-hidden>
+    <span className="tag-mono text-[10px] uppercase tracking-widest text-slate-400 hidden sm:inline">
+      цикл
+    </span>
+    <span className="w-11 h-11 rounded-full border-2 border-accent-500/40 bg-accent-500/10 flex items-center justify-center shrink-0">
+      <span className="tag-mono text-[9px] font-bold text-accent-400">{value}</span>
     </span>
   </div>
 );
@@ -178,21 +170,27 @@ const TileHead: React.FC<{
 );
 
 /**
- * Обгортка плитки. Фактура задається зовні, щоб сусіди не збігались.
+ * Обгортка плитки. Одна поверхня на всі дев'ять.
+ *
+ * Раніше фактура задавалась зовні, щоб сусідні плитки не збігались:
+ * бенто було плоским, і чергування dots/grid/scan було єдиним, що
+ * розбивало сіру стрічку. Тепер порядок несуть групи 01–03, і різні
+ * фактури з ними конкурують — три фони й чотири фактури на дев'ять
+ * карток читались як різнобій, а не як ритм. Відмінності лишились там,
+ * де вони щось означають: усередині плиток.
  *
  * Ховер один на всю сторінку — рамка. Ані чипи, ані панелі всередині
  * своїх станів не мають: коли підсвічується все, не підсвічується ніщо.
  */
 const Tile: React.FC<{
   className?: string;
-  texture?: string;
   children: React.ReactNode;
-}> = ({ className, texture = 'bg-slate-900/50', children }) => (
+}> = ({ className, children }) => (
   <GlowCard
     className={cn(
-      'h-full min-w-0 border border-slate-800/80 rounded-3xl p-6 sm:p-7',
+      'h-full min-w-0 rounded-3xl p-6 sm:p-7',
+      'bg-slate-900/60 border border-slate-800/80',
       'hover:border-accent-500/40 transition-colors',
-      texture,
       className
     )}
   >
@@ -235,12 +233,12 @@ export default function FeaturesPage() {
 
         <div className="grid gap-5 mb-16">
           <Reveal className="min-w-0">
-            <Tile texture="surface-dots bg-slate-950/70">
+            <Tile>
               <TileHead
                 mark="SC"
                 title="Сканування"
                 count={4}
-                aside={<CycleRing label="0.6s" />}
+                aside={<CycleStat value="0.6s" />}
               />
 
               <div className="grid lg:grid-cols-[1fr_1.1fr] gap-7 items-start">
@@ -274,14 +272,14 @@ export default function FeaturesPage() {
               те саме. Тут достатньо назв — суть режимів розкрита там.
             */}
             <Reveal delay={60} className="min-w-0">
-              <Tile texture="bg-slate-900/50">
+              <Tile>
                 <TileHead mark="MD" title="Режими роботи" count={4} />
 
                 <div className="flex gap-2 mb-5">
                   {['СПРЕД', 'ТЕЙКЕР', 'МЕЙКЕР'].map(m => (
                     <span
                       key={m}
-                      className="tag-mono flex-1 text-center text-[11px] py-2.5 px-1.5 rounded-xl bg-slate-950/60 border border-slate-800/60 text-slate-400"
+                      className="tag-mono flex-1 text-center text-[11px] py-2.5 px-1.5 rounded-xl bg-slate-950/80 border border-slate-800 text-slate-400"
                     >
                       {m}
                     </span>
@@ -300,7 +298,7 @@ export default function FeaturesPage() {
             </Reveal>
 
             <Reveal delay={120} className="min-w-0">
-              <Tile texture="surface-scan bg-slate-950/80">
+              <Tile>
                 <TileHead mark="SN" title="Снайпер" count={2} />
 
                 <div className="mb-5">
@@ -323,21 +321,30 @@ export default function FeaturesPage() {
 
         <div className="grid lg:grid-cols-3 gap-5 mb-16">
           <Reveal className="lg:col-span-2 min-w-0">
-            <Tile texture="surface-scan bg-slate-950/80">
+            <Tile>
               <TileHead mark="AF" title="Антифрод" count={4} />
 
-              <div className="rounded-2xl bg-slate-950/60 border border-slate-800/70 p-4 sm:p-5 mb-5">
+              {/*
+                Шкала й сигнали — в одній заглибленій панелі, і підкладка
+                тут не косметика. VerdictRow навмисно світліший за тло
+                (slate-900/70): він має читатись як піднятий рядок. Після
+                того як усі картки звели до одної поверхні slate-900/60,
+                рядок на ній майже зник. Правити треба не компонент — на
+                головній він лежить на surface-scan і там відрив
+                правильний, — а те, на чому він лежить тут.
+              */}
+              <div className="rounded-2xl bg-slate-950/80 border border-slate-800 p-4 sm:p-5 mb-6">
                 <RiskSpectrum />
-                <p className="text-[11px] text-slate-400 leading-snug mt-1">
+                <p className="text-[11px] text-slate-400 leading-snug mt-1 mb-4">
                   Шкала движка: пороги 20 / 45 / 75 — ті самі, що в боті. Нижче — типи
                   сигналів, з яких складається бал.
                 </p>
-              </div>
 
-              <div className="space-y-2 mb-6">
-                {RISK_ROWS.map(r => (
-                  <VerdictRow key={r.title} {...r} />
-                ))}
+                <div className="space-y-2">
+                  {RISK_ROWS.map(r => (
+                    <VerdictRow key={r.title} {...r} />
+                  ))}
+                </div>
               </div>
 
               <Items
@@ -353,7 +360,7 @@ export default function FeaturesPage() {
           </Reveal>
 
           <Reveal delay={60} className="min-w-0">
-            <Tile texture="surface-grid bg-slate-900/50">
+            <Tile>
               <TileHead mark="FL" title="Фільтри" count={4} />
 
               <FilterFunnel steps={FUNNEL} />
@@ -379,7 +386,7 @@ export default function FeaturesPage() {
         <div className="grid gap-5 mb-4">
           <div className="grid lg:grid-cols-3 gap-5">
             <Reveal className="min-w-0">
-              <Tile texture="surface-dots bg-slate-950/70">
+              <Tile>
                 <TileHead mark="CL" title="Картки й ліміти" count={4} />
 
                 <LimitBars rows={LIMITS} />
@@ -399,7 +406,7 @@ export default function FeaturesPage() {
             </Reveal>
 
             <Reveal delay={60} className="min-w-0">
-              <Tile texture="bg-slate-900/50">
+              <Tile>
                 <TileHead mark="AL" title="Сповіщення" count={4} />
 
                 <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5">
@@ -430,7 +437,7 @@ export default function FeaturesPage() {
             </Reveal>
 
             <Reveal delay={120} className="min-w-0">
-              <Tile texture="surface-grid bg-slate-900/50">
+              <Tile>
                 <TileHead mark="AN" title="Аналітика" count={4} />
 
                 <div className="mb-5">
@@ -450,7 +457,7 @@ export default function FeaturesPage() {
           </div>
 
           <Reveal delay={60} className="min-w-0">
-            <Tile texture="surface-scan bg-slate-950/80">
+            <Tile>
               <TileHead mark="CT" title="Контроль" count={3} />
 
               <div className="grid lg:grid-cols-2 gap-7 items-start">
