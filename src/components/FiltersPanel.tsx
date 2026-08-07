@@ -13,6 +13,7 @@ import { SniperRules } from './filters/SniperRules';
 import {
   Bank, ScannerMode, SpreadStrategy, CapitalMode, UserFilters, UserFiltersPatch,
 } from '../types';
+import LoadingVeil from './LoadingVeil';
 
 const SCANNER_MODES: { value: ScannerMode; label: string; hint: string }[] = [
   { value: 'SPREAD', label: 'Спред', hint: 'Класичний пошук зв\'язок купівля→продаж' },
@@ -55,7 +56,7 @@ export default function FiltersPanel() {
   useEffect(() => { setDraft({}); }, [filters?.userId]);
 
   if (!telegramId) return <EmptyState text="Потрібен вхід через Telegram." />;
-  if (isLoading) return <EmptyState text="Читаю фільтри з бота…" spinner />;
+  if (isLoading) return <LoadingVeil compact label="Читаю фільтри з бота" />;
   if (error) {
     return <EmptyState text={`Не вдалось завантажити фільтри: ${(error as Error).message}`} />;
   }

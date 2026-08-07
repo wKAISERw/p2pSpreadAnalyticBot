@@ -9,6 +9,7 @@ import { api } from '../services/api';
 import { useAppStore } from '../store';
 import { Card, CardReportRow, CardTransaction } from '../types';
 import { CardSettings } from './cards/CardSettings';
+import LoadingVeil from './LoadingVeil';
 
 const uah = (v: number) => `${Math.round(v ?? 0).toLocaleString('uk-UA')} ₴`;
 
@@ -38,7 +39,7 @@ export default function CardsPanel() {
   );
 
   if (!telegramId) return <Empty text="Потрібен вхід через Telegram." />;
-  if (isLoading) return <Empty text="Читаю картки…" spinner />;
+  if (isLoading) return <LoadingVeil compact label="Читаю картки" />;
   if (error) return <Empty text={`Не вдалось завантажити картки: ${(error as Error).message}`} />;
   if (!cards?.length) return <Empty text="Карток ще немає — додай їх у боті, меню «Картки»." />;
 

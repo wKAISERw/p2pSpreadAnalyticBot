@@ -7,6 +7,7 @@ import { cn } from '../lib/utils';
 import { api } from '../services/api';
 import { useAppStore } from '../store';
 import { AdminUser } from '../types';
+import LoadingVeil from './LoadingVeil';
 
 /**
  * Керування підписниками. Доступ перевіряє бекенд (require_admin) — тут
@@ -29,7 +30,7 @@ export default function AdminUsersPanel() {
       </Empty>
     );
   }
-  if (isLoading) return <Empty spinner>Читаю список користувачів…</Empty>;
+  if (isLoading) return <LoadingVeil compact label="Читаю список користувачів" />;
   if (error) return <Empty>Не вдалось завантажити: {(error as Error).message}</Empty>;
   if (!users?.length) return <Empty>Підписників ще немає.</Empty>;
 
