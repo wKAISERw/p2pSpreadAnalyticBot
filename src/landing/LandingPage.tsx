@@ -96,7 +96,7 @@ export default function LandingPage() {
               <div className="flex flex-wrap gap-3">
                 <Link
                   to="/login"
-                  className="group inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-colors shadow-lg shadow-accent-500/25"
+                  className="pulse-cta group inline-flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-colors shadow-lg shadow-accent-500/25"
                 >
                   Почати
                   <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-0.5" />
@@ -320,7 +320,7 @@ export default function LandingPage() {
               </p>
               <Link
                 to="/login"
-                className="group inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-all shadow-xl shadow-accent-500/25"
+                className="pulse-cta group inline-flex items-center gap-2 px-8 py-4 rounded-2xl bg-accent-500 hover:bg-accent-400 text-slate-950 font-bold transition-all shadow-xl shadow-accent-500/25"
               >
                 Увійти через Telegram
                 <ArrowRight className="w-5 h-5 transition-transform group-hover:translate-x-0.5" />

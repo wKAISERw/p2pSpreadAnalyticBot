@@ -391,29 +391,17 @@
 
 @supports (animation-timeline: view()) {
   /*
-   * Поява блоків стає прив'язаною до скролу, а не одноразовим переходом:
-   * блок проявляється рівно настільки, наскільки ти його проскролив.
-   * Рухаєш колесо повільно — і він так само повільно виходить.
+   * Появу блоків тут раніше вів view(). Виявилось, що ця гілка мовчки
+   * нічого не робила: ViewTimeline лишався неактивним (currentTime === null)
+   * навіть коли елемент повністю в кадрі, тож анімація не давала внеску, і
+   * застосовувався базовий стиль — тобто картки просто були видимі одразу.
+   * Гірше того, сам факт підтримки view() вимикав обсервер, тому в Chrome
+   * поява не працювала взагалі, а в Safari й Firefox працювала.
+   *
+   * Тепер появу веде IntersectionObserver у всіх браузерах. Прив'язка до
+   * скролу лишилась там, де її відсутність непомітна: паралакс фону й
+   * дрейф героя.
    */
-  .reveal {
-    opacity: 1;
-    transform: none;
-    transition: none;
-    animation: arbix-reveal-scroll linear both;
-    animation-timeline: view();
-    animation-range: entry 4% cover 24%;
-  }
-
-  @keyframes arbix-reveal-scroll {
-    from {
-      opacity: 0;
-      transform: translateY(22px) scale(0.985);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
 
   /*
    * Герой підіймається й тане, поки йде вгору. Діапазон exit — тобто рух
@@ -725,4 +713,43 @@
 
 @media (prefers-reduced-motion: reduce) {
   .sweep-down { display: none; }
+}
+
+/*
+ * Пульс навколо головної кнопки.
+ *
+ * Кільце, що розходиться й тане, а не блимання самої кнопки: миготіння
+ * фону на елементі, який треба натиснути, читається як помилка й заважає
+ * прицілитись. Кільце лишається під кнопкою і в клік не втручається.
+ */
+@keyframes arbix-cta-pulse {
+  0%   { transform: scale(1);    opacity: 0.5; }
+  70%  { transform: scale(1.28); opacity: 0; }
+  100% { transform: scale(1.28); opacity: 0; }
+}
+
+.pulse-cta {
+  position: relative;
+  isolation: isolate;
+}
+
+.pulse-cta::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: rgb(var(--accent-rgb) / 0.55);
+  animation: arbix-cta-pulse 2.8s cubic-bezier(0.2, 0, 0.4, 1) infinite;
+  pointer-events: none;
+}
+
+/* На наведенні пульс зупиняється: людина вже знайшла кнопку. */
+.pulse-cta:hover::before {
+  animation-play-state: paused;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-cta::before { animation: none; opacity: 0; }
 }

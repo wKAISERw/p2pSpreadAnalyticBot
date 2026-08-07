@@ -182,6 +182,14 @@ export default function ScanField({ className }: { className?: string }) {
       if (!visible) return;
 
       gl.viewport(0, 0, canvas.width, canvas.height);
+
+      // Без цього кадр домальовується поверх попереднього: блендинг
+      // увімкнений, тож напівпрозорий шар накладається сам на себе
+      // сотні разів за секунду й за кілька секунд вироджується в суцільну
+      // світлу пелену на пів-екрана. Полотно треба чистити щокадру.
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
       gl.uniform1f(uTime, t * 0.001);
       gl.uniform2f(uRes, canvas.width, canvas.height);
       gl.uniform2f(uMouse, mouse.x * canvas.width, mouse.y * canvas.height);

@@ -45,7 +45,14 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
       {/* Фон живе під усім вмістом і не бере участі в потоці */}
       <AuroraField />
 
-      <header className="header-condense sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-2xl">
+      {/*
+        На вузьких екранах шапка непрозора й без розмиття. Напівпрозорий
+        фон пропускав крізь себе зелені плями аврори, коли ті проходили
+        під ним при скролі, — і шапка помітно зеленіла. Плюс backdrop-blur
+        на липкому елементі телефон перераховує щокадру прокрутки, тобто
+        рівно тоді, коли плавність потрібна найбільше.
+      */}
+      <header className="header-condense sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950 md:bg-slate-950/90 md:backdrop-blur-2xl">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <Link to="/" className="flex items-center gap-2.5 shrink-0">
             <span className="w-9 h-9 rounded-xl bg-accent-500 flex items-center justify-center shadow-lg shadow-accent-500/25">
@@ -275,7 +282,7 @@ export function Section({
  * ще одна статична смуга.
  */
 export function Rule() {
-  const { ref, shown } = useReveal<HTMLDivElement>(true);
+  const { ref, shown } = useReveal<HTMLDivElement>();
 
   return (
     <div ref={ref} className="relative h-px w-full bg-slate-800/40" aria-hidden>

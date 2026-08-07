@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { cn } from '../lib/utils';
 
 /**
@@ -8,18 +8,6 @@ import { cn } from '../lib/utils';
  * лендинг — перше, що бачить людина, і тягнути сюди рантайм заради появи
  * блоків означало б платити ~40 кБ за ефект, який робиться класом.
  */
-
-/**
- * Чи вміє браузер прив'язувати анімацію до прокрутки.
- *
- * Якщо вміє — появу веде CSS (animation-timeline: view()), і обсервер не
- * потрібен зовсім: він робив би ту саму роботу гірше, бо дає одноразовий
- * перемикач замість плавного прогресу.
- */
-const HAS_VIEW_TIMELINE =
-  typeof CSS !== 'undefined' &&
-  typeof CSS.supports === 'function' &&
-  CSS.supports('animation-timeline: view()');
 
 /** Спільний обсервер на всі елементи — по одному на кожен це зайві витрати. */
 let observer: IntersectionObserver | null = null;
@@ -47,46 +35,59 @@ function getObserver(): IntersectionObserver | null {
 }
 
 /**
- * @param alwaysObserve Не довіряти CSS-таймлайну й вести появу через
- *   обсервер. Потрібно тим, кого view() обслужити не може: у елемента
- *   висотою в піксель діапазон «входу у в'юпорт» вироджується в мить, і
- *   анімація просто клацає замість того, щоб іти за скролом.
+ * Скільки чекати на обсервер, перш ніж показати блок усе одно.
+ *
+ * Обсервер може не спрацювати з причин, які до сторінки не мають
+ * стосунку: вкладка не малюється, браузер притримав колбеки, розкладка
+ * змінилась після монтування. Без цієї стелі такий блок лишався б
+ * невидимим до кінця сесії.
  */
-export function useReveal<T extends HTMLElement>(alwaysObserve = false) {
+const REVEAL_FAILSAFE_MS = 4000;
+
+/**
+ * Поява блока, коли до нього доскролили.
+ *
+ * Ключове рішення: за замовчуванням блок ВИДИМИЙ, і лише те, чим хук
+ * реально береться керувати, ховається перед першим кадром. Раніше було
+ * навпаки — `.reveal` мав opacity: 0 у базі, а показувався класом. Це
+ * означало, що будь-який збій механізму появи робив контент назавжди
+ * невидимим, і збій цей мовчазний: сторінка просто порожня.
+ *
+ * До того ж хук поступався дорогою CSS-таймлайну — якщо браузер
+ * підтримує animation-timeline: view(), обсервер не вішався взагалі.
+ * Тобто в тому самому Chrome працювала лише CSS-гілка, і якщо вже вона
+ * чомусь не спрацьовувала, запасного шляху не лишалось. Тепер шлях один
+ * для всіх, зі стелею за часом на додачу.
+ */
+export function useReveal<T extends HTMLElement>() {
   const ref = useRef<T>(null);
-  // Під CSS-таймлайном початковий стан не має значення: анімація
-  // перебиває його. Ставимо true, щоб без JS нічого не лишилось прихованим.
-  const [shown, setShown] = useState(HAS_VIEW_TIMELINE && !alwaysObserve);
+  const [shown, setShown] = useState(true);
 
-  useEffect(() => {
-    // Сучасний браузер веде появу сам — не спостерігаємо взагалі.
-    if (HAS_VIEW_TIMELINE && !alwaysObserve) return;
-
+  // Саме layout-ефект: ховати треба до першого кадру, інакше блок
+  // встигне блимнути видимим і одразу зникнути.
+  useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
 
     const io = getObserver();
-    if (!io) {
-      // Без обсервера (старий браузер) показуємо одразу, а не ховаємо назавжди.
-      setShown(true);
-      return;
-    }
+    // Без обсервера нічого не ховаємо — хай буде без анімації, ніж ніяк.
+    if (!io) return;
 
-    // Елемент, що вже у в'юпорті на момент монтування, має з'явитись
-    // без чекання скролу.
-    if (node.getBoundingClientRect().top < window.innerHeight) {
-      setShown(true);
-      return;
-    }
+    // Те, що вже в кадрі, не ховаємо: анімувати щойно побачене нема сенсу.
+    if (node.getBoundingClientRect().top < window.innerHeight) return;
 
+    setShown(false);
     callbacks.set(node, () => setShown(true));
     io.observe(node);
 
+    const failsafe = window.setTimeout(() => setShown(true), REVEAL_FAILSAFE_MS);
+
     return () => {
+      window.clearTimeout(failsafe);
       io.unobserve(node);
       callbacks.delete(node);
     };
-  }, [alwaysObserve]);
+  }, []);
 
   return { ref, shown };
 }
