@@ -503,12 +503,22 @@ export const ScanStrip: React.FC<{ items: ScanItem[] }> = ({ items }) => (
  * руху анімація знімається, і смуга просто стоїть.
  */
 export const Ticker: React.FC<{ label: string; items: string[] }> = ({ label, items }) => (
-  <div className="flex items-center gap-4 sm:gap-6 rounded-2xl border border-slate-800/80 bg-slate-950/60 backdrop-blur-sm px-4 sm:px-5 py-3.5">
+  <div className="flex w-full min-w-0 items-center gap-4 sm:gap-6 rounded-2xl border border-slate-800/80 bg-slate-950/60 backdrop-blur-sm px-4 sm:px-5 py-3.5">
     <span className="tag-mono text-[10px] uppercase tracking-[0.22em] text-slate-400 whitespace-nowrap shrink-0">
       {label}
     </span>
 
-    <div className="relative flex-1 min-w-0 overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)] [-webkit-mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">
+    {/*
+      Доріжка мусить бути власним контейнером розміру.
+
+      Усередині лежить ul із width: max-content — рядок на всі назви,
+      ~1270px. Самих overflow-hidden і min-w-0 не досить: батьківський
+      елемент сітки має min-width: auto, і його трек однаково рахується
+      від min-content вмісту, тобто від тих 1270px. `contain: inline-size`
+      відрізає внутрішню ширину від зовнішніх розрахунків остаточно —
+      скільки б не було елементів, назовні доріжка не тисне.
+    */}
+    <div className="relative flex-1 min-w-0 overflow-hidden [contain:inline-size] [mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)] [-webkit-mask-image:linear-gradient(to_right,transparent,black_8%,black_92%,transparent)]">
       <ul role="list" className="flex w-max items-center animate-marquee">
         {[0, 1].map(copy =>
           items.map(name => (

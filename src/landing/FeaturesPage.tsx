@@ -118,29 +118,27 @@ const Items: React.FC<{ items: string[][]; cols?: boolean }> = ({ items, cols })
 );
 
 /**
- * Середній час циклу.
+ * Середній час циклу — кільце з дугою, що обертається.
  *
- * Кола тут більше немає, і це третя спроба. Спочатку була дуга, що
- * крутиться (з макета), потім статична дуга, потім замкнене кільце. Усі
- * три читались як індикатор: коло з числом усередині — надто сильна
- * ідіома завантаження, і статичне воно виглядає застиглим незалежно від
- * того, замкнене чи ні. Особливо на телефоні, де дрібний зелений кружок
- * ні з чим іншим не сплутаєш.
+ * Як у макеті. Я двічі намагався зупинити цю анімацію, боячись, що
+ * рухомий індикатор читатиметься як живий вимір, і двічі помилявся:
+ * статична дуга виглядає не «чесно», а зламано — незакрите коло без руху
+ * читається як спінер, що завис. Рух тут якраз і знімає цю двозначність.
  *
- * Тому просто плашка, така сама, як лічильник пунктів поруч. Число з
- * підписом ніхто не сплутає з процесом, що йде.
+ * Обертається лише transform: rotate — композитор, головний потік
+ * вільний. За вимкненого руху дуга просто зупиняється.
  *
  * Весь вузол aria-hidden: те саме число словами стоїть в абзаці нижче,
  * тож для читалки це дубль.
  */
 const CycleStat: React.FC<{ value: string }> = ({ value }) => (
-  <span
-    className="tag-mono flex items-center gap-2 shrink-0 text-[10px] px-2.5 py-1.5 rounded-lg bg-slate-950/80 border border-slate-800"
-    aria-hidden
-  >
-    <span className="uppercase tracking-widest text-slate-400 hidden sm:inline">цикл</span>
-    <span className="font-bold text-accent-400 tabular-nums whitespace-nowrap">{value}</span>
-  </span>
+  <div className="relative w-11 h-11 shrink-0" title="середній час циклу" aria-hidden>
+    <span className="absolute inset-0 rounded-full border-[3px] border-slate-800" />
+    <span className="cycle-spin absolute inset-0 rounded-full border-[3px] border-transparent border-t-accent-400" />
+    <span className="absolute inset-0 flex items-center justify-center tag-mono text-[9px] font-bold text-accent-400">
+      {value}
+    </span>
+  </div>
 );
 
 /** Шапка плитки: монограма, назва, довільний бік, кількість пунктів. */
@@ -243,7 +241,7 @@ export default function FeaturesPage() {
                 mark="SC"
                 title="Сканування"
                 count={4}
-                aside={<CycleStat value="0.6–0.7 с" />}
+                aside={<CycleStat value="0.6s" />}
               />
 
               <div className="grid lg:grid-cols-[1fr_1.1fr] gap-7 items-start">

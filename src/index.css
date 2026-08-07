@@ -785,6 +785,22 @@
  * linear, а не ease: будь-яке пом'якшення дало б помітне пригальмовування
  * на стику циклу — саме там, де рух має бути рівним.
  */
+/*
+ * Дуга часу циклу. Обертається лише transform, тож кадр малює композитор.
+ * linear — інакше на замиканні обороту видно ривок.
+ */
+@keyframes arbix-ring-spin {
+  to { transform: rotate(360deg); }
+}
+
+.cycle-spin {
+  animation: arbix-ring-spin 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cycle-spin { animation: none; }
+}
+
 @keyframes arbix-marquee {
   from { transform: translateX(0); }
   to   { transform: translateX(-50%); }

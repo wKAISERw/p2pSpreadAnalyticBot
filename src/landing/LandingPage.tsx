@@ -87,8 +87,21 @@ export default function LandingPage() {
           роботою для GPU за той самий візуальний результат.
         */}
         <Section className="enter-rise relative pt-14 sm:pt-20 pb-10">
+          {/*
+            min-w-0 на обох колонках обов'язковий, і це не перестраховка.
+
+            Елемент сітки має min-width: auto, тобто трек не може стати
+            вужчим за min-content вмісту. Стрічка майданчиків усередині
+            тримає ul із width: max-content — усі назви в один рядок, ~1270px.
+            Без min-w-0 трек роздувався саме до цієї ширини: на 375px
+            колонка ставала 1370px, заголовок і кнопки виїжджали за екран,
+            а горизонтального скролу не було лише тому, що обгортка секції
+            обрізає overflow. Тобто симптом виглядав як «зламана верстка»,
+            а не як зайва прокрутка, і тому не ловився перевіркою на
+            scrollWidth.
+          */}
           <div className="hero-drift grid lg:grid-cols-2 gap-10 lg:gap-16 items-center">
-            <div className="animate-rise">
+            <div className="animate-rise min-w-0">
               {/*
                 Знак і ярлик в одному рядку. Знак узятий зі сторінки
                 входу — там кутові дужки виявились найвдалішою деталлю
@@ -146,7 +159,7 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <div className="animate-rise lg:pl-6">
+            <div className="animate-rise min-w-0 lg:pl-6">
               <SpreadVisual />
             </div>
           </div>
