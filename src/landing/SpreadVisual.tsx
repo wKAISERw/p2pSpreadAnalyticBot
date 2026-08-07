@@ -55,7 +55,7 @@ export default function SpreadVisual() {
     // setTimeout із залежністю від індексу, а не setInterval: після
     // ручного кліку відлік має початись заново, інакше автоматична зміна
     // прилетіла б майже одразу після натискання.
-    const timer = setTimeout(() => setIndex(i => (i + 1) % FRAMES.length), 4200);
+    const timer = setTimeout(() => setIndex(i => (i + 1) % FRAMES.length), 5400);
     return () => clearTimeout(timer);
   }, [index]);
 
@@ -110,14 +110,26 @@ export default function SpreadVisual() {
             className={cn(
               'absolute inset-x-0 top-0 block w-full text-left rounded-3xl p-6',
               'bg-slate-900/85 border border-accent-500/25 backdrop-blur-sm',
-              'transition-[transform,opacity] duration-[600ms]',
+              'transition-[transform,opacity]',
               isFront ? 'cursor-pointer' : 'pointer-events-none'
             )}
             style={{
               zIndex: s.z,
               opacity: s.opacity,
               transform: `translate3d(${s.x}px, ${s.y}px, 0) scale(${s.scale}) rotate(${s.rot}deg) rotateX(2deg)`,
-              transitionTimingFunction: 'cubic-bezier(0.34, 1.3, 0.5, 1)',
+              /*
+                Довго й без пружини. Крива з перельотом (1.3) читалась як
+                клац: рух устигав закінчитись раніше, ніж око встигало за
+                ним піти. Тепер довгий плавний вихід — карта доїжджає, а
+                не вистрілює.
+
+                Затримка за позицією: картки рушають не разом, а одна за
+                одною. Саме різниця в кілька десятків мілісекунд і робить
+                із перестановки тасування.
+              */
+              transitionDuration: '1150ms',
+              transitionDelay: `${slot * 70}ms`,
+              transitionTimingFunction: 'cubic-bezier(0.16, 0.8, 0.24, 1)',
               boxShadow: isFront
                 ? '0 0 0 1px rgb(var(--accent-rgb) / 0.12), 0 30px 70px -25px rgb(var(--accent-rgb) / 0.4), 0 24px 60px rgb(2 6 23 / 0.7)'
                 : '0 18px 40px rgb(2 6 23 / 0.5)',

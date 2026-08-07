@@ -33,7 +33,22 @@ void main() {
  * у референсі колір був зашитий, і при зміні акценту сторінка
  * розповзалась на два різних зелених.
  */
-const FRAG = `precision mediump float;
+const FRAG = `/*
+ * highp там, де є. У mediump діапазон float близько +-65504 з десятком
+ * біт мантиси, а класичний хеш-трюк множить синус на 43758.5453 — тобто
+ * вилітає за точність і дає сміття, іноді NaN. NaN у gl_FragColor —
+ * невизначена поведінка: на одній відеокарті виходить нуль, на іншій
+ * біла заливка на весь шар. Саме звідси бралась пелена, якої я не міг
+ * відтворити в себе.
+ *
+ * Константи хеша заразом зменшені: навіть під highp немає сенсу
+ * балансувати на межі.
+ */
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
 varying vec2 v_uv;
 uniform float u_time;
 uniform vec2  u_resolution;
@@ -41,9 +56,7 @@ uniform vec2  u_mouse;
 uniform vec3  u_accent;
 
 float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
+  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 137.51);
 }
 
 void main() {
@@ -58,7 +71,7 @@ void main() {
   vec2 m = u_mouse / u_resolution;
   float pulse = smoothstep(0.28, 0.0, distance(uv, m));
 
-  float a = clamp(noise * 0.06 + scan * 0.26 + grid * 0.04 + pulse * 0.16, 0.0, 1.0);
+  float a = clamp(noise * 0.05 + scan * 0.34 + grid * 0.06 + pulse * 0.20, 0.0, 1.0);
   // Колір уже помножений на альфу: полотно віддається браузеру як
   // premultiplied, і будь-яке інше узгодження дає каламутну плівку.
   gl_FragColor = vec4(u_accent * a, a);
@@ -72,14 +85,29 @@ void main() {
  * підходив сторінці про перевірку; тут потрібне відчуття безперервного
  * обходу майданчиків, а не одноразового просвічування.
  */
-const FRAG_FLOW = `precision mediump float;
+const FRAG_FLOW = `/*
+ * highp там, де є. У mediump діапазон float близько +-65504 з десятком
+ * біт мантиси, а класичний хеш-трюк множить синус на 43758.5453 — тобто
+ * вилітає за точність і дає сміття, іноді NaN. NaN у gl_FragColor —
+ * невизначена поведінка: на одній відеокарті виходить нуль, на іншій
+ * біла заливка на весь шар. Саме звідси бралась пелена, якої я не міг
+ * відтворити в себе.
+ *
+ * Константи хеша заразом зменшені: навіть під highp немає сенсу
+ * балансувати на межі.
+ */
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
 varying vec2 v_uv;
 uniform float u_time;
 uniform vec2  u_resolution;
 uniform vec2  u_mouse;
 uniform vec3  u_accent;
 
-float hash(float x) { return fract(sin(x * 127.1) * 43758.5453); }
+float hash(float x) { return fract(sin(x * 12.9898) * 137.51); }
 
 void main() {
   vec2 uv = v_uv;
@@ -101,7 +129,7 @@ void main() {
   vec2 m = u_mouse / u_resolution;
   float pulse = smoothstep(0.3, 0.0, distance(uv, m));
 
-  float a = clamp(packet * alive * 0.5 + grid * 0.035 + pulse * 0.1, 0.0, 1.0);
+  float a = clamp(packet * alive * 0.6 + grid * 0.05 + pulse * 0.14, 0.0, 1.0);
   gl_FragColor = vec4(u_accent * a, a);
 }`;
 
@@ -140,9 +168,15 @@ export default function ScanField({
     const canvas = ref.current;
     if (!canvas) return;
 
+    // Гейт по ширині й типу вказівника. Раніше тут була ще вимога
+    // hover: hover — але цю ознаку віддалені й вбудовані браузери
+    // повідомляють ненадійно, і ефект мовчки не стартував там, де мав.
+    // Змістовна умова — саме pointer: coarse: вона відсікає телефони й
+    // планшети, де фонова анімація коштує батареї.
     if (
       window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
-      !window.matchMedia('(min-width: 1024px) and (hover: hover) and (pointer: fine)').matches
+      window.matchMedia('(pointer: coarse)').matches ||
+      window.innerWidth < 1024
     ) {
       return;
     }
