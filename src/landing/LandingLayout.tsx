@@ -53,7 +53,7 @@ export default function LandingLayout({ children }: { children: React.ReactNode 
         рівно тоді, коли плавність потрібна найбільше.
       */}
       <header className="header-condense sticky top-0 z-40 border-b border-slate-800/80 bg-slate-950 md:bg-slate-950/90 md:backdrop-blur-2xl">
-        <div className="mx-auto max-w-7xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+        <div className="relative z-10 mx-auto max-w-7xl px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <Link to="/" className="flex items-center gap-2.5 shrink-0">
             <span className="w-9 h-9 rounded-xl bg-accent-500 flex items-center justify-center shadow-lg shadow-accent-500/25">
               <Activity className="w-5 h-5 text-slate-950" />

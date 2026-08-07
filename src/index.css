@@ -445,6 +445,18 @@
   clip-path: inset(0 100% 0 0);
 }
 
+/* Шар ущільнення шапки. Малюється завжди, показується прокруткою. */
+.header-condense::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: rgb(2 6 23 / 0.92);
+  box-shadow: 0 8px 24px rgb(2 6 23 / 0.45);
+}
+
 @supports (animation-timeline: scroll()) {
   /* Смужка прогресу читання під шапкою. */
   .scroll-progress {
@@ -457,30 +469,26 @@
   }
 
   /*
-   * Шапка ущільнюється після перших кількох сотень пікселів: фон стає
-   * щільнішим, межа виразнішою. Діапазон у пікселях, а не у відсотках —
-   * інакше на довгій сторінці ефект настав би надто пізно.
+   * Шапка ущільнюється після перших сотень пікселів.
+   *
+   * Анімується opacity ОКРЕМОГО шару всередині шапки, а не її власні
+   * background-color і box-shadow. Це не оптимізація, а виправлення: обидві
+   * ті властивості вимагають перемальовування композитного шару, у який
+   * браузер виносить липкий елемент. Саме на цьому шапка й фарбувалась —
+   * спершу на телефоні, а після гейта по ширині ще й у режимі «версія для
+   * ПК», де в'юпорт широкий і гейт пропускав анімацію назад.
+   *
+   * opacity композитор змінює без перемальовування взагалі, тож
+   * растеризувати нема чого й псувати нема що.
    */
-  /*
-   * Тільки з планшета вгору. Анімація background-color на липкому
-   * елементі змушує браузер перемальовувати композитний шар шапки на
-   * кожен кадр прокрутки — на телефоні це найгірший момент для зайвої
-   * роботи, і саме там ловились артефакти кольору.
-   */
-  @media (min-width: 768px) {
-    .header-condense {
-      animation: arbix-header linear both;
-      animation-timeline: scroll(root block);
-      animation-range: 0 220px;
-    }
+  .header-condense::after {
+    animation: arbix-header linear both;
+    animation-timeline: scroll(root block);
+    animation-range: 0 220px;
   }
 
   @keyframes arbix-header {
-    to {
-      background-color: rgb(2 6 23 / 0.92);
-      border-bottom-color: rgb(30 41 59 / 0.9);
-      box-shadow: 0 8px 24px rgb(2 6 23 / 0.45);
-    }
+    to { opacity: 1; }
   }
 }
 
@@ -488,7 +496,7 @@
   .reveal,
   .hero-drift,
   .scroll-progress,
-  .header-condense {
+  .header-condense::after {
     animation: none;
   }
 
