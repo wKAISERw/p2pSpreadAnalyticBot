@@ -576,18 +576,26 @@ export const BrandMark: React.FC<{ className?: string }> = ({ className }) => (
       style={{ background: 'radial-gradient(circle, rgb(var(--accent-rgb) / 0.5), transparent 70%)' }}
     />
 
-    <span className="pixel-frame relative w-14 h-14 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shadow-lg shadow-accent-500/10 overflow-hidden">
-      <Activity className="relative z-10 w-6 h-6 text-accent-400" />
+    {/*
+      Обрізання живе на внутрішньому шарі, а не на плитці.
 
-      {/* Відблиск: вузька світла смуга, що проходить навскіс */}
-      <span
-        aria-hidden
-        className="mark-sheen absolute inset-y-0 -left-6 w-6 pointer-events-none"
-        style={{
-          background:
-            'linear-gradient(90deg, transparent, rgb(var(--accent-rgb) / 0.45), transparent)',
-        }}
-      />
+      Спершу overflow-hidden стояв на самій плитці — щоб відблиск не
+      вилазив за її межі. Але кутові дужки pixel-frame малюються саме ЗА
+      межами: у них top: -1px, left: -1px. Обрізання зрізало їх до
+      кінчиків, і замість дужок по кутах лишались світлі цятки.
+    */}
+    <span className="pixel-frame relative w-14 h-14 rounded-2xl bg-accent-500/15 border border-accent-500/30 flex items-center justify-center shadow-lg shadow-accent-500/10">
+      <span className="absolute inset-0 rounded-2xl overflow-hidden" aria-hidden>
+        <span
+          className="mark-sheen absolute inset-y-0 -left-6 w-6"
+          style={{
+            background:
+              'linear-gradient(90deg, transparent, rgb(var(--accent-rgb) / 0.45), transparent)',
+          }}
+        />
+      </span>
+
+      <Activity className="relative z-10 w-6 h-6 text-accent-400" />
     </span>
   </div>
 );
