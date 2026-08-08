@@ -1,0 +1,79 @@
+# binance miniapp test :: 2026-08-08T19:35:04
+
+===== [1] 1_control-index
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvaW5kZXg%3D&startPageQuery=ZnJvbU5hdGl2ZT10cnVl
+
+TOP: 
+SCREEN: 
+
+===== [2] merchant-advertiserNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvbWVyY2hhbnQtZGV0YWlsL2luZGV4&startPageQuery=YWR2ZXJ0aXNlck5vPXM0MGM2YmI4M2FjMzYzZDAyYTJmNGNmOWJkMmYyMzY0NSZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [3] merchant-merchantNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvbWVyY2hhbnQtZGV0YWlsL2luZGV4&startPageQuery=bWVyY2hhbnRObz1zNDBjNmJiODNhYzM2M2QwMmEyZjRjZjliZDJmMjM2NDUmZnJvbU5hdGl2ZT10cnVl
+
+TOP: 
+SCREEN: 
+
+===== [4] merchant-userNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvbWVyY2hhbnQtZGV0YWlsL2luZGV4&startPageQuery=dXNlck5vPXM0MGM2YmI4M2FjMzYzZDAyYTJmNGNmOWJkMmYyMzY0NSZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [5] merchant-advertiserId
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvbWVyY2hhbnQtZGV0YWlsL2luZGV4&startPageQuery=YWR2ZXJ0aXNlcklkPXM0MGM2YmI4M2FjMzYzZDAyYTJmNGNmOWJkMmYyMzY0NSZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [6] merchant-id
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvbWVyY2hhbnQtZGV0YWlsL2luZGV4&startPageQuery=aWQ9czQwYzZiYjgzYWMzNjNkMDJhMmY0Y2Y5YmQyZjIzNjQ1JmZyb21OYXRpdmU9dHJ1ZQ%3D%3D
+
+TOP: 
+SCREEN: 
+
+===== [7] ads-advNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvYWRzL2luZGV4&startPageQuery=YWR2Tm89MTE1MjM0NTY3ODkwMTIzNDU2NzgmZnJvbU5hdGl2ZT10cnVl
+
+TOP: 
+SCREEN: 
+
+===== [8] ads-adNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvYWRzL2luZGV4&startPageQuery=YWRObz0xMTUyMzQ1Njc4OTAxMjM0NTY3OCZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [9] ads-advertiserNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvYWRzL2luZGV4&startPageQuery=YWR2ZXJ0aXNlck5vPTExNTIzNDU2Nzg5MDEyMzQ1Njc4JmZyb21OYXRpdmU9dHJ1ZQ%3D%3D
+
+TOP: 
+SCREEN: 
+
+===== [10] ads-id
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvYWRzL2luZGV4&startPageQuery=aWQ9MTE1MjM0NTY3ODkwMTIzNDU2NzgmZnJvbU5hdGl2ZT10cnVl
+
+TOP: 
+SCREEN: 
+
+===== [11] order-orderNo
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvb3JkZXItZGV0YWlsL2luZGV4&startPageQuery=b3JkZXJObz0yMDUxMjM0NTY3ODkwMTIzNDU2NyZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [12] order-orderId
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvb3JkZXItZGV0YWlsL2luZGV4&startPageQuery=b3JkZXJJZD0yMDUxMjM0NTY3ODkwMTIzNDU2NyZmcm9tTmF0aXZlPXRydWU%3D
+
+TOP: 
+SCREEN: 
+
+===== [13] order-id
+URL: https://app.binance.com/mp/web?appId=Bzp9defeaRgNqhgV4wEG5C&startPagePath=cGFnZXMvb3JkZXItZGV0YWlsL2luZGV4&startPageQuery=aWQ9MjA1MTIzNDU2Nzg5MDEyMzQ1NjcmZnJvbU5hdGl2ZT10cnVl
+
+TOP: 
+SCREEN: 

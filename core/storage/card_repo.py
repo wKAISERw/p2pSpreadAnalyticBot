@@ -2,6 +2,7 @@
 # Cards, bank limits, transactions, reservations, mono integration
 from __future__ import annotations
 import logging, time, uuid
+from config.banks import normalize_bank
 from typing import Optional
 import aiohttp
 import aiosqlite
@@ -666,21 +667,9 @@ class CardRepo:
         if not cards:
             return 0.0
 
-        # Normalization map for banks
-        name_map = {
-            "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
-            "14": "privatbank", "pb": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
-            "64": "pumb", "pumb": "pumb", "пумб": "pumb",
-            "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
-            "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
-            "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
-        }
-        
-        def normalize_bank_name(name: str) -> str:
-            if not name:
-                return ""
-            name_low = str(name).strip().lower()
-            return name_map.get(name_low, name_low)
+        # Нормалізація банків — спільна, з config/banks.py. Тут лежала
+        # четверта копія тієї самої мапи.
+        normalize_bank_name = normalize_bank
 
         if allowed_banks is not None:
             allowed_banks_norm = {normalize_bank_name(b) for b in allowed_banks}
@@ -761,6 +750,57 @@ class CardRepo:
             return max(bank_capitals.values()) if bank_capitals else 0.0
         else:
             return sum(bank_capitals.values())
+
+    async def get_user_capital_breakdown(
+        self, user_id: int, allowed_banks: list[str] | set[str] | None = None
+    ) -> dict:
+        """
+        Капітал у розрізі банків — і скільки з нього реально піде в одну угоду.
+
+        Навіщо окремо від get_user_auto_capital: та повертає одне число, і
+        яке саме — залежить від того, чи передали allowed_banks. Меню
+        «Фільтри» кликало її без банків і показувало СУМУ по всіх картках,
+        а движок під час угоди бере максимум по одному банку. Через це в
+        інтерфейсі стояв, скажімо, «Капітал: 31 123 ₴», тоді як угода
+        обмежувалась 21 298 ₴ — і розбіжність нічим не пояснювалась.
+
+        Повертає:
+          total    — сума доступного по всіх банках (скільки грошей узагалі);
+          usable   — максимум в одному банку (скільки піде в одну угоду);
+          bestBank — де саме цей максимум;
+          banks    — розклад, щоб було видно, чому числа різні.
+        """
+        cards = await self.get_cards(user_id, status="active")
+        if not cards:
+            return {"total": 0.0, "usable": 0.0, "best_bank": "", "banks": {}}
+
+        banks: dict[str, float] = {}
+        for card in cards:
+            bank = str(card.get("bank_name", "")).strip().lower()
+            if not bank:
+                continue
+            # Рахуємо по одному банку за раз: get_user_auto_capital із
+            # allowed_banks поверне максимум саме для нього, з усіма
+            # лімітами, прогрівом і pending-сумами.
+            if bank in banks:
+                continue
+            banks[bank] = await self.get_user_auto_capital(user_id, allowed_banks=[bank])
+
+        if allowed_banks is not None:
+            allowed = {str(b).strip().lower() for b in allowed_banks}
+            banks = {b: v for b, v in banks.items() if b in allowed}
+
+        banks = {b: v for b, v in banks.items() if v > 0}
+        if not banks:
+            return {"total": 0.0, "usable": 0.0, "best_bank": "", "banks": {}}
+
+        best_bank = max(banks, key=banks.get)
+        return {
+            "total": round(sum(banks.values()), 2),
+            "usable": round(banks[best_bank], 2),
+            "best_bank": best_bank,
+            "banks": {b: round(v, 2) for b, v in sorted(banks.items(), key=lambda kv: -kv[1])},
+        }
 
     async def get_card_warmth_stats(self, card_id: str) -> tuple[int, float]:
         """

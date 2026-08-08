@@ -1,0 +1,300 @@
+# landing test :: 2026-07-25T16:25:04
+
+===== [1] Binance / ad-adNo
+URL: https://app.binance.com/fiat/ads/detail?adNo=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 1039
+WaitTime: 1050
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{166597874 u0 com.binance.dev/com.eaas.startup.router.activity.NoSupportRouterPathActivity t5673}
+
+===== [2] Binance / ad-advNo
+URL: https://app.binance.com/fiat/ads/detail?advNo=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 825
+WaitTime: 832
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{168317858 u0 com.binance.dev/com.eaas.startup.router.activity.NoSupportRouterPathActivity t5674}
+
+===== [3] Binance / ad-advOrderNumber
+URL: https://app.binance.com/fiat/ads/detail?advOrderNumber=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 553
+WaitTime: 568
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{192198253 u0 com.android.vending/com.google.android.finsky.playcoreacquisition.PlayCoreAcquisitionActivity t5675}
+
+===== [4] Binance / profile-advertiserProfile
+URL: https://app.binance.com/p2p/advertiserProfile?advertiserNo=s40c6bb83ac363d02a2f4cf9bd2f23645
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 706
+WaitTime: 710
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{259283154 u0 com.android.vending/com.google.android.finsky.playcoreacquisition.PlayCoreAcquisitionActivity t5675}
+
+===== [5] Binance / profile-merchantDetails
+URL: https://app.binance.com/fiat/merchant/details?merchantNo=s40c6bb83ac363d02a2f4cf9bd2f23645
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 517
+WaitTime: 522
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{26842538 u0 com.android.vending/com.google.android.finsky.playcoreacquisition.PlayCoreAcquisitionActivity t5675}
+
+===== [6] Binance / profile-userProfile
+URL: https://app.binance.com/p2p/userProfile?userNo=s40c6bb83ac363d02a2f4cf9bd2f23645
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 634
+WaitTime: 642
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{240521013 u0 com.android.vending/com.google.android.finsky.playcoreacquisition.PlayCoreAcquisitionActivity t5675}
+
+===== [7] Binance / order-p2p
+URL: https://app.binance.com/p2p/orderDetail?orderNo=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 899
+WaitTime: 902
+Complete
+
+TOP:   ResumedActivity: ActivityRecord{31231940 u0 com.bybit.app/com.bybit.pro.MainActivity t5682}
+
+===== [8] Binance / order-fiat
+URL: https://app.binance.com/fiat/orderDetails?id=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 645
+WaitTime: 679
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{211530900 u0 com.bybit.app/com.bybit.pro.MainActivity t5684}
+
+===== [9] OKX / merchanthome-shareCode
+URL: okx://exchange/merchanthome.com?shareCode=29849204
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.okinc.okex.gp/com.okinc.okex.deeplink.SchemeActivity
+WaitTime: 1185
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{238142844 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [10] OKX / merchanthome-noext
+URL: okx://exchange/merchanthome?shareCode=29849204
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.core.ok_app.homepage.pro.MainActivity
+TotalTime: 1593
+WaitTime: 1595
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{64435360 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [11] OKX / profile-userId
+URL: okx://exchange/p2p/profile?userId=005977cb24
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.trade.HomePageActivity
+TotalTime: 2010
+WaitTime: 2011
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{140796645 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [12] OKX / profile-publicUserId
+URL: okx://exchange/p2p/profile?publicUserId=005977cb24
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.trade.HomePageActivity
+TotalTime: 1688
+WaitTime: 1694
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{58464941 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [13] OKX / order-id
+URL: okx://exchange/p2p/order?id=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.order.detail.OrderDetailActivity
+TotalTime: 1729
+WaitTime: 1735
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{135173941 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [14] OKX / order-orderId
+URL: okx://exchange/p2p/order?orderId=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.order.detail.OrderDetailActivity
+TotalTime: 1661
+WaitTime: 1672
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{250702121 u0 com.google.android.permissioncontroller/com.android.permissioncontroller.permission.ui.GrantPermissionsActivity t5685}
+
+===== [15] Bybit / order-path
+URL: bybitapp://open/p2p/order/detail?orderId=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1495
+WaitTime: 1498
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{201416964 u0 com.bybit.app/com.bybit.pro.MainActivity t5688}
+
+===== [16] Bybit / order-bydp
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Forder%2Fdetail%3ForderId%3D20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1106
+WaitTime: 1109
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{76991589 u0 com.bybit.app/com.bybit.pro.MainActivity t5689}
+
+===== [17] Bybit / order-inapp
+URL: https://app.bybit.com/inapp/p2p/order/20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1070
+WaitTime: 1075
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{156160221 u0 com.bybit.app/com.bybit.pro.MainActivity t5690}
+
+===== [18] Bybit / profile-userId
+URL: bybitapp://open/p2p/user/home?userId=504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: WARM
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 803
+WaitTime: 805
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{177302449 u0 com.bybit.app/com.bybit.pro.MainActivity t5691}
+
+===== [19] Bybit / profile-bydp-userId
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FuserId%3D504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1031
+WaitTime: 1033
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{195901148 u0 com.bybit.app/com.bybit.pro.MainActivity t5692}
+
+===== [20] Bybit / profile-makerUserId
+URL: bybitapp://open/p2p/user/home?makerUserId=504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1073
+WaitTime: 1078
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{207171299 u0 com.bybit.app/com.bybit.pro.MainActivity t5693}
+
+===== [21] Bybit / profile-bydp-makerUserId
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmakerUserId%3D504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1047
+WaitTime: 1049
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{245956392 u0 com.bybit.app/com.bybit.pro.MainActivity t5694}
+
+===== [22] Bybit / profile-targetUserId
+URL: bybitapp://open/p2p/user/home?targetUserId=504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1174
+WaitTime: 1179
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{22390934 u0 com.bybit.app/com.bybit.pro.MainActivity t5695}
+
+===== [23] Bybit / profile-bydp-targetUserId
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FtargetUserId%3D504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1197
+WaitTime: 1199
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{9757017 u0 com.bybit.app/com.bybit.pro.MainActivity t5696}
+
+===== [24] Bybit / profile-accountId
+URL: bybitapp://open/p2p/user/home?accountId=504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1079
+WaitTime: 1084
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{215185911 u0 com.bybit.app/com.bybit.pro.MainActivity t5697}
+
+===== [25] Bybit / profile-bydp-accountId
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FaccountId%3D504906738
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1144
+WaitTime: 1146
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{147757818 u0 com.bybit.app/com.bybit.pro.MainActivity t5698}

@@ -24,6 +24,7 @@ from bot.handlers.core import (
 from bot.handlers.filters import (
     _get_network_fee, _sell_roi_text, _tbuy_banks_kb, _tbuy_price_strategy_kb, _tsell_price_strategy_kb, _calc_roi,
     _buy_confirm_text, _buy_final_kb, _save_taker_sell_db, _sell_final_kb, _save_taker_buy_db,
+    _set_scanner_mode_db, _get_scanner_modes,
     _update_taker_sell_param_db, _update_taker_buy_param_db, _get_taker_sell_preset, _get_taker_buy_preset,
     _get_current_market_rate, _sell_preset_text, _buy_preset_text, _taker_preset_kb
 )
@@ -1233,6 +1234,9 @@ async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
             return await call.answer("❌ Дані FSM втрачено. Почни знову /mode.", show_alert=True)
 
     await _save_taker_sell_db(call.from_user.id, data, roi)
+    # Режим додається до активних, а не замінює їх: продаж можна ловити
+    # одночасно з купівлею чи спредом.
+    await _set_scanner_mode_db(call.from_user.id, "TAKER_SELL")
     await state.clear()
 
     from bot.keyboards import scanner_mode_kb
@@ -1246,7 +1250,7 @@ async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
             f"🔒 Ціна продажу: <b>{price_label}</b>\n"
             f"📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n\n"
             "<i>Сканер шукає ордери — алерт прийде як тільки знайдеться підходящий.</i>",
-            reply_markup=scanner_mode_kb("TAKER_SELL"),
+            reply_markup=scanner_mode_kb(await _get_scanner_modes(call.from_user.id)),
         )
     await call.answer("🚀 Запущено!")
 
@@ -1784,13 +1788,21 @@ async def _show_tbuy_banks_msg(user_id: int, state: FSMContext, send_fn) -> None
 
 
 async def _get_user_buy_banks_db(user_id: int) -> list:
+    """
+    Банки, з якими майстер Taker Buy стартує.
+
+    resolve_banks поверне перевизначення режиму, якщо воно є, інакше —
+    спільний список. Раніше тут читалось лише buy_bank_codes, тобто майстер
+    показував (а потім і перезаписував) банки спред-режиму.
+    """
     if not _db:
         return []
+
+    from core.engine.bank_scope import resolve_banks
+
     users = await _db.get_active_users()
     user = next((u for u in users if u["user_id"] == user_id), None)
-    if user:
-        return list(user.get("buy_bank_codes") or user.get("bank_codes") or [])
-    return []
+    return list(resolve_banks(user, "TAKER_BUY", "buy")) if user else []
 
 
 @router.callback_query(TakerBuySettingsStates.waiting_banks, F.data.startswith("tbuy_bank:"))
@@ -1879,6 +1891,7 @@ async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
 
     data["banks"] = [str(b) for b in data.get("selected_banks", [])]
     await _save_taker_buy_db(call.from_user.id, data)
+    await _set_scanner_mode_db(call.from_user.id, "TAKER_BUY")
     await state.clear()
 
     from bot.keyboards import scanner_mode_kb
@@ -1889,7 +1902,7 @@ async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
             f"📦 Шукаю ордери для купівлі <b>{data['amount']:.1f} USDT</b>\n"
             + mp_line
             + "\n<i>Алерти надходять одразу як з'являються підходящі ордери.</i>",
-            reply_markup=scanner_mode_kb("TAKER_BUY"),
+            reply_markup=scanner_mode_kb(await _get_scanner_modes(call.from_user.id)),
         )
     await call.answer("🚀 Запущено!")
 

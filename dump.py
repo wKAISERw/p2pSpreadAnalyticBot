@@ -107,7 +107,6 @@ PRIORITY_FILES = [
     "infrastructure/api/okx_account.py",
     # ── Filters
     "filters/merchant_filter.py",
-    "filters/bank_filter.py",
     "filters/limit_filter.py",
     "filters/anomaly_filter.py",
     # ── Scripts / Tools

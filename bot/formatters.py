@@ -10,6 +10,13 @@ from core.analytics.merchant_profile import build_profile_url, build_app_profile
 
 # ── Бейджі ризику ──────────────────────────────────────────────────────
 RISK_BADGES = {
+    # «Не змогли перевірити» — окремий стан, не «чисто».
+    #
+    # Порядок у словнику має значення: risk_badge() бере ПЕРШИЙ ключ, який
+    # трапився в рядку. UNKNOWN стоїть першим свідомо — якщо відгуків немає,
+    # це головне, що треба сказати про мерчанта.
+    "UNKNOWN":               "❔",
+
     # Поведінкові (Deep Research)
     "BEHAVIOR_BOTLIKE":      "🤖",
     "EXACT_LIMITS":          "🎯",
@@ -72,15 +79,9 @@ BANKS_MAP = {
     "48": "А-Банк",
 }
 
-BANK_CODE_TO_DB_NAME = {
-    "43": "monobank",
-    "14": "privatbank",
-    "64": "pumb",
-    "48": "a-bank",
-    "61": "a-bank",
-    "80": "pumb",
-    "1":  "monobank",
-}
+# BANK_CODE_TO_DB_NAME переїхала в config/banks.py: це була четверта копія
+# мапи «код → назва банку», і саме тут жили альтернативні коди 61/80/1,
+# яких решта системи не знала.
 
 BANKS_SHORT = {
     "43": "Mono",
@@ -109,10 +110,37 @@ def risk_badge(risk_flag: str) -> str:
     return "⚠️"
 
 
+# Чому саме не вдалось перевірити — людською мовою.
+UNKNOWN_REASONS = {
+    "NO_SESSION": "немає сесії біржі",
+    "NO_AUTH": "біржа не авторизує запит",
+    "UNAVAILABLE": "біржа не відповідає",
+    "NOT_SUPPORTED": "біржа не віддає відгуки",
+    "EMPTY": "мерчант не вказав умов",
+}
+
+
 def format_risk_line(risk_flag: str) -> str:
     """Форматує рядок ризику для Telegram-повідомлення."""
     if not risk_flag or risk_flag == "OK":
         return ""
+
+    # «Невідомо» читається інакше за ризик: це не звинувачення мерчанта, а
+    # чесне «ми не змогли подивитись». Мовчати про це не можна — саме так
+    # непройдена перевірка й видавалась за успішну.
+    if "UNKNOWN:" in risk_flag.upper():
+        gaps = []
+        for chunk in risk_flag.split(","):
+            chunk = chunk.strip().upper()
+            if not chunk.startswith("UNKNOWN:"):
+                continue
+            parts = chunk.split(":")
+            what = "відгуки" if "REVIEWS" in parts else "умови угоди"
+            why = UNKNOWN_REASONS.get(parts[-1], "технічна причина")
+            gaps.append(f"{what} — {why}")
+        if gaps:
+            return "❔ <b>НЕ ПЕРЕВІРЕНО</b>: <i>" + "; ".join(gaps) + "</i>"
+
     badge = risk_badge(risk_flag)
     # Вирізаємо технічні деталі для читабельності
     display = risk_flag.replace("BLOCK:", "").replace("NEEDS_LLM:", "")
@@ -166,7 +194,9 @@ def format_behavioral_summary(risk_flag: str) -> str:
 
 def _bank_code_to_db(code: str) -> str:
     """Конвертує числовий код банку біржі в назву в БД."""
-    return BANK_CODE_TO_DB_NAME.get(str(code), str(code).lower())
+    from config.banks import normalize_bank
+
+    return normalize_bank(code)
 
 
 def rec_badge(rec: str) -> str:

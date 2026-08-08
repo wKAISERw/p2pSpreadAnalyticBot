@@ -1,0 +1,162 @@
+# deeplink test :: binance :: 2026-07-25T16:04:41
+
+>>> https://app.binance.com/fiat/ads/detail?adNo=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 1119
+WaitTime: 1139
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/fiat/ads/detail?advNo=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 805
+WaitTime: 813
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/fiat/ads/detail?advOrderNumber=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 922
+WaitTime: 932
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/p2p/advertiserProfile?advertiserNo=s1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 601
+WaitTime: 606
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/p2p/userProfile?userNo=s1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 573
+WaitTime: 581
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/fiat/merchant/details?merchantNo=s1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 560
+WaitTime: 565
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/fiat/merchant/store?merchantNo=s1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 715
+WaitTime: 723
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/p2p/orderDetail?orderNo=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 537
+WaitTime: 550
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/fiat/orderDetails?id=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 647
+WaitTime: 655
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.binance.com/c2c/orderDetails?orderNo=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.binance.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+TotalTime: 636
+WaitTime: 638
+Complete
+
+    VERDICT: APP  
+
+>>> bnc://app.binance.com/fiat/ads/detail?adNo=11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bnc://app.binance.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+WaitTime: 280
+Complete
+
+    VERDICT: APP  
+
+>>> bnc://app.binance.com/p2p/advertiserProfile?advertiserNo=s1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bnc://app.binance.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+WaitTime: 1930
+Complete
+
+    VERDICT: APP  
+
+>>> bnc://app.binance.com/p2p/orderDetail?orderNo=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bnc://app.binance.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.binance.dev/com.eaas.launcher.activities.dispatchrouter.FirstDispatchRouterActivity
+WaitTime: 901
+Complete
+
+    VERDICT: APP  
+
+>>> https://p2p.binance.com/en/trade/detail/11523456789012345678
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://p2p.binance.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.sec.android.app.sbrowser/.SBrowserMainActivity
+WaitTime: 283
+Complete
+
+    VERDICT: BROWSER-OR-CHOOSER  
+
+
+=== pm get-app-links com.binance.dev ===
+  com.binance.dev:
+    ID: 86c5c2b9-9fb9-4224-8b3a-5b3771124d5b
+    Signatures: [64:D9:E9:65:7C:E3:52:6B:9B:13:85:8D:46:E5:FC:29:87:A8:61:D2:91:10:D0:8E:37:99:28:3B:57:DF:05:58]
+    Domain verification state:
+      accounts.binance.com: verified
+      app.binance.com: verified
+      app.binance.info: verified
+

@@ -261,14 +261,36 @@ async def require_session(session_user_id: Optional[int] = Depends(optional_sess
     return session_user_id
 
 
+async def require_admin(telegram_id: int = Depends(require_session)) -> int:
+    """
+    Дії, що впливають на всіх: старт/стоп ядра, глобальні налаштування,
+    доступність бірж, спільний чорний список.
+
+    Живе тут, а не в окремому роутері, бо потрібна всім трьом: control,
+    dashboard і personal. Ховати кнопку у фронтенді недостатньо — HTTP
+    залишається відкритим для будь-кого, хто вміє в curl.
+    """
+    from bot.handlers.core import _is_admin
+
+    if not _is_admin(telegram_id):
+        raise HTTPException(status_code=403, detail="Потрібні права адміністратора")
+    return telegram_id
+
+
 def resolve_user_id(requested: Optional[int], session_user_id: Optional[int]) -> int:
     """
     Кого саме читаємо/пишемо.
 
     * Є сесія — беремо id з неї. Чужий id дозволений тільки адміну,
       інакше 403: саме тут закривається підміна telegram_id у запиті.
-    * Сесії немає — лишається старий шлях по X-API-Key (букмарклет,
-      скрипти оператора). Ключ у цьому випадку і є авторизацією.
+    * Сесії немає — 401. Раніше тут був фолбек «X-API-Key і є авторизацією»,
+      і він мав сенс, поки ключ знав лише оператор. У реальному деплої ключ
+      підставляє проксі перед статикою (deploy/Caddyfile), тобто його має
+      кожен відвідувач сайту — і фолбек перетворював `?telegram_id=` на
+      публічний доступ до чужих балансів, ключів і карток.
+
+      Повернути стару поведінку можна через API_KEY_IS_IDENTITY=true, якщо
+      порт справді закритий і ходять тільки скрипти оператора.
     """
     from bot.handlers.core import _is_admin
 
@@ -276,6 +298,12 @@ def resolve_user_id(requested: Optional[int], session_user_id: Optional[int]) ->
         if requested and requested != session_user_id and not _is_admin(session_user_id):
             raise HTTPException(status_code=403, detail="Це не твої дані")
         return requested if (requested and _is_admin(session_user_id)) else session_user_id
+
+    if not getattr(settings, "api_key_is_identity", False):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Потрібен вхід через Telegram",
+        )
 
     if not requested:
         raise HTTPException(

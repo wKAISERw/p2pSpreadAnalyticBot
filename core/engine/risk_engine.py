@@ -157,9 +157,19 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         return[]
 
     status = summary.get("status", "OK")
-    # Статуси що не є помилкою — просто немає даних, не штрафуємо
-    if status in ("UNAVAILABLE", "NOT_SUPPORTED", "NO_AUTH", "UNKNOWN"):
-        return[]
+
+    # Відгуків немає з технічних причин: протухла сесія, біржа не віддає
+    # API, немає інтернету.
+    #
+    # Раніше тут повертався порожній список — тобто мерчант, якого НЕ
+    # перевірили, ставав нарівні з перевіреним і чистим: risk_flag = "OK",
+    # у базу лягав вердикт «ризиків не виявлено» з APPROVE. Це найгірший
+    # варіант помилки: «не знаю» подавалось як «безпечно».
+    #
+    # UNKNOWN не блокує (в рядку немає "BLOCK", і всі фільтри це поважають),
+    # але тепер видно, що висновку просто немає.
+    if status in ("UNAVAILABLE", "NOT_SUPPORTED", "NO_AUTH", "UNKNOWN", "NO_SESSION"):
+        return [f"UNKNOWN:REVIEWS:{status}"]
 
     pos       = int(summary.get("positive",  0) or 0)
     neg       = int(summary.get("negative",  0) or 0)
@@ -1029,8 +1039,19 @@ class RiskEngine:
                 flags.append(_build_weak_regex_flag(regex_result))
             flags.extend(review_flags)
             flags.extend(behavior_flags)
+            # Порожні умови угоди — теж «не перевірили», а не «чисто».
+            # Regex не має за що зачепитись, тому без цієї позначки мерчант
+            # без опису виглядав би так само надійно, як мерчант із повним
+            # текстом, який пройшов аналіз.
+            if not (terms or "").strip():
+                flags.append("UNKNOWN:TERMS:EMPTY")
+
             order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
 
+            # Вердикт «ризиків не виявлено» зберігаємо лише тоді, коли
+            # перевірка справді відбулась. Раніше сюди потрапляли й ті, кого
+            # не змогли перевірити: у базі осідав APPROVE, і наступні цикли
+            # брали його з кешу як доведено безпечний.
             if self._db and order.risk_flag == "OK":
                 await self._db.save_verdict(
                     exchange, mid, order.merchant_name,

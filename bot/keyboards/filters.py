@@ -250,11 +250,22 @@ def banks_selection_kb(all_banks: dict[str, str], selected: list[str], side: str
 
 
 
-def scanner_mode_kb(current_mode: str = "SPREAD") -> InlineKeyboardMarkup:
-    """Клавіатура вибору режиму сканера."""
+def scanner_mode_kb(active_modes: str | list[str] = "SPREAD") -> InlineKeyboardMarkup:
+    """
+    Вибір режимів сканера. Кожен рядок — перемикач, режимів може бути кілька.
+
+    Раніше вибір був одиничним: щоб ловити і купівлю, і продаж, доводилось
+    перемикатися туди-сюди, і половину часу друга сторона не сканувалась
+    узагалі. Приймає і рядок (сумісність зі старими викликами), і список.
+    """
+    if isinstance(active_modes, str):
+        active = {m.strip().upper() for m in active_modes.split(",") if m.strip()}
+    else:
+        active = {str(m).upper() for m in active_modes}
+
     builder = InlineKeyboardBuilder()
     for mode, label in SCANNER_MODE_LABELS.items():
-        icon = "✅ " if mode == current_mode else ""
+        icon = "✅ " if mode in active else "▫️ "
         builder.row(InlineKeyboardButton(
             text=f"{icon}{label}",
             callback_data=f"smode:{mode}",

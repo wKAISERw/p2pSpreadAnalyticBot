@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
-from api.auth import optional_session, resolve_user_id
+from api.auth import optional_session, require_admin, resolve_user_id
 from api.security import require_api_key
 from api.utils import dict_to_camel, dict_to_snake
 
@@ -53,6 +53,9 @@ _EDITABLE_FILTERS: dict[str, type] = {
     "buy_bank_codes": str,
     "sell_bank_codes": str,
     "scanner_mode": str,
+    # Набір активних режимів через кому. Приймає і список, і рядок —
+    # str-caster нижче зводить обидва до CSV.
+    "scanner_modes": str,
     "is_alerts_active": int,
     "target_margin": float,
     "maker_buy_price": float,
@@ -79,7 +82,12 @@ _EDITABLE_FILTERS: dict[str, type] = {
     "buy_auto_scale_up": int,
 }
 
-_SCANNER_MODES = {"SPREAD", "MAKER_BUY", "MAKER_SELL", "TAKER_BUY", "TAKER_SELL"}
+# Порядок імпортуємо, щоб набір режимів записувався однаково і тут, і в
+# UserRepo — інакше "TAKER_BUY,SPREAD" і "SPREAD,TAKER_BUY" були б різними
+# рядками з однаковим змістом.
+from core.storage.user_repo import SCANNER_MODES as _SCANNER_MODE_ORDER
+
+_SCANNER_MODES = set(_SCANNER_MODE_ORDER)
 _SPREAD_STRATEGIES = {"min", "max", "range"}
 _CAPITAL_MODES = {"manual", "auto"}
 # Значення читає core/engine/taker_scanner.py — розходження тут означає
@@ -90,6 +98,42 @@ _BUY_PRICE_STRATEGIES = {"any", "max", "range", "exact"}
 _BUY_BALANCE_MODES = {"CARD_ENFORCED", "AUTO_SCALE", "FREE"}
 
 
+# Фільтри поділені на три групи, які можна читати незалежно.
+#
+# Раніше все віддавалось одним GET /user/filters, і це впиралось у стелю на
+# фронтенді: синхронізація не могла оновлювати пресети тейкера окремо від
+# спредових порогів, бо це фізично одна відповідь. Групи не перетинаються,
+# тож кожну можна тягнути, кешувати й перечитувати сама по собі.
+#
+# Повний ендпоінт лишається: він зручний, коли треба все одразу, і на нього
+# спирається наявний фронтенд.
+
+_CORE_FILTER_KEYS = (
+    "user_id", "capital", "capital_mode", "min_amount", "min_spread", "max_spread",
+    "spread_strategy", "bank_codes", "buy_bank_codes", "sell_bank_codes",
+    "scanner_mode", "scanner_modes", "is_alerts_active",
+)
+
+_TAKER_FILTER_KEYS = (
+    "user_id", "scanner_mode", "scanner_modes",
+    "taker_sell_amount", "taker_sell_price", "taker_sell_exchange",
+    "taker_sell_profit", "taker_sell_min_price", "taker_sell_speed",
+    "taker_sell_price_strategy", "taker_sell_price_to",
+    "taker_buy_amount", "taker_buy_max_price", "taker_buy_limit_min",
+    "taker_buy_limit_max", "taker_buy_speed", "taker_buy_price_strategy",
+    "taker_buy_price_from",
+    "buy_balance_mode", "buy_auto_scale_down", "buy_auto_scale_up",
+    "target_margin", "maker_buy_price",
+)
+
+
+async def _user_or_404(telegram_id: int) -> dict:
+    user = await _db().get_user_by_id(telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
 @router.get("/user/filters")
 async def get_user_filters(
     telegram_id: Optional[int] = None,
@@ -97,10 +141,34 @@ async def get_user_filters(
 ):
     """Повний набір персональних фільтрів — те саме, що показує меню «Фільтри»."""
     telegram_id = resolve_user_id(telegram_id, session_user_id)
-    user = await _db().get_user_by_id(telegram_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = await _user_or_404(telegram_id)
     return dict_to_camel(jsonable_encoder(user))
+
+
+@router.get("/user/filters/core")
+async def get_core_filters(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """Капітал, спред, банки, режим сканера — без пресетів тейкера."""
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+    return dict_to_camel(jsonable_encoder(
+        {k: user.get(k) for k in _CORE_FILTER_KEYS if k in user}
+    ))
+
+
+@router.get("/user/filters/taker")
+async def get_taker_filters(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """Пресети TAKER_BUY / TAKER_SELL і параметри maker-ціни."""
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+    return dict_to_camel(jsonable_encoder(
+        {k: user.get(k) for k in _TAKER_FILTER_KEYS if k in user}
+    ))
 
 
 class FiltersPayload(BaseModel):
@@ -162,6 +230,31 @@ async def update_user_filters(
                 detail=f"{field}: очікується одне з {sorted(allowed)}, отримано {updates[field]!r}",
             )
 
+    # Набір режимів. Порожній не приймаємо: користувач без жодного режиму
+    # нічого не отримує і виглядає як зламаний, а не як «свідомо вимкнений» —
+    # для тиші є is_alerts_active.
+    if "scanner_modes" in updates:
+        picked = [m.strip().upper() for m in str(updates["scanner_modes"]).split(",") if m.strip()]
+        unknown = sorted(set(picked) - _SCANNER_MODES)
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"scanner_modes: невідомі режими {unknown}; доступні {sorted(_SCANNER_MODES)}",
+            )
+        if not picked:
+            raise HTTPException(
+                status_code=400,
+                detail="scanner_modes: потрібен хоча б один режим",
+            )
+
+        ordered = [m for m in _SCANNER_MODE_ORDER if m in set(picked)]
+        updates["scanner_modes"] = ",".join(ordered)
+        # scanner_mode лишається «основним» — його показує меню бота і на
+        # нього падають старі рядки. Тримаємо їх узгодженими, інакше меню
+        # показувало б режим, якого в наборі вже немає.
+        if updates.get("scanner_mode") not in ordered:
+            updates["scanner_mode"] = ordered[0]
+
     if not updates:
         if rejected:
             raise HTTPException(status_code=400, detail=f"Немає полів для оновлення: {sorted(rejected)}")
@@ -178,6 +271,173 @@ async def update_user_filters(
         raise HTTPException(status_code=404, detail="User not found")
 
     return {"status": "success", "updated": sorted(updates), "rejected": sorted(rejected)}
+
+
+# ── Банки окремо для режиму ───────────────────────────────────────────────
+#
+# Базові списки (bank_codes / buy_bank_codes / sell_bank_codes) лишаються
+# спільними і працюють у всіх режимах. Тут — лише винятки: {"TAKER_BUY":
+# {"buy": ["43"]}}. Порожньо = режим бере спільні, тобто поведінка як була.
+
+
+class ModeBankOverridePayload(BaseModel):
+    mode: str
+    side: str
+    # Порожній список знімає перевизначення.
+    banks: list[str] = []
+
+
+@router.get("/user/bank-scopes")
+async def get_bank_scopes(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """Спільні списки + перевизначення по режимах, разом із тим, що вийде."""
+    from core.engine.bank_scope import base_banks, has_override, resolve_banks
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+
+    # Без dict_to_camel: назви режимів — це константи ("TAKER_BUY"), а не
+    # імена полів. Камелізація перетворила б їх на takerBuy і зробила б
+    # відповідь неспівставною зі значеннями, які приймає POST.
+    resolved = {
+        mode: {
+            side: {
+                "banks": resolve_banks(user, mode, side),
+                "isOverride": has_override(user, mode, side),
+            }
+            for side in ("buy", "sell")
+        }
+        for mode in _SCANNER_MODE_ORDER
+    }
+
+    return jsonable_encoder({
+        "base": {"buy": base_banks(user, "buy"), "sell": base_banks(user, "sell")},
+        "overrides": user.get("mode_bank_overrides") or {},
+        "resolved": resolved,
+    })
+
+
+@router.post("/user/bank-scopes")
+async def set_bank_scope(
+    payload: ModeBankOverridePayload,
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    import json
+
+    from core.engine.bank_scope import SIDES, normalize_overrides
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    mode = payload.mode.upper()
+
+    if mode not in _SCANNER_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode: очікується одне з {sorted(_SCANNER_MODES)}",
+        )
+    if payload.side not in SIDES:
+        raise HTTPException(status_code=400, detail=f"side: очікується одне з {list(SIDES)}")
+
+    db = _db()
+    user = await _user_or_404(telegram_id)
+
+    current = dict(user.get("mode_bank_overrides") or {})
+    per_mode = dict(current.get(mode) or {})
+    banks = [b.strip() for b in payload.banks if b.strip()]
+    if banks:
+        per_mode[payload.side] = banks
+    else:
+        per_mode.pop(payload.side, None)
+    current[mode] = per_mode
+
+    cleaned = normalize_overrides(current, _SCANNER_MODE_ORDER)
+    await db._db.execute(
+        "UPDATE scanner_users SET mode_bank_overrides_json = ? WHERE user_id = ?",
+        (json.dumps(cleaned), telegram_id),
+    )
+    await db._db.commit()
+
+    return {
+        "status": "success",
+        "mode": mode,
+        "side": payload.side,
+        # Порожній список у відповіді означає «повернулись до спільних».
+        "banks": banks,
+        # Ключі — назви режимів, тому без камелізації (див. GET вище).
+        "overrides": cleaned,
+    }
+
+
+# ── Ціновий фільтр входу (спред-режим) ────────────────────────────────────
+#
+# Зберігається як JSON у scanner_users.price_range_json і застосовується в
+# alert_dispatcher до ціни купівлі. Окремим ендпоінтом, а не полем у
+# /user/filters, бо це структура, а не скаляр: у решти редагованих полів
+# рівно одне значення.
+
+_PRICE_RANGE_MODES = {"range", "exact", "max", "min"}
+
+
+class PriceRangePayload(BaseModel):
+    """Порожній mode вимикає фільтр."""
+    mode: str = ""
+    min: float = 0.0
+    max: float = 0.0
+    value: float = 0.0
+
+
+@router.get("/user/price-range")
+async def get_price_range(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+    return dict_to_camel(jsonable_encoder(user.get("price_range") or {}))
+
+
+@router.post("/user/price-range")
+async def set_price_range(
+    payload: PriceRangePayload,
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    import json
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    db = _db()
+
+    mode = (payload.mode or "").strip().lower()
+    if mode and mode not in _PRICE_RANGE_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode: очікується одне з {sorted(_PRICE_RANGE_MODES)} або порожнє",
+        )
+
+    if not mode:
+        config: dict[str, Any] = {}
+    elif mode == "range":
+        if payload.min <= 0 or payload.max <= 0:
+            raise HTTPException(status_code=400, detail="range: потрібні додатні min і max")
+        if payload.min >= payload.max:
+            raise HTTPException(status_code=400, detail="range: min має бути меншим за max")
+        config = {"mode": "range", "min": payload.min, "max": payload.max}
+    else:
+        if payload.value <= 0:
+            raise HTTPException(status_code=400, detail=f"{mode}: потрібне додатне value")
+        config = {"mode": mode, "value": payload.value}
+
+    cursor = await db._db.execute(
+        "UPDATE scanner_users SET price_range_json = ? WHERE user_id = ?",
+        (json.dumps(config), telegram_id),
+    )
+    await db._db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {"status": "success", "priceRange": dict_to_camel(config)}
 
 
 @router.get("/user/merchant-filters")
@@ -453,21 +713,27 @@ async def get_scanner_state():
     }
 
 
+# Ядро одне на всіх: зупинка через веб гасить сканування і алерти всім
+# користувачам одразу. Меню в боті показує ці кнопки лише адміну
+# (bot/keyboards/menu.py), HTTP до цього моменту не показував нікому — тобто
+# пускав будь-кого.
+
+
 @router.post("/scanner/start")
-async def start_scanner():
+async def start_scanner(admin_id: int = Depends(require_admin)):
     from config.runtime import runtime_config
     if not await runtime_config.set("is_scanner_active", "true"):
         raise HTTPException(status_code=500, detail="Не вдалось записати стан у bot_settings")
-    logger.info("▶️ Ядро сканера запущено через HTTP API")
+    logger.info("▶️ Ядро сканера запущено через HTTP API (admin=%s)", admin_id)
     return {"status": "success", "isScannerActive": True}
 
 
 @router.post("/scanner/stop")
-async def stop_scanner():
+async def stop_scanner(admin_id: int = Depends(require_admin)):
     from config.runtime import runtime_config
     if not await runtime_config.set("is_scanner_active", "false"):
         raise HTTPException(status_code=500, detail="Не вдалось записати стан у bot_settings")
-    logger.info("⏸ Ядро сканера зупинено через HTTP API")
+    logger.info("⏸ Ядро сканера зупинено через HTTP API (admin=%s)", admin_id)
     return {"status": "success", "isScannerActive": False}
 
 
@@ -477,19 +743,23 @@ class MutePayload(BaseModel):
 
 
 @router.post("/scanner/mute")
-async def set_mute(payload: MutePayload):
+async def set_mute(payload: MutePayload, admin_id: int = Depends(require_admin)):
     """
     Пауза алертів. Стан процесний (bot.handlers.core._mute_until), тому
     працює лише поки живий цей інстанс — так само, як і з боку бота.
+
+    Пауза глобальна: вона замовкає алерти всім. Персональний перемикач —
+    це is_alerts_active у POST /user/filters, він доступний кожному.
     """
     from bot.handlers import core
 
     core._mute_until = 0.0 if payload.hours == 0 else time.monotonic() + payload.hours * 3600
+    logger.info("🔕 Пауза алертів: %s год (admin=%s)", payload.hours, admin_id)
     return {"status": "success", "isMuted": core.is_muted(), "hours": payload.hours}
 
 
 @router.post("/exchanges/{name}/enable")
-async def enable_exchange(name: str):
+async def enable_exchange(name: str, admin_id: int = Depends(require_admin)):
     from core.engine.exchange_manager import exchange_manager
     from config.runtime import runtime_config
 
@@ -503,8 +773,43 @@ class DisableExchangePayload(BaseModel):
     cooldownHours: float = Field(default=0, ge=0, le=720)
 
 
+@router.post("/exchanges/health")
+async def check_exchanges_health(admin_id: int = Depends(require_admin)):
+    """
+    Опитує всі біржі — те саме, що «🏥 Health check» у меню моніторингу.
+
+    На сайті цього не було взагалі: побачити, що біржа мовчить, можна було
+    лише за лічильником відмов, який росте вже після того, як цикли почали
+    падати. Три спроби на біржу робить сам ExchangeManager, тому запит
+    повільний — і викликається тільки руками, без polling.
+    """
+    import asyncio
+
+    from core.engine.exchange_manager import ALL_EXCHANGES, exchange_manager
+
+    results = await asyncio.gather(
+        *(exchange_manager.health_check(name) for name in ALL_EXCHANGES),
+        return_exceptions=True,
+    )
+
+    checked = []
+    for name, result in zip(ALL_EXCHANGES, results):
+        if isinstance(result, BaseException):
+            checked.append({"exchange": name, "ok": False, "message": str(result)[:200]})
+            continue
+        ok, message = result
+        checked.append({"exchange": name, "ok": bool(ok), "message": message})
+
+    logger.info("🏥 Health check через HTTP API (admin=%s)", admin_id)
+    return checked
+
+
 @router.post("/exchanges/{name}/disable")
-async def disable_exchange(name: str, payload: DisableExchangePayload):
+async def disable_exchange(
+    name: str,
+    payload: DisableExchangePayload,
+    admin_id: int = Depends(require_admin),
+):
     """cooldownHours=0 → вимкнено до ручного ввімкнення."""
     from core.engine.exchange_manager import exchange_manager
     from config.runtime import runtime_config
@@ -521,8 +826,142 @@ async def disable_exchange(name: str, payload: DisableExchangePayload):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Тейкер-ордери
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Досі веб бачив лише спред-зв'язки: `state.opportunities` наповнює
+# SPREAD-гілка, а тейкер-шлях (core/engine/scanner_helpers.process_taker_path)
+# віддає знайдене одразу в Telegram і більше нікуди. Тому в режимах
+# TAKER_BUY / TAKER_SELL дашборд виглядав порожнім, хоча бот у цей самий час
+# слав ордери.
+#
+# Тут ордери рахуються на запит із останнього зрізу циклу
+# (state.last_buy_grouped / last_sell_grouped) тим самим TakerScanner і тими
+# самими фільтрами. Два наслідки, обидва бажані:
+#
+#   * дедуп не застосовується. Він потрібен, щоб не слати те саме в чат
+#     двічі; для списку на екрані «вже надіслане» — це рівно те, що треба
+#     показувати;
+#   * scanner_mode юзера не обмежує вибірку. Подивитись бік купівлі, сидячи
+#     в режимі продажу, можна без перемикання режиму — а отже, і без зміни
+#     того, що бот шле в Telegram.
+
+
+def _app_link(order) -> str:
+    """
+    Посилання, яке на телефоні відкриє мерчанта просто в застосунку біржі.
+
+    Те саме, що бот кладе в кнопку алерта (bot/deeplinks.py) — але досі це
+    жило тільки в Telegram. На сайті лишалось `order.link`, тобто звичайна
+    веб-сторінка: з телефона вона веде в мобільний браузер, де треба ще раз
+    логінитись, замість застосунку з живою сесією.
+
+    Порожній рядок означає, що підтвердженого маршруту для цієї біржі немає
+    (перевірено прогоном на пристрої, див. tools/deeplink/FINDINGS.md) —
+    фронтенд у такому разі показує лише звичайне посилання.
+    """
+    try:
+        from bot.deeplinks import app_https_url, resolve_target
+
+        kind, entity_id = resolve_target(order)
+        return app_https_url(getattr(order, "exchange", ""), kind, entity_id) or ""
+    except Exception as e:  # диплінк не має ламати видачу ордерів
+        logger.debug("app_link: %s", e)
+        return ""
+
+
+def _order_to_dict(order) -> dict:
+    """Ордер у вигляді, придатному для JSON. Decimal → float."""
+    return {
+        "appLink": _app_link(order),
+        "id": order.id,
+        "exchange": order.exchange,
+        "price": float(order.price),
+        "availableAmount": float(order.available_amount),
+        "minLimit": float(order.min_limit),
+        "maxLimit": float(order.max_limit),
+        "merchantId": order.merchant_id,
+        "merchantName": order.merchant_name,
+        "monthOrderCount": order.month_order_count,
+        "finishRatePct": order.finish_rate_pct,
+        "positiveRate": order.positive_rate,
+        "isVerified": order.is_verified,
+        "accountAgeDays": order.account_age_days,
+        "lastOnlineMins": order.last_online_mins,
+        "bankCodes": list(order.bank_codes or []),
+        "link": order.link,
+        "riskFlag": order.risk_flag or "",
+        "compositeScore": order.composite_score,
+        "reviewScore": order.review_score,
+        "reviewNegPct": order.review_neg_pct,
+        "tradeTerms": order.trade_terms or "",
+        "isNewUserSubsidy": order.is_new_user_subsidy,
+        "side": order.side or "",
+    }
+
+
+@router.get("/taker/orders")
+async def get_taker_orders(
+    side: str = Query(default="both", description="buy | sell | both"),
+    limit: int = Query(default=50, ge=1, le=200),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Ордери, які проходять тейкер-фільтри користувача, — те саме, що бот шле
+    в режимах TAKER_BUY / TAKER_SELL, але без дедупу й без прив'язки до
+    поточного scanner_mode.
+    """
+    from core.engine.taker_scanner import TakerScanner
+    from state import state
+
+    if side not in {"buy", "sell", "both"}:
+        raise HTTPException(status_code=400, detail="side: очікується buy, sell або both")
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+
+    buy_grouped = state.last_buy_grouped or {}
+    sell_grouped = state.last_sell_grouped or {}
+    if not buy_grouped and not sell_grouped:
+        # Сканер ще не завершив жодного циклу — це не помилка, просто рано.
+        return {"buy": [], "sell": [], "scanned": False}
+
+    scanner = TakerScanner(_db())
+    result: dict[str, Any] = {"buy": [], "sell": [], "scanned": True}
+
+    wanted = ("buy", "sell") if side == "both" else (side,)
+    for want in wanted:
+        mode = "TAKER_BUY" if want == "buy" else "TAKER_SELL"
+        try:
+            orders = await scanner.find_orders_for_user(
+                {**user, "scanner_mode": mode}, buy_grouped, sell_grouped
+            )
+        except Exception as e:
+            logger.error("taker/orders %s: %s", mode, e)
+            raise HTTPException(status_code=500, detail=f"{mode}: {e}") from e
+
+        # TAKER_BUY шукає найдешевше, TAKER_SELL — найдорожче.
+        orders.sort(key=lambda o: float(o.price), reverse=(mode == "TAKER_SELL"))
+        result[want] = [_order_to_dict(o) for o in orders[:limit]]
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Картки
 # ═══════════════════════════════════════════════════════════════════════════
+
+# Колонки, які не покидають бекенд. Зберігаються вони свідомо: повний номер
+# потрібен, щоб звіряти надходження з випискою, а токен — щоб ходити в
+# Monobank. Але у відповіді API їм робити нічого.
+_CARD_PRIVATE_FIELDS = frozenset({
+    "card_number",
+    "mono_x_token_encrypted",
+    "mono_webhook_secret",
+    "mono_account_id",
+})
+
 
 @router.get("/cards")
 async def get_cards(
@@ -547,8 +986,16 @@ async def get_cards(
         await db.lazy_monthly_reset(card_id)
         limits = await db.get_card_effective_limits(card_id, owner_id=telegram_id)
 
+        # `SELECT *` тягне і те, чому нема місця у відповіді HTTP: повний
+        # номер картки та секрети Monobank. Вони потрібні боту всередині,
+        # але браузеру — ніколи: PAN лежав би у відповіді, в кеші SWR і в
+        # девтулзах, а `has*` прапорців для UI цілком достатньо.
+        payload = {k: v for k, v in dict(card).items() if k not in _CARD_PRIVATE_FIELDS}
+
         enriched.append({
-            **dict(card),
+            **payload,
+            "hasCardNumber": bool(card.get("card_number")),
+            "hasMonoToken": bool(card.get("mono_x_token_encrypted")),
             "limits": limits,
             "usedDaily": {
                 "in": await db.get_rolling_used(card_id, "in", hours=24),
@@ -593,14 +1040,22 @@ _SESSION_FRESH_HOURS = 12.0
 
 
 @router.get("/monitoring/sessions")
-async def get_sessions(telegram_id: int = 0):
+async def get_sessions(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     """
     Свіжість перехоплених сесій бірж. Протухла сесія — головна причина,
     чому біржа раптом перестає віддавати дані, і побачити це в дашборді
     досі було ніяк.
+
+    Сесії персональні: у кожного свої кукі бірж. Ендпоінт брав telegram_id
+    просто з query — тобто показував, коли саме інший користувач востаннє
+    логінився на біржу.
     """
     from core.engine.exchange_manager import ALL_EXCHANGES
 
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
     db = _db()
     now = time.time()
     result = []

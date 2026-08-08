@@ -1,0 +1,96 @@
+# deeplink test :: okx :: 2026-07-25T16:04:59
+
+>>> okx://exchange/p2p/order?orderId=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.okinc.okex.gp/com.okinc.okex.deeplink.SchemeActivity
+WaitTime: 659
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/order?id=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.order.detail.OrderDetailActivity
+TotalTime: 2090
+WaitTime: 2092
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/order?orderNo=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.okinc.okex.gp/com.okinc.okex.deeplink.SchemeActivity
+WaitTime: 293
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/orders
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.okinc.okex.gp/com.okinc.okex.deeplink.SchemeActivity
+WaitTime: 123
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/profile?userId=u1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.trade.HomePageActivity
+TotalTime: 1615
+WaitTime: 1622
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/profile?publicUserId=u1234567890
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.trade.HomePageActivity
+TotalTime: 1778
+WaitTime: 1785
+Complete
+
+    VERDICT: APP  
+
+>>> okx://exchange/p2p/trading?type=buy&crypto=USDT
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=okx://exchange/... }
+Status: ok
+LaunchState: COLD
+Activity: com.okinc.okex.gp/com.okinc.p2p.trade.HomePageActivity
+TotalTime: 1852
+WaitTime: 1858
+Complete
+
+    VERDICT: APP  
+
+>>> https://www.okx.com/p2p/order/20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://www.okx.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.sec.android.app.sbrowser/.SBrowserMainActivity
+WaitTime: 660
+Complete
+
+    VERDICT: BROWSER-OR-CHOOSER  
+
+
+=== pm get-app-links com.okinc.okex ===
+adb : Error: package com.okinc.okex unavailable
+At C:\p2p_scanner\tools\deeplink\test_deeplinks.ps1:120 char:1
++ adb shell pm get-app-links $expectedPkg 2>&1 | Out-String | Add-Conte ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error: package ...kex unavailable:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+

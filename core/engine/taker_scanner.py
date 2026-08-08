@@ -9,7 +9,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 from exchanges.base import Order
+from config.banks import normalize_bank
 from config.defaults import MIN_ORDERS, MIN_COMPLETION
+from core.engine.bank_scope import resolve_banks
+from filters.anomaly_filter import AnomalyFilter
+from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 
 logger = logging.getLogger("TakerScanner")
@@ -42,12 +46,16 @@ class TakerScanner:
 
         # buy_grouped  = мерчанти ПРОДАЮТЬ USDT (side=1, user BUYS, low price)
         # sell_grouped = мерчанти КУПУЮТЬ USDT  (side=0, user SELLS, high price)
+        # Банки беремо через resolve_banks: якщо для цього режиму задане
+        # перевизначення — воно, інакше спільний список. Доти майстер Taker
+        # Buy писав свій вибір просто в buy_bank_codes, тобто змінював банки
+        # купівлі й для спред-режиму.
         if mode == "TAKER_BUY":
             source_grouped = buy_grouped   # user купує → ордери де мерчанти продають
-            user_banks = set(user.get("buy_bank_codes") or user.get("bank_codes", []))
+            user_banks = set(resolve_banks(user, mode, "buy"))
         else:
             source_grouped = sell_grouped  # user продає → ордери де мерчанти купують
-            user_banks = set(user.get("sell_bank_codes") or user.get("bank_codes", []))
+            user_banks = set(resolve_banks(user, mode, "sell"))
 
         capital = float(user.get("capital", 0))
         min_amount = float(user.get("min_amount", 0))
@@ -55,24 +63,19 @@ class TakerScanner:
         emf = user.get("exchange_merchant_filters") or {}
         # Preload used subsidies for per-exchange filtering
         used_subs: dict[str, list[str]] = {}
+        # Особистий чорний список: індекс тягнемо один раз на прохід, бо
+        # перевірка нижче йде в циклі по всіх ордерах біржі.
+        personal_bl: tuple[dict, dict] = ({}, {})
         if self.db:
             uid = user.get("user_id", 0)
             used_subs = await self.db.get_used_subsidies(uid) if uid else {}
+            if uid:
+                personal_bl = await self.db._user_blacklist_index(uid)
 
         # ── Smart Card Pre-filtering Setup ──
-        def _normalize_bank(name: str) -> str:
-            if not name:
-                return ""
-            name_low = str(name).strip().lower()
-            name_map = {
-                "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
-                "14": "privatbank", "pb": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
-                "64": "pumb", "pumb": "pumb", "пумб": "pumb",
-                "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
-                "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
-                "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
-            }
-            return name_map.get(name_low, name_low)
+        # Нормалізація банків живе в config/banks.py: та сама мапа лежала
+        # скопійованою тут, в alert_dispatcher, card_repo і formatters.
+        _normalize_bank = normalize_bank
 
         card_matching_active = False
         user_cards_by_bank = {}
@@ -96,6 +99,31 @@ class TakerScanner:
 
         seen_ids: set[str] = set()
         candidates: list[Order] = []
+
+        # Цінові аномалії відсіюємо до всіх інших фільтрів.
+        #
+        # Односторонньо: у TAKER_BUY підозріла надто НИЗЬКА ціна продавця,
+        # у TAKER_SELL — надто ВИСОКА ціна покупця. Протилежний бік не
+        # чіпаємо: там «аномалія» означає просто невигідну ціну, і її й так
+        # відкинуть звичайні пороги.
+        #
+        # Рахуємо по кожному банку окремо: ринок Monobank і ринок ПУМБ — це
+        # різні стакани з різними цінами, і спільна медіана по них показала б
+        # ринок, якого не існує.
+        anomaly_side = "buy" if mode == "TAKER_BUY" else "sell"
+        anomaly_filter = AnomalyFilter()
+        clean_grouped: dict[str, list[Order]] = {}
+        for bank_code, bank_orders in source_grouped.items():
+            if bank_code not in user_banks:
+                continue
+            result = anomaly_filter.analyze(bank_orders, anomaly_side)
+            clean_grouped[bank_code] = result.kept
+            for item in result.rejected:
+                logger.debug(
+                    "🎯 %s [%s] відсіяно як аномалію: %s",
+                    item.order.merchant_name, bank_code, item.reason,
+                )
+        source_grouped = clean_grouped
 
         for bank_code, orders in source_grouped.items():
             if bank_code not in user_banks:
@@ -252,6 +280,13 @@ class TakerScanner:
 
                 if not self._merchant_ok(order, mf, emf, used_subs):
                     continue
+
+                # Особистий бан користувача — беззастережний, на відміну від
+                # спільного списку нижче: там blacklist_mode ще дає вибір
+                # «блокувати / ховати / показувати з позначкою».
+                if in_personal_blacklist(order, *personal_bl):
+                    continue
+
                 # Check blacklist setting: if "blacklist_mode" is "warn", we allow BLOCK:BLACKLIST to pass but keep the flag for warning presentation
                 risk_flag = getattr(order, "risk_flag", "") or ""
                 if "BLOCK:BLACKLIST" in risk_flag:
@@ -462,16 +497,30 @@ async def trigger_buy_autoscale_check(db, user_id: int):
     if not db:
         return
     user = await db.get_user_by_id(user_id)
-    if not user or user.get("scanner_mode") != "TAKER_BUY":
+    if not user:
+        return
+
+    from core.engine.scanner_helpers import _user_modes
+
+    if "TAKER_BUY" not in _user_modes(user):
         return
     if user.get("buy_balance_mode") != "AUTO_SCALE":
         return
 
-    cards = await db.get_user_cards(user_id)
-    if not cards:
+    # Тут стояло `db.get_user_cards(user_id)` — методу з такою назвою в
+    # проєкті немає взагалі, тож виклик щоразу падав на AttributeError.
+    # Усі три викликачі (вебхук Monobank, меню тейкера, воркер синхронізації
+    # балансів) ловлять виняток у except з logger.debug, тому масштабування
+    # «по факту надходження» не працювало жодного разу — і мовчки.
+    #
+    # Рахуємо тим самим методом, що й цикл сканера: максимум по ОДНОМУ банку,
+    # з урахуванням лімітів, прогріву й зарезервованих сум. Сума по всіх
+    # банках тут була б обманом — угода йде з карток одного банку.
+    buy_banks = resolve_banks(user, "TAKER_BUY", "buy") or None
+    total_bal = await db.get_user_auto_capital(user_id, allowed_banks=buy_banks)
+    if total_bal <= 0:
         return
-    
-    total_bal = sum(max(0.0, float(c.get("balance", 0.0))) for c in cards if c.get("status") == "active")
+
     cur_usdt = float(user.get("taker_buy_amount", 0.0))
     est_rate = float(user.get("taker_buy_max_price", 0.0)) or 40.0
 

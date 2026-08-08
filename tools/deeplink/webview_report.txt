@@ -1,0 +1,31 @@
+# webview whitelist test :: 2026-08-08T19:36:21
+
+===== [1] 1_control-www-fixedLoan
+URL: https://app.binance.com/webview/webview?type=default&url=aHR0cHM6Ly93d3cuYmluYW5jZS5jb20vZml4ZWRMb2Fu
+
+TOP: 
+SCREEN: 
+
+===== [2] 2_current-c2c-advertiserDetail
+URL: https://app.binance.com/webview/webview?type=default&url=aHR0cHM6Ly9jMmMuYmluYW5jZS5jb20vdWstVUEvYWR2ZXJ0aXNlckRldGFpbD9hZHZlcnRpc2VyTm89czQwYzZiYjgzYWMzNjNkMDJhMmY0Y2Y5YmQyZjIzNjQ1
+
+TOP: 
+SCREEN: 
+
+===== [3] 3_www-advertiserDetail
+URL: https://app.binance.com/webview/webview?type=default&url=aHR0cHM6Ly93d3cuYmluYW5jZS5jb20vdWstVUEvYWR2ZXJ0aXNlckRldGFpbD9hZHZlcnRpc2VyTm89czQwYzZiYjgzYWMzNjNkMDJhMmY0Y2Y5YmQyZjIzNjQ1
+
+TOP: 
+SCREEN: 
+
+===== [4] 4_p2p-advertiserDetail
+URL: https://app.binance.com/webview/webview?type=default&url=aHR0cHM6Ly9wMnAuYmluYW5jZS5jb20vdWstVUEvYWR2ZXJ0aXNlckRldGFpbD9hZHZlcnRpc2VyTm89czQwYzZiYjgzYWMzNjNkMDJhMmY0Y2Y5YmQyZjIzNjQ1
+
+TOP: 
+SCREEN: 
+
+===== [5] 5_www-advertiserDetail-dynamic
+URL: https://app.binance.com/webview/webview?type=default&needDynamic=true&url=aHR0cHM6Ly93d3cuYmluYW5jZS5jb20vdWstVUEvYWR2ZXJ0aXNlckRldGFpbD9hZHZlcnRpc2VyTm89czQwYzZiYjgzYWMzNjNkMDJhMmY0Y2Y5YmQyZjIzNjQ1
+
+TOP: 
+SCREEN: 

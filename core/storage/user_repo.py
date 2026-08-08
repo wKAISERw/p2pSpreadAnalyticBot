@@ -28,6 +28,35 @@ def _is_owner(user_id: int) -> bool:
     return bool(owner) and int(user_id) == owner
 
 
+# Режими, які вміє сканер. Порядок фіксований: у такому вигляді вони
+# показуються в меню і в такому ж обходяться в конвеєрі.
+SCANNER_MODES = ("SPREAD", "TAKER_BUY", "TAKER_SELL", "MAKER_BUY", "MAKER_SELL")
+
+
+def _parse_scanner_modes(raw: str | None, fallback_mode: str | None) -> list[str]:
+    """
+    Набір активних режимів користувача.
+
+    Колонка scanner_modes з'явилась пізніше за scanner_mode, тому в старих
+    рядках вона порожня — там єдиним режимом лишається той, що був. Завдяки
+    цьому міграція не потрібна: перший же запис через меню чи API заповнить
+    новий формат, а до того все працює як раніше.
+
+    Порожній результат неможливий: користувач без жодного режиму не
+    отримував би нічого і виглядав би як зламаний, тож падаємо на SPREAD.
+    """
+    known = set(SCANNER_MODES)
+    modes = [m.strip().upper() for m in (raw or "").split(",") if m.strip()]
+    modes = [m for m in modes if m in known]
+
+    if not modes:
+        single = (fallback_mode or "").strip().upper()
+        modes = [single] if single in known else ["SPREAD"]
+
+    # Порядок як у SCANNER_MODES, без дублів.
+    return [m for m in SCANNER_MODES if m in set(modes)]
+
+
 class UserRepo:
     """Users, credentials, auth sessions, settings."""
 
@@ -359,7 +388,9 @@ class UserRepo:
                               COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
                               COALESCE(is_alerts_active, 1)                  as is_alerts_active,
                               COALESCE(scanner_mode, 'SPREAD')               as scanner_mode,
+                              COALESCE(scanner_modes, '')                    as scanner_modes,
                               COALESCE(price_range_json, '{}')               as price_range_json,
+                              COALESCE(mode_bank_overrides_json, '{}')       as mode_bank_overrides_json,
                               COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
                               COALESCE(target_margin, 0.005)                 as target_margin,
                               COALESCE(sniper_rules, '[]')                   as sniper_rules,
@@ -419,7 +450,11 @@ class UserRepo:
                     "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                     "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
                     "scanner_mode": row["scanner_mode"] or "SPREAD",
+                    "scanner_modes": _parse_scanner_modes(
+                        row["scanner_modes"], row["scanner_mode"]
+                    ),
                     "price_range": _json.loads(row["price_range_json"] or "{}"),
+                    "mode_bank_overrides": _json.loads(row["mode_bank_overrides_json"] or "{}"),
                     "maker_buy_price": float(row["maker_buy_price"]),
                     "target_margin": float(row["target_margin"]),
                     "sniper_rules": _json.loads(row["sniper_rules"] or "[]"),
@@ -473,7 +508,9 @@ class UserRepo:
                               COALESCE(exchange_merchant_filters_json, '{}') as exchange_merchant_filters_json,
                               COALESCE(is_alerts_active, 1)                  as is_alerts_active,
                               COALESCE(scanner_mode, 'SPREAD')               as scanner_mode,
+                              COALESCE(scanner_modes, '')                    as scanner_modes,
                               COALESCE(price_range_json, '{}')               as price_range_json,
+                              COALESCE(mode_bank_overrides_json, '{}')       as mode_bank_overrides_json,
                               COALESCE(maker_buy_price, 0.0)                 as maker_buy_price,
                               COALESCE(target_margin, 0.005)                 as target_margin,
                               COALESCE(sniper_rules, '[]')                   as sniper_rules,
@@ -533,7 +570,11 @@ class UserRepo:
                 "merchant_filters": _json.loads(row["merchant_filters_json"] or "{}"),
                 "exchange_merchant_filters": _json.loads(row["exchange_merchant_filters_json"] or "{}"),
                 "scanner_mode": row["scanner_mode"] or "SPREAD",
+                "scanner_modes": _parse_scanner_modes(
+                    row["scanner_modes"], row["scanner_mode"]
+                ),
                 "price_range": _json.loads(row["price_range_json"] or "{}"),
+                "mode_bank_overrides": _json.loads(row["mode_bank_overrides_json"] or "{}"),
                 "maker_buy_price": float(row["maker_buy_price"]),
                 "target_margin": float(row["target_margin"]),
                 "sniper_rules": _json.loads(row["sniper_rules"] or "[]"),

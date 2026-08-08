@@ -1,0 +1,269 @@
+﻿# bybit profile v3 :: 2026-08-04T23:41:22 :: maskId=s455c054d9993455d8bef3e2402d21944
+
+===== [1] 00-control-home
+URL: bybitapp://open/home?tab=1&initialL1Tab=overview
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1952
+WaitTime: 1954
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{211360619 u0 com.bybit.app/com.bybit.pro.MainActivity t1079}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:41:31.124 18591 18591 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:41:31.322 18682 18682 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [2] route-enc-maskId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmaskId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1165
+WaitTime: 1168
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{54829978 u0 com.bybit.app/com.bybit.pro.MainActivity t1080}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:41:37.835 10403 10567 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:41:37.958 10403 10566 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:41:38.760 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmaskId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:41:44.389 20982 20982 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:41:44.524 21002 21002 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [3] route-enc-targetUserId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FtargetUserId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1112
+WaitTime: 1114
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{250216333 u0 com.bybit.app/com.bybit.pro.MainActivity t1081}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:41:48.728 10403 10504 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:41:48.729 10403 10504 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:41:48.882 10403 10567 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:41:48.883 10403 10567 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:41:49.678 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FtargetUserId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:41:55.330 23548 23548 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:41:55.477 23562 23562 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [4] route-enc-makerUserId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmakerUserId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1131
+WaitTime: 1135
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{261054560 u0 com.bybit.app/com.bybit.pro.MainActivity t1082}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:41:59.687 10403 10504 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:41:59.688 10403 10504 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:42:00.505 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmakerUserId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:42:06.265 25966 25966 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:42:06.429 25993 25993 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [5] route-enc-userId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FuserId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1114
+WaitTime: 1116
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{41901288 u0 com.bybit.app/com.bybit.pro.MainActivity t1083}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:42:10.395 10403 10550 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:42:10.396 10403 10550 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:42:11.338 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FuserId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:42:17.247 28291 28291 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:42:17.390 28318 28318 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [6] route-enc-accountId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FaccountId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1026
+WaitTime: 1028
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{180720599 u0 com.bybit.app/com.bybit.pro.MainActivity t1084}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:42:21.180 10403 10550 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:42:22.085 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FaccountId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:42:28.079 30478 30478 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:42:28.255 30504 30504 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [7] route-enc-targetAccountId
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FtargetAccountId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1040
+WaitTime: 1042
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{192402143 u0 com.bybit.app/com.bybit.pro.MainActivity t1085}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:42:31.822 10403 10568 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:42:32.727 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FtargetAccountId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:42:38.653 32697 32697 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:42:38.831 32721 32721 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [8] route-raw-maskId
+URL: bybitapp://open/route?targetUrl=by-mini://p2p/user/home?maskId=s455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1140
+WaitTime: 1141
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{108340350 u0 com.bybit.app/com.bybit.pro.MainActivity t1086}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:42:43.486 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini://p2p/user/home?maskId=s455c054d9993455d8bef3e2402d21944'
+  08-04 23:42:49.501  3858  3858 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:42:49.671  3864  3864 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [9] route-raw-targetUserId
+URL: bybitapp://open/route?targetUrl=by-mini://p2p/user/home?targetUserId=s455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1031
+WaitTime: 1034
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{64497281 u0 com.bybit.app/com.bybit.pro.MainActivity t1087}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:42:53.503 10403 10566 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:42:53.504 10403 10566 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:42:54.464 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini://p2p/user/home?targetUserId=s455c054d9993455d8bef3e2402d21944'
+  08-04 23:43:00.411  8876  8876 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:00.570  8924  8924 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [10] route-bare-userhome
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1096
+WaitTime: 1098
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{10033816 u0 com.bybit.app/com.bybit.pro.MainActivity t1088}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:43:04.369 10403 10567 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:43:04.371 10403 10567 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:43:05.203 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome'
+  08-04 23:43:11.447 14541 14541 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:11.637 14620 14620 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [11] route-bare-p2phome
+URL: bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fhome
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1102
+WaitTime: 1106
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{164996327 u0 com.bybit.app/com.bybit.pro.MainActivity t1089}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:43:15.176 10403 10550 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:43:16.037 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/route?targetUrl=by-mini%3A%2F%2Fp2p%2Fhome'
+  08-04 23:43:22.113 17295 17295 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:22.288 17358 17358 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [12] bydp-maskId
+URL: https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmaskId%3Ds455c054d9993455d8bef3e2402d21944
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1063
+WaitTime: 1065
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{265229171 u0 com.bybit.app/com.bybit.pro.MainActivity t1090}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:43:26.162 10403 10504 W ProcStatsManager: No process com.google.android.gms.persistent/10230 for service com.google.android.gms.cast.media.CastMediaRoute2ProviderService_Persistent
+  08-04 23:43:26.163 10403 10504 W ProcStatsManager: No process app.revanced.android.gms/10614 for service com.google.android.gms.cast.media.CastMediaRouteProviderService
+  08-04 23:43:26.985 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d https://app.bybit.com/inapp?by_dp=by-mini%3A%2F%2Fp2p%2Fuser%2Fhome%3FmaskId%3Ds455c054d9993455d8bef3e2402d21944'
+  08-04 23:43:32.992 19538 19538 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:33.174 19544 19544 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+
+===== [13] openweb-profile
+URL: bybitapp://open/web?url=https%3A%2F%2Fwww.bybit.com%2Fuk-UA%2Fp2p%2Fprofile%2Fs455c054d9993455d8bef3e2402d21944%2FUSDT%2FUAH%2Fitem&title=Profile
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1088
+WaitTime: 1090
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{4348171 u0 com.bybit.app/com.bybit.pro.MainActivity t1091}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:43:44.048 21885 21885 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:44.320 21902 21902 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:44.404  1784  1942 D audio_route: Apply path: speaker
+  08-04 23:43:44.515  1784 16561 I AHAL: AudioStream: RouteStream: 2633: enter: usecase(15: mmap-playback) devices 0x2, num devices 1
+  08-04 23:43:44.515  1784 16561 D AHAL: AudioStream: RouteStream: 2636: mAndroidOutDevices 2, mNoOfOutDevices 1
+  08-04 23:43:44.515  1784 16561 D AHAL: AudioStream: RouteStream: 2669: noPalDevices: 1 , new_devices: 1
+  08-04 23:43:44.552  1784 16561 D audio_route: Apply path: speaker
+  08-04 23:43:44.589  1784 16561 D AHAL: AudioStream: RouteStream: 2897: exit 0
+  08-04 23:43:44.644  1784 16561 D AHAL: AudioStream: ForceRouteStream: 6645: pal_stream_handle_ 0xb400007561e85e80 mPalOutDevice id 3
+  08-04 23:43:44.644  1784 16561 D AHAL: SecAudioStream: SecSetParameters: 187: ForceRouteStream for speaker amp status
+  08-04 23:43:44.686  2999  4025 D MediaRouterService: onAudioPlayerActiveStateChanged: uid=10453, active=true, restoreUid=10453
+
+===== [14] native-order-detail
+URL: bybitapp://open/fiat_otc_order_detail?orderId=1234567890123456789&sourcePage=deeplink
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1102
+WaitTime: 1104
+Complete
+
+TOP:     topResumedActivity=ActivityRecord{559549 u0 com.bybit.app/com.bybit.pro.MainActivity t1092}
+SCREEN TEXT: 
+ROUTE LOG:
+  08-04 23:43:48.886  1784 16561 I AHAL: AudioStream: RouteStream: 2633: enter: usecase(15: mmap-playback) devices 0x0, num devices 1
+  08-04 23:43:48.886  1784 16561 D AHAL: AudioStream: RouteStream: 2636: mAndroidOutDevices 2, mNoOfOutDevices 1
+  08-04 23:43:48.886  1784 16561 D AHAL: AudioStream: RouteStream: 2669: noPalDevices: 1 , new_devices: 1
+  08-04 23:43:48.886  1784 16561 D AHAL: AudioStream: RouteStream: 2897: exit 0
+  08-04 23:43:49.840 13533 13533 I adbd    : adbd service requested 'shell,v2,raw:am start -W -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d bybitapp://open/fiat_otc_order_detail?orderId=1234567890123456789&sourcePage=deeplink'
+  08-04 23:43:55.280 24036 24036 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router
+  08-04 23:43:55.451 24050 24050 W libbinder.BackendUnifiedServiceManager: Thread Pool max thread count is 0. Cannot cache binder as linkToDeath cannot be implemented. serviceName: media_router

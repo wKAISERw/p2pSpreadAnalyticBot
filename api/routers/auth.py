@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from api import auth as auth_lib
 from api.security import require_api_key
 
-router = APIRouter(prefix="/api/v1/auth", tags=["Auth"], dependencies=[Depends(require_api_key)])
+router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 logger = logging.getLogger("ApiAuthRouter")
 
 

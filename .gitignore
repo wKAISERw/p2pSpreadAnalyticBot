@@ -36,3 +36,10 @@ __pycache__/
 # cURL-дампи з секретами для probe_from_curl
 _curl.txt
 *_curl.txt
+
+# Артефакти дампу й деплою — збираються локально, у репозиторії не потрібні
+*.tar.gz
+project_dump.txt
+frontend_dump.txt
+# Разові скрипти діагностики
+scratch/

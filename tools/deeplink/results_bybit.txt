@@ -1,0 +1,75 @@
+# deeplink test :: bybit :: 2026-07-25T16:05:15
+
+>>> bybitapp://open?page=p2pOrderDetail&orderId=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+WaitTime: 76
+Complete
+
+    VERDICT: APP  
+
+>>> bybitapp://open?page=/p2p/order/20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=bybitapp://open/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 2123
+WaitTime: 2125
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.bybit.com/inapp/p2p/order/20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1408
+WaitTime: 1415
+Complete
+
+    VERDICT: APP  
+
+>>> https://app.bybit.com/inapp?page=p2p&orderId=20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://app.bybit.com/... }
+Status: ok
+LaunchState: COLD
+Activity: com.bybit.app/com.bybit.pro.MainActivity
+TotalTime: 1339
+WaitTime: 1346
+Complete
+
+    VERDICT: APP  
+
+>>> https://www.bybit.com/uk-UA/p2p/order/20512345678901234567
+Starting: Intent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://www.bybit.com/... }
+Status: ok
+LaunchState: UNKNOWN (0)
+Activity: com.sec.android.app.sbrowser/.SBrowserMainActivity
+WaitTime: 195
+Complete
+
+    VERDICT: BROWSER-OR-CHOOSER  
+
+
+=== pm get-app-links com.bybit.app ===
+  com.bybit.app:
+    ID: 4c5cabe9-7b14-425b-95a0-9ec2edeb63d6
+    Signatures: [14:9E:FC:D0:EA:F6:E3:04:67:BE:F3:81:DC:67:F2:84:8F:6D:BC:85:99:79:17:12:DE:BA:26:F1:7F:AB:FF:2B]
+    Domain verification state:
+      load.bybit.com: 1024
+      dl.bybit.com: 1024
+      market.bybit.com: 1024
+      app.bybit.com: verified
+      download.bybit.com: 1024
+      install.bybit.com: 1024
+      d.bybit.com: verified
+      mobile.bybit.com: 1024
+      store.bybit.com: 1024
+      soft.bybit.com: verified
+      t.bybit.com: verified
+      pkg.bybit.com: 1024
+      go.bybit.com: 1024
+

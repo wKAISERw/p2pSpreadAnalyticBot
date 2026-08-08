@@ -282,9 +282,13 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         maker_monitor=maker_monitor,
         session_manager=session_manager,
     )
+    # Імена мають збігатися з полями Settings. Тут стояли stability_hits і
+    # stability_ttl, яких у Settings немає, — getattr мовчки повертав дефолт,
+    # тож STABILITY_REQUIRED_HITS і STABILITY_TTL_SECONDS з .env не діяли
+    # взагалі й фільтр стабільності завжди працював на 2/15.
     stability_filter = SpreadStabilityFilter(
-        required_hits=getattr(settings, "stability_hits", 2),
-        ttl_seconds=getattr(settings, "stability_ttl", 15.0),
+        required_hits=settings.stability_required_hits,
+        ttl_seconds=settings.stability_ttl_seconds,
     )
     dedup_cache = TTLCache(
         ttl_seconds=getattr(settings, "dedup_ttl_seconds", 60.0),

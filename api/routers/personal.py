@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 
-from api.auth import optional_session, require_session, resolve_user_id
+from api.auth import optional_session, require_admin, require_session, resolve_user_id
 from api.security import require_api_key
 from api.utils import dict_to_camel
 
@@ -30,14 +30,6 @@ def _db():
     if db is None:
         raise HTTPException(status_code=503, detail="База даних ще не піднялась")
     return db
-
-
-async def require_admin(telegram_id: int = Depends(require_session)) -> int:
-    from bot.handlers.core import _is_admin
-
-    if not _is_admin(telegram_id):
-        raise HTTPException(status_code=403, detail="Потрібні права адміністратора")
-    return telegram_id
 
 
 async def _owned_card(card_id: str, telegram_id: int) -> dict:
@@ -358,6 +350,153 @@ async def set_bank_limits(
         await db.set_user_bank_limit(telegram_id, payload.bankName, field, float(value))
 
     return {"status": "success", "bank": payload.bankName, "updated": sorted(payload.limits)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Картки: створення, редагування, видалення
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Досі HTTP умів лише читати картки й правити їхні ліміти. Усе інше —
+# додати, перейменувати, змінити категорію, заморозити, видалити — жило
+# тільки в Telegram-меню, тому веб-дашборд був наполовину декоративним:
+# побачити картку можна, завести нову — ні.
+#
+# Набори значень тут ті самі, що в bot/keyboards/cards.py: розходження
+# означало б категорію чи статус, яких меню бота не вміє показати.
+
+_CARD_CATEGORIES = {"self", "relative", "friend", "drop"}
+_CARD_STATUSES = {"active", "inactive", "cooldown", "frozen", "frozen_funds", "blocked"}
+
+
+class CardCreatePayload(BaseModel):
+    bankName: str
+    # Повний номер потрібен для звірки з випискою Monobank; у відповідях
+    # він ніколи не віддається — лише останні чотири цифри.
+    cardNumber: Optional[str] = None
+    lastFour: Optional[str] = None
+    label: str = ""
+    category: str = "self"
+    balance: float = 0.0
+    note: str = ""
+
+
+@router.post("/cards")
+async def create_card(
+    payload: CardCreatePayload,
+    telegram_id: int = Depends(require_session),
+):
+    import uuid
+    import time as _time
+
+    bank = (payload.bankName or "").strip().lower()
+    if not bank:
+        raise HTTPException(status_code=400, detail="bankName обов'язковий")
+
+    if payload.category not in _CARD_CATEGORIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"category: очікується одне з {sorted(_CARD_CATEGORIES)}",
+        )
+
+    number = (payload.cardNumber or "").replace(" ", "")
+    if number:
+        if not number.isdigit() or len(number) != 16:
+            raise HTTPException(status_code=400, detail="cardNumber: очікується 16 цифр")
+        last_four = number[-4:]
+    else:
+        last_four = (payload.lastFour or "").strip()
+        if not (last_four.isdigit() and len(last_four) == 4):
+            raise HTTPException(
+                status_code=400,
+                detail="Потрібен або повний номер (16 цифр), або lastFour (4 цифри)",
+            )
+
+    card_id = str(uuid.uuid4())
+    await _db().add_card({
+        "id": card_id,
+        "owner_id": telegram_id,
+        "bank_name": bank,
+        "card_number": number or None,
+        "last_four": last_four,
+        "label": payload.label.strip(),
+        "note": payload.note.strip(),
+        "category": payload.category,
+        # is_own дублює категорію — так само, як це робить меню бота
+        # (cb_card_set_category), щоб обидва шляхи давали однаковий рядок.
+        "is_own": 1 if payload.category == "self" else 0,
+        "balance": float(payload.balance),
+        "status": "active",
+        "created_at": _time.time(),
+    })
+
+    return {"status": "success", "cardId": card_id}
+
+
+class CardUpdatePayload(BaseModel):
+    label: Optional[str] = None
+    note: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    balance: Optional[float] = None
+
+
+@router.post("/cards/{card_id}")
+async def update_card(
+    card_id: str,
+    payload: CardUpdatePayload,
+    telegram_id: int = Depends(require_session),
+):
+    """Оновлює лише передані поля — решта колонки картки не чіпається."""
+    await _owned_card(card_id, telegram_id)
+
+    updates: dict[str, Any] = {}
+    if payload.label is not None:
+        updates["label"] = payload.label.strip()
+    if payload.note is not None:
+        updates["note"] = payload.note.strip()
+    if payload.category is not None:
+        if payload.category not in _CARD_CATEGORIES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"category: очікується одне з {sorted(_CARD_CATEGORIES)}",
+            )
+        updates["category"] = payload.category
+        updates["is_own"] = 1 if payload.category == "self" else 0
+    if payload.status is not None:
+        if payload.status not in _CARD_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"status: очікується одне з {sorted(_CARD_STATUSES)}",
+            )
+        updates["status"] = payload.status
+
+    if not updates and payload.balance is None:
+        raise HTTPException(status_code=400, detail="Нема чого оновлювати")
+
+    db = _db()
+    if updates:
+        await db.update_card(card_id, updates)
+    if payload.balance is not None:
+        # Окремим методом: він ще й проставляє balance_updated_at, за яким
+        # видно, наскільки свіжа цифра.
+        await db.update_card_balance(card_id, float(payload.balance))
+        updates["balance"] = payload.balance
+
+    return {"status": "success", "updated": sorted(updates)}
+
+
+@router.delete("/cards/{card_id}")
+async def delete_card(card_id: str, telegram_id: int = Depends(require_session)):
+    await _owned_card(card_id, telegram_id)
+
+    db = _db()
+    # Транзакції прив'язані до картки: лишати їх сиротами означає зіпсувати
+    # звіт, у якому вони й далі рахуються.
+    await db._db.execute("DELETE FROM card_transactions WHERE card_id = ?", (card_id,))
+    await db._db.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    await db._db.commit()
+
+    return {"status": "success", "cardId": card_id}
 
 
 class CardLimitPayload(BaseModel):

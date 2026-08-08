@@ -4,6 +4,9 @@ import logging
 import time
 
 from bot.notifier import TelegramNotifier, SpreadAlert
+from config.banks import normalize_bank
+from core.engine.bank_scope import resolve_banks
+from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 from core.utils.tasks import spawn
 
@@ -33,30 +36,22 @@ class AlertDispatcher:
 
     @staticmethod
     def _clean_and_normalize_banks(banks_input) -> set[str]:
-        """Універсальний куленепробивний нормалізатор брудних даних банку з баз SQLite."""
+        """
+        Витягує назви банків із будь-якого брудного значення з SQLite.
+
+        Мапа синонімів переїхала в config/banks.py: раніше вона лежала
+        скопійованою тут, у taker_scanner, card_repo і formatters, тож
+        додати банк означало не забути про решту трьох файлів.
+        """
         if not banks_input:
             return set()
-        import re
-        raw_strings = []
-        input_str = str(banks_input)
-        raw_strings = re.findall(r'[a-zA-Z0-9а-яА-ЯіІёЁєЄїЇґҐ]+', input_str)
 
-        normalized = set()
-        name_map = {
-            "43": "monobank", "mono": "monobank", "monobank": "monobank", "моно": "monobank", "монобанк": "monobank",
-            "14": "privatbank", "pb": "privatbank", "privat": "privatbank", "privatbank": "privatbank", "приват": "privatbank", "приватбанк": "privatbank",
-            "64": "pumb", "pumb": "pumb", "пумб": "pumb",
-            "48": "a-bank", "abank": "a-bank", "a-bank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
-            "553": "izibank", "izi": "izibank", "izibank": "izibank", "ізі": "izibank", "ізібанк": "izibank",
-            "328": "sense", "sense": "sense", "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense"
-        }
-        for s in raw_strings:
-            s_low = s.lower()
-            if s_low in name_map:
-                normalized.add(name_map[s_low])
-            else:
-                normalized.add(s_low)
-        return normalized
+        import re
+
+        # Значення приходять і списком, і CSV, і навіть як repr списку —
+        # тому виколупуємо всі слова, а не робимо split(",").
+        tokens = re.findall(r'[a-zA-Z0-9а-яА-ЯіІёЁєЄїЇґҐ-]+', str(banks_input))
+        return {normalize_bank(token) for token in tokens if token}
 
     @staticmethod
     def _select_best_bank_from_owned(allowed_banks: set[str], owned_cards: list[dict]) -> str | None:
@@ -114,8 +109,8 @@ class AlertDispatcher:
                 user_all_cards = []
 
         # Очищуємо та розгортаємо глобальні списки доступних карт
-        user_buy_names = cls._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
-        user_sell_names = cls._clean_and_normalize_banks(user.get("sell_bank_codes") or user.get("bank_codes"))
+        user_buy_names = cls._clean_and_normalize_banks(resolve_banks(user, "SPREAD", "buy"))
+        user_sell_names = cls._clean_and_normalize_banks(resolve_banks(user, "SPREAD", "sell"))
         opp_buy_names = cls._clean_and_normalize_banks(getattr(alert, "buy_banks_fit", []))
         opp_sell_names = cls._clean_and_normalize_banks(getattr(alert, "sell_banks_fit", []))
 
@@ -177,10 +172,15 @@ class AlertDispatcher:
 
     def _user_wants(self, user: dict, opp: dict) -> tuple[bool, str, float]:
         """Персональний фільтр юзера. Повертає (True, "", scaled_amount) або (False, причина, entry)."""
-        mode = user.get("scanner_mode", "SPREAD")
+        # Спред-алерти йдуть тим, у кого SPREAD серед активних режимів.
+        # Раніше перевірялось рівно одне поле, тож увімкнути спред разом із
+        # тейкером було неможливо навіть теоретично.
+        from core.engine.scanner_helpers import _user_modes
+
+        modes = _user_modes(user)
         entry = float(opp["actual_entry_uah"])
-        if mode != "SPREAD":
-            return False, f"mode={mode}", entry
+        if "SPREAD" not in modes:
+            return False, f"modes={','.join(modes)}", entry
 
         # 0. Перевірка FOP та Banka/Jar блокування (per-user)
         filter_fop = user.get("filter_fop_tov", "hide")
@@ -188,14 +188,41 @@ class AlertDispatcher:
         buy_o = opp["buy_order"]
         sell_o = opp["sell_order"]
 
+        # Ціновий фільтр входу.
+        #
+        # Меню «💲 Фільтр ціни» в боті існувало давно і справно писало
+        # price_range_json, але PriceRangeFilter не імпортувався ніде — тобто
+        # налаштування зберігалось, бот рапортував «збережено», а жоден ордер
+        # за ним не відсіювався. Тепер фільтр працює там, де він і має сенс:
+        # у спред-режимі, де власного обмеження по ціні не було взагалі
+        # (тейкер-режими мають свої стратегії taker_*_price_strategy).
+        #
+        # Застосовуємо до ціни КУПІВЛІ: саме за нею ти входиш у зв'язку.
+        price_range = user.get("price_range") or {}
+        if price_range:
+            from filters.price_filter import PriceRangeFilter
+
+            price_filter = PriceRangeFilter(price_range)
+            if price_filter.is_active and not price_filter.matches(buy_o):
+                return False, f"Ціна входу поза фільтром ({price_filter.describe()})", entry
+
         mf = user.get("merchant_filters") or {}
+        bl_by_id, bl_by_name = user.get("_personal_blacklist") or ({}, {})
+
         for order_obj in (buy_o, sell_o):
             risk_flags = getattr(order_obj, "risk_flag", "") or ""
+
+            # Особистий бан діє беззастережно: людина сама його поставила,
+            # тож blacklist_mode тут не питаємо — він про те, як поводитись
+            # зі спільним списком і вердиктами ризик-движка.
+            if in_personal_blacklist(order_obj, bl_by_id, bl_by_name):
+                return False, f"Особистий чорний список: {order_obj.merchant_name}", entry
+
             if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
                 return False, "FOP_TOV blocked for user", entry
             if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
                 return False, "Banka/Jar blocked for user", entry
-            
+
             if "BLOCK:BLACKLIST" in risk_flags:
                 bl_mode = mf.get("blacklist_mode", "block").lower()
                 if bl_mode == "block":
@@ -246,8 +273,8 @@ class AlertDispatcher:
                 return False, f"spread {net_spread:.2f}% != exact {min_spread}", entry
 
         # 3. Нормалізація та звірка перетину банків
-        user_buy_normalized = self._clean_and_normalize_banks(user.get("buy_bank_codes") or user.get("bank_codes"))
-        user_sell_normalized = self._clean_and_normalize_banks(user.get("sell_bank_codes") or user.get("bank_codes"))
+        user_buy_normalized = self._clean_and_normalize_banks(resolve_banks(user, "SPREAD", "buy"))
+        user_sell_normalized = self._clean_and_normalize_banks(resolve_banks(user, "SPREAD", "sell"))
         opp_buy_normalized = self._clean_and_normalize_banks(opp.get("buy_banks_fit"))
         opp_sell_normalized = self._clean_and_normalize_banks(opp.get("sell_banks_fit"))
 
@@ -325,6 +352,12 @@ class AlertDispatcher:
             card_settings = await self._db.get_user_card_settings(uid)
             card_module_enabled = bool(card_settings and card_settings.get("card_module_mode") != "off")
             used_subsidies = await self._db.get_used_subsidies(uid) if self._db else {}
+            # Особистий чорний список — теж незмінний у межах батчу. Тягнемо
+            # індекс один раз: _user_wants синхронний, і робити там запит на
+            # кожен ордер означало б сотні звернень до бази за цикл.
+            personal_bl = (
+                await self._db._user_blacklist_index(uid) if self._db else ({}, {})
+            )
             try:
                 user_cards_active = await self._db.get_cards(owner_id=uid, status="active")
                 user_cards_all = await self._db.get_cards(owner_id=uid)
@@ -336,7 +369,7 @@ class AlertDispatcher:
             # алертів різний — тому мемоїзуємо по цьому набору.
             auto_cap_cache: dict[frozenset, float] = {}
             user_buy_names = self._clean_and_normalize_banks(
-                user.get("buy_bank_codes") or user.get("bank_codes")
+                resolve_banks(user, "SPREAD", "buy")
             )
 
             user_matches = []  # list of (local_alert, opp, is_sniper)
@@ -378,6 +411,7 @@ class AlertDispatcher:
                             break
 
                 local_user["_used_subsidies"] = used_subsidies
+                local_user["_personal_blacklist"] = personal_bl
 
                 wants, skip_reason, scaled_amount = self._user_wants(local_user, opp)
 

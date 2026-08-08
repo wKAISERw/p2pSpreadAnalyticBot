@@ -27,6 +27,7 @@ from bot.keyboards import exchanges_status_kb, global_settings_kb, back_to_setti
 from config.runtime import runtime_config
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
+from core.exchange_names import CANONICAL_EXCHANGES
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -49,7 +50,10 @@ async def cmd_keys(message: Message) -> None:
 
 
 # ── /connect & /disconnect ─────────────────────────────────────────────────
-SUPPORTED_EXCHANGES = ["Binance", "Bybit", "OKX", "MEXC", "Wallet", "BingX"]
+# Список живе в core/exchange_names.py: те саме написання читає HTTP API,
+# коли ключі підключають із дашборду. Поки списки були різні, веб клав
+# креденшли під назвою, за якою бот їх не знаходив.
+SUPPORTED_EXCHANGES = list(CANONICAL_EXCHANGES)
 
 
 @router.message(Command("connect"))
@@ -1688,7 +1692,30 @@ async def on_banks_menu(call: CallbackQuery) -> None:
                     info_lines.append(f"└ Продаж: <i>= загальні</i>")
                 break
 
-    info_lines.append("\n<i>Загальні — фільтри для обох сторін.\nОкремі buy/sell мають перевагу.</i>")
+    # Показуємо ще й винятки по режимах. Без цього рядка людина бачила
+    # спільні списки і не розуміла, чому Taker Buy працює з іншими банками:
+    # його вибір живе в окремому перевизначенні (core/engine/bank_scope.py).
+    if _db:
+        from core.engine.bank_scope import has_override, resolve_banks
+        from core.storage.user_repo import SCANNER_MODES
+
+        u = next((x for x in await _db.get_active_users()
+                  if x["user_id"] == call.from_user.id), None)
+        if u:
+            exceptions = []
+            for mode in SCANNER_MODES:
+                for side, label in (("buy", "покупка"), ("sell", "продаж")):
+                    if has_override(u, mode, side):
+                        names = [BANK_NAMES.get(c, c) for c in resolve_banks(u, mode, side)]
+                        exceptions.append(f"  • {mode} / {label}: <b>{', '.join(names)}</b>")
+            if exceptions:
+                info_lines.append("\n<b>Винятки по режимах:</b>")
+                info_lines.extend(exceptions)
+
+    info_lines.append(
+        "\n<i>Загальні — фільтри для обох сторін. Окремі buy/sell мають перевагу."
+        "\nРежим може мати власний список — він перебиває обидва.</i>"
+    )
 
     with suppress(TelegramBadRequest):
         await call.message.edit_text("\n".join(info_lines), reply_markup=builder.as_markup())

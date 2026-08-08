@@ -16,6 +16,10 @@ from core.engine.risk_engine import RiskEngine
 from exchanges.base import Order
 from bot.handlers.filters import cmd_ban, cmd_unban, _db as bot_db
 
+USER_ID = 5001
+OTHER_ID = 5002
+ADMIN_ID = 5003
+
 
 @pytest.fixture
 def event_loop():
@@ -132,40 +136,81 @@ async def test_taker_scanner_blacklist_modes(db):
 
 
 @pytest.mark.asyncio
-async def test_bot_ban_unban_commands(db):
-    # Mock message
+async def test_bot_ban_writes_to_personal_list(db):
+    """
+    Звичайний користувач банить СОБІ.
+
+    Раніше /ban від будь-кого писав у global_blacklist, тобто одна людина
+    вимикала мерчанта всім користувачам бота.
+    """
     message = MagicMock()
     message.answer = AsyncMock()
+    message.from_user.id = USER_ID
 
-    # 1. Тестуємо команду /ban з нікнеймом, що має пробіли та роздільником-двокрапкою
     message.text = "/ban CryptoBot Spiky Blowfish : реф і скам"
     await cmd_ban(message)
 
-    # Перевіряємо чи надійшла відповідь
     message.answer.assert_called_once()
-    assert "Заблоковано в Чорному списку" in message.answer.call_args[0][0]
+    answer = message.answer.call_args[0][0]
+    assert "Заблоковано в Чорному списку" in answer
+    assert "особистий" in answer
 
-    # Перевіряємо чи додалося в БД
-    is_bl, reason = await db.is_blacklisted("CryptoBot", "any_id", "Spiky Blowfish")
+    # У спільному списку його немає…
+    is_bl, _ = await db.is_blacklisted("CryptoBot", "any_id", "Spiky Blowfish")
+    assert is_bl is False
+    # …а у власному — є.
+    is_bl, reason = await db.is_user_blacklisted(
+        USER_ID, "CryptoBot", "any_id", "Spiky Blowfish"
+    )
     assert is_bl is True
     assert "реф і скам" in reason
 
-    # 2. Тестуємо команду /unban
+    # Чужі алерти це не зачіпає.
+    is_bl, _ = await db.is_user_blacklisted(
+        OTHER_ID, "CryptoBot", "any_id", "Spiky Blowfish"
+    )
+    assert is_bl is False
+
+    # /unban чистить власний список.
     message.answer.reset_mock()
     message.text = "/unban CryptoBot Spiky Blowfish"
     await cmd_unban(message)
 
     message.answer.assert_called_once()
-    assert "Розблоковано (вилучено з Чорного списку)" in message.answer.call_args[0][0]
+    assert "Розблоковано" in message.answer.call_args[0][0]
 
-    # Перевіряємо чи видалилося з БД
-    is_bl, reason = await db.is_blacklisted("CryptoBot", "any_id", "Spiky Blowfish")
+    is_bl, _ = await db.is_user_blacklisted(
+        USER_ID, "CryptoBot", "any_id", "Spiky Blowfish"
+    )
     assert is_bl is False
 
-    # 3. Додаємо запис перед тестуванням /blacklist, щоб список не був порожнім
+
+@pytest.mark.asyncio
+async def test_bot_ban_from_admin_is_shared(db, monkeypatch):
+    """Бан адміністратора лишається спільним — він і має діяти на всіх."""
+    monkeypatch.setattr("bot.handlers.filters._is_admin", lambda uid: uid == ADMIN_ID)
+
+    message = MagicMock()
+    message.answer = AsyncMock()
+    message.from_user.id = ADMIN_ID
+    message.text = "/ban CryptoBot Shared Scammer : скам з чеком"
+    await cmd_ban(message)
+
+    assert "спільний" in message.answer.call_args[0][0]
+    is_bl, reason = await db.is_blacklisted("CryptoBot", "any_id", "Shared Scammer")
+    assert is_bl is True
+    assert "скам з чеком" in reason
+
+
+@pytest.mark.asyncio
+async def test_bot_blacklist_command_still_lists_shared(db):
+    message = MagicMock()
+    message.answer = AsyncMock()
+    message.from_user.id = USER_ID
+
     await db.add_to_blacklist("CryptoBot", "unk_unborn_deer", "Unborn Deer", "Fake receipt")
 
-    # 4. Тестуємо команду /blacklist (без аргументів - список)
+    # /blacklist без аргументів — список
     from bot.handlers.filters import cmd_blacklist
     message.answer.reset_mock()
     message.text = "/blacklist"
@@ -175,7 +220,7 @@ async def test_bot_ban_unban_commands(db):
     assert "Чорний список мерчантів" in response_text
     assert "Unborn Deer" in response_text
 
-    # 5. Тестуємо команду /blacklist з пошуковим запитом
+    # /blacklist із пошуковим запитом
     message.answer.reset_mock()
     message.text = "/blacklist Deer"
     await cmd_blacklist(message)
@@ -247,6 +292,7 @@ async def test_blacklist_ui_callbacks_and_inputs(db):
     
     # 1. Test menu callback
     call = MagicMock()
+    call.from_user.id = USER_ID
     call.message = MagicMock()
     call.message.edit_text = AsyncMock()
     await on_blacklist_menu(call)
@@ -263,6 +309,7 @@ async def test_blacklist_ui_callbacks_and_inputs(db):
     # 3. Test add manual merchant via UI input
     message = MagicMock()
     message.answer = AsyncMock()
+    message.from_user.id = USER_ID
     message.text = "CryptoBot Spiky Blowfish : реф"
     state = AsyncMock()
     await on_blacklist_add_input(message, state)
@@ -288,7 +335,7 @@ async def test_blacklist_ui_callbacks_and_inputs(db):
 
     # 6. Test unban button callback
     call.answer = AsyncMock()
-    call.data = "bl_u:CryptoBot:unk_spiky_blowfish"
+    call.data = "bl_u:personal:CryptoBot:unk_spiky_blowfish"
     call.message.edit_text.reset_mock()
     await on_blacklist_unban_button(call)
     call.answer.assert_called_once()

@@ -424,3 +424,162 @@ class TestAdminUsers(_PersonalCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCardCrud(_PersonalCase):
+    """
+    Заведення, редагування й видалення картки.
+
+    До цього HTTP умів лише читати картки й правити ліміти: щоб додати нову
+    чи перейменувати стару, доводилось іти в Telegram.
+    """
+
+    async def _card_ids(self, owner: int = USER_ID) -> set[str]:
+        return {c["id"] for c in await self.db.get_cards(owner_id=owner)}
+
+    async def test_create_and_read_back(self):
+        resp = self.client.post(
+            "/api/v1/cards",
+            json={
+                "bankName": "Monobank",
+                "cardNumber": "1234567812345678",
+                "label": "основна",
+                "category": "self",
+                "balance": 1500.0,
+            },
+            headers=self._auth(USER_ID),
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        card_id = resp.json()["cardId"]
+
+        cards = await self.db.get_cards(owner_id=USER_ID)
+        created = next(c for c in cards if c["id"] == card_id)
+        self.assertEqual(created["bank_name"], "monobank")
+        self.assertEqual(created["last_four"], "5678")
+        self.assertEqual(created["is_own"], 1)
+
+    async def test_last_four_is_enough_without_full_number(self):
+        resp = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "pumb", "lastFour": "4321"},
+            headers=self._auth(USER_ID),
+        )
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_broken_number_is_rejected(self):
+        for payload in (
+            {"bankName": "monobank", "cardNumber": "12345"},
+            {"bankName": "monobank"},
+            {"bankName": "monobank", "lastFour": "12"},
+            {"bankName": "", "lastFour": "1234"},
+        ):
+            with self.subTest(payload=payload):
+                resp = self.client.post(
+                    "/api/v1/cards", json=payload, headers=self._auth(USER_ID)
+                )
+                self.assertEqual(resp.status_code, 400)
+
+    def test_unknown_category_is_rejected(self):
+        resp = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "lastFour": "1111", "category": "нонсенс"},
+            headers=self._auth(USER_ID),
+        )
+        self.assertEqual(resp.status_code, 400)
+
+    async def test_partial_update_keeps_other_fields(self):
+        card_id = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "lastFour": "1111", "label": "стара мітка"},
+            headers=self._auth(USER_ID),
+        ).json()["cardId"]
+
+        resp = self.client.post(
+            f"/api/v1/cards/{card_id}",
+            json={"note": "тримати для виводу"},
+            headers=self._auth(USER_ID),
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        card = next(c for c in await self.db.get_cards(owner_id=USER_ID) if c["id"] == card_id)
+        self.assertEqual(card["note"], "тримати для виводу")
+        self.assertEqual(card["label"], "стара мітка", "мітка не мала змінитись")
+
+    async def test_category_drives_is_own(self):
+        card_id = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "lastFour": "2222", "category": "self"},
+            headers=self._auth(USER_ID),
+        ).json()["cardId"]
+
+        self.client.post(
+            f"/api/v1/cards/{card_id}",
+            json={"category": "drop"},
+            headers=self._auth(USER_ID),
+        )
+
+        card = next(c for c in await self.db.get_cards(owner_id=USER_ID) if c["id"] == card_id)
+        self.assertEqual(card["category"], "drop")
+        self.assertEqual(card["is_own"], 0, "дропівська картка не може лишатись власною")
+
+    async def test_delete_removes_card_and_its_transactions(self):
+        card_id = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "lastFour": "3333"},
+            headers=self._auth(USER_ID),
+        ).json()["cardId"]
+
+        await self.db._db.execute(
+            "INSERT INTO card_transactions (id, card_id, amount, direction, type, source, timestamp)"
+            " VALUES ('tx-1', ?, 100.0, 'in', 'work', 'test', 0)",
+            (card_id,),
+        )
+        await self.db._db.commit()
+
+        resp = self.client.delete(f"/api/v1/cards/{card_id}", headers=self._auth(USER_ID))
+        self.assertEqual(resp.status_code, 200)
+
+        self.assertNotIn(card_id, await self._card_ids())
+        async with self.db._db.execute(
+            "SELECT COUNT(*) FROM card_transactions WHERE card_id = ?", (card_id,)
+        ) as cur:
+            self.assertEqual((await cur.fetchone())[0], 0, "транзакції лишились сиротами")
+
+    async def test_cannot_touch_someone_elses_card(self):
+        card_id = self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "lastFour": "4444"},
+            headers=self._auth(OTHER_ID),
+        ).json()["cardId"]
+
+        self.assertEqual(
+            self.client.post(
+                f"/api/v1/cards/{card_id}", json={"label": "чуже"},
+                headers=self._auth(USER_ID),
+            ).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.delete(f"/api/v1/cards/{card_id}", headers=self._auth(USER_ID)).status_code,
+            403,
+        )
+        self.assertIn(card_id, await self._card_ids(OTHER_ID))
+
+    def test_card_secrets_never_leave_the_backend(self):
+        # Повний номер і токен Monobank зберігаються, але у відповідь не
+        # потрапляють: SELECT * тягнув їх просто в браузер.
+        self.client.post(
+            "/api/v1/cards",
+            json={"bankName": "monobank", "cardNumber": "4444555566667777"},
+            headers=self._auth(USER_ID),
+        )
+
+        body = self.client.get("/api/v1/cards", headers=self._auth(USER_ID)).json()
+        self.assertTrue(body)
+        for card in body:
+            self.assertNotIn("cardNumber", card)
+            self.assertNotIn("monoXTokenEncrypted", card)
+            self.assertNotIn("monoWebhookSecret", card)
+            self.assertNotIn("4444555566667777", str(card))
+        self.assertTrue(body[0]["hasCardNumber"])

@@ -242,6 +242,36 @@ class MerchantDB:
                                      )
                                          );
 
+                                     -- Персональний чорний список.
+                                     --
+                                     -- global_blacklist вище — спільний: туди
+                                     -- пише ризик-движок і адміністратор, і він
+                                     -- діє на всіх. Але «мені цей мерчант не
+                                     -- подобається» — рішення однієї людини, і
+                                     -- нав'язувати його решті не можна.
+                                     --
+                                     -- Окрема таблиця, а не owner_id у спільній:
+                                     -- вердикт ризик-движка кешується на мерчанта
+                                     -- один раз на цикл для всіх користувачів, і
+                                     -- робити його персональним означало б
+                                     -- перераховувати скоринг N разів. Тому
+                                     -- персональний шар застосовується пізніше —
+                                     -- там, де user_id уже відомий
+                                     -- (alert_dispatcher, taker_scanner).
+                                     CREATE TABLE IF NOT EXISTS user_blacklist
+                                     (
+                                         owner_id      INTEGER NOT NULL,
+                                         exchange      TEXT    NOT NULL,
+                                         merchant_id   TEXT    NOT NULL,
+                                         merchant_name TEXT,
+                                         reason        TEXT,
+                                         added_at      REAL DEFAULT 0,
+                                         PRIMARY KEY (owner_id, exchange, merchant_id)
+                                     );
+
+                                     CREATE INDEX IF NOT EXISTS idx_user_blacklist_owner
+                                         ON user_blacklist(owner_id);
+
                                      CREATE TABLE IF NOT EXISTS block_log
                                      (
                                          exchange
@@ -680,8 +710,28 @@ class MerchantDB:
         await self._ensure_column("active_trades", "payment_method", "TEXT DEFAULT ''")
         # 🚀 ФАЗА 1: Режим сканера (SPREAD / TAKER_BUY / TAKER_SELL / MAKER_BUY / MAKER_SELL)
         await self._ensure_column("scanner_users", "scanner_mode", "TEXT DEFAULT 'SPREAD'")
+        # Набір активних режимів через кому — один користувач може ловити
+        # одразу і купівлю, і продаж.
+        #
+        # scanner_mode лишається: він визначає, який режим вважається
+        # основним (що показує меню бота першим), і слугує фолбеком для
+        # рядків, де scanner_modes ще порожній. Тримати два поля дешевше,
+        # ніж переписувати кожне місце, яке роками читало один рядок.
+        await self._ensure_column("scanner_users", "scanner_modes", "TEXT DEFAULT ''")
         # 🚀 ФАЗА 2: Фільтр по діапазону ціни для тейкер-режимів
         await self._ensure_column("scanner_users", "price_range_json", "TEXT DEFAULT '{}'")
+        # Банки окремо для конкретного режиму.
+        #
+        # Базові списки (bank_codes / buy_bank_codes / sell_bank_codes)
+        # лишаються спільними — вони й далі працюють у всіх режимах. Тут
+        # зберігаються лише ВИНЯТКИ: {"TAKER_BUY": {"buy": ["43"]}}.
+        #
+        # Навіщо: майстер Taker Buy писав обрані банки просто в
+        # buy_bank_codes, тобто мовчки перевизначав банки купівлі й для
+        # спред-режиму. Два режими топтали один одного через спільну колонку.
+        await self._ensure_column(
+            "scanner_users", "mode_bank_overrides_json", "TEXT DEFAULT '{}'"
+        )
         # 🚀 ФАЗА 3: Maker — ціна купівлі (MAKER_SELL) + цільова маржа (MAKER_BUY)
         await self._ensure_column("scanner_users", "maker_buy_price", "REAL DEFAULT 0.0")
         await self._ensure_column("scanner_users", "target_margin", "REAL DEFAULT 0.005")

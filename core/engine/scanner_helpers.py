@@ -8,6 +8,21 @@ from core.utils.tasks import spawn
 logger = logging.getLogger("Scanner.Helpers")
 
 
+def _user_modes(user: dict) -> list[str]:
+    """
+    Активні режими користувача.
+
+    scanner_modes заповнює UserRepo (див. _parse_scanner_modes) і там уже
+    врахований фолбек на одиничний scanner_mode. Але сюди приходять і
+    словники, зібрані руками — у тестах і в HTTP-шарі, — тож підстраховка
+    лишається тут.
+    """
+    modes = user.get("scanner_modes")
+    if isinstance(modes, (list, tuple)) and modes:
+        return [str(m).upper() for m in modes]
+    return [str(user.get("scanner_mode") or "SPREAD").upper()]
+
+
 def calculate_search_amounts(active_users: list[dict], default_amounts: list[float]) -> list[float]:
     """Будує динамічну сітку сум для пошуку на основі капіталів активних юзерів."""
     _grid: set[float] = {1000.0, 2500.0}
@@ -35,18 +50,27 @@ async def process_taker_path(
     if not active_users or is_muted():
         return
 
-    taker_users = [
-        u for u in active_users
-        if u.get("scanner_mode") in ("TAKER_BUY", "TAKER_SELL")
+    # Режимів у користувача може бути кілька — наприклад, і купівля, і
+    # продаж одночасно. Раніше тут стояла перевірка одного scanner_mode,
+    # тому «ловити обидві сторони» доводилось імітувати перемиканням режиму
+    # туди-сюди, і половину часу друга сторона просто не сканувалась.
+    #
+    # Розгортаємо в пари (юзер, режим): кожна проходить свій набір фільтрів
+    # (taker_buy_* проти taker_sell_*) і має власний дедуп.
+    taker_jobs: list[tuple[dict, str]] = [
+        (u, mode)
+        for u in active_users
+        for mode in _user_modes(u)
+        if mode in ("TAKER_BUY", "TAKER_SELL")
     ]
-    for t_user in taker_users:
+
+    for t_user, t_mode in taker_jobs:
         try:
             t_orders = await taker_scanner.find_orders_for_user(
-                t_user, buy_grouped, sell_grouped,
+                {**t_user, "scanner_mode": t_mode}, buy_grouped, sell_grouped,
             )
             if not t_orders:
                 continue
-            t_mode = t_user["scanner_mode"]
 
             # Кандидати, які ще не відправлялись. Позначку в dedup ставимо НЕ
             # тут, а після ризик-фільтрів: раніше ордер маркувався до перевірки,
@@ -54,7 +78,7 @@ async def process_taker_path(
             # тобто після зняття блоку LLM юзер його вже не отримував.
             candidates = [
                 o for o in t_orders
-                if not taker_dedup.seen(f"taker:{t_user['user_id']}:{o.id}")
+                if not taker_dedup.seen(f"taker:{t_user['user_id']}:{t_mode}:{o.id}")
             ]
 
             fresh = []
@@ -81,7 +105,7 @@ async def process_taker_path(
 
                 # Маркуємо тільки те, що реально піде юзеру.
                 for o in fresh:
-                    taker_dedup.mark(f"taker:{t_user['user_id']}:{o.id}")
+                    taker_dedup.mark(f"taker:{t_user['user_id']}:{t_mode}:{o.id}")
 
             if fresh:
                 logger.info(
@@ -161,7 +185,7 @@ async def process_maker_path(
     # ── MAKER_SELL: розрахунок рекомендованої ціни продажу ──
     maker_sell_users = [
         u for u in active_users
-        if u.get("scanner_mode") == "MAKER_SELL"
+        if "MAKER_SELL" in _user_modes(u)
            and float(u.get("maker_buy_price", 0)) > 0
     ]
     for ms_user in maker_sell_users:
@@ -220,7 +244,7 @@ async def process_maker_path(
     # ── MAKER_BUY: аналіз ринку + рекомендація ціни купівлі ──
     maker_buy_users = [
         u for u in active_users
-        if u.get("scanner_mode") == "MAKER_BUY"
+        if "MAKER_BUY" in _user_modes(u)
     ]
     for mb_user in maker_buy_users:
         try:

@@ -603,16 +603,25 @@ class StatsEngine:
 
         return "\n".join(lines)
 
-    async def get_full_stats(self, period_days: int = 30) -> dict:
-        """Повна статистика для API."""
+    async def get_full_stats(
+        self, period_days: int = 30, owner_user_id: int = 0, mode: str = "ALL"
+    ) -> dict:
+        """
+        Повна статистика для API.
+
+        owner_user_id=0 означає «всі користувачі» — це погляд оператора.
+        Кожен окремий метод уміє фільтрувати по власнику вже давно, але сюди
+        параметр не був прокинутий, тож HTTP-дашборд завжди показував
+        зведення по всіх, тоді як бот у тому ж меню рахує особисте.
+        """
         return {
-            "summary": await self.get_summary(period_days),
-            "proposals": await self._db.get_proposals_summary(period_days),
-            "daily": await self.get_profit_by_day(period_days),
-            "exchanges": await self.get_top_exchanges(period_days),
-            "banks": await self.get_top_banks(period_days),
-            "heatmap": await self.get_hourly_heatmap(period_days),
-            "weekly": await self.get_weekly_comparison(period_days),
+            "summary": await self.get_summary(period_days, owner_user_id, mode),
+            "proposals": await self._db.get_proposals_summary(period_days, owner_user_id, mode),
+            "daily": await self.get_profit_by_day(period_days, owner_user_id, mode),
+            "exchanges": await self.get_top_exchanges(period_days, owner_user_id, mode),
+            "banks": await self.get_top_banks(period_days, owner_user_id, mode),
+            "heatmap": await self.get_hourly_heatmap(period_days, owner_user_id, mode),
+            "weekly": await self.get_weekly_comparison(period_days, owner_user_id, mode),
         }
 
     # ─── Пропозиції сканера (детальні звіти) ──────────────────────────────

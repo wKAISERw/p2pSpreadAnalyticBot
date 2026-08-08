@@ -56,17 +56,30 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
             card_settings = await _db.get_user_card_settings(call.from_user.id)
             card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
             
+            # Капітал показуємо тим числом, яким реально можна оперувати.
+            #
+            # get_user_auto_capital() без банків повертає СУМУ по всіх
+            # картках, а угода йде з карток одного банку — движок бере
+            # максимум по банку. Через це в меню стояло, скажімо,
+            # «31 123 ₴», а масштабування під ордер писало «21 298 ₴», і
+            # розбіжність нічим не пояснювалась. Тепер основна цифра —
+            # доступна в угоді, а загальна сума йде поруч як довідка.
+            breakdown = await _db.get_user_capital_breakdown(call.from_user.id)
+            usable = float(breakdown.get("usable", 0.0))
+            total = float(breakdown.get("total", 0.0))
+            best_bank = str(breakdown.get("best_bank", "") or "")
+
+            spread_note = ""
+            if total > usable + 1:
+                spread_note = f" <i>(на картках {total:,.0f}, у різних банках)</i>".replace(",", " ")
+
             if cap_mode == "auto":
-                auto_cap = await _db.get_user_auto_capital(call.from_user.id)
-                user_capital = f"{auto_cap:.1f} (Авто)"
+                bank_note = f" · {best_bank}" if best_bank else ""
+                user_capital = f"{usable:.1f} (Авто{bank_note}){spread_note}"
             else:
                 manual_cap = float(row[0])
-                if card_module_enabled:
-                    auto_cap = await _db.get_user_auto_capital(call.from_user.id)
-                    if auto_cap > 0 and auto_cap < manual_cap:
-                        user_capital = f"{manual_cap:.1f} (Обмеж. до {auto_cap:.1f})"
-                    else:
-                        user_capital = f"{manual_cap:.1f}"
+                if card_module_enabled and usable > 0 and usable < manual_cap:
+                    user_capital = f"{manual_cap:.1f} (Обмеж. до {usable:.1f}){spread_note}"
                 else:
                     user_capital = f"{manual_cap:.1f}"
             _min_amt = float(row[1] or 0.0)
@@ -125,12 +138,26 @@ async def cmd_ban(message: Message) -> None:
         merchant_id = merchant_val
         merchant_name = "Unknown"
 
-    await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "manual_cmd")
+    # Адмін банить для всіх, решта — собі.
+    #
+    # Раніше будь-хто писав у спільний список, тобто одна людина вирішувала
+    # за всіх користувачів бота. Персональний шар живе в user_blacklist і
+    # застосовується в alert_dispatcher / taker_scanner.
+    if _is_admin(message.from_user.id):
+        await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "manual_cmd")
+        scope_line = "Список: <b>спільний</b> (діє на всіх)"
+    else:
+        await _db.add_user_blacklist(
+            message.from_user.id, exchange, merchant_id, merchant_name, reason
+        )
+        scope_line = "Список: <b>особистий</b>"
+
     await message.answer(
         f"⛔ <b>Заблоковано в Чорному списку</b>\n"
         f"Біржа: <code>{exchange}</code>\n"
         f"Користувач: <code>{merchant_val}</code>\n"
-        f"Причина: {reason}"
+        f"Причина: {reason}\n"
+        f"{scope_line}"
     )
 
 
@@ -161,25 +188,53 @@ async def cmd_unban(message: Message) -> None:
 
     # Видаляємо з БД
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-    
+    uid = message.from_user.id
+    removed: list[str] = []
+
+    # Спершу свій список — його чистить будь-хто і без питань.
     if merchant_name:
-        async with conn.execute(
-            "DELETE FROM global_blacklist WHERE exchange=? AND (merchant_id=? OR LOWER(merchant_name)=LOWER(?))",
-            (exchange, merchant_id, merchant_name)
-        ):
-            pass
+        cur = await conn.execute(
+            "DELETE FROM user_blacklist WHERE owner_id=? AND exchange=? "
+            "AND (merchant_id=? OR LOWER(merchant_name)=LOWER(?))",
+            (uid, exchange, merchant_id, merchant_name),
+        )
     else:
-        async with conn.execute(
-            "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
-            (exchange, merchant_id)
-        ):
-            pass
-            
+        cur = await conn.execute(
+            "DELETE FROM user_blacklist WHERE owner_id=? AND exchange=? AND merchant_id=?",
+            (uid, exchange, merchant_id),
+        )
+    if cur.rowcount:
+        removed.append("особистого")
+        _db._user_bl_cache.pop(int(uid), None)
+
+    # Спільний — лише адмін: вилучення звідти знімає бан у всіх одразу.
+    if _is_admin(uid):
+        if merchant_name:
+            cur = await conn.execute(
+                "DELETE FROM global_blacklist WHERE exchange=? AND (merchant_id=? OR LOWER(merchant_name)=LOWER(?))",
+                (exchange, merchant_id, merchant_name),
+            )
+        else:
+            cur = await conn.execute(
+                "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
+                (exchange, merchant_id),
+            )
+        if cur.rowcount:
+            removed.append("спільного")
+
     await conn.commit()
+
+    if not removed:
+        return await message.answer(
+            f"🤷 <code>{merchant_val}</code> не знайдено у твоєму чорному списку."
+            + ("" if _is_admin(uid) else "\n<i>Спільний список знімає лише адміністратор.</i>")
+        )
+
     await message.answer(
-        f"✅ <b>Розблоковано (вилучено з Чорного списку)</b>\n"
+        f"✅ <b>Розблоковано</b>\n"
         f"Біржа: <code>{exchange}</code>\n"
-        f"Користувач: <code>{merchant_val}</code>"
+        f"Користувач: <code>{merchant_val}</code>\n"
+        f"Вилучено з {' і '.join(removed)} списку"
     )
 
 
@@ -1066,25 +1121,22 @@ async def _save_exchange_merchant_filter(user_id: int, exchange: str, key: str, 
 
 @router.callback_query(F.data == "set:scanner_mode")
 async def on_scanner_mode_menu(call: CallbackQuery) -> None:
-    """Показує меню вибору режиму сканера."""
-    current_mode = "SPREAD"
-    if _db:
-        users = await _db.get_active_users()
-        for u in users:
-            if u["user_id"] == call.from_user.id:
-                current_mode = u.get("scanner_mode", "SPREAD")
-                break
+    """Меню режимів сканування. Режимів може бути кілька одночасно."""
+    modes = await _get_scanner_modes(call.from_user.id)
+
     from bot.keyboards import scanner_mode_kb
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "🎯 <b>Режим сканування</b>\n\n"
+            "🎯 <b>Режими сканування</b>\n\n"
             "• <b>SPREAD</b> — класичний, шукає зв'язки Купівля→Продаж з маржею\n"
             "• <b>TAKER BUY</b> — шукає найвигідніші sell-ордери для швидкої покупки\n"
             "• <b>TAKER SELL</b> — шукає найвигідніші buy-ордери для швидкого продажу\n"
             "• <b>MAKER BUY</b> — аналіз ринку + підказка оптимальної ціни купівлі\n"
             "• <b>MAKER SELL</b> — розрахунок мін. ціни продажу за ціною купівлі\n\n"
-            f"Поточний: <b>{current_mode}</b>",
-            reply_markup=scanner_mode_kb(current_mode),
+            f"Активні: <b>{', '.join(modes)}</b>\n"
+            "<i>Натисни, щоб увімкнути або вимкнути. Можна тримати кілька —"
+            " наприклад, і купівлю, і продаж одночасно.</i>",
+            reply_markup=scanner_mode_kb(modes),
         )
     await call.answer()
 
@@ -1093,17 +1145,60 @@ async def on_scanner_mode_menu(call: CallbackQuery) -> None:
 # 🔧 TAKER FSM — Helper Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _set_scanner_mode_db(user_id: int, mode: str) -> None:
-    """Атомарно записує режим і вмикає сканер. Викликати ТІЛЬКИ після підтвердження."""
+async def _get_scanner_modes(user_id: int) -> list[str]:
+    """Активні режими користувача (з фолбеком на одиничний scanner_mode)."""
+    from core.storage.user_repo import _parse_scanner_modes
+
+    if not _db:
+        return ["SPREAD"]
+    conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
+    async with conn.execute(
+        "SELECT COALESCE(scanner_modes, ''), COALESCE(scanner_mode, 'SPREAD')"
+        " FROM scanner_users WHERE user_id = ?",
+        (user_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return ["SPREAD"]
+    return _parse_scanner_modes(row[0], row[1])
+
+
+async def _write_scanner_modes(user_id: int, modes: list[str]) -> None:
+    """
+    Записує набір режимів.
+
+    scanner_mode лишається основним — його показує статус у меню, і на нього
+    падають старі рядки, де scanner_modes ще порожній. Тримаємо їх
+    узгодженими: основним стає перший режим набору.
+    """
+    from core.storage.user_repo import SCANNER_MODES
+
     if not _db:
         return
+
+    ordered = [m for m in SCANNER_MODES if m in set(modes)] or ["SPREAD"]
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
     await conn.execute(
-        "UPDATE scanner_users SET scanner_mode = ?, is_alerts_active = 1 WHERE user_id = ?",
-        (mode, user_id),
+        "UPDATE scanner_users SET scanner_modes = ?, scanner_mode = ?,"
+        " is_alerts_active = 1 WHERE user_id = ?",
+        (",".join(ordered), ordered[0], user_id),
     )
     await conn.commit()
-    logger.info("✅ Mode set → user=%s mode=%s", user_id, mode)
+    logger.info("✅ Modes set → user=%s modes=%s", user_id, ordered)
+
+
+async def _set_scanner_mode_db(user_id: int, mode: str) -> None:
+    """
+    Додає режим до активних і вмикає сканер.
+
+    Раніше цей виклик ЗАМІНЯВ режим: увімкнув купівлю — вимкнув продаж.
+    Тепер режими накопичуються, тож можна ловити обидві сторони одночасно.
+    Викликати ТІЛЬКИ після підтвердження пресетів.
+    """
+    modes = await _get_scanner_modes(user_id)
+    if mode not in modes:
+        modes.append(mode)
+    await _write_scanner_modes(user_id, modes)
 
 
 async def _save_taker_sell_db(user_id: int, d: dict, roi: dict) -> None:
@@ -1122,8 +1217,7 @@ async def _save_taker_sell_db(user_id: int, d: dict, roi: dict) -> None:
 
     await conn.execute(
         """UPDATE scanner_users
-           SET scanner_mode              = 'TAKER_SELL',
-               is_alerts_active          = 1,
+           SET is_alerts_active          = 1,
                taker_sell_amount         = ?,
                taker_sell_price          = ?,
                taker_sell_exchange       = ?,
@@ -1152,21 +1246,16 @@ async def _save_taker_buy_db(user_id: int, d: dict) -> None:
     if not _db:
         return
     conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
-    banks_csv = ",".join(str(c) for c in d.get("banks", []))
     await conn.execute(
         """UPDATE scanner_users
-           SET scanner_mode             = 'TAKER_BUY',
-               is_alerts_active         = 1,
+           SET is_alerts_active         = 1,
                taker_buy_amount         = ?,
                taker_buy_price_strategy = ?,
                taker_buy_price_from     = ?,
                taker_buy_max_price      = ?,
                taker_buy_limit_min      = ?,
                taker_buy_limit_max      = ?,
-               taker_buy_speed          = ?,
-               buy_bank_codes           = ?
-
-
+               taker_buy_speed          = ?
            WHERE user_id = ?""",
         (
             d["amount"],
@@ -1176,11 +1265,76 @@ async def _save_taker_buy_db(user_id: int, d: dict) -> None:
             d.get("limit_min", 0.0),
             d.get("limit_max", 0.0),
             d.get("speed", "ANY"),
-            banks_csv,
             user_id,
         ),
     )
     await conn.commit()
+
+    # Банки — окремо, у перевизначення саме для TAKER_BUY.
+    #
+    # Раніше цей рядок писав обраний список просто в buy_bank_codes, який
+    # читає ще й спред-режим: налаштувавши банки в майстрі тейкера, юзер
+    # мовчки міняв банки купівлі для спредів. Тепер вибір лишається в межах
+    # свого режиму, а спільні списки не чіпаються.
+    await _set_mode_bank_override(user_id, "TAKER_BUY", "buy", d.get("banks", []))
+
+
+def _read_mode_bank_override(raw_json, mode: str, side: str) -> list[str]:
+    """Банки режиму з JSON-колонки. Порожньо = використовуються спільні."""
+    import json
+
+    try:
+        data = json.loads(raw_json) if isinstance(raw_json, str) else (raw_json or {})
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    per_mode = data.get(str(mode).upper()) if isinstance(data, dict) else None
+    if not isinstance(per_mode, dict):
+        return []
+    return [str(b) for b in (per_mode.get(side) or []) if str(b).strip()]
+
+
+async def _set_mode_bank_override(user_id: int, mode: str, side: str, banks) -> None:
+    """
+    Записує банки для конкретного режиму. Порожній список знімає
+    перевизначення — режим повертається до спільних списків.
+    """
+    import json
+
+    from core.engine.bank_scope import normalize_overrides
+    from core.storage.user_repo import SCANNER_MODES
+
+    if not _db:
+        return
+
+    conn = getattr(_db, "_db", None) or getattr(_db, "db", _db)
+    async with conn.execute(
+        "SELECT COALESCE(mode_bank_overrides_json, '{}') FROM scanner_users WHERE user_id = ?",
+        (user_id,),
+    ) as cur:
+        row = await cur.fetchone()
+
+    try:
+        current = json.loads(row[0]) if row and row[0] else {}
+    except (json.JSONDecodeError, TypeError):
+        current = {}
+
+    per_mode = dict(current.get(mode.upper()) or {})
+    values = [str(b).strip() for b in (banks or []) if str(b).strip()]
+    if values:
+        per_mode[side] = values
+    else:
+        per_mode.pop(side, None)
+
+    current[mode.upper()] = per_mode
+    cleaned = normalize_overrides(current, SCANNER_MODES)
+
+    await conn.execute(
+        "UPDATE scanner_users SET mode_bank_overrides_json = ? WHERE user_id = ?",
+        (json.dumps(cleaned), user_id),
+    )
+    await conn.commit()
+    logger.info("🏦 Банки режиму %s/%s → user=%s: %s", mode, side, user_id, values or "спільні")
 
 
 async def _update_taker_sell_param_db(user_id: int, key: str, value) -> None:
@@ -1275,7 +1429,7 @@ async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
     async with conn.execute(
         """SELECT taker_buy_amount, taker_buy_price_strategy, taker_buy_price_from,
                   taker_buy_max_price, taker_buy_limit_min, taker_buy_limit_max,
-                  taker_buy_speed, buy_bank_codes
+                  taker_buy_speed, COALESCE(mode_bank_overrides_json, '{}')
            FROM scanner_users WHERE user_id = ?""",
         (user_id,)
     ) as cur:
@@ -1292,7 +1446,9 @@ async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
         "limit_min": float(row[4] or 0.0),
         "limit_max": float(row[5] or 0.0),
         "speed": row[6] or "ANY",
-        "banks": (row[7] or "").split(",") if row[7] else [],
+        # Банки тейкера живуть у перевизначенні режиму — спільні
+        # buy_bank_codes лишаються за спредом.
+        "banks": _read_mode_bank_override(row[7], "TAKER_BUY", "buy"),
     }
     
     # Update the modified key
@@ -1315,8 +1471,6 @@ async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
     elif key == "speed":
         d["speed"] = str(value)
         
-    banks_csv = ",".join(str(c) for c in d["banks"] if c)
-    
     # Save back to DB
     await conn.execute(
         """UPDATE scanner_users
@@ -1326,8 +1480,7 @@ async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
                taker_buy_max_price      = ?,
                taker_buy_limit_min      = ?,
                taker_buy_limit_max      = ?,
-               taker_buy_speed          = ?,
-               buy_bank_codes           = ?
+               taker_buy_speed          = ?
            WHERE user_id = ?""",
         (
             d["amount"],
@@ -1337,11 +1490,14 @@ async def _update_taker_buy_param_db(user_id: int, key: str, value) -> None:
             d["limit_min"],
             d["limit_max"],
             d["speed"],
-            banks_csv,
             user_id
         )
     )
     await conn.commit()
+
+    # Банки зберігаємо окремо — вони живуть у перевизначенні режиму.
+    if key == "banks":
+        await _set_mode_bank_override(user_id, "TAKER_BUY", "buy", d["banks"])
 
 
 def _tbuy_price_strategy_kb() -> InlineKeyboardMarkup:
@@ -1749,25 +1905,49 @@ async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
     """
     mode = call.data.split(":")[1]
 
-    old_mode = "SPREAD"
     user_row = None
     if _db:
         users = await _db.get_active_users()
         user_row = next((u for u in users if u["user_id"] == call.from_user.id), None)
-        if user_row:
-            old_mode = user_row.get("scanner_mode", "SPREAD")
 
-    # ── Cleanup: зупиняємо мейкер-сервіси при виході з MAKER ──
-    if old_mode in ("MAKER_SELL", "MAKER_BUY") and mode not in ("MAKER_SELL", "MAKER_BUY"):
-        for key in list(_active_repricers):
-            if str(call.from_user.id) in str(key):
-                task = _active_repricers.pop(key, None)
-                if task and not task.done():
-                    task.cancel()
-                    logger.info("🛑 AdRepricer зупинено (mode switch): %s", key)
-        if _maker_monitor:
-            with suppress(Exception):
-                _maker_monitor.stop_all()
+    active_modes = await _get_scanner_modes(call.from_user.id)
+
+    # ── Повторний клік вимикає режим ──
+    #
+    # Меню тепер мультивибірне, тож натиск по вже увімкненому означає
+    # «прибрати», а не «налаштувати ще раз». Останній режим не даємо зняти:
+    # користувач без жодного режиму просто нічого не отримує і виглядає це
+    # як поламаний бот — для тиші є окремий вимикач алертів.
+    if mode in active_modes:
+        if len(active_modes) == 1:
+            return await call.answer(
+                "Це єдиний активний режим. Увімкни інший, щоб зняти цей, "
+                "або вимкни алерти в меню фільтрів.",
+                show_alert=True,
+            )
+
+        remaining = [m for m in active_modes if m != mode]
+        await _write_scanner_modes(call.from_user.id, remaining)
+
+        if mode in ("MAKER_SELL", "MAKER_BUY") and not any(
+            m in ("MAKER_SELL", "MAKER_BUY") for m in remaining
+        ):
+            _stop_maker_services(call.from_user.id)
+
+        from bot.keyboards import scanner_mode_kb
+        with suppress(TelegramBadRequest):
+            await call.message.edit_text(
+                f"⏹ Режим <b>{mode}</b> вимкнено\n\n"
+                "Лишились: " + ", ".join(f"<b>{m}</b>" for m in remaining),
+                reply_markup=scanner_mode_kb(remaining),
+            )
+        return await call.answer()
+
+    # Блоку «зупинити мейкер-сервіси при виході з MAKER» тут більше немає:
+    # ми нічого не знімаємо, а лише додаємо режим. Раніше вмикання тейкера
+    # означало вихід із мейкера, тож зупинка була доречна — тепер вона
+    # вбивала б репрайсер, який далі має працювати. Зупинка живе у гілці
+    # вимикання вище.
 
     # ── MAKER_SELL ──
     if mode == "MAKER_SELL":
@@ -1883,8 +2063,11 @@ async def on_price_range_menu(call: CallbackQuery) -> None:
     from bot.keyboards import price_range_kb
     with suppress(TelegramBadRequest):
         await call.message.edit_text(
-            "💰 <b>Фільтр ціни (UAH/USDT)</b>\n\n"
-            "Обмежує ордери, які показує тейкер-режим.\n"
+            "💰 <b>Фільтр ціни входу (UAH/USDT)</b>\n\n"
+            "Обмежує ціну <b>купівлі</b> у спред-режимі: зв'язки, де вхід "
+            "поза діапазоном, не надсилаються.\n\n"
+            "<i>Тейкер-режими його не використовують — у них власні цінові "
+            "стратегії в налаштуваннях Taker Buy / Taker Sell.</i>\n\n"
             "Оберіть тип фільтра:",
             reply_markup=price_range_kb(),
         )
@@ -2027,9 +2210,16 @@ async def on_feedback(call: CallbackQuery):
 
         reason = reason_map[action]
 
-        # Записуємо в глобальний Blacklist
-        await _db.add_to_blacklist(exchange, mid, "Unknown", reason, "manual_tg")
-        await call.answer(f"✅ Успіх! Заблоковано: {reason}", show_alert=True)
+        # Скарга з-під алерта. Раніше вона одразу писалась у спільний список,
+        # тобто натиск однієї людини вимикав мерчанта всім користувачам бота —
+        # без перевірки і без можливості це побачити. Тепер бан особистий,
+        # а від адміністратора — спільний.
+        if _is_admin(call.from_user.id):
+            await _db.add_to_blacklist(exchange, mid, "Unknown", reason, "manual_tg")
+            await call.answer(f"✅ Заблоковано для всіх: {reason}", show_alert=True)
+        else:
+            await _db.add_user_blacklist(call.from_user.id, exchange, mid, "Unknown", reason)
+            await call.answer(f"✅ Заблоковано в твоєму списку: {reason}", show_alert=True)
 
         # 📊 Feedback Loop: записуємо лічильники для аналізу пропущених ризиків
         # Ці дані дозволяють відстежувати, які категорії ризику найчастіше пропускає AI
@@ -2481,13 +2671,27 @@ async def on_blacklist_list(call: CallbackQuery) -> None:
         return await call.answer("❌ База не ініціалізована", show_alert=True)
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
 
+    # Показуємо обидва списки: свій і спільний.
+    #
+    # Поки тут був тільки global_blacklist, людина банила мерчанта і не
+    # бачила його ніде — власний бан ставав невидимим одразу після натиску.
+    uid = call.from_user.id
     async with conn.execute(
-        "SELECT exchange, merchant_id, merchant_name, reason FROM global_blacklist ORDER BY added_at DESC LIMIT ? OFFSET ?",
-        (limit, offset)
+        "SELECT exchange, merchant_id, merchant_name, reason, added_at, 'personal' AS scope "
+        "FROM user_blacklist WHERE owner_id = ? "
+        "UNION ALL "
+        "SELECT exchange, merchant_id, merchant_name, reason, added_at, 'global' AS scope "
+        "FROM global_blacklist "
+        "ORDER BY added_at DESC LIMIT ? OFFSET ?",
+        (uid, limit, offset)
     ) as cur:
         rows = await cur.fetchall()
 
-    async with conn.execute("SELECT COUNT(*) FROM global_blacklist") as cur:
+    async with conn.execute(
+        "SELECT (SELECT COUNT(*) FROM user_blacklist WHERE owner_id = ?) "
+        "     + (SELECT COUNT(*) FROM global_blacklist)",
+        (uid,)
+    ) as cur:
         total = (await cur.fetchone())[0]
 
     if not rows:
@@ -2496,6 +2700,7 @@ async def on_blacklist_list(call: CallbackQuery) -> None:
         builder.button(text="🔙 Назад", callback_data="blacklist:menu")
         return await call.message.edit_text(text, reply_markup=builder.as_markup())
 
+    is_admin = _is_admin(uid)
     text = f"⛔ <b>Чорний список ({offset + 1}-{min(offset + limit, total)} із {total})</b>\n\n"
     builder = InlineKeyboardBuilder()
     for r in rows:
@@ -2503,13 +2708,20 @@ async def on_blacklist_list(call: CallbackQuery) -> None:
         mid = r["merchant_id"]
         name = r["merchant_name"]
         reason = r["reason"] or "Без причини"
-        
-        unb_cb = f"bl_u:{ex}:{mid}"
-        if len(unb_cb) > 64:
-            unb_cb = unb_cb[:64]
-        
-        text += f"• [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
-        builder.button(text=f"❌ Вилучити {name[:12]}", callback_data=unb_cb)
+        scope = r["scope"]
+        badge = "👤" if scope == "personal" else "🌍"
+
+        text += f"{badge} [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
+
+        # Спільний запис знімає лише адмін — решті кнопка не показується,
+        # щоб не пропонувати дію, яка гарантовано впаде.
+        if scope == "personal" or is_admin:
+            unb_cb = f"bl_u:{scope}:{ex}:{mid}"
+            if len(unb_cb) > 64:
+                unb_cb = unb_cb[:64]
+            builder.button(text=f"❌ Вилучити {str(name)[:12]}", callback_data=unb_cb)
+
+    text += "\n<i>👤 — твій список, 🌍 — спільний</i>"
 
     nav_row = []
     if page > 0:
@@ -2526,19 +2738,37 @@ async def on_blacklist_list(call: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("bl_u:"))
 async def on_blacklist_unban_button(call: CallbackQuery) -> None:
-    parts = call.data.split(":", 2)
-    ex = parts[1]
-    mid = parts[2]
-    
+    # bl_u:<scope>:<exchange>:<merchant_id>. Старий формат був без scope —
+    # тоді кнопка завжди чистила спільний список, кому б він не належав.
+    parts = call.data.split(":", 3)
+    if len(parts) == 4:
+        _, scope, ex, mid = parts
+    else:
+        _, ex, mid = parts[0], parts[1], parts[2]
+        scope = "global"
+
     if not _db:
         return await call.answer("❌ База не ініціалізована", show_alert=True)
+
+    if scope == "global" and not _is_admin(call.from_user.id):
+        return await call.answer(
+            "Спільний список знімає лише адміністратор", show_alert=True
+        )
+
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
-    async with conn.execute(
-        "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
-        (ex, mid)
-    ):
-        pass
+    if scope == "personal":
+        await conn.execute(
+            "DELETE FROM user_blacklist WHERE owner_id=? AND exchange=? AND merchant_id=?",
+            (call.from_user.id, ex, mid),
+        )
+        _db._user_bl_cache.pop(int(call.from_user.id), None)
+    else:
+        await conn.execute(
+            "DELETE FROM global_blacklist WHERE exchange=? AND merchant_id=?",
+            (ex, mid),
+        )
     await conn.commit()
+
     await call.answer("✅ Мерчанта вилучено з чорного списку")
     call.data = "blacklist:list:0"
     await on_blacklist_list(call)
@@ -2563,12 +2793,23 @@ async def on_blacklist_search_input(message: Message, state: FSMContext) -> None
     conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
 
     like_query = f"%{query}%"
+    # Шукаємо в обох списках. Поки тут був лише спільний, власний бан не
+    # знаходився навіть за точним нікнеймом — виглядало як «не зберігся».
+    uid = message.from_user.id
     async with conn.execute(
-        "SELECT exchange, merchant_id, merchant_name, reason FROM global_blacklist WHERE merchant_name LIKE ? OR merchant_id LIKE ? LIMIT 15",
-        (like_query, like_query)
+        "SELECT exchange, merchant_id, merchant_name, reason, 'personal' AS scope "
+        "FROM user_blacklist "
+        "WHERE owner_id = ? AND (merchant_name LIKE ? OR merchant_id LIKE ?) "
+        "UNION ALL "
+        "SELECT exchange, merchant_id, merchant_name, reason, 'global' AS scope "
+        "FROM global_blacklist "
+        "WHERE merchant_name LIKE ? OR merchant_id LIKE ? "
+        "LIMIT 15",
+        (uid, like_query, like_query, like_query, like_query)
     ) as cur:
         rows = await cur.fetchall()
 
+    is_admin = _is_admin(uid)
     builder = InlineKeyboardBuilder()
     if not rows:
         text = f"🔍 За запитом «{query}» нікого не знайдено."
@@ -2579,11 +2820,15 @@ async def on_blacklist_search_input(message: Message, state: FSMContext) -> None
             mid = r["merchant_id"]
             name = r["merchant_name"]
             reason = r["reason"] or "Без причини"
-            text += f"• [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
-            unb_cb = f"bl_u:{ex}:{mid}"
-            if len(unb_cb) > 64:
-                unb_cb = unb_cb[:64]
-            builder.button(text=f"❌ Вилучити {name[:12]}", callback_data=unb_cb)
+            scope = r["scope"]
+            badge = "👤" if scope == "personal" else "🌍"
+            text += f"{badge} [{ex}] <b>{name}</b>\n└ <i>{reason}</i>\n"
+
+            if scope == "personal" or is_admin:
+                unb_cb = f"bl_u:{scope}:{ex}:{mid}"
+                if len(unb_cb) > 64:
+                    unb_cb = unb_cb[:64]
+                builder.button(text=f"❌ Вилучити {str(name)[:12]}", callback_data=unb_cb)
     
     builder.row(InlineKeyboardButton(text="🔙 До меню блеклісту", callback_data="blacklist:menu"))
     builder.adjust(1)
@@ -2645,15 +2890,23 @@ async def on_blacklist_add_input(message: Message, state: FSMContext) -> None:
     if not _db:
         return await message.answer("❌ База не ініціалізована")
 
-    await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "ui_manual")
-    
+    if _is_admin(message.from_user.id):
+        await _db.add_to_blacklist(exchange, merchant_id, merchant_name, reason, "ui_manual")
+        scope_line = "• Список: <b>спільний</b> — діє на всіх"
+    else:
+        await _db.add_user_blacklist(
+            message.from_user.id, exchange, merchant_id, merchant_name, reason
+        )
+        scope_line = "• Список: <b>особистий</b>"
+
     builder = InlineKeyboardBuilder()
     builder.button(text="🔙 До меню блеклісту", callback_data="blacklist:menu")
     await message.answer(
         f"⛔ <b>Мерчанта додано до Чорного списку!</b>\n\n"
         f"• Біржа: <code>{exchange}</code>\n"
         f"• Ім'я/ID: <code>{merchant_val}</code>\n"
-        f"• Причина: <i>{reason}</i>",
+        f"• Причина: <i>{reason}</i>\n"
+        f"{scope_line}",
         reply_markup=builder.as_markup()
     )
 

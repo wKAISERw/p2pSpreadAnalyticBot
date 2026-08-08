@@ -1,5 +1,7 @@
 # api/routers/dashboard.py
 import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 
@@ -16,12 +18,35 @@ from infrastructure.api.mexc_account import MEXCAccountClient
 # Імпортуємо перевірку прав з хендлерів боту
 from bot.handlers.core import _is_admin
 
+from api.auth import optional_session, require_admin, require_session, resolve_user_id
 from api.security import require_api_key
+from core.exchange_names import CANONICAL_EXCHANGES, canonical_exchange
 
 # Автентифікація на рівні роутера — жоден ендпоінт не може випадково
 # лишитись без неї.
+#
+# X-API-Key каже лише «цьому клієнту можна стукати в API». Хто саме стукає,
+# знає тільки session-токен, тому персональні ендпоінти нижче додатково
+# беруть user_id із сесії, а спільні дії — з-під require_admin.
 router = APIRouter(prefix="/api/v1", tags=["Dashboard"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger("ApiDashboard")
+
+
+def _require_exchange(raw: str) -> str:
+    """
+    Канонічне написання назви біржі або 400.
+
+    Тут роками стояв `.capitalize()`, який мовчки перетворював "okx" на
+    "Okx" — назву, за якою бот креденшли вже не знаходив (див.
+    core/exchange_names.py).
+    """
+    name = canonical_exchange(raw)
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Невідома біржа: {raw}. Доступні: {', '.join(CANONICAL_EXCHANGES)}",
+        )
+    return name
 
 @router.get("/stats")
 async def get_stats():
@@ -34,12 +59,37 @@ async def get_exchanges():
     return dict_to_camel(jsonable_encoder(exchange_manager.get_status_all()))
 
 @router.get("/stats/detailed")
-async def get_detailed_stats(period: int = 30):
-    """Детальна статистика: daily, exchanges, banks, heatmap, weekly."""
+async def get_detailed_stats(
+    period: int = 30,
+    mode: str = "ALL",
+    scope: str = "mine",
+    telegram_id: int = Depends(require_session),
+):
+    """
+    Детальна статистика: summary, proposals, daily, exchanges, banks,
+    heatmap, weekly.
+
+    scope="mine" (за замовчуванням) рахує лише угоди цього користувача —
+    так само, як «💼 Моя статистика» в боті. Раніше сюди не передавався
+    owner_user_id узагалі, тож StatsEngine брав дефолт 0 = «всі юзери», і
+    кожен бачив зведений PnL усіх разом.
+
+    scope="all" лишається для адміна: це погляд оператора на систему.
+    """
     from bot.handlers.core import _db as db
     from core.analytics.stats_engine import StatsEngine
+
+    if scope not in {"mine", "all"}:
+        raise HTTPException(status_code=400, detail="scope: очікується 'mine' або 'all'")
+    if scope == "all" and not _is_admin(telegram_id):
+        raise HTTPException(status_code=403, detail="Зведена статистика доступна лише адміністратору")
+
     engine = StatsEngine(db)
-    data = await engine.get_full_stats(period_days=period)
+    data = await engine.get_full_stats(
+        period_days=period,
+        owner_user_id=0 if scope == "all" else telegram_id,
+        mode=mode,
+    )
     return dict_to_camel(jsonable_encoder(data))
 
 @router.get("/opportunities")
@@ -54,23 +104,49 @@ async def get_logs(limit: int = 200):
     return dict_to_camel(jsonable_encoder(recent))
 
 @router.post("/credentials/{exchange}")
-async def save_credentials(exchange: str, payload: ApiKeyPayload, telegram_id: int = 0):
+async def save_credentials(
+    exchange: str,
+    payload: ApiKeyPayload,
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Кладе ключі біржі в зашифроване сховище бота.
+
+    Раніше telegram_id брався з query і за замовчуванням дорівнював 0 —
+    тобто ключі можна було записати будь-кому, а без параметра вони лягали
+    в службовий слот власника, де їх не бачив жоден реальний користувач.
+    """
     from bot.handlers.core import _db as db
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    name = _require_exchange(exchange)
+
     try:
         ok = await db.save_credentials(
-            exchange=exchange.capitalize(),
+            exchange=name,
             api_key=payload.key,
             api_secret=payload.secret,
             passphrase=payload.passphrase,
             label="api",
             user_id=telegram_id,
         )
-        return {"status": "success" if ok else "error"}
+        if not ok:
+            raise HTTPException(status_code=500, detail="Не вдалось зберегти ключі")
+        return {"status": "success", "exchange": name}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        logger.error("save_credentials [%s]: %s", name, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.delete("/credentials/{exchange}")
-async def delete_credentials(exchange: str, telegram_id: int = 0):
+async def delete_credentials(
+    exchange: str,
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     """
     Відв'язує біржу від акаунта.
 
@@ -79,7 +155,10 @@ async def delete_credentials(exchange: str, telegram_id: int = 0):
     під ними.
     """
     from bot.handlers.core import _db as db
-    name = exchange.capitalize()
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    name = _require_exchange(exchange)
+
     try:
         # delete_credentials рапортує True навіть коли рядка не було —
         # тому наявність перевіряємо окремо, інакше 404 був би недосяжним.
@@ -87,7 +166,7 @@ async def delete_credentials(exchange: str, telegram_id: int = 0):
             raise HTTPException(status_code=404, detail="Credentials not found")
         if not await db.delete_credentials(exchange=name, user_id=telegram_id):
             raise HTTPException(status_code=500, detail="Delete failed")
-        return {"status": "success"}
+        return {"status": "success", "exchange": name}
     except HTTPException:
         raise
     except Exception as e:
@@ -95,38 +174,103 @@ async def delete_credentials(exchange: str, telegram_id: int = 0):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Чорний список
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Списків два, і це не дублювання:
+#
+#   personal — «мені цей мерчант не подобається». Свій у кожного, правиться
+#              без жодних прав, впливає лише на власні алерти.
+#   global   — спільний. Наповнюють ризик-движок і адміністратор; діє на всіх,
+#              тому редагувати може лише адмін.
+#
+# Читають обидва всі: бачити, що система вже позначила скамера, корисно
+# кожному. Раніше ендпоінт віддавав тільки спільний і не давав пересічному
+# користувачу забанити нікого взагалі.
+
+
 @router.get("/blacklist")
-async def get_blacklist():
+async def get_blacklist(telegram_id: int = Depends(require_session)):
+    """Особистий список користувача плюс спільний, з поміткою scope."""
     from bot.handlers.core import _db as db
+
+    entries: list[dict] = []
+    try:
+        for row in await db.get_user_blacklist(telegram_id):
+            entries.append({**row, "source": "personal", "scope": "personal"})
+    except Exception as e:
+        logger.error("get_user_blacklist: %s", e)
+
     try:
         if hasattr(db, "get_all_blacklist"):
-            records = await db.get_all_blacklist()
-            return dict_to_camel(records)
-        return []
+            for row in await db.get_all_blacklist():
+                entries.append({**dict(row), "scope": "global"})
     except Exception as e:
-        logger.error(f"Error fetching blacklist: {e}")
-        return []
+        logger.error("Error fetching blacklist: %s", e)
+
+    return dict_to_camel(entries)
+
 
 @router.post("/blacklist")
-async def add_to_blacklist(payload: BlacklistPayload):
+async def add_to_blacklist(
+    payload: BlacklistPayload,
+    scope: str = "personal",
+    telegram_id: int = Depends(require_session),
+):
     from bot.handlers.core import _db as db
-    try:
-        await db.add_to_blacklist(
-            payload.exchange,
-            payload.merchantId,
-            payload.merchantName,
-            payload.reason,
-            payload.source or "api",
+
+    if scope not in {"personal", "global"}:
+        raise HTTPException(status_code=400, detail="scope: очікується 'personal' або 'global'")
+    if scope == "global" and not _is_admin(telegram_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Спільний чорний список редагує лише адміністратор",
         )
-        return {"status": "success"}
+
+    exchange = _require_exchange(payload.exchange)
+    try:
+        if scope == "personal":
+            await db.add_user_blacklist(
+                telegram_id, exchange, payload.merchantId,
+                payload.merchantName, payload.reason,
+            )
+        else:
+            await db.add_to_blacklist(
+                exchange, payload.merchantId, payload.merchantName,
+                payload.reason, payload.source or f"web:{telegram_id}",
+            )
+        return {"status": "success", "scope": scope}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("add_to_blacklist: %s", e)
-        return {"status": "error", "detail": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.delete("/blacklist/{exchange}/{merchant_id}")
-async def remove_from_blacklist(exchange: str, merchant_id: str):
+async def remove_from_blacklist(
+    exchange: str,
+    merchant_id: str,
+    scope: str = "personal",
+    telegram_id: int = Depends(require_session),
+):
     from bot.handlers.core import _db as db
+
+    if scope not in {"personal", "global"}:
+        raise HTTPException(status_code=400, detail="scope: очікується 'personal' або 'global'")
+    if scope == "global" and not _is_admin(telegram_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Спільний чорний список редагує лише адміністратор",
+        )
+
     try:
+        if scope == "personal":
+            if not await db.remove_user_blacklist(telegram_id, exchange, merchant_id):
+                raise HTTPException(status_code=404, detail="Merchant not found in blacklist")
+            return {"status": "success", "scope": scope}
+
         # Таблиця називається global_blacklist. Тут роками стояло
         # `merchant_blacklist`, якої не існує — DELETE завжди падав у except
         # і ендпоінт мовчки повертав error.
@@ -137,7 +281,7 @@ async def remove_from_blacklist(exchange: str, merchant_id: str):
         await db._db.commit()
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Merchant not found in blacklist")
-        return {"status": "success", "deleted": cursor.rowcount}
+        return {"status": "success", "scope": scope, "deleted": cursor.rowcount}
     except HTTPException:
         raise
     except Exception as e:
@@ -152,10 +296,11 @@ async def get_global_settings():
 
 
 @router.post("/settings/global")
-async def update_global_settings(settings: dict):
+async def update_global_settings(settings: dict, admin_id: int = Depends(require_admin)):
     """
     Пише глобальні налаштування в bot_settings (runtime_config) — сканер
-    перечитує їх раз на 10с.
+    перечитує їх раз на 10с. Впливає на всіх користувачів, тому лише адмін:
+    UI ховав цю секцію від решти, але HTTP лишався відкритим.
 
     Раніше цей ендпоінт складав значення в in-memory `state.global_settings`,
     який НІХТО не читав: сканер бере конфіг з runtime_config. Тобто UI
@@ -191,9 +336,14 @@ async def update_global_settings(settings: dict):
 
 
 @router.get("/settings/user")
-async def get_user_settings(telegram_id: int):
+async def get_user_settings(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     """Персональні налаштування юзера зі scanner_users."""
     from bot.handlers.core import _db as db
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
     users = await db.get_active_users()
     user = next((u for u in users if u["user_id"] == telegram_id), None)
     if not user:
@@ -201,8 +351,13 @@ async def get_user_settings(telegram_id: int):
     return dict_to_camel(jsonable_encoder(user))
 
 @router.get("/telegram/sync/{telegram_id}")
-async def sync_telegram(telegram_id: int):
+async def sync_telegram(
+    telegram_id: int,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     from bot.handlers.core import _db as db
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
     users = await db.get_active_users()
     user_data = next((u for u in users if u["user_id"] == telegram_id), None)
 
@@ -214,36 +369,41 @@ async def sync_telegram(telegram_id: int):
 
     data = {
         "settings": {
-            "minCapital": 1000,
+            # Мінімального капіталу як налаштування не існує — колонки під
+            # нього немає ні в scanner_users, ні в bot_settings. Тут роками
+            # стояла константа 1000, яку фронтенд міг прийняти за реальне
+            # значення користувача.
             "maxCapital": user_data.get("capital", 0),
             "minSpread": user_data.get("min_spread", 0),
             "banks": user_data.get("bank_codes") if isinstance(user_data.get("bank_codes"), list) else (user_data.get("bank_codes", "").split(",") if user_data.get("bank_codes") else [])
         },
-        "keys": [k.lower() for k in creds.keys()],
+        # Канонічні назви, як вони лежать у базі: фронтенд звіряє їх
+        # без урахування регістру, а «okx» проти «OKX» тут уже ламалось.
+        "keys": sorted(creds.keys()),
         "isAdmin": is_admin
     }
     return dict_to_camel(data)
 
 @router.post("/settings/user")
-async def update_local_user_settings(settings: dict):
+async def update_local_user_settings(
+    settings: dict,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     """
     Аліас на /user/settings — лишений щоб не ламати наявний фронтенд.
     Раніше писав у in-memory state.user_settings, який ніхто не читав.
     """
-    return await update_telegram_settings(settings)
+    return await update_telegram_settings(settings, session_user_id)
 
 
 @router.post("/user/settings")
-async def update_telegram_settings(settings: dict):
+async def update_telegram_settings(
+    settings: dict,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     from bot.handlers.core import _db as db
     snake_settings = dict_to_snake(settings)
-    telegram_id = settings.get("telegramUserId")
-
-    if not telegram_id:
-        raise HTTPException(
-            status_code=400,
-            detail="telegramUserId обов'язковий — без нього немає кого оновлювати",
-        )
+    telegram_id = resolve_user_id(settings.get("telegramUserId"), session_user_id)
 
     # Оновлюємо тільки ті поля, що реально прийшли. Раніше сюди летіли
     # безумовні .get() — відсутній ключ перетворювався на NULL і затирав
@@ -273,8 +433,13 @@ async def update_telegram_settings(settings: dict):
     return {"status": "success", "updated": sorted(updates)}
 
 @router.get("/accounts/{telegram_id}")
-async def get_real_exchange_accounts(telegram_id: int):
+async def get_real_exchange_accounts(
+    telegram_id: int,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
     from bot.handlers.core import _db as db
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
     creds = await db.get_all_credentials(user_id=telegram_id)
 
     if not creds:
@@ -287,15 +452,23 @@ async def get_real_exchange_accounts(telegram_id: int):
         api_secret = keys.get("api_secret", "")
         passphrase = keys.get("passphrase", "")
 
+        # kycLevel, merchantStatus і tradingVolume30d нижче заповнюються
+        # тільки для тих бірж, у яких для цього є виклик. Для решти вони
+        # лишаються None — фронтенд покаже «немає даних» замість
+        # правдоподібних «Verified / None / 0», які нічого не означали.
+        #
+        # volumeLimit тут теж колись стояв константою 100000. Ліміт обігу
+        # залежить від рівня верифікації на кожній біржі, ми його не знаємо
+        # і вигадувати не будемо.
         account_data = {
             "id": exchange_name.lower(),
-            "exchange": exchange_name.capitalize(),
+            "exchange": canonical_exchange(exchange_name) or exchange_name,
             "balanceUAH": 0.0,
             "balanceUSDT": 0.0,
-            "kycLevel": "Verified",
-            "merchantStatus": "None",
-            "tradingVolume30d": 0,
-            "volumeLimit": 100000
+            "kycLevel": None,
+            "merchantStatus": None,
+            "tradingVolume30d": None,
+            "volumeLimit": None,
         }
 
         try:
@@ -334,8 +507,9 @@ async def get_real_exchange_accounts(telegram_id: int):
             elif exchange_name.lower() == "mexc":
                 client = MEXCAccountClient(api_key, api_secret)
                 balances = await client.get_balance()
-                info = await client.get_account_info()
-                account_data["kycLevel"] = "Verified"
+                # Рівень верифікації MEXC тут не віддає: раніше в цьому
+                # місці стояло безумовне "Verified", хоча відповідь клієнта
+                # навіть не читалась.
 
             for b in balances:
                 if b["coin"] == "USDT":
@@ -345,8 +519,10 @@ async def get_real_exchange_accounts(telegram_id: int):
 
         except Exception as e:
             logger.error(f"Помилка даних акаунта {exchange_name}: {e}")
-            account_data["kycLevel"] = "API Error"
-            account_data["merchantStatus"] = "API Error"
+            # Помилка запиту — це окремий стан, а не «рівень KYC = API Error».
+            # Фронтенд має показати, що баланс не приїхав, а не намалювати
+            # нулі так, ніби на акаунті справді порожньо.
+            account_data["error"] = str(e)[:200]
 
         accounts.append(account_data)
 

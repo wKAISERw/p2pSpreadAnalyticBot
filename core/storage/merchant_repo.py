@@ -11,6 +11,20 @@ logger = logging.getLogger(__name__)
 class MerchantRepo:
     """Verdicts, blacklist, reviews, snapshots."""
 
+    # owner_id → (момент читання, індекс за id, індекс за іменем).
+    # Оголошено на класі, бо MerchantRepo — міксин без власного __init__:
+    # доступ іде через _user_bl_cache, який лениво створює словник на
+    # інстансі, тож різні MerchantDB не ділять кеш між собою.
+    _user_bl_cache_attr = "__user_bl_cache"
+
+    @property
+    def _user_bl_cache(self) -> dict:
+        cache = self.__dict__.get(self._user_bl_cache_attr)
+        if cache is None:
+            cache = {}
+            self.__dict__[self._user_bl_cache_attr] = cache
+        return cache
+
     async def get_risk_score(self, exchange: str, merchant_id: str) -> int:
         async with self._db.execute(
                 "SELECT risk_score FROM merchant_verdict WHERE exchange=? AND merchant_id=?",
@@ -85,6 +99,103 @@ class MerchantRepo:
         )
         await self._db.commit()
         logger.warning("🚫 Blacklist додано: %s [%s] — %s", merchant_name, exchange, reason)
+
+    # ── Персональний чорний список ────────────────────────────────────────
+    #
+    # Спільний global_blacklist вище діє на всіх і наповнюється ризик-движком
+    # та адміністратором. Цей — особистий: кожен банить сам собі, і чужі
+    # алерти від цього не змінюються.
+    #
+    # Читається він не там, де рахується скоринг, а там, де вже відомий
+    # user_id (alert_dispatcher, taker_scanner). Щоб не робити запит на
+    # кожен ордер, індекс власника кешується на кілька секунд — за цикл
+    # сканера він однаково не встигає застаріти.
+
+    _USER_BL_TTL = 10.0
+
+    @staticmethod
+    def _clean_merchant_name(value: str) -> str:
+        """Ім'я без емодзі й розділових — мерчанти люблять їх міняти."""
+        if not value:
+            return ""
+        return "".join(c for c in value.lower() if c.isalnum())
+
+    async def add_user_blacklist(
+            self,
+            owner_id: int,
+            exchange: str,
+            merchant_id: str,
+            merchant_name: str = "",
+            reason: str = "",
+    ) -> None:
+        await self._db.execute(
+            """INSERT OR REPLACE INTO user_blacklist
+               (owner_id, exchange, merchant_id, merchant_name, reason, added_at)
+               VALUES (?,?,?,?,?,?)""",
+            (int(owner_id), exchange, str(merchant_id), merchant_name, reason, time.time()),
+        )
+        await self._db.commit()
+        self._user_bl_cache.pop(int(owner_id), None)
+        logger.info("🚫 Особистий blacklist %s: %s [%s]", owner_id, merchant_name or merchant_id, exchange)
+
+    async def remove_user_blacklist(self, owner_id: int, exchange: str, merchant_id: str) -> bool:
+        cursor = await self._db.execute(
+            "DELETE FROM user_blacklist WHERE owner_id=? AND exchange=? AND merchant_id=?",
+            (int(owner_id), exchange, str(merchant_id)),
+        )
+        await self._db.commit()
+        self._user_bl_cache.pop(int(owner_id), None)
+        return cursor.rowcount > 0
+
+    async def get_user_blacklist(self, owner_id: int) -> list[dict]:
+        async with self._db.execute(
+            """SELECT exchange, merchant_id, merchant_name, reason, added_at
+               FROM user_blacklist WHERE owner_id=? ORDER BY added_at DESC""",
+            (int(owner_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def _user_blacklist_index(self, owner_id: int) -> tuple[dict, dict]:
+        """
+        (за id, за очищеним іменем) → reason. Обидва ключі вміщують біржу,
+        крім імені: мерчанта, поміченого на одній біржі, ховаємо всюди —
+        так само, як це робить спільний список.
+        """
+        owner_id = int(owner_id)
+        cached = self._user_bl_cache.get(owner_id)
+        now = time.monotonic()
+        if cached and now - cached[0] < self._USER_BL_TTL:
+            return cached[1], cached[2]
+
+        by_id: dict[tuple[str, str], str] = {}
+        by_name: dict[str, str] = {}
+        for row in await self.get_user_blacklist(owner_id):
+            reason = row.get("reason") or "особистий чорний список"
+            by_id[(str(row["exchange"]).lower(), str(row["merchant_id"]))] = reason
+            cleaned = self._clean_merchant_name(row.get("merchant_name") or "")
+            if cleaned:
+                by_name[cleaned] = reason
+
+        self._user_bl_cache[owner_id] = (now, by_id, by_name)
+        return by_id, by_name
+
+    async def is_user_blacklisted(
+            self, owner_id: int, exchange: str, merchant_id: str, merchant_name: str = ""
+    ) -> tuple[bool, str]:
+        if not owner_id:
+            return False, ""
+        by_id, by_name = await self._user_blacklist_index(owner_id)
+
+        reason = by_id.get((str(exchange).lower(), str(merchant_id)))
+        if reason:
+            return True, reason
+
+        cleaned = self._clean_merchant_name(merchant_name)
+        if cleaned and cleaned in by_name:
+            return True, by_name[cleaned]
+
+        return False, ""
 
     async def load_blacklist_from_file(self, path: str = "data/blacklist.json") -> int:
         import json

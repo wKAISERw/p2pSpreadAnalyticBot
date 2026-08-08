@@ -219,3 +219,80 @@ DEFAULT_BANK_CODES = ["43", "14", "64"]
 
 # Повна назва для логів і алертів
 BANK_NAMES = {b.internal_code: b.name for b in BANKS}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Нормалізація назв банків
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Одна й та сама мапа («43» → monobank, «моно» → monobank, «pb» → privatbank…)
+# лежала скопійованою в чотирьох файлах: alert_dispatcher, taker_scanner,
+# card_repo і formatters. Кожна копія жила своїм життям, і додати банк
+# означало не забути про решту трьох — інакше движок і картки почали б
+# розуміти під тим самим словом різні речі.
+#
+# Тепер джерело одне. Розширювати треба тут.
+
+# Синоніми поверх канонічних назв із BANKS. Ключі — у нижньому регістрі.
+_BANK_ALIASES: dict[str, str] = {
+    "mono": "monobank", "моно": "monobank", "монобанк": "monobank",
+    "pb": "privatbank", "privat": "privatbank",
+    "приват": "privatbank", "приватбанк": "privatbank",
+    "пумб": "pumb",
+    "abank": "a-bank", "абанк": "a-bank", "а-банк": "a-bank",
+    "izi": "izibank", "ізі": "izibank", "ізібанк": "izibank",
+    "sensebank": "sense", "сенс": "sense", "сенсбанк": "sense",
+    "sense bank": "sense",
+    "ощадбанк": "oschadbank", "oschad": "oschadbank",
+    "raiffeisen bank": "raiffeisen", "райф": "raiffeisen",
+    "otp bank": "otp", "отп": "otp",
+}
+
+# Внутрішній код («43») → канонічна коротка назва («monobank»).
+#
+# Мапа явна, а не похідна від Bank.name: назви в реєстрі місцями українські
+# («ПУМБ») або довші за слаг («Sense Bank»), і автоматичне перетворення дало
+# б «пумб» і «sense-bank» — тобто рядки, яких решта коду не знає. Слаги тут
+# рівно ті, що вже використовувались у копіях мапи по движку.
+_CODE_TO_SLUG: dict[str, str] = {
+    "43": "monobank",
+    "14": "privatbank",
+    "64": "pumb",
+    "48": "a-bank",
+    "99": "oschadbank",
+    "380": "raiffeisen",
+    "328": "sense",
+    "319": "otp",
+    "553": "izibank",
+    # Альтернативні коди, під якими ті самі банки приходять від бірж.
+    # Були відомі лише bot/formatters.py — тепер їх розуміє вся система.
+    "61": "a-bank",
+    "80": "pumb",
+    "1": "monobank",
+}
+
+
+def normalize_bank(value: str) -> str:
+    """
+    Зводить будь-яке написання банку до канонічного: код, англійська чи
+    українська назва, скорочення. Невідоме значення повертається як є, у
+    нижньому регістрі — щоб порівняння лишалось передбачуваним.
+    """
+    if not value:
+        return ""
+
+    key = str(value).strip().lower()
+    if key in _CODE_TO_SLUG:
+        return _CODE_TO_SLUG[key]
+    if key in _BANK_ALIASES:
+        return _BANK_ALIASES[key]
+    return key
+
+
+def normalize_banks(values) -> set[str]:
+    """Нормалізує список/рядок банків у множину канонічних назв."""
+    if not values:
+        return set()
+    if isinstance(values, str):
+        values = [chunk for chunk in values.replace(";", ",").split(",")]
+    return {normalize_bank(v) for v in values if str(v).strip()}
