@@ -1,137 +1,67 @@
 import React, { useState } from 'react';
-import useSWR from 'swr';
+import { useSWRConfig } from 'swr';
 import { motion } from 'motion/react';
-import {
-  RefreshCw, ArrowDownToLine, ArrowUpFromLine, Loader2, Info, Link2, Unlink,
-} from 'lucide-react';
+import { RefreshCw, Loader2, Info, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
-import { api } from '../../services/api';
 import { useAppStore } from '../../store';
-import { UserFilters } from '../../types';
+import { SyncSectionKey } from '../../types';
+import { DEFAULT_SYNC, SYNC_SECTION_LABELS, resolveSync, syncNow } from '../../hooks/useBotSync';
 
 /**
- * Синхронізація налаштувань сайту з ботом.
+ * Синхронізація з ботом.
  *
- * Навіщо взагалі вибір, якщо дані «одні й ті самі»: бо вони одні лише
- * доти, доки ти цього хочеш. Цілком нормально тримати на сайті інший
- * поріг спреду, ніж у боті — наприклад, у боті ловити все від 0.5%, а на
- * дашборді дивитись тільки на 1.5%+. Тому кожне поле має власну галочку:
- * увімкнена — значення спільне, вимкнена — живе окремо.
+ * Тут раніше були кнопки «Забрати з бота» / «Відправити в бот» і три поля:
+ * капітал, спред, банки. Виглядало це як обмін даними між двома системами,
+ * хоча системи одна: фільтри, картки, ліміти й пресети лежать у базі бота,
+ * і сайт читає їх напряму. «Забрати» клало значення в локальні
+ * userSettings.maxCapital і userSettings.banks — змінні, яких більше ніхто
+ * не читав, тобто обмін нікуди не вів.
  *
- * Напрямок теж явний. «Забрати з бота» і «Відправити в бот» — різні дії
- * з різними наслідками, і зливати їх в одну кнопку «синхронізувати»
- * означає не дати зрозуміти, чиї значення переможуть.
+ * Справжня проблема була інша: відкрита вкладка не помічала змін, зроблених
+ * у Telegram, поки її не перезавантажиш. Саме цим тут тепер і керують.
  */
 
-interface Field {
-  key: 'capital' | 'minSpread' | 'banks';
-  label: string;
-  hint: string;
-  /** Як дістати значення з фільтрів бота. */
-  fromBot: (f: UserFilters) => string;
-  /** Як показати локальне значення. */
-  fromLocal: (s: ReturnType<typeof useAppStore.getState>['userSettings']) => string;
-}
-
-const FIELDS: Field[] = [
-  {
-    key: 'capital',
-    label: 'Капітал',
-    hint: 'working_capital у боті ↔ maxCapital на сайті',
-    fromBot: f => `${Math.round(f.capital ?? 0).toLocaleString('uk-UA')} ₴`,
-    fromLocal: s => `${Math.round(s.maxCapital ?? 0).toLocaleString('uk-UA')} ₴`,
-  },
-  {
-    key: 'minSpread',
-    label: 'Мінімальний спред',
-    hint: 'min_spread_pct у боті ↔ фільтр дашборду',
-    fromBot: f => `${(f.minSpread ?? 0).toFixed(2)}%`,
-    fromLocal: s => `${(s.minSpread ?? 0).toFixed(2)}%`,
-  },
-  {
-    key: 'banks',
-    label: 'Банки',
-    hint: 'bank_codes у боті ↔ список на сайті',
-    fromBot: f => (f.bankCodes?.length ? `${f.bankCodes.length} обрано` : 'порожньо'),
-    fromLocal: s => (s.banks?.length ? `${s.banks.length} обрано` : 'порожньо'),
-  },
-];
+const INTERVALS = [10, 30, 60, 300];
 
 export default function SyncSection() {
   const telegramId = useAppStore(state => state.auth?.telegramId);
   const userSettings = useAppStore(state => state.userSettings);
   const setUserSettings = useAppStore(state => state.setUserSettings);
+  const { mutate } = useSWRConfig();
 
-  const { data: filters, isLoading, mutate } = useSWR<UserFilters>(
-    telegramId ? ['/user/filters', telegramId] : null,
-    () => api.getUserFilters(telegramId!),
-    { shouldRetryOnError: false }
-  );
+  const sync = resolveSync(userSettings.sync);
+  const [busy, setBusy] = useState(false);
 
-  const [busy, setBusy] = useState<'pull' | 'push' | null>(null);
+  const patch = (next: Partial<typeof sync>) =>
+    setUserSettings({ ...userSettings, sync: { ...sync, ...next } });
 
-  const prefs = userSettings.syncPreferences ?? {
-    capital: true,
-    spread: true,
-    banks: true,
-    apiKeys: false,
-  };
+  const toggleSection = (key: SyncSectionKey) =>
+    patch({ sections: { ...sync.sections, [key]: !sync.sections[key] } });
 
-  // Ключі налаштувань історично називаються інакше за поля — тримаємо
-  // мапу в одному місці, щоб не плутатись у двох іменуваннях.
-  const prefKey = (key: Field['key']) =>
-    key === 'minSpread' ? 'spread' : key === 'capital' ? 'capital' : 'banks';
-
-  const isOn = (key: Field['key']) => Boolean(prefs[prefKey(key) as keyof typeof prefs]);
-
-  const toggle = (key: Field['key']) => {
-    const name = prefKey(key) as keyof typeof prefs;
-    setUserSettings({
-      ...userSettings,
-      syncPreferences: { ...prefs, [name]: !prefs[name] },
+  const setAll = (value: boolean) =>
+    patch({
+      sections: Object.fromEntries(
+        (Object.keys(sync.sections) as SyncSectionKey[]).map(k => [k, value])
+      ) as typeof sync.sections,
     });
-  };
 
-  const enabled = FIELDS.filter(f => isOn(f.key));
-
-  const pull = async () => {
-    if (!filters || !enabled.length) return;
-    setBusy('pull');
+  const refreshNow = async () => {
+    setBusy(true);
     try {
-      const next = { ...userSettings };
-      if (isOn('capital')) next.maxCapital = filters.capital;
-      if (isOn('minSpread')) next.minSpread = filters.minSpread;
-      if (isOn('banks')) next.banks = filters.bankCodes ?? [];
-      setUserSettings(next);
-      toast.success(`Забрано з бота: ${enabled.map(f => f.label.toLowerCase()).join(', ')}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const push = async () => {
-    if (!telegramId || !enabled.length) return;
-    setBusy('push');
-    try {
-      // Шлемо тільки відмічені поля: бекенд оновлює те, що прийшло, тож
-      // невідмічене лишається в боті недоторканим.
-      const patch: Record<string, unknown> = {};
-      if (isOn('capital')) patch.workingCapital = userSettings.maxCapital;
-      if (isOn('minSpread')) patch.minSpreadPct = userSettings.minSpread;
-      if (isOn('banks')) patch.bankCodes = userSettings.banks ?? [];
-
-      const result = await api.updateUserFilters(telegramId, patch as never);
-      toast.success(`Відправлено в бот: ${result.updated.join(', ')}`);
-      await mutate();
+      await syncNow(sync, mutate);
+      toast.success('Дані перечитано з бота');
     } catch (e: any) {
-      toast.error(`Не вдалось: ${e?.message ?? 'помилка'}`);
+      toast.error(`Не вдалось оновити: ${e?.message ?? 'помилка'}`);
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   };
 
   if (!telegramId) return null;
+
+  const sections = Object.keys(SYNC_SECTION_LABELS) as SyncSectionKey[];
+  const activeCount = sections.filter(k => sync.sections[k]).length;
 
   return (
     <motion.section
@@ -142,120 +72,142 @@ export default function SyncSection() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-slate-800/60 rounded-xl">
-            <RefreshCw className="w-5 h-5 text-blue-400" />
+            <RefreshCw className={cn('w-5 h-5 text-blue-400', busy && 'animate-spin')} />
           </div>
           <div>
             <h2 className="text-lg font-bold text-white">Синхронізація з ботом</h2>
             <p className="text-xs text-slate-400">
-              Що спільне, а що живе окремо на сайті
+              Що сайт перечитує сам, коли ти міняєш це в Telegram
             </p>
           </div>
         </div>
 
+        <button
+          onClick={refreshNow}
+          disabled={busy || !activeCount}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-bold transition-colors shrink-0"
+        >
+          {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+          Оновити зараз
+        </button>
+      </div>
+
+      {/* Головний вимикач і частота */}
+      <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4 mb-4">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <button
+            onClick={() => patch({ enabled: !sync.enabled })}
+            className="flex items-center gap-3 text-left"
+          >
+            <span
+              className={cn(
+                'w-11 h-6 rounded-full relative transition-colors shrink-0',
+                sync.enabled ? 'bg-accent-500' : 'bg-slate-700'
+              )}
+            >
+              <span
+                className={cn(
+                  'absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all',
+                  sync.enabled ? 'right-0.5' : 'left-0.5'
+                )}
+              />
+            </span>
+            <span>
+              <span className={cn('block text-sm font-bold', sync.enabled ? 'text-accent-400' : 'text-slate-400')}>
+                {sync.enabled ? 'Автооновлення увімкнено' : 'Автооновлення вимкнено'}
+              </span>
+              <span className="block text-[11px] text-slate-500">
+                {sync.enabled
+                  ? `Кожні ${sync.intervalSeconds} с для ${activeCount} розділів`
+                  : 'Дані оновляться при перезаході на сторінку або кнопкою вище'}
+              </span>
+            </span>
+          </button>
+
+          <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded-xl p-1">
+            {INTERVALS.map(seconds => (
+              <button
+                key={seconds}
+                onClick={() => patch({ intervalSeconds: seconds })}
+                disabled={!sync.enabled}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-[11px] font-bold transition-colors disabled:opacity-40',
+                  sync.intervalSeconds === seconds
+                    ? 'bg-slate-800 text-white'
+                    : 'text-slate-500 hover:text-slate-300'
+                )}
+              >
+                {seconds < 60 ? `${seconds} с` : `${seconds / 60} хв`}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Розділи */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-bold uppercase tracking-wider text-slate-400">
+          Що оновлювати
+        </span>
         <div className="flex gap-2">
           <button
-            onClick={pull}
-            disabled={busy !== null || !enabled.length || isLoading}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-bold transition-colors"
-            title="Перезаписати значення на сайті тим, що в боті"
+            onClick={() => setAll(true)}
+            className="text-[11px] font-bold text-slate-400 hover:text-white transition-colors"
           >
-            {busy === 'pull' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowDownToLine className="w-3.5 h-3.5" />}
-            Забрати з бота
+            усі
           </button>
+          <span className="text-slate-700">·</span>
           <button
-            onClick={push}
-            disabled={busy !== null || !enabled.length}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-accent-500 hover:bg-accent-400 disabled:opacity-40 text-slate-950 text-xs font-bold transition-colors"
-            title="Перезаписати значення в боті тим, що на сайті"
+            onClick={() => setAll(false)}
+            className="text-[11px] font-bold text-slate-400 hover:text-white transition-colors"
           >
-            {busy === 'push' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ArrowUpFromLine className="w-3.5 h-3.5" />}
-            Відправити в бот
+            жодного
           </button>
         </div>
       </div>
 
-      {isLoading ? (
-        <p className="flex items-center gap-2 text-sm text-slate-500">
-          <Loader2 className="w-4 h-4 animate-spin" /> Читаю налаштування бота…
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {FIELDS.map(field => {
-            const on = isOn(field.key);
-            const botValue = filters ? field.fromBot(filters) : '—';
-            const localValue = field.fromLocal(userSettings);
-            const differs = botValue !== localValue;
-
-            return (
-              <div
-                key={field.key}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        {sections.map(key => {
+          const on = sync.sections[key];
+          const { title, hint } = SYNC_SECTION_LABELS[key];
+          return (
+            <button
+              key={key}
+              onClick={() => toggleSection(key)}
+              disabled={!sync.enabled}
+              className={cn(
+                'flex items-start gap-3 p-4 rounded-2xl border text-left transition-all disabled:opacity-50',
+                on ? 'bg-accent-500/5 border-accent-500/25' : 'bg-slate-950/50 border-slate-800'
+              )}
+            >
+              <span
                 className={cn(
-                  'flex flex-wrap items-center gap-3 px-4 py-3 rounded-2xl border transition-colors',
-                  on
-                    ? 'bg-slate-950/60 border-slate-800'
-                    : 'bg-slate-950/30 border-slate-800/50'
+                  'w-5 h-5 rounded-md border flex items-center justify-center shrink-0 mt-0.5 transition-colors',
+                  on ? 'bg-accent-500 border-accent-500' : 'border-slate-700'
                 )}
               >
-                <button
-                  onClick={() => toggle(field.key)}
-                  className={cn(
-                    'flex items-center gap-2 shrink-0',
-                    on ? 'text-accent-400' : 'text-slate-500'
-                  )}
-                  title={on ? 'Спільне значення' : 'Живе окремо на сайті'}
-                >
-                  {on ? <Link2 className="w-4 h-4" /> : <Unlink className="w-4 h-4" />}
-                  <span
-                    className={cn(
-                      'w-9 h-5 rounded-full relative transition-colors',
-                      on ? 'bg-accent-500' : 'bg-slate-700'
-                    )}
-                  >
-                    <span
-                      className={cn(
-                        'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all',
-                        on ? 'right-0.5' : 'left-0.5'
-                      )}
-                    />
-                  </span>
-                </button>
-
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-bold text-white">{field.label}</div>
-                  <div className="text-[10px] text-slate-500 font-mono">{field.hint}</div>
-                </div>
-
-                <div className="flex items-center gap-4 text-xs tabular-nums shrink-0">
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-600">бот</div>
-                    <div className="text-slate-300 font-bold">{botValue}</div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-600">сайт</div>
-                    <div
-                      className={cn(
-                        'font-bold',
-                        // Розбіжність підсвічуємо лише для спільних полів:
-                        // для відвʼязаних вона очікувана й нормальна.
-                        on && differs ? 'text-orange-400' : 'text-slate-300'
-                      )}
-                    >
-                      {localValue}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+                {on && <Check className="w-3.5 h-3.5 text-slate-950" strokeWidth={3} />}
+              </span>
+              <span className="min-w-0">
+                <span className={cn('block text-sm font-bold', on ? 'text-accent-400' : 'text-slate-300')}>
+                  {title}
+                </span>
+                <span className="block text-[11px] text-slate-500 leading-snug">{hint}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
 
       <div className="flex items-start gap-2 mt-4 text-[11px] text-slate-500 leading-snug">
         <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
         <span>
-          Увімкнена галочка означає, що поле бере участь в обміні. Вимкнена —
-          значення на сайті живе своїм життям і в бот не потрапляє.
-          Помаранчевим підсвічено розбіжність там, де поля мали б збігатись.
+          Копіювання тут не відбувається: фільтри, картки, ліміти й пресети
+          зберігаються в одному місці — базі бота, — тож сайт і Telegram
+          завжди показують те саме. Ці перемикачі керують лише тим, як швидко
+          відкрита вкладка помітить зміну. Вимикати варто розділ, який ти
+          саме зараз редагуєш на сайті: інакше незбережену чернетку може
+          перебити значення з бота.
         </span>
       </div>
     </motion.section>

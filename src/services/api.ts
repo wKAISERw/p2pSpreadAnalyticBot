@@ -9,8 +9,16 @@ import {
   GLOBAL_SETTING_KINDS,
   UserSettings,
   BlacklistEntry,
+  BlacklistScope,
   ApiKeyConfig,
   ExchangeStatus,
+  ExchangeHealthResult,
+  TakerSide,
+  TakerOrdersResponse,
+  PriceRange,
+  BankScopes,
+  BankSide,
+  ScannerMode,
   LogRecord,
   DetailedStats,
   TelegramSyncData,
@@ -20,6 +28,8 @@ import {
   Bank,
   ScannerState,
   Card,
+  CardCreatePayload,
+  CardPatch,
   CardTransaction,
   SessionStatus,
   MonitoringOrder,
@@ -231,6 +241,9 @@ export interface GlobalSettingsUpdateResult {
   rejected: string[];
 }
 
+/** Чиї угоди рахує аналітика. 'all' бекенд дозволяє лише адміну. */
+export type StatsScope = 'mine' | 'all';
+
 // ─── Публічний клієнт ─────────────────────────────────────────────────────
 
 export const api = {
@@ -239,22 +252,37 @@ export const api = {
   /** Доступність бірж: enabled / cooldown / лічильник відмов. */
   getExchanges: () => apiClient.get<any, ExchangeStatus[]>('/exchanges'),
 
-  /** Повна аналітика: summary, proposals, daily, exchanges, banks, heatmap, weekly. */
-  getDetailedStats: (periodDays = 30) =>
-    apiClient.get<any, DetailedStats>('/stats/detailed', { params: { period: periodDays } }),
+  /**
+   * Повна аналітика: summary, proposals, daily, exchanges, banks, heatmap, weekly.
+   *
+   * scope='mine' рахує лише власні угоди — це те саме, що «💼 Моя статистика»
+   * в боті. 'all' бекенд віддає тільки адміну: раніше параметра не було
+   * взагалі і кожен бачив зведений PnL усіх користувачів.
+   */
+  getDetailedStats: (periodDays = 30, scope: StatsScope = 'mine') =>
+    apiClient.get<any, DetailedStats>('/stats/detailed', {
+      params: { period: periodDays, scope },
+    }),
 
   getOpportunities: () => apiClient.get<any, ArbitrageOpportunity[]>('/opportunities'),
 
   /** Останні записи логу сканера, найновіші першими. Бекенд ріже limit до 500. */
   getLogs: (limit = 200) => apiClient.get<any, LogRecord[]>('/logs', { params: { limit } }),
 
+  /** Свій список плюс спільний — кожен запис підписаний полем scope. */
   getBlacklist: () => apiClient.get<any, BlacklistEntry[]>('/blacklist'),
 
-  addToBlacklist: (entry: Omit<BlacklistEntry, 'addedAt'>) =>
-    apiClient.post('/blacklist', entry),
+  /** scope='global' бекенд приймає лише від адміністратора. */
+  addToBlacklist: (
+    entry: Omit<BlacklistEntry, 'addedAt' | 'scope'>,
+    scope: BlacklistScope = 'personal'
+  ) => apiClient.post('/blacklist', entry, { params: { scope } }),
 
-  removeFromBlacklist: (merchantId: string, exchange: string) =>
-    apiClient.delete(`/blacklist/${exchange}/${merchantId}`),
+  removeFromBlacklist: (
+    merchantId: string,
+    exchange: string,
+    scope: BlacklistScope = 'personal'
+  ) => apiClient.delete(`/blacklist/${exchange}/${merchantId}`, { params: { scope } }),
 
   async getGlobalSettings(): Promise<GlobalSettings> {
     const raw = await apiClient.get<any, GlobalSettingsRaw>('/settings/global');
@@ -318,6 +346,50 @@ export const api = {
   getUserFilters: (telegramId: string | number) =>
     apiClient.get<any, UserFilters>('/user/filters', { params: { telegram_id: telegramId } }),
 
+  /**
+   * Групи фільтрів окремими запитами.
+   *
+   * Потрібні, щоб синхронізація могла перечитувати пресети тейкера, не
+   * чіпаючи спредові пороги (і навпаки): поки все приходило однією
+   * відповіддю, роздільні перемикачі були б декорацією.
+   */
+  getCoreFilters: () => apiClient.get<any, UserFilters>('/user/filters/core'),
+  getTakerFilters: () => apiClient.get<any, UserFilters>('/user/filters/taker'),
+
+  /** Банки в розрізі режимів: спільні, винятки і те, що вийде насправді. */
+  getBankScopes: () => apiClient.get<any, BankScopes>('/user/bank-scopes'),
+
+  /** Порожній `banks` знімає виняток — режим повертається до спільних. */
+  setBankScope: (mode: ScannerMode, side: BankSide, banks: string[]) =>
+    apiClient.post<any, { status: string; banks: string[] }>('/user/bank-scopes', {
+      mode, side, banks,
+    }),
+
+  /** Ціновий фільтр входу — лише для спред-режиму. */
+  getPriceRange: () => apiClient.get<any, PriceRange>('/user/price-range'),
+  setPriceRange: (config: PriceRange) =>
+    apiClient.post<any, { status: string; priceRange: PriceRange }>('/user/price-range', {
+      mode: config.mode ?? '',
+      min: config.min ?? 0,
+      max: config.max ?? 0,
+      value: config.value ?? 0,
+    }),
+
+  /** Пороги мерчанта: загальні та перевизначені по біржах. */
+  getMerchantFilters: () =>
+    apiClient.get<any, {
+      merchantFilters: MerchantThresholdsFull;
+      exchangeMerchantFilters: Record<string, MerchantThresholdsFull>;
+    }>('/user/merchant-filters'),
+
+  /**
+   * Ордери, що проходять тейкер-фільтри. `side` за замовчуванням 'both' —
+   * дивитись обидві сторони можна незалежно від того, який scanner_mode
+   * зараз стоїть у бота.
+   */
+  getTakerOrders: (side: TakerSide = 'both', limit = 50) =>
+    apiClient.get<any, TakerOrdersResponse>('/taker/orders', { params: { side, limit } }),
+
   /** Пише лише передані поля — решта колонок scanner_users не чіпається. */
   updateUserFilters: (telegramId: string | number, patch: UserFiltersPatch) =>
     apiClient.post<any, { status: string; updated: string[]; rejected: string[] }>(
@@ -347,15 +419,35 @@ export const api = {
   disableExchange: (name: string, cooldownHours = 0, reason = 'manual (web)') =>
     apiClient.post(`/exchanges/${name}/disable`, { reason, cooldownHours }),
 
+  /**
+   * Опитує всі біржі по три спроби кожну — звідси довгий таймаут.
+   * Викликається лише руками: це не метрика, а діагностика.
+   */
+  checkExchangesHealth: () =>
+    apiClient.post<any, ExchangeHealthResult[]>('/exchanges/health', undefined, {
+      timeout: 90000,
+    }),
+
   getCards: (telegramId: string | number) =>
     apiClient.get<any, Card[]>('/cards', { params: { telegram_id: telegramId } }),
   getCardTransactions: (cardId: string, limit = 50) =>
     apiClient.get<any, CardTransaction[]>(`/cards/${cardId}/transactions`, { params: { limit } }),
 
-  getSessions: (telegramId: string | number = 0) =>
-    apiClient.get<any, SessionStatus[]>('/monitoring/sessions', {
-      params: { telegram_id: telegramId },
-    }),
+  /**
+   * Заведення картки. Потрібен або повний номер (16 цифр — за ним бот
+   * звіряє виписку Monobank), або останні чотири, якщо звірка не потрібна.
+   */
+  createCard: (payload: CardCreatePayload) =>
+    apiClient.post<any, { status: string; cardId: string }>('/cards', payload),
+
+  /** Пише лише передані поля — решта колонок картки не чіпається. */
+  updateCard: (cardId: string, patch: CardPatch) =>
+    apiClient.post<any, { status: string; updated: string[] }>(`/cards/${cardId}`, patch),
+
+  deleteCard: (cardId: string) => apiClient.delete(`/cards/${cardId}`),
+
+  /** Свіжість сесій бірж поточного користувача — id бере бекенд із токена. */
+  getSessions: () => apiClient.get<any, SessionStatus[]>('/monitoring/sessions'),
   getMonitoringOrders: () => apiClient.get<any, MonitoringOrder[]>('/monitoring/orders'),
   getQueues: () => apiClient.get<any, QueueStatus>('/monitoring/queues'),
 

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
-import { SlidersHorizontal, Wallet, Percent, Building2, Users, Loader2, Save, Bell, BellOff } from 'lucide-react';
+import { SlidersHorizontal, Wallet, Percent, Building2, Users, Loader2, Save, Bell, BellOff, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { api } from '../services/api';
@@ -10,6 +10,8 @@ import { useExchanges } from '../hooks/useExchanges';
 import { TakerSettings } from './filters/TakerSettings';
 import { MerchantThresholds } from './filters/MerchantThresholds';
 import { SniperRules } from './filters/SniperRules';
+import { PriceRangeFilter } from './filters/PriceRangeFilter';
+import { BankScopes } from './filters/BankScopes';
 import {
   Bank, ScannerMode, SpreadStrategy, CapitalMode, UserFilters, UserFiltersPatch,
 } from '../types';
@@ -73,7 +75,22 @@ export default function FiltersPanel() {
     set(field, next);
   };
 
-  const activeMode = value('scannerMode', filters.scannerMode);
+  // Набір активних режимів. scannerModes зʼявився пізніше за scannerMode,
+  // тож у старих рядках його немає — падаємо на одиничний режим.
+  const activeModes: ScannerMode[] =
+    (value('scannerModes', filters.scannerModes) as ScannerMode[] | undefined)
+    ?? (filters.scannerMode ? [filters.scannerMode] : ['SPREAD']);
+
+  const toggleMode = (mode: ScannerMode) => {
+    const next = activeModes.includes(mode)
+      ? activeModes.filter(m => m !== mode)
+      : [...activeModes, mode];
+    if (next.length === 0) return;
+    set('scannerModes', next);
+  };
+
+  /** Який пресет тейкера показувати першим — беремо перший увімкнений. */
+  const activeMode = activeModes.find(m => m !== 'SPREAD') ?? activeModes[0];
   const hasChanges = Object.keys(draft).length > 0;
 
   const save = async () => {
@@ -139,24 +156,43 @@ export default function FiltersPanel() {
         </div>
       </div>
 
-      {/* Режим сканера */}
-      <Section icon={<SlidersHorizontal className="w-5 h-5 text-accent-400" />} title="Режим сканера">
+      {/* Режими сканера */}
+      <Section icon={<SlidersHorizontal className="w-5 h-5 text-accent-400" />} title="Режими сканера">
+        <p className="text-xs text-slate-400 -mt-2 mb-4">
+          Можна тримати кілька одночасно — наприклад, і купівлю, і продаж.
+          Кожен режим працює за своїм набором налаштувань нижче.
+        </p>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {SCANNER_MODES.map(mode => {
-            const active = value('scannerMode', filters.scannerMode) === mode.value;
+            const active = activeModes.includes(mode.value);
+            // Останній режим не даємо зняти: користувач без жодного нічого
+            // не отримує, і це читається як поламаний бот. Для тиші є
+            // окремий перемикач алертів у шапці.
+            const isLast = active && activeModes.length === 1;
             return (
               <button
                 key={mode.value}
-                onClick={() => set('scannerMode', mode.value)}
+                onClick={() => toggleMode(mode.value)}
+                disabled={isLast}
+                title={isLast ? 'Це єдиний активний режим' : mode.hint}
                 className={cn(
-                  'text-left p-4 rounded-2xl border transition-all',
+                  'text-left p-4 rounded-2xl border transition-all disabled:cursor-not-allowed',
                   active
                     ? 'bg-accent-500/10 border-accent-500/30'
                     : 'bg-slate-950/50 border-slate-800 hover:border-slate-700'
                 )}
               >
-                <div className={cn('font-bold text-sm mb-1', active ? 'text-accent-400' : 'text-white')}>
-                  {mode.label}
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={cn(
+                    'w-4 h-4 rounded-md border flex items-center justify-center shrink-0 transition-colors',
+                    active ? 'bg-accent-500 border-accent-500' : 'border-slate-700'
+                  )}>
+                    {active && <Check className="w-3 h-3 text-slate-950" strokeWidth={3} />}
+                  </span>
+                  <span className={cn('font-bold text-sm', active ? 'text-accent-400' : 'text-white')}>
+                    {mode.label}
+                  </span>
                 </div>
                 <div className="text-xs text-slate-400 leading-snug">{mode.hint}</div>
               </button>
@@ -165,17 +201,25 @@ export default function FiltersPanel() {
         </div>
       </Section>
 
-      {/* Тейкер-режими мають власний набір налаштувань — показуємо його
-          замість спредових порогів, які в цих режимах не читаються. */}
-      {(activeMode === 'TAKER_BUY' || activeMode === 'TAKER_SELL') && (
-        <TakerSettings
-          mode={activeMode}
-          filters={filters as any}
-          value={value}
-          set={set}
-          exchangeNames={exchangeNames}
-        />
-      )}
+      {/*
+        Тейкер-налаштування.
+
+        Раніше блок з'являвся лише тоді, коли обраний відповідний режим:
+        подивитись, що виставлено в Taker Sell, сидячи в Taker Buy, було
+        неможливо — доводилось перемикати режим сканера (і мимоволі його
+        зберігати). Тепер обидва набори доступні завжди, з окремою вкладкою;
+        активний режим просто підсвічений.
+
+        Колонки в базі різні (taker_buy_* і taker_sell_*), тож редагування
+        неактивного набору нічого не ламає — воно просто чекає свого режиму.
+      */}
+      <TakerWorkspace
+        activeMode={activeMode}
+        filters={filters as any}
+        value={value}
+        set={set}
+        exchangeNames={exchangeNames}
+      />
 
       {/* Капітал і спред */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -206,7 +250,7 @@ export default function FiltersPanel() {
           </Field>
         </Section>
 
-        {activeMode === 'SPREAD' && (
+        {activeModes.includes('SPREAD') && (
         <Section icon={<Percent className="w-5 h-5 text-yellow-400" />} title="Спред">
           <Field label="Мінімальний спред (%)" sub="min_spread_pct">
             <NumberInput
@@ -234,42 +278,106 @@ export default function FiltersPanel() {
               ))}
             </div>
           </Field>
+
+          {/* Ціновий фільтр входу. Зберігається окремим ендпоінтом, бо це
+              структура, а не скаляр — тому й кнопка збереження власна. */}
+          <PriceRangeFilter />
         </Section>
         )}
       </div>
 
       {/* Банки */}
       <Section icon={<Building2 className="w-5 h-5 text-purple-400" />} title="Банки">
-        <p className="text-xs text-slate-400 -mt-2 mb-4">
-          Загальний список використовується, коли окремі списки для купівлі й продажу порожні.
-        </p>
-        <BankPicker
-          title="Загальні"
+        <BankScopes
           banks={banks}
-          selected={value('bankCodes', filters.bankCodes)}
-          onToggle={code => toggleBank('bankCodes', code, value('bankCodes', filters.bankCodes))}
-        />
-        <BankPicker
-          title="Тільки для купівлі"
-          banks={banks}
-          selected={value('buyBankCodes', filters.buyBankCodes)}
-          onToggle={code => toggleBank('buyBankCodes', code, value('buyBankCodes', filters.buyBankCodes))}
-        />
-        <BankPicker
-          title="Тільки для продажу"
-          banks={banks}
-          selected={value('sellBankCodes', filters.sellBankCodes)}
-          onToggle={code => toggleBank('sellBankCodes', code, value('sellBankCodes', filters.sellBankCodes))}
+          activeModes={activeModes}
+          sharedValue={side => {
+            if (side === 'general') return value('bankCodes', filters.bankCodes);
+            if (side === 'buy') return value('buyBankCodes', filters.buyBankCodes);
+            return value('sellBankCodes', filters.sellBankCodes);
+          }}
+          onToggleShared={(field, code) => {
+            const current =
+              field === 'bankCodes' ? value('bankCodes', filters.bankCodes)
+                : field === 'buyBankCodes' ? value('buyBankCodes', filters.buyBankCodes)
+                : value('sellBankCodes', filters.sellBankCodes);
+            toggleBank(field, code, current);
+          }}
         />
       </Section>
 
-      <MerchantThresholds
-        filters={filters}
-        exchangeNames={exchangeNames}
-        onSaved={mutate}
-      />
+      <MerchantThresholds exchangeNames={exchangeNames} onSaved={mutate} />
 
       <SniperRules exchangeNames={exchangeNames} />
+    </div>
+  );
+}
+
+/**
+ * Обидва тейкер-набори з перемикачем.
+ *
+ * За замовчуванням відкритий той, що відповідає активному режиму сканера —
+ * але піти подивитись сусідній можна без наслідків.
+ */
+function TakerWorkspace({
+  activeMode, filters, value, set, exchangeNames,
+}: {
+  activeMode: ScannerMode;
+  filters: UserFilters & Record<string, any>;
+  value: <K extends keyof UserFiltersPatch>(key: K, fallback: any) => any;
+  set: <K extends keyof UserFiltersPatch>(key: K, v: UserFiltersPatch[K]) => void;
+  exchangeNames: string[];
+}) {
+  type TakerMode = 'TAKER_BUY' | 'TAKER_SELL';
+  const isTakerActive = activeMode === 'TAKER_BUY' || activeMode === 'TAKER_SELL';
+  const [tab, setTab] = useState<TakerMode>(
+    isTakerActive ? (activeMode as TakerMode) : 'TAKER_BUY'
+  );
+
+  // Перемкнув режим сканера — показуємо відповідний набір. Але якщо людина
+  // сама відкрила іншу вкладку, не смикаємо її назад на кожен рендер.
+  useEffect(() => {
+    if (isTakerActive) setTab(activeMode as TakerMode);
+  }, [activeMode, isTakerActive]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex gap-1 bg-slate-950 border border-slate-800 rounded-xl p-1">
+          {([
+            ['TAKER_BUY', 'Taker Buy'],
+            ['TAKER_SELL', 'Taker Sell'],
+          ] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              onClick={() => setTab(mode)}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-xs font-bold transition-colors',
+                tab === mode ? 'bg-slate-800 text-white' : 'text-slate-500 hover:text-slate-300'
+              )}
+            >
+              {label}
+              {activeMode === mode && <span className="ml-1.5 text-accent-400">●</span>}
+            </button>
+          ))}
+        </div>
+
+        <span className="text-[11px] text-slate-500">
+          {activeMode === tab
+            ? 'Активний режим сканера'
+            : isTakerActive
+              ? 'Не активний зараз — зміни збережуться і чекатимуть свого режиму'
+              : `Зараз працює режим ${activeMode} — ці налаштування не читаються`}
+        </span>
+      </div>
+
+      <TakerSettings
+        mode={tab}
+        filters={filters}
+        value={value}
+        set={set}
+        exchangeNames={exchangeNames}
+      />
     </div>
   );
 }
@@ -328,44 +436,6 @@ const Chip: React.FC<{ active: boolean; onClick: () => void; label: string; badg
       {label}
       {badge && <span className="ml-1.5 text-accent-400">{badge}</span>}
     </button>
-  );
-}
-
-function BankPicker({
-  title, banks, selected, onToggle,
-}: {
-  title: string;
-  banks: Bank[];
-  selected: string[];
-  onToggle: (code: string) => void;
-}) {
-  const list = selected || [];
-  return (
-    <div>
-      <div className="flex items-center gap-2 mb-2">
-        <span className="text-sm font-bold text-white">{title}</span>
-        <span className="text-xs text-slate-500">
-          {list.length ? `обрано ${list.length}` : 'порожньо'}
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {banks.map(bank => (
-          <button
-            key={bank.code}
-            onClick={() => onToggle(bank.code)}
-            title={`код ${bank.code}`}
-            className={cn(
-              'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
-              list.includes(bank.code)
-                ? 'bg-purple-500/10 border-purple-500/30 text-purple-300'
-                : 'bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700'
-            )}
-          >
-            {bank.name}
-          </button>
-        ))}
-      </div>
-    </div>
   );
 }
 

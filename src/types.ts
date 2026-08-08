@@ -2,6 +2,8 @@
 // (api/routers/dashboard.py). Бекенд проганяє всі відповіді через
 // dict_to_camel, тому тут скрізь camelCase.
 
+import type { OrderCardFields } from './lib/orderCard';
+
 export interface Order {
   id: string;
   price: number;
@@ -47,46 +49,83 @@ export interface ApiKeyConfig {
   passphrase?: string;
 }
 
-export interface AutoTradeConfig {
-  enabled: boolean;
-  maxTradeAmount: number;
-  minSpread: number;
-  allowedExchanges: string[];
-  maxRiskScore: number;
-  maxCapital?: number;
-}
-
 export interface MerchantFilters {
   minOrders: number;
   minRate: number;
 }
 
-export interface SyncPreferences {
-  capital: boolean;
-  spread: boolean;
-  banks: boolean;
-  apiKeys: boolean;
-}
-
+/**
+ * Налаштування, які належать САЙТУ.
+ *
+ * Тут навмисно немає капіталу, банків і порогів мерчанта: усе це живе в
+ * базі бота, і сайт читає його напряму через /user/filters. Локальні копії
+ * `maxCapital`, `minCapital` і `banks` звідси прибрано — вони не впливали
+ * ні на що, крім панелі синхронізації, яка сама їх і заповнювала.
+ *
+ * minSpread лишається: це поріг ПОКАЗУ на дашборді, свідомо окремий від
+ * min_spread_pct, за яким бот вирішує, що взагалі шукати.
+ */
 export interface UserSettings {
-  minCapital: number;
-  maxCapital: number;
+  /** Ховає з дашборду слабші спреди. Не впливає на те, що шле бот. */
   minSpread: number;
-  banks: string[];
   merchantFilters?: MerchantFilters;
-  autoTrade?: AutoTradeConfig;
   apiKeys?: Record<string, ApiKeyConfig>;
   telegramUserId?: string;
   isTelegramAdmin?: boolean;
-  autoSyncTelegram?: boolean;
   goalCapital?: number;
   soundEnabled?: boolean;
   soundVolume?: number;
   /** Відтінок акценту в OKLCH (0–360). Рядки лишились із часів,
    *  коли зберігалась назва кольору — resolveHue() їх розуміє. */
   accentColor?: number | string;
-  syncPreferences?: SyncPreferences;
+  /** Автопідхоплення змін, зроблених у Telegram-боті. */
+  sync?: SyncSettings;
+  /**
+   * Які поля показувати в картці ордера на дашборді.
+   *
+   * Свій набір, а не той, що керує Telegram-алертами (`/user/display`):
+   * у чаті повідомлення читають поодинці, а тут картки стоять сіткою, і те
+   * саме наповнення перетворює список на стіну тексту. Тип — з lib/orderCard.
+   */
+  orderCard?: Partial<OrderCardFields>;
 }
+
+/**
+ * Які розділи сайт перечитує сам, коли їх міняють у боті.
+ *
+ * Це не копіювання даних: фільтри, картки, ліміти й пресети зберігаються в
+ * одному місці — базі бота — і сайт бачить рівно те саме. Питання лише в
+ * тому, як швидко відкрита вкладка помітить зміну. Вимкнений розділ просто
+ * не оновлюється сам; це має сенс, коли ти саме редагуєш його на сайті й
+ * не хочеш, щоб чернетку перебило значення з бота.
+ */
+export type SyncSectionKey =
+  | 'filters'
+  | 'taker'
+  | 'merchant'
+  | 'cards'
+  | 'limits'
+  | 'display'
+  | 'sniper'
+  | 'features'
+  | 'blacklist'
+  | 'exchanges';
+
+export interface SyncSettings {
+  /** Головний вимикач: без нього жоден розділ не оновлюється сам. */
+  enabled: boolean;
+  /** Як часто перечитувати, секунди. */
+  intervalSeconds: number;
+  sections: Record<SyncSectionKey, boolean>;
+}
+
+/**
+ * Списків два, і вони не взаємозамінні:
+ *   personal — свій у кожного, впливає лише на власні алерти, правиться без
+ *              жодних прав;
+ *   global   — спільний, наповнюють ризик-движок і адміністратор, діє на всіх.
+ */
+export type BlacklistScope = 'personal' | 'global';
 
 export interface BlacklistEntry {
   exchange: string;
@@ -95,6 +134,7 @@ export interface BlacklistEntry {
   reason: string;
   source: string;
   addedAt: number;
+  scope: BlacklistScope;
 }
 
 // ─── Глобальні налаштування ───────────────────────────────────────────────
@@ -190,6 +230,94 @@ export interface ExchangeStatus {
   failures: number;
 }
 
+/** POST /exchanges/health — по три спроби на біржу, тому повільно. */
+export interface ExchangeHealthResult {
+  exchange: string;
+  ok: boolean;
+  message: string;
+}
+
+// ─── Тейкер-ордери (GET /taker/orders) ────────────────────────────────────
+//
+// Одна сторона ринку, а не зв'язка: у тейкер-режимах ти береш чуже
+// оголошення, тож другої ноги тут немає за визначенням.
+
+export type TakerSide = 'buy' | 'sell' | 'both';
+
+/**
+ * Ціновий фільтр входу (GET/POST /user/price-range).
+ *
+ * Стосується лише спред-режиму: обмежує ціну КУПІВЛІ у зв'язці. Тейкер має
+ * власні стратегії (takerBuyPriceStrategy / takerSellPriceStrategy), тому
+ * тут його немає. Порожній mode = фільтр вимкнено.
+ */
+export type PriceRangeMode = '' | 'range' | 'exact' | 'max' | 'min';
+
+/**
+ * Банки в розрізі режимів (GET/POST /user/bank-scopes).
+ *
+ * base — спільні списки, які працюють у всіх режимах.
+ * overrides — винятки для конкретного режиму; порожньо = беруться спільні.
+ * resolved — що з цього вийде насправді, з позначкою, чи це виняток.
+ *
+ * Останнє тут головне: доти майстер Taker Buy писав свій вибір у спільне
+ * buy_bank_codes, тобто мовчки міняв банки й для спред-режиму — і побачити
+ * це можна було хіба що за зниклими зв'язками.
+ */
+export type BankSide = 'buy' | 'sell';
+
+export interface BankScopes {
+  base: Record<BankSide, string[]>;
+  overrides: Partial<Record<ScannerMode, Partial<Record<BankSide, string[]>>>>;
+  resolved: Record<ScannerMode, Record<BankSide, { banks: string[]; isOverride: boolean }>>;
+}
+
+export interface PriceRange {
+  mode?: PriceRangeMode;
+  min?: number;
+  max?: number;
+  value?: number;
+}
+
+export interface TakerOrder {
+  id: string;
+  exchange: string;
+  price: number;
+  availableAmount: number;
+  minLimit: number;
+  maxLimit: number;
+  merchantId: string;
+  merchantName: string;
+  monthOrderCount: number;
+  finishRatePct: number;
+  positiveRate: number;
+  isVerified: boolean;
+  accountAgeDays: number;
+  lastOnlineMins: number | null;
+  bankCodes: string[];
+  /** Звичайне веб-посилання на профіль мерчанта. */
+  link: string;
+  /**
+   * Посилання, яке на телефоні відкриває мерчанта просто в застосунку
+   * біржі (bot/deeplinks.py). Порожнє = підтвердженого маршруту немає.
+   */
+  appLink: string;
+  riskFlag: string;
+  compositeScore: number;
+  reviewScore: number;
+  reviewNegPct: number;
+  tradeTerms: string;
+  isNewUserSubsidy: boolean;
+  side: string;
+}
+
+export interface TakerOrdersResponse {
+  buy: TakerOrder[];
+  sell: TakerOrder[];
+  /** false — сканер ще не завершив жодного циклу, це не помилка. */
+  scanned: boolean;
+}
+
 /**
  * GET /logs — кільцевий буфер із main.StateLogHandler.
  * Раніше ендпоінт завжди віддавав [], тому фронтенд типізував його як
@@ -260,11 +388,11 @@ export interface DetailedStats {
 /** GET /telegram/sync/{id} */
 export interface TelegramSyncData {
   settings: {
-    minCapital: number;
     maxCapital: number;
     minSpread: number;
     banks: string[];
   };
+  /** Канонічні назви підключених бірж: "OKX", "MEXC", "BingX", "Wallet". */
   keys: string[];
   isAdmin: boolean;
   error?: string;
@@ -300,7 +428,15 @@ export interface UserFilters {
   sellBankCodes: string[];
   merchantFilters: MerchantThresholds;
   exchangeMerchantFilters: Record<string, MerchantThresholds>;
+  /**
+   * Основний режим — той, що бачить меню бота першим.
+   *
+   * Лишається заради старих рядків, де scannerModes ще порожній: набір
+   * зʼявився пізніше, і міграції для нього немає навмисно.
+   */
   scannerMode: ScannerMode;
+  /** Усі активні режими. Бот сканує кожен із них одночасно. */
+  scannerModes?: ScannerMode[];
   makerBuyPrice: number;
   targetMargin: number;
   isAlertsActive?: number;
@@ -323,6 +459,11 @@ export interface UserFiltersPatch extends Partial<TakerSellSettings>, Partial<Ta
   buyBankCodes?: string[];
   sellBankCodes?: string[];
   scannerMode?: ScannerMode;
+  /**
+   * Набір режимів. Порожній бекенд не приймає: користувач без жодного
+   * режиму нічого не отримує, а для тиші є isAlertsActive.
+   */
+  scannerModes?: ScannerMode[];
   isAlertsActive?: boolean;
   targetMargin?: number;
   makerBuyPrice?: number;
@@ -343,17 +484,45 @@ export interface CardLimits {
   [key: string]: number | string | boolean | null;
 }
 
+/** Значення збігаються з меню бота (bot/keyboards/cards.py). */
+export type CardCategory = 'self' | 'relative' | 'friend' | 'drop';
+export type CardStatus =
+  | 'active' | 'inactive' | 'cooldown' | 'frozen' | 'frozen_funds' | 'blocked';
+
 export interface Card {
   id: string;
   ownerId: number;
   bankName: string;
   lastFour: string;
   label: string;
+  note?: string;
+  category?: CardCategory;
   balance: number;
-  status?: string;
+  status?: CardStatus;
+  balanceUpdatedAt?: number;
   limits: CardLimits;
   usedDaily: { in: number; out: number };
   usedMonthly: { in: number; out: number };
+}
+
+export interface CardCreatePayload {
+  bankName: string;
+  /** 16 цифр — потрібні для звірки з випискою Monobank. */
+  cardNumber?: string;
+  /** Альтернатива повному номеру, коли звірка не потрібна. */
+  lastFour?: string;
+  label?: string;
+  category?: CardCategory;
+  balance?: number;
+  note?: string;
+}
+
+export interface CardPatch {
+  label?: string;
+  note?: string;
+  category?: CardCategory;
+  status?: CardStatus;
+  balance?: number;
 }
 
 export interface CardTransaction {

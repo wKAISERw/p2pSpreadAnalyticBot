@@ -1,7 +1,11 @@
 import React from 'react';
-import { Wallet, ShieldCheck, Award, BarChart3, Landmark } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Wallet, ShieldCheck, Award, BarChart3, Landmark, AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useExchangeAccounts, ExchangeAccount } from '../hooks/useExchangeAccounts';
+
+const num = (v: number) =>
+  v.toLocaleString('uk-UA', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export default function AccountsPanel() {
   // Використовуємо НАШ реальний хук, а не моковий від Bolt
@@ -18,13 +22,18 @@ export default function AccountsPanel() {
   const safeAccounts = accounts || [];
   const totalUAH = safeAccounts.reduce((sum, acc) => sum + acc.balanceUAH, 0);
   const totalUSDT = safeAccounts.reduce((sum, acc) => sum + acc.balanceUSDT, 0);
-
-  // Курс для відображення (можна потім теж тягнути з бекенду)
-  const usdtToUahRate = 39.5;
-  const totalGlobalCapital = totalUAH + (totalUSDT * usdtToUahRate);
+  const failed = safeAccounts.filter(acc => acc.error);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto p-4 md:p-8">
+      {/*
+        Дві валюти показуються окремо.
+
+        Тут раніше був «Total Global Capital» — сума гривні й USDT за курсом
+        39.5, вписаним у код. Курс жодного разу не оновлювався і ні з чим не
+        звірявся, тобто головна цифра сторінки була вигадана. Складати їх
+        нема на чому: курсу USDT/UAH бекенд не віддає.
+      */}
       <div className="bg-gradient-to-br from-accent-500/20 via-accent-500/10 to-transparent border border-accent-500/30 rounded-3xl p-8">
         <div className="flex items-center gap-4 mb-4">
           <div className="p-3 bg-accent-500/20 rounded-2xl">
@@ -32,20 +41,27 @@ export default function AccountsPanel() {
           </div>
           <div>
             <h2 className="text-xs uppercase tracking-widest text-slate-400 font-semibold mb-1">
-              Total Global Capital
+              Баланси на біржах
             </h2>
-            <div className="text-4xl font-black text-white tabular-nums">
-              {totalGlobalCapital.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-accent-400 text-2xl">₴</span>
+            <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+              <div className="text-4xl font-black text-white tabular-nums">
+                {num(totalUSDT)} <span className="text-accent-400 text-2xl">USDT</span>
+              </div>
+              <div className="text-2xl font-bold text-slate-300 tabular-nums">
+                {num(totalUAH)} <span className="text-slate-500 text-lg">₴</span>
+              </div>
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-slate-400">Across</span>
-          <span className="font-bold text-accent-400">{safeAccounts.length} exchanges</span>
-          <span className="text-slate-400">• Live balances</span>
-
-          {/* Додали відображення розбивки, як було в нашому старому дизайні */}
-          <span className="text-slate-500 ml-4 font-mono">({totalUAH.toLocaleString('en-US', {maximumFractionDigits: 0})} ₴ + {totalUSDT.toLocaleString('en-US', {maximumFractionDigits: 0})} ₮)</span>
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-slate-400">Підключено бірж:</span>
+          <span className="font-bold text-accent-400">{safeAccounts.length}</span>
+          {failed.length > 0 && (
+            <span className="flex items-center gap-1.5 text-orange-400 ml-2">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {failed.length} не відповіли — суми неповні
+            </span>
+          )}
         </div>
       </div>
 
@@ -54,9 +70,13 @@ export default function AccountsPanel() {
           <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
             <Wallet className="w-8 h-8 text-slate-600" />
           </div>
-          <h3 className="text-lg font-bold text-white mb-2">No Connected Accounts</h3>
+          <h3 className="text-lg font-bold text-white mb-2">Жодної біржі не підключено</h3>
           <p className="text-sm text-slate-400">
-            Connect your exchange API keys to view balances and account details.
+            Додай ключі в розділі{' '}
+            <Link to="/app/apikeys" className="text-accent-400 hover:text-accent-300 underline">
+              «Ключі бірж»
+            </Link>
+            {' '}— після цього тут з'являться баланси.
           </p>
         </div>
       ) : (
@@ -71,97 +91,101 @@ export default function AccountsPanel() {
 }
 
 const ExchangeAccountCard: React.FC<{ account: ExchangeAccount }> = ({ account }) => {
-  // Адаптуємо дані нашого бекенда під дизайн Bolt
-  const limitPercentage = Math.min((account.tradingVolume30d / account.volumeLimit) * 100, 100);
-
   return (
-    <div className="bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-3xl p-6 hover:border-accent-500/30 transition-all">
+    <div className={cn(
+      "bg-slate-900/80 backdrop-blur-md border rounded-3xl p-6 transition-all",
+      account.error ? "border-orange-500/30" : "border-slate-800 hover:border-accent-500/30"
+    )}>
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
           <ExchangeIcon name={account.exchange} />
           <div>
             <h3 className="font-bold text-white text-lg">{account.exchange}</h3>
             <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
-              Exchange Account
+              Акаунт біржі
             </p>
           </div>
         </div>
-        <div className="text-right">
-          <div className="text-2xl font-black text-white tabular-nums">
-            {account.balanceUAH.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            <span className="text-sm text-slate-400 ml-1">₴</span>
+
+        {account.error ? (
+          <div className="text-right max-w-[14rem]">
+            <div className="flex items-center justify-end gap-1.5 text-orange-400 text-sm font-bold">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              Немає відповіді
+            </div>
+            <div className="text-[11px] text-slate-500 truncate" title={account.error}>
+              {account.error}
+            </div>
           </div>
-          <div className="text-xs text-accent-400 font-bold tabular-nums">
-            {account.balanceUSDT.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-accent-500/70">USDT</span>
+        ) : (
+          <div className="text-right">
+            <div className="text-2xl font-black text-white tabular-nums">
+              {num(account.balanceUSDT)}
+              <span className="text-sm text-slate-400 ml-1">USDT</span>
+            </div>
+            <div className="text-xs text-slate-400 font-bold tabular-nums">
+              {num(account.balanceUAH)} ₴
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <ShieldCheck className="w-4 h-4 text-blue-400" />
-              <span className="text-xs uppercase tracking-widest text-slate-400 font-semibold">
-                KYC Level
-              </span>
-            </div>
-            <div className="text-lg font-bold text-white">{account.kycLevel}</div>
+      {/* Показуємо лише те, що біржа справді віддала. Порожні плитки з
+          «Verified / None / $0» виглядали як факти про акаунт, хоча були
+          константами в коді бекенда. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <InfoTile
+          icon={<ShieldCheck className="w-4 h-4 text-blue-400" />}
+          label="Рівень KYC"
+          value={account.kycLevel}
+        />
+        <InfoTile
+          icon={<Award className="w-4 h-4 text-purple-400" />}
+          label="Мерчант"
+          value={
+            account.merchantStatus === 'Active' ? 'Активний'
+              : account.merchantStatus === 'Pending' ? 'На розгляді'
+              : account.merchantStatus === 'None' ? 'Немає статусу'
+              : null
+          }
+          tone={
+            account.merchantStatus === 'Active' ? 'text-accent-400'
+              : account.merchantStatus === 'Pending' ? 'text-orange-400'
+              : undefined
+          }
+        />
+        {account.tradingVolume30d !== null && (
+          <div className="sm:col-span-2">
+            <InfoTile
+              icon={<BarChart3 className="w-4 h-4 text-accent-400" />}
+              label="Обіг за 30 днів"
+              value={`${num(account.tradingVolume30d)} ₴`}
+            />
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
-          <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Award className="w-4 h-4 text-purple-400" />
-              <span className="text-xs uppercase tracking-widest text-slate-400 font-semibold">
-                Merchant
-              </span>
-            </div>
-            <div className={cn(
-              "text-sm font-bold uppercase tracking-wider",
-              account.merchantStatus === 'Active' ? "text-accent-400" :
-              account.merchantStatus === 'Pending' ? "text-orange-400" : "text-slate-500"
-            )}>
-              {account.merchantStatus}
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <BarChart3 className="w-4 h-4 text-accent-400" />
-              <span className="text-xs uppercase tracking-widest text-slate-400 font-semibold">
-                30-Day Volume
-              </span>
-            </div>
-            <span className="text-lg font-bold text-white tabular-nums">
-              ${account.tradingVolume30d.toLocaleString('en-US')}
-            </span>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex justify-between text-xs">
-              <span className="text-slate-500">Limit Usage</span>
-              <span className="text-slate-300 font-bold tabular-nums">
-                {limitPercentage.toFixed(0)}%
-              </span>
-            </div>
-            <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
-              <div
-                className={cn(
-                  "h-full rounded-full transition-all duration-1000",
-                  limitPercentage > 90 ? "bg-red-500" :
-                  limitPercentage > 75 ? "bg-orange-500" : "bg-accent-500"
-                )}
-                style={{ width: `${limitPercentage}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-[10px] font-mono uppercase text-slate-500 tabular-nums">
-              <span>${account.tradingVolume30d.toLocaleString('en-US')}</span>
-              <span>${account.volumeLimit.toLocaleString('en-US')}</span>
-            </div>
-          </div>
-        </div>
+function InfoTile({
+  icon, label, value, tone,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string | null;
+  tone?: string;
+}) {
+  return (
+    <div className="bg-slate-950/50 border border-slate-800 rounded-2xl p-4">
+      <div className="flex items-center gap-2 mb-2">
+        {icon}
+        <span className="text-xs uppercase tracking-widest text-slate-400 font-semibold">
+          {label}
+        </span>
+      </div>
+      <div className={cn('text-sm font-bold', value ? (tone ?? 'text-white') : 'text-slate-600')}>
+        {value ?? 'біржа не віддає'}
       </div>
     </div>
   );

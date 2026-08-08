@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { api } from '../../services/api';
 import {
-  BlacklistMode, MerchantThresholdsFull, UsedSubsidy, UserFilters, VerifiedFilter,
+  BlacklistMode, MerchantThresholdsFull, UsedSubsidy, VerifiedFilter,
 } from '../../types';
 
 /**
@@ -27,22 +27,31 @@ const BLACKLIST: { value: BlacklistMode; label: string; hint: string }[] = [
 ];
 
 interface Props {
-  filters: UserFilters;
   exchangeNames: string[];
+  /** Даємо знати панелі, щоб вона перечитала повний набір фільтрів. */
   onSaved: () => void;
 }
 
-export function MerchantThresholds({ filters, exchangeNames, onSaved }: Props) {
+export function MerchantThresholds({ exchangeNames, onSaved }: Props) {
   const [scope, setScope] = useState('global');
   const [draft, setDraft] = useState<MerchantThresholdsFull>({});
   const [saving, setSaving] = useState(false);
 
+  // Власний запит, а не пропс із FiltersPanel: інакше пороги оновлювались
+  // би тільки разом з усіма фільтрами, і окремий перемикач синхронізації
+  // для них був би несправжнім.
+  const { data, mutate } = useSWR(
+    '/user/merchant-filters',
+    () => api.getMerchantFilters(),
+    { shouldRetryOnError: false }
+  );
+
   const stored: MerchantThresholdsFull =
     scope === 'global'
-      ? (filters.merchantFilters ?? {})
-      : (filters.exchangeMerchantFilters?.[scope] ?? {});
+      ? (data?.merchantFilters ?? {})
+      : (data?.exchangeMerchantFilters?.[scope] ?? {});
 
-  useEffect(() => { setDraft({}); }, [scope, filters]);
+  useEffect(() => { setDraft({}); }, [scope, data]);
 
   const val = <K extends keyof MerchantThresholdsFull>(key: K, fallback: any) =>
     (draft[key] !== undefined ? draft[key] : (stored[key] ?? fallback));
@@ -65,6 +74,7 @@ export function MerchantThresholds({ filters, exchangeNames, onSaved }: Props) {
           : `Пороги для ${scope} збережено`
       );
       setDraft({});
+      await mutate();
       onSaved();
     } catch (e: any) {
       toast.error(`Не збережено: ${e?.message ?? 'помилка'}`);
@@ -106,7 +116,7 @@ export function MerchantThresholds({ filters, exchangeNames, onSaved }: Props) {
             key={name}
             label={name}
             active={scope === name}
-            dot={Boolean(filters.exchangeMerchantFilters?.[name])}
+            dot={Boolean(data?.exchangeMerchantFilters?.[name])}
             onClick={() => setScope(name)}
           />
         ))}

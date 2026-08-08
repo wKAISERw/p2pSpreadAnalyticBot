@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import useSWR from 'swr';
-import { Key, Eye, EyeOff, CheckCircle2, Trash2 } from 'lucide-react';
+import { Key, Eye, EyeOff, CheckCircle2, Trash2, Bot } from 'lucide-react';
+import { useExchanges } from '../hooks/useExchanges';
 import { ApiKeyConfig } from '../types';
 import { cn } from '../lib/utils';
 import { motion } from 'motion/react';
@@ -9,6 +10,45 @@ import { api } from '../services/api';
 import { toast } from 'sonner';
 import { doc, setDoc } from 'firebase/firestore';
 import { db, auth } from '../firebase';
+
+/**
+ * Біржі, які автентифікуються персональними ключами.
+ *
+ * Список повторює core/exchange_names.py. «Telegram Wallet» звідси
+ * прибрано не тому, що біржі немає, а тому що вона зветься `Wallet`:
+ * назва їхала на бекенд як `telegram wallet` і лягала в базу під
+ * написанням, за яким сканер креденшли вже не шукав.
+ */
+const EXCHANGES: { name: string; hasPassphrase?: boolean; hint?: string }[] = [
+  { name: 'Binance' },
+  { name: 'Bybit' },
+  { name: 'OKX', hasPassphrase: true },
+  { name: 'MEXC' },
+  { name: 'BingX' },
+  { name: 'Wallet', hint: 'Telegram Wallet: @wallet → P2P → Settings → API. Потрібен лише API Key.' },
+];
+
+/**
+ * Біржі, які працюють без персональних ключів.
+ *
+ * CryptoBot тут не «не підтримується» — сканер його опитує нарівні з
+ * рештою (core/engine/exchange_manager.ALL_EXCHANGES). Просто авторизація
+ * в нього інша: Pyrogram-юзербот на сервері бота отримує tgWebAppData і
+ * оновлює токен раз на кілька хвилин. Вводити API Key і Secret нема чого —
+ * тому картка з полями, яка тут була раніше, нікуди не вела: ключі лягали
+ * в базу під назвою «Cryptobot», яку не читає жоден клієнт.
+ */
+interface UserbotExchangeCardProps {
+  name: string;
+  note: string;
+}
+
+const USERBOT_EXCHANGES: UserbotExchangeCardProps[] = [
+  {
+    name: 'CryptoBot',
+    note: 'Підключається юзерботом на сервері: TELEGRAM_API_ID, TELEGRAM_API_HASH і сесія в data/cryptobot_session. Персональні ключі не потрібні й не приймаються.',
+  },
+];
 
 export default function ApiKeysPanel() {
   const { userSettings, setUserSettings } = useAppStore();
@@ -22,6 +62,9 @@ export default function ApiKeysPanel() {
     () => api.syncTelegram(telegramId!),
     { shouldRetryOnError: false }
   );
+  // Звіряємось без урахування регістру: бекенд віддає канонічні назви
+  // ("OKX", "BingX"), і посимвольне порівняння з нашим списком ламалось би
+  // на першій же біржі, написаній не так.
   const connectedExchanges = (sync?.keys ?? []).map(k => k.toLowerCase());
 
   /**
@@ -33,7 +76,7 @@ export default function ApiKeysPanel() {
    */
   const handleSaveKey = async (exchange: string, config: ApiKeyConfig) => {
     if (!telegramId) {
-      toast.error('Спочатку вкажи Telegram ID у налаштуваннях — без нього невідомо, чиї це ключі');
+      toast.error('Потрібен вхід через Telegram — без нього невідомо, чиї це ключі');
       throw new Error('telegramUserId is not set');
     }
 
@@ -80,69 +123,97 @@ export default function ApiKeysPanel() {
             <Key className="w-6 h-6 text-accent-400" />
           </div>
           <div>
-            <h2 className="text-lg font-bold text-accent-400 mb-1">API Credentials Management</h2>
+            <h2 className="text-lg font-bold text-accent-400 mb-1">Ключі бірж</h2>
             <p className="text-sm text-accent-500/80 leading-relaxed">
-              Connect your exchange API keys to enable real-time balance tracking, deep merchant profiling, and automated trading. 
-              Keys are encrypted using AES-128-CBC before being stored in the database.
+              Ключі потрібні для читання балансів, профілю мерчанта й торгівлі.
+              Вони шифруються (Fernet) перед записом у базу бота — у браузері
+              не лишається нічого. Це те саме сховище, що й у команди
+              <code className="mx-1 text-accent-300">/connect</code> у Telegram.
             </p>
           </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <ApiKeyCard
-          exchange="Binance"
-          isConnected={connectedExchanges.includes('binance')}
-          onSave={(config: any) => handleSaveKey('Binance', config)}
-          onDisconnect={() => handleDisconnect('Binance')}
-        />
-        <ApiKeyCard
-          exchange="Bybit"
-          isConnected={connectedExchanges.includes('bybit')}
-          onSave={(config: any) => handleSaveKey('Bybit', config)}
-          onDisconnect={() => handleDisconnect('Bybit')}
-        />
-        <ApiKeyCard
-          exchange="OKX"
-          isConnected={connectedExchanges.includes('okx')}
-          hasPassphrase
-          onSave={(config: any) => handleSaveKey('OKX', config)}
-          onDisconnect={() => handleDisconnect('OKX')}
-        />
-        <ApiKeyCard
-          exchange="MEXC"
-          isConnected={connectedExchanges.includes('mexc')}
-          onSave={(config: any) => handleSaveKey('MEXC', config)}
-          onDisconnect={() => handleDisconnect('MEXC')}
-        />
-        <ApiKeyCard
-          exchange="BingX"
-          isConnected={connectedExchanges.includes('bingx')}
-          onSave={(config: any) => handleSaveKey('BingX', config)}
-          onDisconnect={() => handleDisconnect('BingX')}
-        />
-        <ApiKeyCard
-          exchange="CryptoBot"
-          isConnected={connectedExchanges.includes('cryptobot')}
-          onSave={(config: any) => handleSaveKey('CryptoBot', config)}
-          onDisconnect={() => handleDisconnect('CryptoBot')}
-        />
-        <ApiKeyCard
-          exchange="Telegram Wallet"
-          isConnected={connectedExchanges.includes('telegram wallet')}
-          onSave={(config: any) => handleSaveKey('Telegram Wallet', config)}
-          onDisconnect={() => handleDisconnect('Telegram Wallet')}
-        />
+        {EXCHANGES.map(ex => (
+          <ApiKeyCard
+            key={ex.name}
+            exchange={ex.name}
+            hint={ex.hint}
+            isConnected={connectedExchanges.includes(ex.name.toLowerCase())}
+            hasPassphrase={ex.hasPassphrase}
+            onSave={(config: any) => handleSaveKey(ex.name, config)}
+            onDisconnect={() => handleDisconnect(ex.name)}
+          />
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {USERBOT_EXCHANGES.map(ex => (
+          <UserbotExchangeCard key={ex.name} name={ex.name} note={ex.note} />
+        ))}
       </div>
     </div>
   );
 }
 
-function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase }: any) {
+/**
+ * Біржа без персональних ключів. Показуємо реальний стан із /exchanges,
+ * щоб було видно, чи сканер її взагалі опитує — це єдине, чим тут можна
+ * керувати, і робиться воно в «Моніторингу».
+ */
+// React.FC, а не звичайна функція: інакше TS рахує `key` зайвим пропом
+// (той самий патерн, що в ExchangeChip у dashboard/ExchangeHealth.tsx).
+const UserbotExchangeCard: React.FC<UserbotExchangeCardProps> = ({ name, note }) => {
+  const { exchanges } = useExchanges();
+  const status = exchanges.find(e => e.name.toLowerCase() === name.toLowerCase());
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <ExchangeIcon name={name} />
+          <div>
+            <h3 className="font-bold text-white text-lg">{name}</h3>
+            <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
+              Без персональних ключів
+            </p>
+          </div>
+        </div>
+
+        {status && (
+          <span
+            className={cn(
+              'px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border',
+              status.enabled
+                ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                : status.isCooldown
+                  ? 'bg-orange-500/10 border-orange-500/30 text-orange-400'
+                  : 'bg-slate-800 border-slate-700 text-slate-400'
+            )}
+          >
+            {status.enabled ? 'Опитується' : status.isCooldown ? 'Пауза' : 'Вимкнено'}
+          </span>
+        )}
+      </div>
+
+      <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50 flex items-start gap-3">
+        <Bot className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+        <p className="text-[11px] text-slate-400 leading-snug">{note}</p>
+      </div>
+    </div>
+  );
+};
+
+function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase, hint }: any) {
   const [isEditing, setIsEditing] = useState(!isConnected);
   const [showSecret, setShowSecret] = useState(false);
   const [localKeys, setLocalKeys] = useState<ApiKeyConfig>({ key: '', secret: '', passphrase: '' });
   const [isSaving, setIsSaving] = useState(false);
+
+  // Wallet автентифікується одним X-API-Key — секрету в нього просто немає,
+  // і вимагати його означало б зробити форму незаповнюваною.
+  const needsSecret = exchange !== 'Wallet';
 
   const handleSave = async () => {
     setIsSaving(true);
@@ -167,7 +238,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
           <div>
             <h3 className="font-bold text-white text-lg">{exchange}</h3>
             <p className="text-xs text-slate-400 uppercase tracking-widest font-semibold">
-              {isConnected ? 'Connected' : 'Not Connected'}
+              {isConnected ? 'Підключено' : 'Не підключено'}
             </p>
           </div>
         </div>
@@ -196,6 +267,9 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
 
       {isEditing ? (
         <div className="space-y-4">
+          {hint && (
+            <p className="text-[11px] text-slate-500 leading-snug">{hint}</p>
+          )}
           <div>
             <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Key</label>
             <input
@@ -203,27 +277,29 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
               value={localKeys.key}
               onChange={(e) => setLocalKeys({ ...localKeys, key: e.target.value })}
               className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all"
-              placeholder="Enter API Key"
+              placeholder="Встав API Key"
             />
           </div>
-          <div>
-            <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Secret</label>
-            <div className="relative">
-              <input
-                type={showSecret ? "text" : "password"}
-                value={localKeys.secret}
-                onChange={(e) => setLocalKeys({ ...localKeys, secret: e.target.value })}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all pr-10"
-                placeholder="Enter API Secret"
-              />
-              <button 
-                onClick={() => setShowSecret(!showSecret)} 
-                className="absolute right-3 top-3 text-slate-400 hover:text-slate-300 focus:outline-none"
-              >
-                {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-              </button>
+          {needsSecret && (
+            <div>
+              <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">API Secret</label>
+              <div className="relative">
+                <input
+                  type={showSecret ? "text" : "password"}
+                  value={localKeys.secret}
+                  onChange={(e) => setLocalKeys({ ...localKeys, secret: e.target.value })}
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all pr-10"
+                  placeholder="Встав API Secret"
+                />
+                <button
+                  onClick={() => setShowSecret(!showSecret)}
+                  className="absolute right-3 top-3 text-slate-400 hover:text-slate-300 focus:outline-none"
+                >
+                  {showSecret ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
             </div>
-          </div>
+          )}
           {hasPassphrase && (
             <div>
               <label className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">Passphrase</label>
@@ -232,7 +308,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
                 value={localKeys.passphrase}
                 onChange={(e) => setLocalKeys({ ...localKeys, passphrase: e.target.value })}
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/50 outline-none transition-all"
-                placeholder="Enter Passphrase"
+                placeholder="Встав Passphrase"
               />
             </div>
           )}
@@ -244,17 +320,17 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
                 onClick={() => setIsEditing(false)}
                 className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl transition-all focus:ring-2 focus:ring-slate-500/50 outline-none"
               >
-                CANCEL
+                Скасувати
               </motion.button>
             )}
             <motion.button
               whileHover={{ scale: 1.02 }}
               whileTap={{ scale: 0.95 }}
               onClick={handleSave}
-              disabled={isSaving || !localKeys.key || !localKeys.secret}
+              disabled={isSaving || !localKeys.key || (needsSecret && !localKeys.secret)}
               className="flex-1 py-2.5 bg-accent-500 hover:bg-accent-400 text-slate-950 text-xs font-bold rounded-xl transition-all shadow-lg shadow-accent-500/20 disabled:opacity-50 focus:ring-2 focus:ring-accent-500/50 outline-none"
             >
-              {isSaving ? 'SAVING...' : 'SAVE KEYS'}
+              {isSaving ? 'Зберігаю…' : 'Зберегти ключі'}
             </motion.button>
           </div>
         </div>
@@ -267,7 +343,7 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
             </div>
           </div>
           <div className="text-xs font-bold text-accent-500 uppercase tracking-widest bg-accent-500/10 px-2 py-1 rounded">
-            Active
+            Активні
           </div>
         </div>
       )}
@@ -276,13 +352,17 @@ function ApiKeyCard({ exchange, isConnected, onSave, onDisconnect, hasPassphrase
 }
 
 function ExchangeIcon({ name }: { name: string }) {
+  // Ключі — канонічні назви бірж (core/exchange_names.py). Раніше тут
+  // стояло 'Telegram Wallet', якого в системі не існує, тож біржа Wallet
+  // завжди малювалась сірою заглушкою.
   const colors: Record<string, string> = {
     'Bybit': 'bg-orange-500',
     'OKX': 'bg-white',
     'Binance': 'bg-yellow-400',
     'MEXC': 'bg-blue-500',
+    'BingX': 'bg-cyan-400',
     'CryptoBot': 'bg-indigo-500 text-white',
-    'Telegram Wallet': 'bg-sky-500 text-white'
+    'Wallet': 'bg-sky-500 text-white',
   };
   return (
     <div className={cn("w-10 h-10 rounded-full flex items-center justify-center border-2 border-slate-900 font-black text-xs text-slate-950", colors[name] || 'bg-slate-700 text-white')}>

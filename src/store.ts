@@ -5,7 +5,18 @@ import { mockUserSettings } from './data/mock';
 import type { ConnectionState } from './services/api';
 import { setSessionToken } from './services/api';
 
-export type TradingMode = 'taker' | 'maker';
+/**
+ * Що показує дашборд.
+ *
+ * Це вибір ВИДУ, а не режиму бота. Раніше тут було бінарне taker|maker, і
+ * «taker» означав список спред-зв'язок — тобто назва суперечила тому, що
+ * малювалось. Тепер види названі тим, чим вони є, і тейкер-сторони можна
+ * дивитись поодинці або разом.
+ *
+ * scanner_mode (те, що бот шле в Telegram) живе окремо, у базі бота:
+ * дивитись на сайті бік купівлі, поки бот працює на спред, — нормально.
+ */
+export type DashboardView = 'spread' | 'buy' | 'sell' | 'both' | 'maker';
 
 interface AppState {
   /**
@@ -37,7 +48,7 @@ interface AppState {
   isFocusMode: boolean;
   connection: ConnectionState;
 
-  tradingMode: TradingMode;
+  dashboardView: DashboardView;
   excludedExchanges: string[];
 
   setUserSettings: (settings: UserSettings) => void;
@@ -47,7 +58,7 @@ interface AppState {
   setIsFocusMode: (isFocusMode: boolean) => void;
   setConnection: (connection: ConnectionState) => void;
 
-  setTradingMode: (mode: TradingMode) => void;
+  setDashboardView: (view: DashboardView) => void;
   setExcludedExchanges: (exchanges: string[]) => void;
   toggleExcludedExchange: (exchange: string) => void;
 }
@@ -78,7 +89,7 @@ export const useAppStore = create<AppState>()(
       isFocusMode: false,
       connection: 'connecting',
 
-      tradingMode: 'taker',
+      dashboardView: 'spread',
       excludedExchanges: [],
 
       setUserSettings: (settings) => set({ userSettings: settings }),
@@ -89,7 +100,7 @@ export const useAppStore = create<AppState>()(
       setIsFocusMode: (isFocusMode) => set({ isFocusMode }),
       setConnection: (connection) => set({ connection }),
 
-      setTradingMode: (mode) => set({ tradingMode: mode }),
+      setDashboardView: (view) => set({ dashboardView: view }),
       setExcludedExchanges: (exchanges) => set({ excludedExchanges: exchanges }),
       toggleExcludedExchange: (exchange) =>
         set((state) => {
@@ -109,17 +120,36 @@ export const useAppStore = create<AppState>()(
       partialize: (state) => ({
         userSettings: state.userSettings,
         isFocusMode: state.isFocusMode,
-        tradingMode: state.tradingMode,
+        dashboardView: state.dashboardView,
         excludedExchanges: state.excludedExchanges,
       }),
       // partialize впливає лише на запис. У браузерах, які вже ходили на
       // стару версію, у localStorage лежать globalSettings з мок-значеннями
       // та isConnected — без міграції вони пережили б регідратацію і знову
       // стали б джерелом «налаштувань з голови».
-      version: 2,
+      version: 4,
       migrate: (persisted: any) => {
         if (!persisted) return persisted;
         const { globalSettings, isConnected, ...rest } = persisted;
+
+        // v3: блок autoTrade прибрано. Він ніколи не долітав до бота —
+        // виконанням угод керує trade_worker, HTTP-ендпоінта під нього
+        // немає, — але його `allowedExchanges` мовчки фільтрував дашборд.
+        // У браузерах, які вже сюди ходили, він лежить у localStorage, тож
+        // викидаємо його явно.
+        //
+        // v4: туди ж поїхали maxCapital, minCapital, banks і syncPreferences.
+        // Це були локальні копії того, що живе в базі бота; єдиним їхнім
+        // читачем лишалась панель синхронізації, яка сама ж їх і заповнювала.
+        for (const dead of [
+          'autoTrade', 'maxCapital', 'minCapital', 'banks', 'syncPreferences',
+          'autoSyncTelegram',
+        ]) {
+          if (rest?.userSettings && dead in rest.userSettings) {
+            delete rest.userSettings[dead];
+          }
+        }
+
         return rest;
       },
     }

@@ -4,7 +4,25 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { useAppStore } from '../store';
 import { api } from '../services/api';
-import { Search, LayoutDashboard, Settings, Key, ShieldBan, Activity, Volume2, VolumeX, Power, PowerOff } from 'lucide-react';
+import {
+  Search, LayoutDashboard, Settings, Key, ShieldBan, Activity, Volume2, VolumeX,
+  Power, PowerOff, BarChart3, SlidersHorizontal, CreditCard, MonitorDot, Wallet,
+} from 'lucide-react';
+
+// Ті самі розділи, що в сайдбарі. Раніше половини з них тут не було —
+// «Фільтри», «Картки», «Моніторинг» і «Баланси» не відкривались із палітри.
+const NAV_ITEMS = [
+  { path: '/app', label: 'Дашборд', icon: LayoutDashboard },
+  { path: '/app/analytics', label: 'Аналітика', icon: BarChart3 },
+  { path: '/app/filters', label: 'Фільтри', icon: SlidersHorizontal },
+  { path: '/app/blacklist', label: 'Чорний список', icon: ShieldBan },
+  { path: '/app/cards', label: 'Картки', icon: CreditCard },
+  { path: '/app/accounts', label: 'Баланси бірж', icon: Wallet },
+  { path: '/app/apikeys', label: 'Ключі бірж', icon: Key },
+  { path: '/app/monitoring', label: 'Моніторинг', icon: MonitorDot },
+  { path: '/app/logs', label: 'Логи', icon: Activity },
+  { path: '/app/settings', label: 'Налаштування', icon: Settings },
+] as const;
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -60,75 +78,46 @@ export function CommandPalette() {
           <Command.Input
             autoFocus
             className="flex h-12 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-zinc-500 text-zinc-100"
-            placeholder="Type a command or search..."
+            placeholder="Куди йдемо? Почни вводити…"
           />
         </div>
         <Command.List className="max-h-[300px] overflow-y-auto p-2">
           <Command.Empty className="py-6 text-center text-sm text-zinc-500">
-            No results found.
+            Нічого не знайдено.
           </Command.Empty>
 
-          <Command.Group heading="Navigation" className="text-xs font-medium text-zinc-500 px-2 py-1.5">
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <LayoutDashboard className="mr-2 h-4 w-4" />
-              Dashboard
-            </Command.Item>
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app/autotrade'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <Activity className="mr-2 h-4 w-4" />
-              Auto-Trade
-            </Command.Item>
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app/analytics'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <Activity className="mr-2 h-4 w-4" />
-              Analytics
-            </Command.Item>
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app/apikeys'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <Key className="mr-2 h-4 w-4" />
-              API Keys
-            </Command.Item>
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app/blacklist'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <ShieldBan className="mr-2 h-4 w-4" />
-              Blacklist
-            </Command.Item>
-            <Command.Item
-              onSelect={() => runCommand(() => navigate('/app/settings'))}
-              className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
-            >
-              <Settings className="mr-2 h-4 w-4" />
-              Settings
-            </Command.Item>
+          <Command.Group heading="Розділи" className="text-xs font-medium text-zinc-500 px-2 py-1.5">
+            {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
+              <Command.Item
+                key={path}
+                value={label}
+                onSelect={() => runCommand(() => navigate(path))}
+                className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
+              >
+                <Icon className="mr-2 h-4 w-4" />
+                {label}
+              </Command.Item>
+            ))}
           </Command.Group>
 
-          <Command.Group heading="Quick Actions" className="text-xs font-medium text-zinc-500 px-2 py-1.5 mt-2">
+          <Command.Group heading="Швидкі дії" className="text-xs font-medium text-zinc-500 px-2 py-1.5 mt-2">
             <Command.Item
+              value={userSettings.soundEnabled ? 'Вимкнути звук' : 'Увімкнути звук'}
               onSelect={() => runCommand(() => setUserSettings({ ...userSettings, soundEnabled: !userSettings.soundEnabled }))}
               className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
             >
               {userSettings.soundEnabled ? <VolumeX className="mr-2 h-4 w-4" /> : <Volume2 className="mr-2 h-4 w-4" />}
-              {userSettings.soundEnabled ? 'Mute Sounds' : 'Enable Sounds'}
+              {userSettings.soundEnabled ? 'Вимкнути звук алертів' : 'Увімкнути звук алертів'}
             </Command.Item>
-            
+
             {isAdmin && (
               <Command.Item
+                value="Рівень антифроду"
                 onSelect={() => runCommand(toggleRiskMode)}
                 className="flex cursor-pointer items-center rounded-md px-2 py-2 text-sm text-zinc-100 hover:bg-zinc-800 aria-selected:bg-zinc-800"
               >
                 {globalSettings.riskMode === 'STRICT' ? <PowerOff className="mr-2 h-4 w-4 text-red-400" /> : <Power className="mr-2 h-4 w-4 text-accent-400" />}
-                {globalSettings.riskMode === 'STRICT' ? 'Relax Risk Mode' : 'Strict Risk Mode'}
+                {globalSettings.riskMode === 'STRICT' ? 'Послабити антифрод (WARNING)' : 'Посилити антифрод (STRICT)'}
               </Command.Item>
             )}
           </Command.Group>

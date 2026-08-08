@@ -13,11 +13,12 @@ import { api, checkConnection } from '../services/api';
 import { signOutGoogle } from '../lib/google';
 import { useCloudPrefs } from '../hooks/useCloudPrefs';
 import { useSpreadAlerts } from '../hooks/useSpreadAlerts';
+import { useBotSync } from '../hooks/useBotSync';
 import { cn } from '../lib/utils';
 
 // Розділи вантажаться на вимогу — інакше recharts і всі панелі їхали б
 // користувачу ще до того, як він побачив перший спред.
-const AutoTradePanel = lazy(() => import('./AutoTradePanel'));
+const LogsPanel = lazy(() => import('./LogsPanel'));
 const SettingsPanel = lazy(() => import('./SettingsPanel'));
 const ApiKeysPanel = lazy(() => import('./ApiKeysPanel'));
 const BlacklistPanel = lazy(() => import('./BlacklistPanel'));
@@ -95,6 +96,11 @@ export default function AppShell() {
   // іншій сторінці разом із розмонтованим компонентом.
   useSpreadAlerts(Boolean(auth) && connection === 'live');
 
+  // Підхоплення змін, зроблених у Telegram. Теж на рівні оболонки: панелі
+  // монтуються й розмонтовуються, а перечитувати треба незалежно від того,
+  // на якій вкладці зараз людина.
+  useBotSync(Boolean(auth) && connection === 'live');
+
   // Вихід гасить обидві сесії: нашу і Google, якщо він був задіяний.
   const handleLogout = async () => {
     setAuth(null);
@@ -166,7 +172,11 @@ export default function AppShell() {
             <Suspense fallback={<RouteFallback />}>
               <Routes>
                 <Route index element={<Dashboard />} />
-                <Route path="autotrade" element={<AutoTradePanel />} />
+                <Route path="logs" element={<LogsPanel />} />
+                {/* Розділ переїхав із /autotrade: він показує лог сканера, а
+                    не керує авто-торгівлею. Старий шлях лишаємо живим —
+                    він міг осісти в закладках. */}
+                <Route path="autotrade" element={<Navigate to="/app/logs" replace />} />
                 <Route path="analytics" element={<AnalyticsPanel />} />
                 <Route path="settings" element={<SettingsPanel />} />
                 <Route path="apikeys" element={<ApiKeysPanel />} />

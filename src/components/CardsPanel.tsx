@@ -3,11 +3,13 @@ import useSWR from 'swr';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   CreditCard, ArrowDownLeft, ArrowUpRight, Loader2, ChevronDown, Link2, Settings2,
+  Plus, X, Pencil, Trash2, Snowflake, Check,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { api } from '../services/api';
 import { useAppStore } from '../store';
-import { Card, CardReportRow, CardTransaction } from '../types';
+import { Card, CardCategory, CardReportRow, CardTransaction } from '../types';
 import { CardSettings } from './cards/CardSettings';
 import LoadingVeil from './LoadingVeil';
 
@@ -31,6 +33,7 @@ export default function CardsPanel() {
   // Особа береться з підтвердженої сесії — раніше тут був ID,
   // введений руками в налаштуваннях, тобто будь-який.
   const telegramId = useAppStore(state => state.auth?.telegramId);
+  const [isAdding, setIsAdding] = useState(false);
 
   const { data: cards, error, isLoading, mutate } = useSWR<Card[]>(
     telegramId ? ['/cards', telegramId] : null,
@@ -41,62 +44,348 @@ export default function CardsPanel() {
   if (!telegramId) return <Empty text="Потрібен вхід через Telegram." />;
   if (isLoading) return <LoadingVeil compact label="Читаю картки" />;
   if (error) return <Empty text={`Не вдалось завантажити картки: ${(error as Error).message}`} />;
-  if (!cards?.length) return <Empty text="Карток ще немає — додай їх у боті, меню «Картки»." />;
 
-  const totalBalance = cards.reduce((sum, c) => sum + (c.balance ?? 0), 0);
+  const list = cards ?? [];
+  const totalBalance = list.reduce((sum, c) => sum + (c.balance ?? 0), 0);
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">Картки</h1>
-          <p className="text-sm text-slate-400">{cards.length} шт · загальний баланс {uah(totalBalance)}</p>
+          <p className="text-sm text-slate-400">
+            {list.length} шт · загальний баланс {uah(totalBalance)}
+          </p>
         </div>
+
+        <button
+          onClick={() => setIsAdding(v => !v)}
+          className="flex items-center gap-2 px-4 py-2.5 bg-accent-500 hover:bg-accent-400 text-slate-950 text-xs font-bold rounded-xl transition-colors shrink-0"
+        >
+          {isAdding ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+          {isAdding ? 'Скасувати' : 'Додати картку'}
+        </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {cards.map(card => <CardItem key={card.id} card={card} onChanged={mutate} />)}
-      </div>
+      <AnimatePresence>
+        {isAdding && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden"
+          >
+            <AddCardForm
+              onDone={async () => {
+                setIsAdding(false);
+                await mutate();
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {list.length === 0 ? (
+        <Empty text="Карток ще немає — додай першу кнопкою вище або в боті, меню «Картки»." />
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {list.map(card => <CardItem key={card.id} card={card} onChanged={mutate} />)}
+        </div>
+      )}
 
       <CardsReport />
     </div>
   );
 }
 
+const BANKS: { value: string; label: string }[] = [
+  { value: 'monobank', label: 'Monobank' },
+  { value: 'privatbank', label: 'PrivatBank' },
+  { value: 'pumb', label: 'ПУМБ' },
+  { value: 'a-bank', label: 'А-Банк' },
+  { value: 'izibank', label: 'izibank' },
+  { value: 'sense', label: 'Sense' },
+];
+
+const CATEGORIES: { value: CardCategory; label: string }[] = [
+  { value: 'self', label: '🙋 Власна' },
+  { value: 'relative', label: '👪 Родич' },
+  { value: 'friend', label: '🤝 Друг' },
+  { value: 'drop', label: '💼 Дроп' },
+];
+
+/**
+ * Заведення картки — те саме, що майстер `card:add_start` у боті.
+ *
+ * Повний номер необов'язковий: він потрібен лише для звірки з випискою
+ * Monobank. Без нього достатньо останніх чотирьох цифр, і картка працює
+ * як ручний облік лімітів.
+ */
+function AddCardForm({ onDone }: { onDone: () => Promise<void> }) {
+  const [bankName, setBankName] = useState('monobank');
+  const [cardNumber, setCardNumber] = useState('');
+  const [lastFour, setLastFour] = useState('');
+  const [label, setLabel] = useState('');
+  const [category, setCategory] = useState<CardCategory>('self');
+  const [balance, setBalance] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  const digits = cardNumber.replace(/\D/g, '');
+  const hasFullNumber = digits.length === 16;
+  const hasLastFour = /^\d{4}$/.test(lastFour.trim());
+  const canSubmit = Boolean(bankName) && (hasFullNumber || (!digits && hasLastFour));
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setSaving(true);
+    try {
+      await api.createCard({
+        bankName,
+        cardNumber: hasFullNumber ? digits : undefined,
+        lastFour: hasFullNumber ? undefined : lastFour.trim(),
+        label: label.trim(),
+        category,
+        balance,
+      });
+      toast.success('Картку додано');
+      await onDone();
+    } catch (e: any) {
+      toast.error(`Не додано: ${e?.message ?? 'помилка'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="bg-slate-900/50 border border-slate-800/50 rounded-3xl p-6 space-y-5">
+      <div>
+        <FieldLabel>Банк</FieldLabel>
+        <div className="flex flex-wrap gap-2">
+          {BANKS.map(bank => (
+            <button
+              key={bank.value}
+              onClick={() => setBankName(bank.value)}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
+                bankName === bank.value
+                  ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+              )}
+            >
+              {bank.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <FieldLabel>Номер картки</FieldLabel>
+          <input
+            value={cardNumber}
+            onChange={e => setCardNumber(e.target.value)}
+            inputMode="numeric"
+            placeholder="16 цифр"
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white font-mono focus:border-accent-500 outline-none transition-all"
+          />
+          <p className="text-[11px] text-slate-500 mt-1.5">
+            Потрібен, щоб бот звіряв надходження з випискою Monobank.
+            {digits.length > 0 && !hasFullNumber && (
+              <span className="text-orange-400"> Введено {digits.length} із 16.</span>
+            )}
+          </p>
+        </div>
+
+        <div>
+          <FieldLabel>або останні 4 цифри</FieldLabel>
+          <input
+            value={lastFour}
+            onChange={e => setLastFour(e.target.value)}
+            inputMode="numeric"
+            maxLength={4}
+            disabled={digits.length > 0}
+            placeholder="1234"
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white font-mono focus:border-accent-500 outline-none transition-all disabled:opacity-40"
+          />
+          <p className="text-[11px] text-slate-500 mt-1.5">
+            Якщо звірка не потрібна — вистачить їх.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <FieldLabel>Мітка</FieldLabel>
+          <input
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            placeholder="напр. «основна» або «Дроп Іван»"
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:border-accent-500 outline-none transition-all"
+          />
+        </div>
+        <div>
+          <FieldLabel>Поточний баланс (₴)</FieldLabel>
+          <input
+            type="number"
+            value={balance}
+            onChange={e => setBalance(parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white tabular-nums focus:border-accent-500 outline-none transition-all"
+          />
+        </div>
+      </div>
+
+      <div>
+        <FieldLabel>Чия картка</FieldLabel>
+        <div className="flex flex-wrap gap-2">
+          {CATEGORIES.map(cat => (
+            <button
+              key={cat.value}
+              onClick={() => setCategory(cat.value)}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
+                category === cat.value
+                  ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+              )}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <button
+        onClick={submit}
+        disabled={!canSubmit || saving}
+        className="flex items-center gap-2 px-6 py-2.5 bg-accent-500 hover:bg-accent-400 disabled:opacity-40 text-slate-950 text-xs font-bold rounded-xl transition-all"
+      >
+        {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+        Додати картку
+      </button>
+    </div>
+  );
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+      {children}
+    </div>
+  );
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  active: 'активна',
+  inactive: 'неактивна',
+  cooldown: 'пауза',
+  frozen: 'заморожена',
+  frozen_funds: 'кошти заморожені',
+  blocked: 'заблокована',
+};
+
 const CardItem: React.FC<{ card: Card; onChanged: () => void }> = ({ card, onChanged }) => {
-  const [panel, setPanel] = useState<'none' | 'transactions' | 'settings'>('none');
+  const [panel, setPanel] = useState<'none' | 'transactions' | 'settings' | 'edit'>('none');
+  const [busy, setBusy] = useState(false);
 
   const dailyOut = limitOf(card, 'daily_out', 'dailyOut', 'day_out');
   const monthlyOut = limitOf(card, 'monthly_out', 'monthlyOut', 'month_out');
   const dailyIn = limitOf(card, 'daily_in', 'dailyIn', 'day_in');
   const monthlyIn = limitOf(card, 'monthly_in', 'monthlyIn', 'month_in');
 
+  const isFrozen = card.status === 'frozen_funds';
+
+  // Той самий перемикач, що `card:toggle` у боті: активна ↔ кошти заморожені.
+  const toggleFrozen = async () => {
+    setBusy(true);
+    try {
+      await api.updateCard(card.id, { status: isFrozen ? 'active' : 'frozen_funds' });
+      toast.success(isFrozen ? 'Картку розморожено' : 'Кошти позначено як заморожені');
+      onChanged();
+    } catch (e: any) {
+      toast.error(`Не вдалось: ${e?.message ?? 'помилка'}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    // Разом із карткою підуть її транзакції — попереджаємо явно, бо
+    // відновити їх нізвідки.
+    const name = card.label || `${card.bankName} ••••${card.lastFour}`;
+    if (!window.confirm(`Видалити картку «${name}» разом з історією транзакцій?`)) return;
+
+    setBusy(true);
+    try {
+      await api.deleteCard(card.id);
+      toast.success(`Картку «${name}» видалено`);
+      onChanged();
+    } catch (e: any) {
+      toast.error(`Не вдалось видалити: ${e?.message ?? 'помилка'}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      className="bg-slate-900/50 border border-slate-800/50 rounded-3xl overflow-hidden"
+      className={cn(
+        'bg-slate-900/50 border rounded-3xl overflow-hidden',
+        isFrozen ? 'border-blue-500/25' : 'border-slate-800/50'
+      )}
     >
       <div className="p-6">
-        <div className="flex items-start justify-between mb-5">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-slate-800/60 rounded-xl">
-              <CreditCard className="w-5 h-5 text-accent-400" />
+        <div className="flex items-start justify-between mb-5 gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="p-2.5 bg-slate-800/60 rounded-xl shrink-0">
+              <CreditCard className={cn('w-5 h-5', isFrozen ? 'text-blue-400' : 'text-accent-400')} />
             </div>
-            <div>
-              <div className="font-bold text-white">{card.label || 'Без назви'}</div>
-              <div className="text-xs text-slate-400 capitalize">
+            <div className="min-w-0">
+              <div className="font-bold text-white truncate">{card.label || 'Без назви'}</div>
+              <div className="text-xs text-slate-400 capitalize truncate">
                 {card.bankName} · •••• {card.lastFour}
               </div>
             </div>
           </div>
 
-          <div className="text-right">
+          <div className="text-right shrink-0">
             <div className="text-xl font-black text-white tabular-nums">{uah(card.balance)}</div>
             {card.status && (
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">{card.status}</div>
+              <div className={cn(
+                'text-[10px] uppercase tracking-wider',
+                card.status === 'active' ? 'text-slate-500' : 'text-blue-400'
+              )}>
+                {STATUS_LABELS[card.status] ?? card.status}
+              </div>
             )}
           </div>
+        </div>
+
+        {card.note && (
+          <p className="text-[11px] text-slate-500 italic mb-4 line-clamp-2">{card.note}</p>
+        )}
+
+        <div className="flex flex-wrap gap-2 mb-5">
+          <IconAction
+            icon={<Pencil className="w-3.5 h-3.5" />}
+            label="Редагувати"
+            active={panel === 'edit'}
+            onClick={() => setPanel(panel === 'edit' ? 'none' : 'edit')}
+          />
+          <IconAction
+            icon={<Snowflake className="w-3.5 h-3.5" />}
+            label={isFrozen ? 'Розморозити' : 'Заморозити'}
+            disabled={busy}
+            onClick={toggleFrozen}
+          />
+          <IconAction
+            icon={<Trash2 className="w-3.5 h-3.5" />}
+            label="Видалити"
+            tone="danger"
+            disabled={busy}
+            onClick={remove}
+          />
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -147,13 +436,152 @@ const CardItem: React.FC<{ card: Card; onChanged: () => void }> = ({ card, onCha
             exit={{ height: 0, opacity: 0 }}
             className="overflow-hidden border-t border-slate-800/50"
           >
-            {panel === 'transactions'
-              ? <Transactions cardId={card.id} />
-              : <CardSettings card={card} onSaved={onChanged} />}
+            {panel === 'transactions' && <Transactions cardId={card.id} />}
+            {panel === 'settings' && <CardSettings card={card} onSaved={onChanged} />}
+            {panel === 'edit' && (
+              <EditCardForm
+                card={card}
+                onSaved={() => {
+                  setPanel('none');
+                  onChanged();
+                }}
+              />
+            )}
           </motion.div>
         )}
       </AnimatePresence>
     </motion.div>
+  );
+}
+
+function IconAction({
+  icon, label, onClick, active, disabled, tone,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  tone?: 'danger';
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors disabled:opacity-40',
+        tone === 'danger'
+          ? 'bg-slate-950 border-slate-800 text-slate-400 hover:text-red-400 hover:border-red-500/30'
+          : active
+            ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+            : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Мітка, нотатка, категорія і баланс — те саме, що `card:edit:*` у боті.
+ *
+ * Баланс тут правиться руками навмисно: автоматично його оновлює лише
+ * Monobank-вебхук, а для карток інших банків єдине джерело — людина.
+ */
+function EditCardForm({ card, onSaved }: { card: Card; onSaved: () => void }) {
+  const [label, setLabel] = useState(card.label ?? '');
+  const [note, setNote] = useState(card.note ?? '');
+  const [category, setCategory] = useState<CardCategory>(card.category ?? 'self');
+  const [balance, setBalance] = useState(card.balance ?? 0);
+  const [saving, setSaving] = useState(false);
+
+  const dirty =
+    label !== (card.label ?? '') ||
+    note !== (card.note ?? '') ||
+    category !== (card.category ?? 'self') ||
+    balance !== (card.balance ?? 0);
+
+  const save = async () => {
+    if (!dirty) return;
+    setSaving(true);
+    try {
+      await api.updateCard(card.id, {
+        label,
+        note,
+        category,
+        ...(balance !== (card.balance ?? 0) ? { balance } : {}),
+      });
+      toast.success('Картку оновлено');
+      onSaved();
+    } catch (e: any) {
+      toast.error(`Не збережено: ${e?.message ?? 'помилка'}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="px-6 py-5 space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <FieldLabel>Мітка</FieldLabel>
+          <input
+            value={label}
+            onChange={e => setLabel(e.target.value)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:border-accent-500 outline-none"
+          />
+        </div>
+        <div>
+          <FieldLabel>Баланс (₴)</FieldLabel>
+          <input
+            type="number"
+            value={balance}
+            onChange={e => setBalance(parseFloat(e.target.value) || 0)}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white tabular-nums focus:border-accent-500 outline-none"
+          />
+        </div>
+      </div>
+
+      <div>
+        <FieldLabel>Нотатка</FieldLabel>
+        <input
+          value={note}
+          onChange={e => setNote(e.target.value)}
+          placeholder="що варто памʼятати про цю картку"
+          className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2 text-sm text-white focus:border-accent-500 outline-none"
+        />
+      </div>
+
+      <div>
+        <FieldLabel>Чия картка</FieldLabel>
+        <div className="flex flex-wrap gap-2">
+          {CATEGORIES.map(cat => (
+            <button
+              key={cat.value}
+              onClick={() => setCategory(cat.value)}
+              className={cn(
+                'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
+                category === cat.value
+                  ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+              )}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <button
+        onClick={save}
+        disabled={!dirty || saving}
+        className="flex items-center gap-2 px-5 py-2 bg-accent-500 hover:bg-accent-400 disabled:opacity-40 text-slate-950 text-xs font-bold rounded-xl transition-all"
+      >
+        {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+        Зберегти
+      </button>
+    </div>
   );
 }
 

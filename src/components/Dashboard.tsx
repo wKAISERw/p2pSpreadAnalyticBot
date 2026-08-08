@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers, SlidersHorizontal } from 'lucide-react';
-import { ArbitrageOpportunity, Order } from '../types';
+import { ArbitrageOpportunity, Order, UserFilters } from '../types';
 import { cn } from '../lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore } from '../store';
@@ -11,8 +11,9 @@ import useSWR from 'swr';
 import { api } from '../services/api';
 
 // Modular components
-import { FilterControls } from './dashboard/FilterControls';
-import { TradingModeToggle } from './dashboard/TradingModeToggle';
+import { ViewToggle } from './dashboard/ViewToggle';
+import { ScannerModePicker } from './dashboard/ScannerModePicker';
+import { TakerOrdersList } from './dashboard/TakerOrdersList';
 import { ExchangeHealth } from './dashboard/ExchangeHealth';
 import MakerWorkspace from './maker/MakerWorkspace';
 import { useExchanges } from '../hooks/useExchanges';
@@ -76,7 +77,7 @@ export default function Dashboard() {
   const setUserSettings = useAppStore(state => state.setUserSettings);
   const isFocusMode = useAppStore(state => state.isFocusMode);
   const setIsFocusMode = useAppStore(state => state.setIsFocusMode);
-  const tradingMode = useAppStore(state => state.tradingMode);
+  const view = useAppStore(state => state.dashboardView);
   const isAdmin = useAppStore(state => state.auth?.isAdmin ?? false);
 
   // Data fetching
@@ -84,6 +85,15 @@ export default function Dashboard() {
     useSWR('/stats', () => api.getStats(), { refreshInterval: 5000, shouldRetryOnError: false });
   const { data: opportunities, isLoading: isOppsLoading } =
     useSWR('/opportunities', () => api.getOpportunities(), { refreshInterval: 5000, shouldRetryOnError: false });
+
+  // Робочий капітал живе в боті. Тягнемо той самий /user/filters, що й
+  // однойменний розділ — SWR віддасть його з кешу, зайвого запиту не буде.
+  const telegramId = useAppStore(state => state.auth?.telegramId);
+  const { data: filters } = useSWR<UserFilters>(
+    telegramId ? ['/user/filters', telegramId] : null,
+    () => api.getUserFilters(telegramId!),
+    { shouldRetryOnError: false }
+  );
 
   const isScannerActive = stats?.isScannerActive ?? false;
   const [isTogglingScanner, setIsTogglingScanner] = useState(false);
@@ -109,6 +119,8 @@ export default function Dashboard() {
   
   // Use custom hook for filtering (Taker mode)
   const { opportunities: activeOpportunities, hasExclusions } = useSpreadFilters(opportunities, { sortBy });
+  const excludedExchanges = useAppStore(state => state.excludedExchanges);
+  const toggleExcludedExchange = useAppStore(state => state.toggleExcludedExchange);
 
   // Hotkeys
   useEffect(() => {
@@ -128,15 +140,6 @@ export default function Dashboard() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [userSettings, setUserSettings]);
 
-  const toggleExchange = (exchange: string) => {
-    if (!userSettings.autoTrade) return;
-    const current = userSettings.autoTrade.allowedExchanges;
-    const newExchanges = current.includes(exchange)
-      ? current.filter(e => e !== exchange)
-      : [...current, exchange];
-    setUserSettings({ ...userSettings, autoTrade: { ...userSettings.autoTrade, allowedExchanges: newExchanges } });
-  };
-
   return (
     <div className="space-y-8">
       {!isFocusMode && (
@@ -144,28 +147,28 @@ export default function Dashboard() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard
               icon={<TrendingUp className="w-5 h-5 text-accent-400" />}
-              label="Active Spreads"
+              label="Активні спреди"
               value={activeOpportunities.length}
               subValue={`${stats?.opportunitiesFound ?? 0} знайдено за сесію`}
               isLoading={isOppsLoading}
             />
             <StatCard
               icon={<ArrowRightLeft className="w-5 h-5 text-blue-400" />}
-              label="Cycles Completed"
+              label="Циклів пройдено"
               value={stats?.cycles ?? 0}
-              subValue={`${stats?.lastCycleMs ?? 0}ms останній цикл`}
+              subValue={`останній цикл ${Math.round(stats?.lastCycleMs ?? 0)} мс`}
               isLoading={isStatsLoading}
             />
             <StatCard
               icon={<ShieldAlert className="w-5 h-5 text-orange-400" />}
-              label="Bots Detected"
+              label="Ботів виявлено"
               value={stats?.botsDetectedToday ?? 0}
               subValue={`${stats?.totalScanned ?? 0} ордерів проскановано`}
               isLoading={isStatsLoading}
             />
             <GoalProgressCard
-              currentCapital={userSettings.maxCapital}
-              goalCapital={userSettings.goalCapital || 50000}
+              currentCapital={filters?.capital}
+              goalCapital={userSettings.goalCapital}
             />
           </div>
 
@@ -216,14 +219,24 @@ export default function Dashboard() {
 
             <div className="h-6 w-px bg-slate-800 shrink-0 hidden sm:block" />
 
-            <TradingModeToggle />
+            {/* Режим бота і вигляд сторінки — дві різні речі, тому й два
+                контроли поруч, а не один. */}
+            <ScannerModePicker />
+            <ViewToggle />
 
-            {tradingMode === "taker" && (
+            {view === "spread" && (
               <>
                 <div className="h-6 w-px bg-slate-800 shrink-0 hidden sm:block" />
-                <div className="flex items-center gap-2 shrink-0">
+                {/* Це поріг ПОКАЗУ, окремий від min_spread_pct у «Фільтрах».
+                    Два однойменні числа поруч без пояснення читались як одне
+                    й те саме, і люди дивувались, чому Telegram шле те, що
+                    сховане на сайті. */}
+                <div
+                  className="flex items-center gap-2 shrink-0"
+                  title="Ховає зі списку слабші спреди. Те, що бот шукає і шле в Telegram, задається в розділі «Фільтри»."
+                >
                   <span className="text-xs text-slate-400 font-medium uppercase tracking-wider">
-                    Спред від
+                    Показувати від
                   </span>
                   <input
                     type="number"
@@ -295,25 +308,40 @@ export default function Dashboard() {
                 className="overflow-hidden border-t border-slate-800"
               >
                 <div className="p-3 md:p-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+                  {/* Клік вимикає біржу. Один список замість колишньої пари
+                      «include + exclude», яка стояла тут поруч і робила
+                      протилежні речі над різними наборами бірж. */}
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-[11px] text-slate-500 uppercase tracking-wider mr-1">Біржі</span>
-                    {exchangeNames.map(ex => (
+                    {exchangeNames.map(ex => {
+                      const hidden = excludedExchanges.includes(ex);
+                      return (
+                        <button
+                          key={ex}
+                          onClick={() => toggleExcludedExchange(ex)}
+                          title={hidden ? `${ex}: приховано — клікни, щоб показати` : `${ex}: показується`}
+                          className={cn(
+                            "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-accent-500/50 outline-none",
+                            hidden
+                              ? "bg-slate-950 border-slate-800 text-slate-600 line-through"
+                              : "bg-accent-500/10 border-accent-500/30 text-accent-400"
+                          )}
+                        >
+                          {ex}
+                        </button>
+                      );
+                    })}
+                    {hasExclusions && (
                       <button
-                        key={ex}
-                        onClick={() => toggleExchange(ex)}
-                        className={cn(
-                          "px-2 py-1 rounded-lg text-xs font-bold transition-all border focus:ring-2 focus:ring-accent-500/50 outline-none",
-                          userSettings.autoTrade?.allowedExchanges.includes(ex)
-                            ? "bg-accent-500/10 border-accent-500/30 text-accent-400"
-                            : "bg-slate-950 border-slate-800 text-slate-500 hover:border-slate-700"
-                        )}
+                        onClick={() => useAppStore.getState().setExcludedExchanges([])}
+                        className="px-2 py-1 rounded-lg text-xs font-bold text-slate-400 hover:text-white transition-colors"
                       >
-                        {ex}
+                        показати всі
                       </button>
-                    ))}
+                    )}
                   </div>
 
-                  {tradingMode === "taker" && (
+                  {view === "spread" && (
                     <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-lg p-1">
                       <ArrowUpDown className="w-3.5 h-3.5 text-slate-500 ml-1" />
                       {([
@@ -335,24 +363,28 @@ export default function Dashboard() {
                       ))}
                     </div>
                   )}
-
-                  <FilterControls />
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
-        {/* Conditional rendering based on trading mode */}
-        {tradingMode === 'taker' ? (
-          <TakerOpportunitiesList 
+        {/*
+          Що малюємо, вирішує вигляд сторінки, а не режим бота.
+          Спред — зв'язки з /opportunities; купівля/продаж — окремі ордери
+          з /taker/orders, яких на дашборді досі не існувало взагалі.
+        */}
+        {view === 'spread' && (
+          <TakerOpportunitiesList
             opportunities={activeOpportunities}
             isLoading={isOppsLoading}
             viewMode={viewMode}
           />
-        ) : (
-          <MakerWorkspace />
         )}
+        {(view === 'buy' || view === 'sell' || view === 'both') && (
+          <TakerOrdersList side={view} />
+        )}
+        {view === 'maker' && <MakerWorkspace />}
       </div>
     </div>
   );
@@ -400,7 +432,7 @@ function TakerOpportunitiesList({
         <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center mb-4">
           <TrendingUp className="w-6 h-6 opacity-20" />
         </div>
-        <p>Searching for profitable spreads...</p>
+        <p>Шукаю прибуткові зв'язки…</p>
       </motion.div>
     );
   }
@@ -466,8 +498,27 @@ function StatCard({ icon, label, value, subValue, trend, trendUp, isLoading }: a
   );
 }
 
-function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: number, goalCapital: number }) {
-  const progress = Math.min(100, Math.max(0, (currentCapital / goalCapital) * 100));
+/**
+ * Робочий капітал і ціль.
+ *
+ * currentCapital приходить із scanner_users.working_capital — тобто з тієї
+ * ж цифри, якою сканер рахує розмір угоди. Раніше сюди підставлявся
+ * локальний userSettings.maxCapital із дефолтом 15 000, який ніде не
+ * зберігався й ні на що не впливав: картка показувала прогрес до цілі за
+ * капіталом, якого не існує.
+ *
+ * Ціль лишається річчю сайту: у боті такого поняття немає.
+ */
+function GoalProgressCard({
+  currentCapital, goalCapital,
+}: {
+  currentCapital?: number;
+  goalCapital?: number;
+}) {
+  const hasGoal = Boolean(goalCapital && goalCapital > 0);
+  const progress = hasGoal && currentCapital
+    ? Math.min(100, Math.max(0, (currentCapital / goalCapital!) * 100))
+    : 0;
 
   return (
     <div className="bg-slate-900 border border-slate-800 p-5 rounded-3xl relative overflow-hidden">
@@ -476,27 +527,44 @@ function GoalProgressCard({ currentCapital, goalCapital }: { currentCapital: num
           <div className="p-2 bg-slate-800 rounded-xl">
             <Target className="w-5 h-5 text-purple-400" />
           </div>
-          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Goal Progress</span>
+          <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+            Робочий капітал
+          </span>
         </div>
-        <span className="text-xs font-bold text-purple-400 tabular-nums">
-          <CountUp end={progress} decimals={1} duration={1} />%
-        </span>
-      </div>
-      <div className="text-2xl font-bold text-white mb-2 tabular-nums">
-        <CountUp end={currentCapital} duration={1} separator="," /> ₴
+        {hasGoal && (
+          <span className="text-xs font-bold text-purple-400 tabular-nums">
+            <CountUp end={progress} decimals={1} duration={1} />%
+          </span>
+        )}
       </div>
 
-      <div className="w-full bg-slate-800 rounded-full h-1.5 mb-1">
-        <motion.div
-          className="bg-purple-500 h-1.5 rounded-full"
-          initial={{ width: 0 }}
-          animate={{ width: `${progress}%` }}
-          transition={{ duration: 1, ease: "easeOut" }}
-        />
-      </div>
-      <div className="text-xs text-slate-400 font-medium uppercase tracking-widest text-right tabular-nums">
-        Target: {goalCapital.toLocaleString()} ₴
-      </div>
+      {currentCapital === undefined ? (
+        <div className="text-2xl font-bold text-slate-600 mb-2">—</div>
+      ) : (
+        <div className="text-2xl font-bold text-white mb-2 tabular-nums">
+          <CountUp end={currentCapital} duration={1} separator=" " /> ₴
+        </div>
+      )}
+
+      {hasGoal ? (
+        <>
+          <div className="w-full bg-slate-800 rounded-full h-1.5 mb-1">
+            <motion.div
+              className="bg-purple-500 h-1.5 rounded-full"
+              initial={{ width: 0 }}
+              animate={{ width: `${progress}%` }}
+              transition={{ duration: 1, ease: "easeOut" }}
+            />
+          </div>
+          <div className="text-xs text-slate-400 font-medium uppercase tracking-widest text-right tabular-nums">
+            Ціль: {goalCapital!.toLocaleString('uk-UA')} ₴
+          </div>
+        </>
+      ) : (
+        <div className="text-xs text-slate-500">
+          Ціль не задана — це поле в «Налаштуваннях».
+        </div>
+      )}
     </div>
   );
 }

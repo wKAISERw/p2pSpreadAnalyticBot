@@ -3,14 +3,16 @@ import useSWR from 'swr';
 import { motion } from 'motion/react';
 import {
   Cookie, Activity, Brain, MessageSquare, Wifi, WifiOff, Loader2,
-  Power, PowerOff, BellOff, Bell, TimerReset, CircleSlash,
+  Power, PowerOff, BellOff, Bell, TimerReset, CircleSlash, Stethoscope,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { api } from '../services/api';
 import { useAppStore } from '../store';
 import { useExchanges } from '../hooks/useExchanges';
-import { MonitoringOrder, QueueStatus, ScannerState, SessionStatus } from '../types';
+import {
+  ExchangeHealthResult, MonitoringOrder, QueueStatus, ScannerState, SessionStatus,
+} from '../types';
 
 /**
  * Меню «Моніторинг» + «Система» з бота: стан ядра, пауза алертів, свіжість
@@ -31,7 +33,7 @@ export default function MonitoringPanel() {
     { refreshInterval: 5000, shouldRetryOnError: false }
   );
   const { data: sessions } = useSWR<SessionStatus[]>(
-    ['/monitoring/sessions', telegramId ?? 0], () => api.getSessions(telegramId ?? 0),
+    telegramId ? ['/monitoring/sessions', telegramId] : null, () => api.getSessions(),
     { refreshInterval: 30000, shouldRetryOnError: false }
   );
   const { data: orders } = useSWR<MonitoringOrder[]>(
@@ -142,23 +144,94 @@ export default function MonitoringPanel() {
   );
 }
 
+/**
+ * Варіанти паузи при вимкненні біржі — ті самі, що пропонує меню
+ * `exch:cooldown_pick` у боті. 0 означає «до ручного ввімкнення».
+ */
+const COOLDOWN_CHOICES: { hours: number; label: string }[] = [
+  { hours: 1, label: '1 год' },
+  { hours: 4, label: '4 год' },
+  { hours: 12, label: '12 год' },
+  { hours: 24, label: '1 доба' },
+  { hours: 0, label: 'Назавжди' },
+];
+
 function ExchangeControl({ isAdmin }: { isAdmin: boolean }) {
   const { exchanges } = useExchanges();
   const { mutate } = useSWR('/exchanges');
+  // Яку біржу зараз вимикаємо — для неї показуємо вибір паузи.
+  const [picking, setPicking] = React.useState<string | null>(null);
+  const [health, setHealth] = React.useState<ExchangeHealthResult[] | null>(null);
+  const [checking, setChecking] = React.useState(false);
 
-  const toggle = async (name: string, enabled: boolean) => {
+  /**
+   * «Health check» із меню моніторингу бота.
+   *
+   * Лічильник відмов поруч показує минуле — скільки разів біржа вже не
+   * відповіла в бойових циклах. Ця кнопка питає її просто зараз, тому й
+   * повільна: ExchangeManager робить три спроби на кожну.
+   */
+  const runHealthCheck = async () => {
+    setChecking(true);
     try {
-      if (enabled) await api.disableExchange(name);
-      else await api.enableExchange(name);
+      const result = await api.checkExchangesHealth();
+      setHealth(result);
+      const dead = result.filter(r => !r.ok);
+      if (dead.length) {
+        toast.warning(`Не відповідають: ${dead.map(r => r.exchange).join(', ')}`);
+      } else {
+        toast.success('Усі біржі відповідають');
+      }
+    } catch (e: any) {
+      toast.error(`Перевірка не вдалась: ${e?.message ?? 'помилка'}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const enable = async (name: string) => {
+    try {
+      await api.enableExchange(name);
       await mutate();
-      toast.success(`${name}: ${enabled ? 'вимкнено' : 'увімкнено'}`);
+      toast.success(`${name}: увімкнено`);
+    } catch (e: any) {
+      toast.error(`Не вдалось: ${e?.message ?? 'помилка'}`);
+    }
+  };
+
+  const disable = async (name: string, cooldownHours: number) => {
+    setPicking(null);
+    try {
+      await api.disableExchange(name, cooldownHours);
+      await mutate();
+      toast.success(
+        cooldownHours
+          ? `${name}: пауза ${cooldownHours} год`
+          : `${name}: вимкнено до ручного ввімкнення`
+      );
     } catch (e: any) {
       toast.error(`Не вдалось: ${e?.message ?? 'помилка'}`);
     }
   };
 
   return (
-    <Panel title="Біржі" icon={<CircleSlash className="w-5 h-5 text-orange-400" />}>
+    <Panel
+      title="Біржі"
+      icon={<CircleSlash className="w-5 h-5 text-orange-400" />}
+      action={isAdmin && (
+        <button
+          onClick={runHealthCheck}
+          disabled={checking}
+          title="Опитати всі біржі просто зараз (три спроби на кожну)"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-800 border border-slate-700 text-slate-300 hover:text-white disabled:opacity-40 transition-colors"
+        >
+          {checking
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Stethoscope className="w-3.5 h-3.5" />}
+          {checking ? 'Опитую…' : 'Перевірити'}
+        </button>
+      )}
+    >
       {exchanges.length === 0 ? (
         <Muted>Немає даних.</Muted>
       ) : (
@@ -166,36 +239,75 @@ function ExchangeControl({ isAdmin }: { isAdmin: boolean }) {
           {exchanges.map(ex => (
             <div
               key={ex.name}
-              className="flex items-center justify-between px-4 py-2.5 bg-slate-950/50 border border-slate-800/50 rounded-xl"
+              className="px-4 py-2.5 bg-slate-950/50 border border-slate-800/50 rounded-xl"
             >
-              <div className="flex items-center gap-2.5 min-w-0">
-                <span className={cn(
-                  'w-2 h-2 rounded-full shrink-0',
-                  ex.enabled ? 'bg-accent-500' : ex.isCooldown ? 'bg-orange-500' : 'bg-slate-600'
-                )} />
-                <span className="text-sm font-bold text-white">{ex.name}</span>
-                {ex.isCooldown && (
-                  <span className="flex items-center gap-1 text-[11px] text-orange-400">
-                    <TimerReset className="w-3 h-3" />{ex.cooldownRemainingH}г
-                  </span>
-                )}
-                {ex.disabledReason && (
-                  <span className="text-[11px] text-slate-500 truncate">{ex.disabledReason}</span>
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className={cn(
+                    'w-2 h-2 rounded-full shrink-0',
+                    ex.enabled ? 'bg-accent-500' : ex.isCooldown ? 'bg-orange-500' : 'bg-slate-600'
+                  )} />
+                  <span className="text-sm font-bold text-white">{ex.name}</span>
+                  {ex.isCooldown && (
+                    <span className="flex items-center gap-1 text-[11px] text-orange-400">
+                      <TimerReset className="w-3 h-3" />{ex.cooldownRemainingH}г
+                    </span>
+                  )}
+                  {ex.disabledReason && (
+                    <span className="text-[11px] text-slate-500 truncate">{ex.disabledReason}</span>
+                  )}
+                  {(() => {
+                    const probe = health?.find(h => h.exchange === ex.name);
+                    if (!probe) return null;
+                    return (
+                      <span
+                        title={probe.message}
+                        className={cn(
+                          'text-[11px] font-bold shrink-0',
+                          probe.ok ? 'text-accent-400' : 'text-red-400'
+                        )}
+                      >
+                        {probe.ok ? 'відповідає' : 'мовчить'}
+                      </span>
+                    );
+                  })()}
+                </div>
+
+                {isAdmin && (
+                  <button
+                    onClick={() =>
+                      ex.enabled
+                        ? setPicking(picking === ex.name ? null : ex.name)
+                        : enable(ex.name)
+                    }
+                    className={cn(
+                      'px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-colors shrink-0',
+                      ex.enabled
+                        ? 'bg-slate-900 border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-500/30'
+                        : 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                    )}
+                  >
+                    {ex.enabled ? (picking === ex.name ? 'Скасувати' : 'Вимкнути') : 'Увімкнути'}
+                  </button>
                 )}
               </div>
 
-              {isAdmin && (
-                <button
-                  onClick={() => toggle(ex.name, ex.enabled)}
-                  className={cn(
-                    'px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border transition-colors shrink-0',
-                    ex.enabled
-                      ? 'bg-slate-900 border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-500/30'
-                      : 'bg-accent-500/10 border-accent-500/30 text-accent-400'
-                  )}
-                >
-                  {ex.enabled ? 'Вимкнути' : 'Увімкнути'}
-                </button>
+              {/* Раніше кнопка завжди слала cooldownHours=0, хоча ендпоінт
+                  приймав будь-яке значення — тимчасово прибрати біржу з
+                  опитування можна було тільки в боті. */}
+              {picking === ex.name && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-3 pt-3 border-t border-slate-800/50">
+                  <span className="text-[11px] text-slate-500 mr-1">Пауза на:</span>
+                  {COOLDOWN_CHOICES.map(choice => (
+                    <button
+                      key={choice.hours}
+                      onClick={() => disable(ex.name, choice.hours)}
+                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-900 border border-slate-700 text-slate-300 hover:border-red-500/30 hover:text-red-400 transition-colors"
+                    >
+                      {choice.label}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
           ))}
@@ -310,7 +422,15 @@ function BreakersCard({ cbStatus }: { cbStatus?: Record<string, string> }) {
 
 // ─── Дрібниці ─────────────────────────────────────────────────────────────
 
-function Panel({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+function Panel({
+  title, icon, children, action,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  /** Кнопка праворуч від заголовка — напр. ручна перевірка бірж. */
+  action?: React.ReactNode;
+}) {
   return (
     <motion.section
       initial={{ opacity: 0, y: 12 }}
@@ -320,6 +440,7 @@ function Panel({ title, icon, children }: { title: string; icon: React.ReactNode
       <div className="flex items-center gap-3 mb-4">
         <div className="p-2 bg-slate-800/60 rounded-xl">{icon}</div>
         <h2 className="text-lg font-bold text-white">{title}</h2>
+        {action && <div className="ml-auto">{action}</div>}
       </div>
       {children}
     </motion.section>

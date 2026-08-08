@@ -1,3 +1,4 @@
-export { FilterControls } from './FilterControls';
-export { TradingModeToggle } from './TradingModeToggle';
+export { ViewToggle } from './ViewToggle';
+export { ScannerModePicker } from './ScannerModePicker';
+export { TakerOrdersList } from './TakerOrdersList';
 export { ExchangeHealth } from './ExchangeHealth';

@@ -19,6 +19,7 @@ import AppearanceSection from './settings/AppearanceSection';
 import SyncSection from './settings/SyncSection';
 import FeaturesSection from './settings/FeaturesSection';
 import BankLimitsSection from './settings/BankLimitsSection';
+import OrderCardSection from './settings/OrderCardSection';
 
 type TabId = 'account' | 'appearance' | 'alerts' | 'cards' | 'extra' | 'antifraud';
 
@@ -86,6 +87,9 @@ export default function SettingsPanel() {
         {active === 'appearance' && (
           <>
             <AppearanceSection />
+            {/* Наповнення карток — теж про вигляд сайту, тому тут, а не
+                поруч із налаштуваннями Telegram-алертів. */}
+            <OrderCardSection />
             <SoundSettings />
           </>
         )}

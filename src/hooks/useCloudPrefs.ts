@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { firestoreDoc } from '../lib/google';
-import { useAppStore } from '../store';
+import { useAppStore, DashboardView } from '../store';
 
 /**
  * Синхронізація налаштувань САЙТУ між браузерами й пристроями.
@@ -25,14 +25,15 @@ interface CloudPrefs {
   soundVolume?: number;
   accentColor?: number | string;
   goalCapital?: number;
-  tradingMode?: 'taker' | 'maker';
+  dashboardView?: DashboardView;
+  orderCard?: Record<string, boolean>;
   excludedExchanges?: string[];
 }
 
 export function useCloudPrefs(hasGoogleLink: boolean) {
   const telegramId = useAppStore(state => state.auth?.telegramId);
   const userSettings = useAppStore(state => state.userSettings);
-  const tradingMode = useAppStore(state => state.tradingMode);
+  const dashboardView = useAppStore(state => state.dashboardView);
   const excludedExchanges = useAppStore(state => state.excludedExchanges);
 
   // Прапорець «зміна прийшла з хмари» — без нього snapshot одразу тригерив
@@ -63,7 +64,7 @@ export function useCloudPrefs(hasGoogleLink: boolean) {
 
       const merged = { ...store.userSettings };
       let touched = false;
-      for (const key of ['soundEnabled', 'soundVolume', 'accentColor', 'goalCapital'] as const) {
+      for (const key of ['soundEnabled', 'soundVolume', 'accentColor', 'goalCapital', 'orderCard'] as const) {
         if (remote[key] !== undefined && remote[key] !== merged[key]) {
           (merged as any)[key] = remote[key];
           touched = true;
@@ -71,8 +72,8 @@ export function useCloudPrefs(hasGoogleLink: boolean) {
       }
       if (touched) store.setUserSettings(merged);
 
-      if (remote.tradingMode && remote.tradingMode !== store.tradingMode) {
-        store.setTradingMode(remote.tradingMode);
+      if (remote.dashboardView && remote.dashboardView !== store.dashboardView) {
+        store.setDashboardView(remote.dashboardView);
       }
       if (
         remote.excludedExchanges &&
@@ -109,7 +110,8 @@ export function useCloudPrefs(hasGoogleLink: boolean) {
         soundVolume: userSettings.soundVolume,
         accentColor: userSettings.accentColor,
         goalCapital: userSettings.goalCapital,
-        tradingMode,
+        orderCard: userSettings.orderCard as Record<string, boolean> | undefined,
+        dashboardView,
         excludedExchanges,
       };
       try {
@@ -131,7 +133,8 @@ export function useCloudPrefs(hasGoogleLink: boolean) {
     userSettings.soundVolume,
     userSettings.accentColor,
     userSettings.goalCapital,
-    tradingMode,
+    userSettings.orderCard,
+    dashboardView,
     excludedExchanges,
   ]);
 }

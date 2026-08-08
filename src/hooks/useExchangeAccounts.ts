@@ -2,15 +2,24 @@ import useSWR from 'swr';
 import { api } from '../services/api'; // Перевір, чи правильний шлях до api.ts
 import { useAppStore } from '../store';
 
+/**
+ * Дані акаунта біржі з GET /accounts/{id}.
+ *
+ * Поля, крім балансів, nullable свідомо: бекенд уміє їх дістати лише для
+ * частини бірж (Binance і OKX). Раніше замість null там лежали константи
+ * «Verified» / «None» / 0 / 100000 — цифри, яких ніхто не питав у біржі.
+ */
 export interface ExchangeAccount {
   id: string;
   exchange: string;
   balanceUAH: number;
   balanceUSDT: number;
-  kycLevel: string;
-  merchantStatus: 'Active' | 'Pending' | 'None';
-  tradingVolume30d: number;
-  volumeLimit: number;
+  kycLevel: string | null;
+  merchantStatus: 'Active' | 'Pending' | 'None' | null;
+  tradingVolume30d: number | null;
+  volumeLimit: number | null;
+  /** Заповнене, якщо біржа не відповіла: баланси тоді нульові несправжні. */
+  error?: string;
 }
 
 export function useExchangeAccounts() {

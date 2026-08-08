@@ -19,18 +19,18 @@ export function useSpreadFilters(
     if (!opportunities) return [];
 
     return opportunities
-      // Filter by min spread
+      // Поріг спреду — суто для показу. Те, що бот взагалі шукає й шле в
+      // Telegram, задає min_spread_pct у розділі «Фільтри».
       .filter(opp => opp.netSpread >= userSettings.minSpread)
-      // Filter by allowed exchanges (include list)
-      .filter(opp => {
-        const allowedExchanges = userSettings.autoTrade?.allowedExchanges || [];
-        if (allowedExchanges.length === 0) return true;
-        return (
-          allowedExchanges.includes(opp.buyOrder.exchange) &&
-          allowedExchanges.includes(opp.sellOrder.exchange)
-        );
-      })
-      // Filter by excluded exchanges
+      /*
+       * Приховані біржі.
+       *
+       * Раніше фільтрів було два: include-список `autoTrade.allowedExchanges`
+       * і цей exclude-список. Вони жили в одній панелі, робили протилежні
+       * речі й мали різні набори бірж — а include ще й приїжджав із
+       * дефолтом ['Bybit','OKX'], тобто мовчки ховав решту. Лишився один
+       * список: порожній = видно все.
+       */
       .filter(opp => {
         if (excludedExchanges.length === 0) return true;
         return (
@@ -55,7 +55,7 @@ export function useSpreadFilters(
             return b.netSpread - a.netSpread;
         }
       });
-  }, [opportunities, userSettings.minSpread, userSettings.autoTrade?.allowedExchanges, excludedExchanges, options.sortBy]);
+  }, [opportunities, userSettings.minSpread, excludedExchanges, options.sortBy]);
 
   return {
     opportunities: filteredAndSorted,
