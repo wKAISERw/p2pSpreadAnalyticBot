@@ -3,8 +3,8 @@ import asyncio
 import time
 from typing import List, Tuple
 from decimal import Decimal
-from config.banks import BankRegistry
-from core.engine import bank_discovery
+from config.banks import is_unmapped_code
+from core.engine import bank_discovery, terms_status
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
 
@@ -31,9 +31,16 @@ class BybitExchange(BaseExchange):
             code = str(p.get("paymentType", "")) if isinstance(p, dict) else str(p)
             if not code:
                 continue
-            if BankRegistry.from_api_code(code, "Bybit") is None:
+            # Питаємо саме normalize_bank, а не BankRegistry: у проєкті два
+            # реєстри — `exchange_codes` (коди API бірж) і `_CODE_TO_SLUG`
+            # (аліаси нормалізації). Bybit-коди 1 і 61 є в другому й
+            # чудово працюють, але в першому їх немає — перша версія цієї
+            # перевірки рапортувала їх як невідомі 268 тисяч разів.
+            if is_unmapped_code(code):
                 bank_discovery.note("Bybit", code, p)
             parsed_banks.append(code)
+
+        terms_text, terms_state = terms_status.from_payload(item, "remark")
 
         is_online = bool(item.get("isOnline"))
         last_online_mins = 0
@@ -62,7 +69,8 @@ class BybitExchange(BaseExchange):
             exchange="Bybit",
             link=f"https://www.bybit.com/uk-UA/p2p/profile/{profile_id}/USDT/UAH/item" if profile_id else "",
             bank_codes=parsed_banks,
-            trade_terms=str(item.get("remark", "") or "").strip().lower(),
+            trade_terms=terms_text,
+            terms_status=terms_state,
             is_verified=bool(item.get("authTag") or item.get("isVerified")),
             last_online_mins=last_online_mins,
         )

@@ -5,6 +5,7 @@ import time
 from decimal import Decimal
 from typing import List, Tuple
 
+from core.engine import terms_status
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.mexc_client import MexcClient
 from config.banks import BankRegistry
@@ -76,6 +77,9 @@ class MexcExchange(BaseExchange):
             if internal_code and internal_code not in bank_codes:
                 bank_codes.append(internal_code)
 
+        terms_text, terms_state = terms_status.from_payload(
+            item, "tradeTerms", "remark")
+
         return Order(
             id=f"mx_{adv_no}",
             price=price,
@@ -89,7 +93,8 @@ class MexcExchange(BaseExchange):
             exchange="MEXC",
             link=f"https://www.mexc.com/uk-UA/buy-crypto/merchant?id={user_id}",
             bank_codes=bank_codes,
-            trade_terms=str(item.get("tradeTerms") or item.get("remark") or "").strip().lower(),
+            trade_terms=terms_text,
+            terms_status=terms_state,
             is_verified=bool(merchant.get("isCertified") or merchant.get("isVerified")),
             last_online_mins=last_online_mins,
         )

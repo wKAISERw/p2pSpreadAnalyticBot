@@ -26,6 +26,7 @@ from core.analysis.behavioral_analyzer import analyze_history
 from core.analysis.identity_analyzer import analyze_identity
 from core.utils.cache import TTLCache
 from core.utils.tasks import spawn
+from core.engine import terms_status
 from config.defaults import (
     MIN_ORDERS, MIN_COMPLETION,
     TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
@@ -1043,8 +1044,17 @@ class RiskEngine:
             # Regex не має за що зачепитись, тому без цієї позначки мерчант
             # без опису виглядав би так само надійно, як мерчант із повним
             # текстом, який пройшов аналіз.
+            #
+            # Але причина важить: «мерчант нічого не написав» і «ми не змогли
+            # дістати умови» — різні речі. Перше характеризує мерчанта, друге
+            # нас. Досі обидва позначались як EMPTY, і людина бачила «умови не
+            # вказані» там, де насправді протухла сесія.
             if not (terms or "").strip():
-                flags.append("UNKNOWN:TERMS:EMPTY")
+                status = getattr(order, "terms_status", "") or terms_status.UNKNOWN
+                if status == terms_status.OK:
+                    # Умови отримані й порожні — це справді EMPTY.
+                    status = terms_status.EMPTY
+                flags.append(f"UNKNOWN:TERMS:{status}")
 
             order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
 

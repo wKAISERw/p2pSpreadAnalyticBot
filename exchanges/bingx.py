@@ -4,6 +4,7 @@ import logging
 from decimal import Decimal
 from typing import List, Tuple, Optional
 
+from core.engine import terms_status
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.bingx_client import BingxClient
 from config.banks import BankRegistry
@@ -81,6 +82,8 @@ class BingxExchange(BaseExchange):
                 except Exception:
                     pass
 
+        terms_text, terms_state = terms_status.from_payload(item, "termsDesc")
+
         return Order(
             id=f"bx_{adv_no}",
             price=price,
@@ -94,7 +97,8 @@ class BingxExchange(BaseExchange):
             exchange="BingX",
             link=f"https://bingx.com/p2p?uid={user_id}",
             bank_codes=bank_codes,
-            trade_terms=str(item.get("termsDesc") or "").strip().lower(),
+            trade_terms=terms_text,
+            terms_status=terms_state,
             is_verified=bool(merchant_info.get("verificationType", 0) > 0),
             last_online_mins=last_online_mins,
             is_new_user_subsidy=bool(subsidized_info.get("isNewUserSubsidy", False)),

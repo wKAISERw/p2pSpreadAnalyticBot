@@ -135,100 +135,32 @@ class CardNotifier:
         target_amount: float
     ) -> str:
         """
-        Знаходить пари (джерело -> цільова картка), які дозволят покрити нестачу балансу,
-        перевіряючи при цьому ліміти на вихід (OUT) для джерела та на вхід (IN) для цільової.
+        Пари «звідки → куди», які покривають нестачу на картці потрібного банку.
+
+        Сам розрахунок переїхав у `core/engine/transfer_advice`: він потрібен
+        і дашборду, а звідси віддавався одразу готовим HTML — тож на сайті
+        картковий блок лишався без порад, які в чат приходили справно.
+        Тут тепер лише форматування.
         """
-        all_cards = await self._db.get_cards(owner_id=chat_id, status="active")
-        if not all_cards:
+        from core.engine.transfer_advice import suggest_transfers
+
+        found = await suggest_transfers(self._db, chat_id, target_bank, target_amount)
+        if not found:
             return ""
 
-        # Normalize target bank name
-        target_bank_normalized = target_bank.lower()
-
-        # Destination candidates: active cards in target_bank with balance < target_amount
-        dest_candidates = [
-            c for c in all_cards 
-            if c.get("bank_name", "").lower() == target_bank_normalized and c.get("balance", 0.0) < target_amount
-        ]
-        if not dest_candidates:
-            return ""
-
-        suggestions = []
-        now = time.time()
-
-        for dest in dest_candidates:
-            dest_id = dest["id"]
-            dest_bal = float(dest.get("balance", 0.0))
-            needed_transfer = target_amount - dest_bal
-            if needed_transfer <= 0:
-                continue
-
-            # Fetch destination IN limits
-            dest_limits = await self._db.get_card_effective_limits(dest_id)
-            dest_single_in = dest_limits["max_single_tx_in"]
-            dest_daily_in = dest_limits["daily_in_max"]
-            dest_monthly_in = dest_limits["monthly_in_max"]
-            dest_max_tx = dest_limits["max_tx_per_day"]
-
-            # Check if destination can accept this single transaction amount
-            if dest_single_in != -1 and dest_single_in != -1.0 and needed_transfer > dest_single_in:
-                continue
-
-            # Check destination rolling used IN
-            dest_used_daily = await self._db.get_rolling_used(dest_id, "in", hours=24)
-            dest_used_monthly = await self._db.get_monthly_used(dest_id, "in")
-            dest_tx_count = await self._db.get_card_transactions_count(dest_id, hours=24)
-
-            if dest_daily_in != -1 and dest_daily_in != -1.0 and (dest_used_daily + needed_transfer) > dest_daily_in:
-                continue
-            if dest_monthly_in != -1 and dest_monthly_in != -1.0 and (dest_used_monthly + needed_transfer) > dest_monthly_in:
-                continue
-            if dest_max_tx != -1 and dest_max_tx != -1.0 and dest_tx_count >= dest_max_tx:
-                continue
-
-            # Source candidates: any active card OTHER than dest card, with balance >= needed_transfer
-            src_candidates = [
-                c for c in all_cards 
-                if c["id"] != dest_id and float(c.get("balance", 0.0)) >= needed_transfer
-            ]
-
-            for src in src_candidates:
-                src_id = src["id"]
-                
-                # Fetch source OUT limits
-                src_limits = await self._db.get_card_effective_limits(src_id)
-                src_single_out = src_limits["max_single_tx_out"]
-                src_daily_out = src_limits["daily_out_max"]
-                src_monthly_out = src_limits["monthly_out_max"]
-                src_max_tx = src_limits["max_tx_per_day"]
-
-                # Check if source can send this single transaction amount
-                if src_single_out != -1 and src_single_out != -1.0 and needed_transfer > src_single_out:
-                    continue
-
-                # Check source rolling used OUT
-                src_used_daily = await self._db.get_rolling_used(src_id, "out", hours=24)
-                src_used_monthly = await self._db.get_monthly_used(src_id, "out")
-                src_tx_count = await self._db.get_card_transactions_count(src_id, hours=24)
-
-                if src_daily_out != -1 and src_daily_out != -1.0 and (src_used_daily + needed_transfer) > src_daily_out:
-                    continue
-                if src_monthly_out != -1 and src_monthly_out != -1.0 and (src_used_monthly + needed_transfer) > src_monthly_out:
-                    continue
-                if src_max_tx != -1 and src_max_tx != -1.0 and src_tx_count >= src_max_tx:
-                    continue
-
-                # If all limit checks pass, we have a valid transfer suggestion!
-                src_lbl = f"{src['bank_name'].capitalize()} *{src['last_four']}"
-                dest_lbl = f"{dest['bank_name'].capitalize()} *{dest['last_four']}"
-                suggestions.append(
-                    f"  💡 <b>Порада:</b> Перекажіть <code>{needed_transfer:,.2f} ₴</code> з <b>{src_lbl}</b> на <b>{dest_lbl}</b>"
-                )
-
-        if suggestions:
-            # Return unique and formatted tips
-            return "\n💡 <b>Рекомендовані перекази між картками:</b>\n" + "\n".join(suggestions) + "\n"
-        return ""
+        lines = []
+        for s in found:
+            src_lbl = f"{s.from_bank.capitalize()} *{s.from_last_four}"
+            dest_lbl = f"{s.to_bank.capitalize()} *{s.to_last_four}"
+            lines.append(
+                f"  💡 <b>Порада:</b> Перекажіть "
+                f"<code>{s.amount_uah:,.2f} ₴</code> "
+                f"з <b>{src_lbl}</b> на <b>{dest_lbl}</b>"
+            )
+        return (
+            "\n💡 <b>Рекомендовані перекази між картками:</b>\n"
+            + "\n".join(lines) + "\n"
+        )
 
     async def _build_rejection_diagnosis(
             self,

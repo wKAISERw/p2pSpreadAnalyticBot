@@ -7,7 +7,7 @@ from typing import List, Tuple
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.binance_client import BinanceClient
 from config.banks import BankRegistry
-from core.engine import bank_discovery
+from core.engine import bank_discovery, terms_status
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ class BinanceExchange(BaseExchange):
                 # приймав саме наш. Тепер це видно в /checkup.
                 bank_discovery.note("Binance", identifier, m)
 
+        terms_text, terms_state = terms_status.from_payload(adv, "remarks")
+
         finish_rate = float(user.get("monthFinishRate", 0)) * 100
         order_count = int(user.get("monthOrderCount", 0))
         # positiveRate — це % позитивних ВІДГУКІВ (не completion rate!)
@@ -56,7 +58,8 @@ class BinanceExchange(BaseExchange):
             exchange="Binance",
             link=f"https://c2c.binance.com/uk-UA/advertiserDetail?advertiserNo={user.get('userNo', '')}",
             bank_codes=bank_codes if bank_codes else [bank_code],
-            trade_terms=str(adv.get("remarks", "") or "").strip().lower(),
+            trade_terms=terms_text,
+            terms_status=terms_state,
             is_verified=str(user.get("userType", "")) == "merchant",
             last_online_mins=last_online_mins,
         )

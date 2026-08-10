@@ -95,9 +95,13 @@ def note(exchange: str, code: str, payload=None) -> None:
         entry = UnknownBank(exchange=exchange, code=code, first_seen=time.time())
         _seen[key] = entry
 
+    # У OKX «кодом» і є назва («Oschad Bank»), тож окрема назва там зайва —
+    # але тоді вона й має показуватись як назва, а не як «невідома».
     name = extract_name(payload)
     if name and name.lower() != code.lower():
         entry.names.add(name)
+    elif not code.isdigit():
+        entry.names.add(code)
     entry.hits += 1
     entry.last_seen = time.time()
 

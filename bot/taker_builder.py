@@ -410,6 +410,7 @@ async def send_taker_single(
         terms_summary=terms_summary,
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
+        terms_status=getattr(order, "terms_status", ""),
     )
     if terms_blk:
         text += terms_blk

@@ -333,6 +333,7 @@ async def send_single(
         terms_summary=alert.buy_terms_summary,
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
+        terms_status=getattr(alert.buy_order, "terms_status", ""),
     )
     if buy_terms_blk:
         text += buy_terms_blk
@@ -355,6 +356,7 @@ async def send_single(
         terms_summary=alert.sell_terms_summary,
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
+        terms_status=getattr(alert.sell_order, "terms_status", ""),
     )
     if sell_terms_blk:
         text += sell_terms_blk

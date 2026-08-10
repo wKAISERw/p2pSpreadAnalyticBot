@@ -111,11 +111,18 @@ def risk_badge(risk_flag: str) -> str:
 
 
 # Чому саме не вдалось перевірити — людською мовою.
+#
+# EMPTY тут єдиний, що описує МЕРЧАНТА; решта описує нас. Плутати їх не
+# можна: «мерчант не вказав умов» — привід придивитись до контрагента,
+# «сесія протухла» — привід полагодити бота.
 UNKNOWN_REASONS = {
     "NO_SESSION": "немає сесії біржі",
+    "SESSION_EXPIRED": "сесія біржі протухла",
     "NO_AUTH": "біржа не авторизує запит",
     "UNAVAILABLE": "біржа не відповідає",
-    "NOT_SUPPORTED": "біржа не віддає відгуки",
+    "NOT_SUPPORTED": "біржа не віддає ці дані через API",
+    "FETCH_FAILED": "біржа не віддала відповідь",
+    "UNKNOWN": "у відповіді біржі цих даних не було",
     "EMPTY": "мерчант не вказав умов",
 }
 
@@ -240,6 +247,7 @@ def _terms_block(
     terms_summary: str = "",
     show_ai_terms_summary: bool = True,
     show_full_terms: bool = True,
+    terms_status: str = "",
 ) -> str:
     """
     Розділ «📋 Умови» між ризиками та вердиктом LLM.
@@ -258,6 +266,18 @@ def _terms_block(
     has_summary = show_ai_terms_summary and bool(terms_summary and str(terms_summary).strip())
     has_full    = show_full_terms and bool(terms_raw and str(terms_raw).strip())
     if not has_summary and not has_full:
+        # Умов немає — але чому? «Мерчант не вказав» і «ми не змогли
+        # дістати» досі виглядали однаково, і людина робила висновок про
+        # контрагента там, де бачила межу власної видимості.
+        from core.engine import terms_status as _ts
+
+        if terms_status and _ts.is_blind(terms_status):
+            return (
+                "📋 <b>Умови</b>\n"
+                f"<blockquote>❔ Умов не видно — {_ts.label(terms_status)}.\n"
+                f"Це не означає, що умов немає: перевірте їх у застосунку "
+                f"біржі перед угодою.</blockquote>\n"
+            )
         return ""
  
     # Заголовок завжди один, але кожен блок — окремий expandable blockquote

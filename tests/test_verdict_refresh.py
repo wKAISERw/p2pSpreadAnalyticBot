@@ -112,6 +112,39 @@ class TestRefresh(unittest.IsolatedAsyncioTestCase):
         await refresh_flags(self.db, orders)  # без exchange/merchantId — просто пропуск
         self.assertEqual(orders[0]["riskFlag"], "PENDING")
 
+    async def test_blind_terms_drop_the_cached_summary(self):
+        # Вердикт живе в кеші до 12 годин і не перераховується, поки хеш
+        # умов не змінився. Але коли умов НЕ ВИДНО, хеш порожній і сталий —
+        # тобто стара вижимка «Умови не вказані» переживе будь-яку кількість
+        # циклів і виглядатиме як свіжий факт про мерчанта.
+        await self.db.save_verdict(
+            exchange="Bybit", merchant_id="m1", merchant_name="Merchant",
+            trade_terms="", verdict="OK", reason="статистика в нормі",
+            terms_summary="Умови не вказані.",
+        )
+
+        blind = _order("OK")
+        blind["termsStatus"] = "NO_SESSION"
+        await refresh_flags(self.db, [blind])
+
+        self.assertEqual(blind["ai"]["termsSummary"], "")
+        # Решта висновку лишається: він про статистику, а не про умови.
+        self.assertIn("статистика", blind["ai"]["reason"])
+
+    async def test_real_empty_terms_keep_the_summary(self):
+        # Мерчант справді нічого не написав — вижимка про це чесна.
+        await self.db.save_verdict(
+            exchange="Bybit", merchant_id="m2", merchant_name="Merchant",
+            trade_terms="", verdict="OK", reason="ок",
+            terms_summary="Умови не вказані.",
+        )
+
+        order = _order("OK", merchant_id="m2")
+        order["termsStatus"] = "EMPTY"
+        await refresh_flags(self.db, [order])
+
+        self.assertEqual(order["ai"]["termsSummary"], "Умови не вказані.")
+
     async def test_spread_legs_are_refreshed_both(self):
         await self._save("BLOCK", merchant_id="buy-m")
         await self._save("BLOCK", merchant_id="sell-m")

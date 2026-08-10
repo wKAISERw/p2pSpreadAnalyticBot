@@ -12,7 +12,7 @@ import time
 from typing import Optional
 
 from config import settings
-from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
+from config.banks import DEFAULT_BANK_CODES, BANK_NAMES, bank_view_list
 from config.runtime import runtime_config
 
 from bot.notifier import TelegramNotifier, SpreadAlert
@@ -52,6 +52,7 @@ from core.workers.session_manager import SessionManager
 from core.engine.alert_dispatcher import AlertDispatcher
 from core.engine.credentials import AccountClients, load_credentials as _load_credentials, bind_http_credentials as _bind_http_credentials
 from core.engine.scanner_helpers import calculate_search_amounts, process_taker_path, process_maker_path
+from core.engine.terms_status import blind_label as blind_terms_label
 
 
 logger = logging.getLogger("Scanner")
@@ -814,8 +815,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                 "exchange": getattr(buy_o, "exchange", "Unknown"),
                                 "link": getattr(buy_o, "link", "#"),
                                 "bankCodes": getattr(buy_o, "bank_codes", []),
+                                "banks": bank_view_list(getattr(buy_o, "bank_codes", [])),
                                 "riskScore": getattr(buy_o, "risk_score", 0),
                                 "riskFlag": getattr(buy_o, "risk_flag", "OK"),
+                                "tradeTerms": getattr(buy_o, "trade_terms", "") or "",
+                                "termsStatus": getattr(buy_o, "terms_status", "") or "",
+                                "termsStatusLabel": blind_terms_label(getattr(buy_o, "terms_status", "")),
                                 "isVerified": getattr(buy_o, "is_verified", False),
                                 "lastOnlineMins": getattr(buy_o, "last_online_mins", None)
                             },
@@ -845,8 +850,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                                 "exchange": getattr(sell_o, "exchange", "Unknown"),
                                 "link": getattr(sell_o, "link", "#"),
                                 "bankCodes": getattr(sell_o, "bank_codes", []),
+                                "banks": bank_view_list(getattr(sell_o, "bank_codes", [])),
                                 "riskScore": getattr(sell_o, "risk_score", 0),
                                 "riskFlag": getattr(sell_o, "risk_flag", "OK"),
+                                "tradeTerms": getattr(sell_o, "trade_terms", "") or "",
+                                "termsStatus": getattr(sell_o, "terms_status", "") or "",
+                                "termsStatusLabel": blind_terms_label(getattr(sell_o, "terms_status", "")),
                                 "isVerified": getattr(sell_o, "is_verified", False),
                                 "lastOnlineMins": getattr(sell_o, "last_online_mins", None)
                             },

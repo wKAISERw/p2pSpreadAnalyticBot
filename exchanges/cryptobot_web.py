@@ -5,6 +5,7 @@ from typing import List, Tuple
 from decimal import Decimal
 from datetime import datetime, timezone
 
+from core.engine import terms_status
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.cryptobot_client import CryptoBotWebClient
 from config.banks import BankRegistry
@@ -112,11 +113,16 @@ class CryptoBotWebExchange(BaseExchange):
 
             for i, order in enumerate(top_orders):
                 detail = details[i]
+                # Причина — в terms_status, не в тексті умов: інакше
+                # службове речення потрапляє в регекси risk_engine і в
+                # промпт LLM як слова мерчанта.
                 if isinstance(detail, Exception):
                     logger.debug("Не вдалося отримати умови оффера %s: %s", order.id, detail)
-                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
+                    order.trade_terms = ""
+                    order.terms_status = terms_status.FETCH_FAILED
                 elif detail:
-                    order.trade_terms = str(detail.get("description", "") or "").strip().lower()
+                    order.trade_terms, order.terms_status = terms_status.from_payload(
+                        detail, "description")
 
                 # Якщо вік завантажено з кешу — переходимо до наступного
                 if order.merchant_id in self._profile_cache:

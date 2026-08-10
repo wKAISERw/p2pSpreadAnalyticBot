@@ -3,6 +3,7 @@ import logging
 import asyncio
 from typing import List, Tuple
 from decimal import Decimal
+from core.engine import terms_status
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.wallet_client import WalletClient
 from config.banks import BankRegistry
@@ -84,18 +85,25 @@ class WalletExchange(BaseExchange):
                 return_exceptions=True
             )
             for order, details in zip(top_orders, details_list):
+                # Причина невдачі йде в terms_status, а НЕ в trade_terms.
+                # Раніше сюди писалось речення «не вдалося отримати доступ до
+                # умов…», і risk_engine проганяв його через регекси й віддавав
+                # LLM — тобто службовий текст аналізувався як слова мерчанта.
                 if isinstance(details, Exception):
                     logger.warning("⚠️ Не вдалося завантажити деталі Wallet оффера %s через виняток: %s",
                                     order.id, details)
-                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
+                    order.trade_terms = ""
+                    order.terms_status = terms_status.FETCH_FAILED
                 elif not details:
                     logger.warning(
                         "⚠️ Не вдалося достукатися до деталей Wallet оффера %s (помилка авторизації або мережі)",
                         order.id)
-                    order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
+                    order.trade_terms = ""
+                    order.terms_status = terms_status.NO_SESSION
                 else:
                     # Успішно отримали умови з поля comment
-                    order.trade_terms = str(details.get("comment", "") or "").strip().lower()
+                    order.trade_terms, order.terms_status = terms_status.from_payload(
+                        details, "comment")
 
                     # Витягуємо точні та свіжі дані профілю мерчанта з детального запиту
                     user = details.get("user") or {}

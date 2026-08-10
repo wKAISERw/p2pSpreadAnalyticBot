@@ -7,9 +7,51 @@ from decimal import Decimal
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.okx_client import OkxClient
 from config.banks import BankRegistry
-from core.engine import bank_discovery
+from core.engine import bank_discovery, terms_status
 
 logger = logging.getLogger(__name__)
+
+# Ключі, під якими біржі кладуть «коли мерчант був онлайн». Точну назву для
+# OKX з документації не видно, а поле в інтерфейсі є — тому пробуємо
+# кілька, а невідому відповідь один раз логуємо, щоб додати сюди факт, а
+# не здогадку.
+_ONLINE_FLAGS = ("isOnline", "online", "userOnline")
+_LAST_SEEN_KEYS = ("lastOnlineTime", "lastActiveTime", "lastLogoutTime", "latestActiveTime")
+
+_online_keys_logged = False
+
+
+def _online_minutes(item: dict) -> int | None:
+    """
+    Скільки хвилин тому мерчанта бачили. None — біржа цього не сказала.
+
+    None і 0 — різні відповіді: нуль означає «онлайн зараз», а None — що ми
+    не знаємо. Показувати друге як «давно не заходив» не можна.
+    """
+    global _online_keys_logged
+
+    for key in _ONLINE_FLAGS:
+        if key in item:
+            return 0 if bool(item.get(key)) else None
+
+    now = int(time.time())
+    for key in _LAST_SEEN_KEYS:
+        raw = item.get(key)
+        if not raw:
+            continue
+        try:
+            ts = int(raw)
+        except (TypeError, ValueError):
+            continue
+        # OKX віддає час у мілісекундах — секундне значення було б у 1970-х.
+        if ts > 1e11:
+            ts //= 1000
+        return max(0, (now - ts) // 60)
+
+    if not _online_keys_logged:
+        _online_keys_logged = True
+        logger.debug("OKX: онлайн-статусу немає у відповіді; ключі: %s", sorted(item))
+    return None
 
 
 class OkxExchange(BaseExchange):
@@ -33,6 +75,17 @@ class OkxExchange(BaseExchange):
                 # ордера мовчки. Фіксуємо, щоб реєстр можна було доповнити
                 # за фактом, а не за здогадкою.
                 bank_discovery.note("OKX", name, method)
+
+        # Умови OKX кладе в tradingOrderInfo.tradeOrderDesc. Якщо самого
+        # блоку в відповіді немає — це не «мерчант не вказав умов», а «ми їх
+        # не бачили»: у списку ордерів OKX цей блок з'являється не завжди.
+        order_info = item.get("tradingOrderInfo")
+        if isinstance(order_info, dict):
+            terms_text, terms_state = terms_status.from_payload(order_info, "tradeOrderDesc")
+        else:
+            terms_text, terms_state = "", terms_status.UNKNOWN
+
+        last_online_mins = _online_minutes(item)
 
         if not bank_codes:
             logger.debug("⚠️ Не вдалося розпізнати банки в ордері OKX: %s", raw_methods)
@@ -58,9 +111,10 @@ class OkxExchange(BaseExchange):
             exchange="OKX",
             link=link,
             bank_codes=bank_codes,
-            trade_terms=str(item.get("tradingOrderInfo", {}).get("tradeOrderDesc", "") or "").strip().lower(),
+            trade_terms=terms_text,
+            terms_status=terms_state,
             is_verified=bool(item.get("isAuthenticatedMerchant") or item.get("isMerchant")),
-            last_online_mins=None,
+            last_online_mins=last_online_mins,
         )
 
     async def _fetch_orders(self, amount: float, bank_code: str, side: str) -> List[Order]:

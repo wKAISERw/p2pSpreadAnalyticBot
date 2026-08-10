@@ -108,6 +108,7 @@ BANKS: list[Bank] = [
         exchange_codes={
             "Binance":   "Oschadbank",
             "Bybit":     "99",
+            "OKX":       "Oschad Bank",
             "MEXC":      "130",
         },
     ),
@@ -117,6 +118,10 @@ BANKS: list[Bank] = [
         exchange_codes={
             "Binance":   "RaiffeisenBankUkraine",
             "Bybit":     "380",
+            # OKX пише назву з помилкою — «Raiffaisen» замість «Raiffeisen».
+            # Виправляти нема що: у їхньому API це буквальне значення поля,
+            # і зіставляти треба саме з ним.
+            "OKX":       "Raiffaisen Bank",
             "MEXC":      "132",
             "CryptoBot": "choose-method-raiffeisenua",
             "BingX":     "235",
@@ -138,6 +143,7 @@ BANKS: list[Bank] = [
         internal_code="319",
         name="OTP Bank",
         exchange_codes={
+            "OKX":       "OTP Bank",
             "MEXC":      "140",
             "CryptoBot": "choose-method-otpbank",
         },
@@ -579,6 +585,42 @@ def is_unmapped_code(bank: str) -> bool:
     """
     slug = normalize_bank(bank)
     return bool(slug) and slug.isdigit() and slug not in _CODE_TO_SLUG
+
+
+def bank_view_list(codes) -> list[dict]:
+    """
+    Банки ордера у вигляді, придатному для інтерфейсу.
+
+    Біржі віддають банки числами, і одному банку відповідає кілька кодів:
+    Monobank — і «43», і «1»; А-Банк — і «48», і «61». Реєстр `/banks`
+    знає лише канонічні, тож дашборд, маючи саму лише мапу код→назва,
+    показував «код 1» і «код 61» як невідомі банки — і людина йшла шукати
+    помилку у своїх картках.
+
+    Мапа тут одна на весь проєкт, і клієнту віддається вже результат:
+    друга копія на фронтенді розійшлася б із цією за перший же новий код.
+
+    `known=false` означає, що коду немає в реєстрі бота: під нього картка
+    не підбереться, скільки б їх не завести.
+    """
+    result: list[dict] = []
+    seen: set[str] = set()
+
+    for raw in (codes or []):
+        code = str(raw).strip()
+        if not code:
+            continue
+        slug = normalize_bank(code)
+        if slug in seen:
+            continue
+        seen.add(slug)
+        result.append({
+            "code": code,
+            "slug": slug,
+            "name": bank_display_name(code),
+            "known": not is_unmapped_code(code),
+        })
+    return result
 
 
 def license_group_of(bank: str) -> str:

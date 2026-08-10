@@ -38,9 +38,75 @@ def is_pending(risk_flag: Optional[str]) -> bool:
     return any(marker in flag for marker in _PENDING_MARKERS)
 
 
+# Рекомендація LLM людською мовою — те саме, що бот пише в алерті.
+_RECOMMENDATION_LABELS = {
+    "APPROVE": "✅ Безпечно",
+    "CONDITIONAL": "⚡ З обережністю",
+    "REJECT": "🚫 Не торгувати",
+    "RECHECKING": "🔄 AI перепровіряє",
+    "PENDING": "🔍 AI аналізує",
+}
+
+
+async def _ai_view(db, exchange: str, merchant_id: str) -> Optional[dict]:
+    """
+    Що модель сказала про мерчанта: вердикт, пояснення, вижимка умов.
+
+    Живе не в `risk_flag`, а в таблиці `merchant_verdict` — саме тому на
+    сайті не було ні вижимки умов, ні пояснення для «безпечних». Бот бере
+    їх звідси й пише в алерт («🧠 Buy: ✅ БЕЗПЕЧНО» плюс абзац тексту), а
+    в API це поле не доходило взагалі.
+    """
+    try:
+        rec, verdict, reason, terms_summary, reviews = (
+            await db.get_trade_recommendation_full(exchange, merchant_id)
+        )
+    except Exception as e:
+        logger.debug("ai view %s/%s: %s", exchange, merchant_id, e)
+        return None
+
+    if not any((reason, terms_summary, reviews)) and rec == "PENDING":
+        return None
+
+    return {
+        "recommendation": rec,
+        "recommendationLabel": _RECOMMENDATION_LABELS.get(rec, rec),
+        "verdict": verdict,
+        # Чому саме такий вердикт — головна цінність усього блоку.
+        "reason": reason,
+        # Вижимка умов оголошення: мерчанти пишуть їх абзацами, і модель
+        # зводить до кількох рядків.
+        "termsSummary": terms_summary,
+        "reviewsAnalysis": reviews,
+    }
+
+
+def _drop_blind_terms(ai: dict, terms_status: Optional[str]) -> dict:
+    """
+    Прибирає вижимку умов, зроблену з умов, яких ми не бачили.
+
+    Вердикт живе в кеші до 12 годин і не перераховується, поки не змінився
+    хеш умов. Але якщо умов не видно взагалі (немає сесії, біржа не віддала
+    поле), хеш порожній і стабільний — тобто стара вижимка «Умови не
+    вказані» переживе будь-яку кількість циклів і виглядатиме як свіжий
+    факт про мерчанта.
+
+    Це та сама підміна, що й раніше, тільки джерело інше: не поле умов, а
+    кеш вердиктів. Тому при «сліпому» статусі вижимка не показується — її
+    місце займає чесне «умов не видно».
+    """
+    from core.engine import terms_status as ts
+
+    if not ai or not ts.is_blind(terms_status or ""):
+        return ai
+    if not ai.get("termsSummary"):
+        return ai
+    return {**ai, "termsSummary": ""}
+
+
 async def refresh_flags(db, orders: list[dict]) -> int:
     """
-    Оновлює `riskFlag` там, де вердикт уже дозрів. Повертає кількість змін.
+    Оновлює `riskFlag` там, де вердикт дозрів, і додає блок `ai`.
 
     `orders` — серіалізовані ордери з полями exchange / merchantId /
     riskFlag / tradeTerms. Міняються на місці.
@@ -53,18 +119,28 @@ async def refresh_flags(db, orders: list[dict]) -> int:
     # Один мерчант зустрічається в кількох зв'язках одразу — без кешу та
     # сама пара давала б по два запити на кожну.
     seen: dict[tuple[str, str], Optional[str]] = {}
+    ai_seen: dict[tuple[str, str], Optional[dict]] = {}
     changed = 0
 
     for order in orders:
-        if not is_pending(order.get("riskFlag")):
-            continue
-
         exchange = order.get("exchange") or ""
         merchant_id = order.get("merchantId") or ""
         if not exchange or not merchant_id:
             continue
 
         key = (exchange, merchant_id)
+
+        # Вижимка й пояснення потрібні завжди, а не лише поки вердикт
+        # дозріває: саме їх бракувало «безпечним» ордерам, де прапорець
+        # порожній і показувати без цього блоку нічого.
+        if key not in ai_seen:
+            ai_seen[key] = await _ai_view(db, exchange, merchant_id)
+        if ai_seen[key]:
+            order["ai"] = _drop_blind_terms(ai_seen[key], order.get("termsStatus"))
+
+        if not is_pending(order.get("riskFlag")):
+            continue
+
         if key not in seen:
             try:
                 verdict = await db.get_verdict(

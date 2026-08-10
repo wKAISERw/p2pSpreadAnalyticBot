@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 from api.auth import optional_session, require_admin, resolve_user_id
 from api.security import require_api_key
 from api.utils import dict_to_camel, dict_to_snake
+from config.banks import bank_display_name, bank_view_list, normalize_bank
+from core.engine.terms_status import blind_label as blind_terms_label
 
 router = APIRouter(prefix="/api/v1", tags=["Control"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger("ApiControl")
@@ -984,12 +986,20 @@ def _order_to_dict(order) -> dict:
         "accountAgeDays": order.account_age_days,
         "lastOnlineMins": order.last_online_mins,
         "bankCodes": list(order.bank_codes or []),
+        # Назви поруч із кодами: одному банку відповідає кілька кодів
+        # («43» і «1» — Monobank), і мапа для цього одна, на беку.
+        "banks": bank_view_list(order.bank_codes or []),
         "link": order.link,
         "riskFlag": order.risk_flag or "",
         "compositeScore": order.composite_score,
         "reviewScore": order.review_score,
         "reviewNegPct": order.review_neg_pct,
         "tradeTerms": order.trade_terms or "",
+        # Порожні умови означають дві протилежні речі: «мерчант нічого не
+        # написав» і «ми не змогли дістати». Друге — факт про нас, і читати
+        # його як факт про мерчанта не можна.
+        "termsStatus": getattr(order, "terms_status", "") or "",
+        "termsStatusLabel": blind_terms_label(getattr(order, "terms_status", "")),
         "isNewUserSubsidy": order.is_new_user_subsidy,
         "side": order.side or "",
     }
@@ -1356,6 +1366,74 @@ async def get_cards(
         })
 
     return dict_to_camel(jsonable_encoder(enriched))
+
+
+@router.get("/cards/match")
+async def match_cards(
+    bank: str = Query(..., description="Банк мерчанта: код або слаг"),
+    amount: float = Query(..., gt=0, description="Сума угоди, ₴"),
+    direction: str = Query(default="buy", description="buy | sell"),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Які картки підходять під цю угоду, які ні — і що зробити, щоб підійшли.
+
+    Бот шле це окремим повідомленням після кожного алерта («💳 Рекомендований
+    пластик під угоду»), а на сайті блоку не було взагалі: людина бачила
+    ордер, але не знала, чи зможе його взяти, поки не відкриє Telegram.
+
+    Причини відмов приходять структуровано — тими самими кодами, що й у
+    статистиці, тож «не вистачає балансу» тут і в дайджесті означає те саме.
+    """
+    from core.engine.card_matching_engine import CardMatchingEngine
+    from core.engine.transfer_advice import suggest_transfers
+
+    if direction not in ("buy", "sell"):
+        raise HTTPException(status_code=400, detail="direction: очікується buy або sell")
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    await _user_or_404(telegram_id)
+    db = _db()
+
+    slug = normalize_bank(bank)
+    result = await CardMatchingEngine(db).run(telegram_id, slug, amount, direction)
+
+    # Баланси всіх активних карток — той самий блок, що бот друкує під
+    # порадами: без нього незрозуміло, звідки брати нестачу.
+    cards = await db.get_cards(owner_id=telegram_id, status="active")
+    balances = [
+        {
+            "id": c["id"],
+            "bank": c.get("bank_name", ""),
+            "bankName": bank_display_name(c.get("bank_name", "")),
+            "lastFour": c.get("last_four", ""),
+            "label": c.get("label") or "",
+            "balance": float(c.get("balance") or 0.0),
+            "isWarmedUp": bool(c.get("is_warmed_up")),
+        }
+        for c in cards
+    ]
+
+    # Поради потрібні лише коли грошей на цільовому банку бракує — для
+    # продажу переказувати нічого не треба, там фіат приходить нам.
+    tips = []
+    if direction == "buy" and result.status != "success":
+        tips = [t.as_dict() for t in await suggest_transfers(db, telegram_id, slug, amount)]
+
+    return {
+        "bank": slug,
+        "bankName": bank_display_name(slug),
+        "amountUah": amount,
+        "direction": direction,
+        "status": result.status,
+        "bestCard": result.best_card,
+        "splitOptions": result.split_options,
+        "availableUah": round(result.available_uah, 2),
+        "rejections": dict_to_camel(result.rejection_report or []),
+        "balances": balances,
+        "transferTips": tips,
+    }
 
 
 @router.get("/cards/{card_id}/transactions")
