@@ -49,12 +49,17 @@ class TestCanonicalNames(unittest.TestCase):
         self.assertEqual(normalize_bank(""), "")
 
     def test_every_bank_in_the_registry_has_a_slug(self):
+        # Суть перевірки — щоб числовий код біржі не лишався «банком» сам по
+        # собі. Порівнювати слаг із кодом напряму не можна: у БВР немає
+        # числового коду взагалі, OKX ідентифікує його назвою, тож там
+        # internal_code і слаг збігаються — і це правильно.
         for bank in BANKS:
             with self.subTest(bank=bank.name):
                 slug = normalize_bank(bank.internal_code)
-                self.assertNotEqual(
-                    slug, bank.internal_code,
-                    f"{bank.name} ({bank.internal_code}) не має канонічної назви",
+                self.assertTrue(slug, f"{bank.name} нормалізується в порожнечу")
+                self.assertFalse(
+                    slug.isdigit(),
+                    f"{bank.name} ({bank.internal_code}) лишився числовим кодом",
                 )
 
 
