@@ -574,6 +574,37 @@ def bank_display_name(bank: str) -> str:
     return slug.capitalize()
 
 
+# Способи оплати, які взагалі не є банком.
+#
+# «Bank Transfer», «Банковский перевод», «Global Transfer» — це переказ на
+# рахунок, і приймається він з БУДЬ-ЯКОГО банку. Система ж бачила в них
+# черговий невідомий «банк», якого в користувача немає, і чесно писала
+# «немає твоєї картки» на ордерах, які насправді підходять усім.
+_ANY_BANK_TOKENS = frozenset({
+    "transfer",
+    "bank transfer",
+    "banktransfer",
+    "global transfer",
+    "globalbanktransfer",
+    "банковский перевод",
+    "банківський переказ",
+    "переказ на рахунок",
+    "bank",
+})
+
+
+def is_any_bank(bank: str) -> bool:
+    """
+    Чи це «переказ звідки завгодно», а не конкретний банк.
+
+    Такий метод не звужує вибір карток, а знімає обмеження: підходить будь-яка.
+    """
+    value = str(bank or "").strip().lower()
+    if not value:
+        return False
+    return value in _ANY_BANK_TOKENS or normalize_bank(value) in _ANY_BANK_TOKENS
+
+
 def is_unmapped_code(bank: str) -> bool:
     """
     Чи це числовий код біржі, якого немає в реєстрі.
@@ -614,11 +645,15 @@ def bank_view_list(codes) -> list[dict]:
         if slug in seen:
             continue
         seen.add(slug)
+        any_bank = is_any_bank(code)
         result.append({
             "code": code,
             "slug": slug,
-            "name": bank_display_name(code),
-            "known": not is_unmapped_code(code),
+            # «Переказ» — не банк, і показувати його як невідомий код
+            # означало б натякати на прогалину в реєстрі там, де її немає.
+            "name": "Переказ з будь-якого банку" if any_bank else bank_display_name(code),
+            "known": any_bank or not is_unmapped_code(code),
+            "anyBank": any_bank,
         })
     return result
 

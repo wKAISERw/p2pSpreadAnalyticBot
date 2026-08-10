@@ -169,10 +169,16 @@ class CardNotifier:
             target_amount: float,
             direction: str,
             excluded_cards: list[str] | None = None,
+            route_banks: list[str] | None = None,
     ) -> str:
         """
         Повний root-cause звіт: чому жодна картка не підійшла.
         Покриває всі причини відхилення рушія CardMatchingEngine.
+
+        `route_banks` — усі банки маршруту. Без них звіт рахував картки лише
+        того банку, який вказав мерчант, і з увімкненими кошиками писав
+        «сумарно доступно 4 820 ₴» там, де движок бачив ще 21 000 ₴ на
+        Monobank. Тобто сам матчинг працював, а пояснення до нього — ні.
         """
         import time as _t
 
@@ -184,8 +190,15 @@ class CardNotifier:
         if card_settings.get("card_module_mode") == "off":
             return "  └ ❌ <b>Причина:</b> картковий модуль вимкнений у налаштуваннях\n"
 
-        # ── Отримуємо всі картки по банку та загалом ───────────────────────
-        all_cards_bank = await self._db.get_cards(owner_id=chat_id, bank_name=bank)
+        # ── Отримуємо всі картки по банках маршруту та загалом ─────────────
+        banks_in_route = [b for b in (route_banks or [bank]) if b]
+        all_cards_bank: list[dict] = []
+        seen_ids: set = set()
+        for b in banks_in_route:
+            for card in await self._db.get_cards(owner_id=chat_id, bank_name=b):
+                if card["id"] not in seen_ids:
+                    seen_ids.add(card["id"])
+                    all_cards_bank.append(card)
         all_cards_any  = await self._db.get_cards(owner_id=chat_id)
 
         # ── Рівень 1: картки цього банку відсутні взагалі ──────────────────
@@ -456,7 +469,10 @@ class CardNotifier:
             if result.status == "disabled":
                 return "", [], None
             text = f"{prefix}⚠️ Немає доступних карток\n"
-            diagnosis = await self._build_rejection_diagnosis(chat_id, bank, target_amount, direction, excluded_cards=excluded)
+            diagnosis = await self._build_rejection_diagnosis(
+                chat_id, bank, target_amount, direction,
+                excluded_cards=excluded, route_banks=route_banks,
+            )
             text += diagnosis
             return text, [], None
 
@@ -468,7 +484,10 @@ class CardNotifier:
 
         if not cards:
             text = f"{prefix}⚠️ Немає доступних (split failed)\n"
-            diagnosis = await self._build_rejection_diagnosis(chat_id, bank, target_amount, direction, excluded_cards=excluded)
+            diagnosis = await self._build_rejection_diagnosis(
+                chat_id, bank, target_amount, direction,
+                excluded_cards=excluded, route_banks=route_banks,
+            )
             text += diagnosis
             return text, [], None
 

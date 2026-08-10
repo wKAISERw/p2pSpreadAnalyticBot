@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from config.banks import normalize_bank
+from config.banks import is_any_bank, normalize_bank
 from config.card_limits import FEATURE_IGNORE_MERCHANT_BANKS, FEATURE_INTER_BANK
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,15 @@ async def resolve_route(db, user_id: int, order_bank_codes,
     й передає, щоб не ходити в базу вдруге.
     """
     declared = _declared_banks(order_bank_codes)
+
+    # «Bank Transfer» / «Банковский перевод» — не банк, а спосіб оплати:
+    # переказ приймається з будь-якого. Такий метод не звужує вибір карток,
+    # а знімає обмеження — і трактувати його як черговий невідомий банк
+    # означало б відмовляти на ордерах, які насправді підходять усім.
+    accepts_any = any(is_any_bank(b) for b in declared)
+    if accepts_any:
+        declared = [b for b in declared if not is_any_bank(b)]
+
     primary = normalize_bank(primary_bank) or (declared[0] if declared else "")
 
     inter_bank = ignore_merchant = False
@@ -65,9 +74,8 @@ async def resolve_route(db, user_id: int, order_bank_codes,
         except Exception as e:
             logger.debug("Не вдалось прочитати стан фіч карток: %s", e)
 
-    if not inter_bank:
-        return Route(banks=[primary] if primary else [], declared=declared)
-
+    # Банки карток потрібні і без кошиків: коли мерчант приймає переказ
+    # звідки завгодно, «свій банк» треба ще вибрати.
     if card_banks is None:
         card_banks = set()
         if db and user_id:
@@ -78,7 +86,19 @@ async def resolve_route(db, user_id: int, order_bank_codes,
                 logger.debug("Не вдалось перелічити банки карток: %s", e)
 
     mine = sorted(b for b in card_banks if b)
-    if ignore_merchant:
+
+    # Переказ приймається з будь-якого банку — отже всі свої заявлені.
+    # Без цього ордер із самим лише «Bank Transfer» лишався без жодного
+    # придатного банку, хоча підходить будь-яка картка.
+    if accepts_any:
+        declared = sorted(set(declared) | set(mine))
+        if not primary:
+            primary = mine[0] if mine else ""
+
+    if not inter_bank:
+        return Route(banks=[primary] if primary else [], declared=declared)
+
+    if ignore_merchant or accepts_any:
         extra = [b for b in mine if b != primary]
     else:
         # Без «ігнорувати фільтр» кошик лишається в межах заявленого

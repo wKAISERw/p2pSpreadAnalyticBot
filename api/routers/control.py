@@ -1373,6 +1373,10 @@ async def match_cards(
     bank: str = Query(..., description="Банк мерчанта: код або слаг"),
     amount: float = Query(..., gt=0, description="Сума угоди, ₴"),
     direction: str = Query(default="buy", description="buy | sell"),
+    banks: str = Query(
+        default="",
+        description="Усі банки ордера через кому — потрібні для кошика між банками",
+    ),
     telegram_id: Optional[int] = None,
     session_user_id: Optional[int] = Depends(optional_session),
 ):
@@ -1397,7 +1401,25 @@ async def match_cards(
     db = _db()
 
     slug = normalize_bank(bank)
-    result = await CardMatchingEngine(db).run(telegram_id, slug, amount, direction)
+
+    # Маршрут — той самий, що будує сканер: із увімкненою фічею «Кошики
+    # карток між банками» він дозволяє брати картки не лише того банку,
+    # який стоїть в ордері першим.
+    #
+    # Без цього виклику движок отримував рівно один банк і збирав суму
+    # тільки в його межах — тобто фіча була ввімкнена, а на сайті нічого
+    # не змінювалось: 21 000 ₴ на Monobank і 5 000 ₴ на ПУМБ так і
+    # лишались двома окремими сумами.
+    from core.engine.card_routing import resolve_route
+
+    order_banks = [b.strip() for b in (banks or "").split(",") if b.strip()] or [slug]
+    route = await resolve_route(db, telegram_id, order_banks, primary_bank=slug)
+
+    result = await CardMatchingEngine(db).run(
+        telegram_id, slug, amount, direction,
+        banks=route.banks or None,
+        declared_banks=route.declared or None,
+    )
 
     # Баланси всіх активних карток — той самий блок, що бот друкує під
     # порадами: без нього незрозуміло, звідки брати нестачу.
@@ -1426,6 +1448,10 @@ async def match_cards(
         "bankName": bank_display_name(slug),
         "amountUah": amount,
         "direction": direction,
+        # Які банки реально брали участь у пошуку. Коли їх більше одного,
+        # це вже кошик — і людина має бачити, що сума збирається звідусіль.
+        "routeBanks": [bank_display_name(b) for b in (route.banks or [])],
+        "interBank": bool(getattr(route, "inter_bank", False)),
         "status": result.status,
         "bestCard": result.best_card,
         "splitOptions": result.split_options,
