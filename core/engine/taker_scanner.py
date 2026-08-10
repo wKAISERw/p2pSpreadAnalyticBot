@@ -18,6 +18,7 @@ from core.engine.bank_scope import resolve_banks
 from core.engine.buy_budget import resolve_buy_budget
 from core.engine.card_routing import resolve_route
 from filters.anomaly_filter import AnomalyFilter
+from core.engine import risk_flags as risk_flags_mod
 from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 
@@ -548,12 +549,15 @@ class TakerScanner:
 
                 # Check blacklist setting: if "blacklist_mode" is "warn", we allow BLOCK:BLACKLIST to pass but keep the flag for warning presentation
                 risk_flag = getattr(order, "risk_flag", "") or ""
-                if "BLOCK:BLACKLIST" in risk_flag:
+                if risk_flags_mod.is_blacklist_block(risk_flag):
                     bl_mode = mf.get("blacklist_mode", "block").lower()
                     if bl_mode == "block":
                         continue
-                elif "BLOCK" in risk_flag:
-                    # other non-blacklist BLOCK flags (like CACHED blocks) are always skipped
+                elif risk_flags_mod.has_block(risk_flag):
+                    # other non-blacklist BLOCK flags (like CACHED blocks) are always skipped.
+                    # Розбір списком, а не підрядком: "BLOCK" міститься
+                    # всередині FOP_TOV_BLOCKED і BANKA_JAR_BLOCKED, які є
+                    # метаданими для персональних фільтрів, а не блоками.
                     continue
                 
                 seen_ids.add(order.id)

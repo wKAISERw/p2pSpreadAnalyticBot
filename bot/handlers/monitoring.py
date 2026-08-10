@@ -19,6 +19,7 @@ from bot.keyboards import main_menu_kb, stats_overview_kb
 from bot.keyboards.exchanges import exchanges_status_kb, exchange_toggle_kb, exchange_cooldown_kb, exchange_down_kb
 from bot.keyboards.common import back_to_status_kb, EXCHANGE_ICONS, back_to_main_kb
 from config.runtime import runtime_config
+from core.engine import risk_flags as risk_flags_mod
 
 from bot.handlers.core import (
     _is_admin, _db, _bot, _notifier, _account_clients,
@@ -366,20 +367,23 @@ async def cmd_active(message: Message) -> None:
         if not buy_order or not sell_order:
             return False, "missing orders"
 
-        if "BLOCK" in (getattr(buy_order, "risk_flag", "") or ""):
-            return False, "buy order blocked"
-        if "BLOCK" in (getattr(sell_order, "risk_flag", "") or ""):
-            return False, "sell order blocked"
-
+        # Перевірка блоку йде ПІСЛЯ персональних фільтрів і розбирає прапори
+        # списком. Раніше вона стояла першою і шукала підрядок "BLOCK", який
+        # міститься всередині FOP_TOV_BLOCKED / BANKA_JAR_BLOCKED — тобто
+        # ордер із ФОП чи банкою відкидався ще до того, як хтось питав
+        # налаштування користувача.
         filter_fop = user_row.get("filter_fop_tov", "hide")
         filter_banka = user_row.get("filter_banka_jar", "hide")
 
         for order_obj in (buy_order, sell_order):
             risk_flags = getattr(order_obj, "risk_flag", "") or ""
-            if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+            if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
                 return False, "FOP_TOV blocked for user"
-            if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+            if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
                 return False, "Banka/Jar blocked for user"
+            if risk_flags_mod.has_block(risk_flags):
+                side = "buy" if order_obj is buy_order else "sell"
+                return False, f"{side} order blocked"
             ex_name = getattr(order_obj, "exchange", "")
             side_label = "buy" if order_obj is buy_order else "sell"
             ex_filters = ex_merchant_filters.get(ex_name, {})
@@ -448,11 +452,11 @@ async def cmd_active(message: Message) -> None:
             filtered = []
             for o in t_orders:
                 risk_flags = getattr(o, "risk_flag", "") or ""
-                if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
                     continue
-                if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+                if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
                     continue
-                if "BLOCK" in risk_flags:
+                if risk_flags_mod.has_block(risk_flags):
                     continue
                 filtered.append(o)
             t_orders = filtered

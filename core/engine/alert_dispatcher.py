@@ -6,6 +6,7 @@ import time
 from bot.notifier import TelegramNotifier, SpreadAlert
 from config.banks import normalize_bank
 from core.engine.bank_scope import resolve_banks
+from core.engine import risk_flags as risk_flags_mod
 from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 from core.utils.tasks import spawn
@@ -272,17 +273,23 @@ class AlertDispatcher:
             if in_personal_blacklist(order_obj, bl_by_id, bl_by_name):
                 return False, f"Особистий чорний список: {order_obj.merchant_name}", entry
 
-            if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+            if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
                 return False, "FOP_TOV blocked for user", entry
-            if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
+            if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
                 return False, "Banka/Jar blocked for user", entry
 
-            if "BLOCK:BLACKLIST" in risk_flags:
+            if risk_flags_mod.is_blacklist_block(risk_flags):
                 bl_mode = mf.get("blacklist_mode", "block").lower()
                 if bl_mode == "block":
                     return False, f"BLACKLIST merchant {order_obj.merchant_name} blocked for user", entry
-            elif "BLOCK" in risk_flags:
-                # Всі інші BLOCK вердикти (наприклад, LLM_BLOCK) завжди приховуються
+            elif risk_flags_mod.has_block(risk_flags):
+                # Всі інші BLOCK вердикти (наприклад, LLM_BLOCK) завжди приховуються.
+                #
+                # Раніше тут стояло `"BLOCK" in risk_flags`, і підрядок ловився
+                # всередині FOP_TOV_BLOCKED / BANKA_JAR_BLOCKED. Через це ордер
+                # із ФОП або банкою відкидався навіть тоді, коли користувач
+                # обрав «попереджати» чи «показувати»: гілки вище давали іншу
+                # причину в лозі, а результат був однаковий.
                 return False, f"Severe risk BLOCK {order_obj.merchant_name} for user", entry
 
         user_capital = float(user["capital"])
@@ -545,6 +552,24 @@ class AlertDispatcher:
                     )
 
                     local_alert = copy.copy(alert)
+                    # Копія алерта поверхнева, тож ноги в неї приходять ті
+                    # самі об'єкти для всіх користувачів у батчі. А рендер їх
+                    # МУТУЄ: `alert_builder.send_single` переписує
+                    # `order.risk_flag` під персональні налаштування показу
+                    # (filter_fop_tov / filter_banka_jar) і заповнює
+                    # review_neg_pct / review_fetched.
+                    #
+                    # Тобто другий користувач у циклі бачив прапор, похідний
+                    # від налаштувань першого. Поки фільтрів було два і обидва
+                    # зводились до «сховати», це майже не проявлялось — але
+                    # персональна політика ризику (див. PLAN_RISK_ENGINE, етап
+                    # 5) робить цей шлях основним.
+                    #
+                    # Копіюємо самі ноги, а не весь алерт углиб: мутуються
+                    # лише скалярні поля ордера, а списки банків ніхто не
+                    # чіпає, тож deepcopy тут був би зайвою ціною.
+                    local_alert.buy_order = copy.copy(alert.buy_order)
+                    local_alert.sell_order = copy.copy(alert.sell_order)
                     local_alert.buy_bank = chosen_buy
                     local_alert.sell_bank = chosen_sell
                     local_alert.is_asymmetric = opp.get("is_asymmetric", False)
