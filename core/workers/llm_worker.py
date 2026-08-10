@@ -736,6 +736,22 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             diag += f", reason={rev_error_reason[:220]}"
         lines.append(diag)
 
+    # Дані є, але вони не сьогоднішні.
+    #
+    # Відколи невдалий фетч перестав затирати відомі відгуки, з'явився третій
+    # стан між «є свіжі» і «немає нічого»: лічильники й тексти лишились із
+    # минулого успішного збору. Модель має знати вік цих даних, інакше
+    # опише вчорашню картину як поточну.
+    _data_at = float((review_summary or {}).get("data_at", 0) or 0)
+    if _data_at > 0 and rev_status != "OK":
+        _age_h = max(0.0, (time.time() - _data_at) / 3600.0)
+        lines.append(
+            f"⏳ ВІДГУКИ НЕ ОНОВЛЮВАЛИСЬ {_age_h:.0f} год: свіжих дістати не вдалось "
+            f"(status={rev_status}), нижче — останні відомі дані. Говори про них як про "
+            f"минулі («станом на {_age_h:.0f} год тому»), не як про поточні. "
+            "Нових скарг за цей час ми б не побачили — врахуй це як невизначеність."
+        )
+
     from config.runtime import runtime_config
     require_sessions = runtime_config.get("require_sessions", "true") == "true"
     if not require_sessions:
@@ -790,10 +806,23 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         )
     else:
         # Успішно завантажені відгуки (rev_status == "OK")
-        if total > 0:
-            est_note = " (оцінено зі статистики профілю)" if is_estimated else ""
+        if total > 0 and is_estimated:
+            # Це НЕ відгуки. Це кількість УГОД, перерахована через
+            # positive_rate там, де профіль біржі віддав нулі. Раніше ця
+            # оцінка йшла в ту саму гілку, що й реальні відгуки, і при neg=0
+            # модель отримувала прямий наказ написати «бездоганна репутація»
+            # про мерчанта, чиїх відгуків ніхто не бачив.
             lines.append(
-                f"Reviews: Успішно завантажено відгуки{est_note}. Статистика: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%"
+                f"⚠️ ВІДГУКІВ НЕМАЄ — НИЖЧЕ ОЦІНКА ЗІ СТАТИСТИКИ УГОД, А НЕ ВІДГУКИ: "
+                f"~{pos} успішних / ~{neg} проблемних з {total} угод. "
+                "Це похідна від completion rate профілю, а не відгуки користувачів. "
+                "КАТЕГОРИЧНО не називай це відгуками, не пиши «відгуки чисті» і не роби "
+                "висновків про репутацію. У reviews_analysis напиши рівно: "
+                "«відгуків немає, є лише статистика угод»."
+            )
+        elif total > 0:
+            lines.append(
+                f"Reviews: Успішно завантажено відгуки. Статистика: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%"
             )
             if neg == 0:
                 lines.append(
@@ -939,6 +968,16 @@ def _parse_json(text: str) -> dict:
         trade_recommendation = "REJECT"
 
     terms_summary = str(data.get("terms_summary", "")).strip()[:300]
+    # Вижимка відгуків раніше в цей словник не потрапляла — і `_process`
+    # читав звідси порожній рядок кожного разу. Системний промпт вимагає
+    # reviews_analysis трьома окремими абзацами, модель його чесно
+    # генерувала, ми його парсили і викидали. У базі це видно наочно:
+    # 1137 вердиктів із terms_summary і лише 14 з reviews_analysis, та й
+    # ті 14 — не від моделі, а захардкожені рядки з risk_engine.
+    #
+    # Наслідок був не косметичний: тумблер show_llm_summary керував блоком,
+    # якого не існує, а людина не бачила, ЩО саме пишуть у поганих відгуках.
+    reviews_analysis = str(data.get("reviews_analysis", "")).strip()[:500]
 
     return {
         "status": status,
@@ -946,4 +985,5 @@ def _parse_json(text: str) -> dict:
         "reason": reason or "Без пояснення",
         "trade_recommendation": trade_recommendation,
         "terms_summary": terms_summary,
+        "reviews_analysis": reviews_analysis,
     }

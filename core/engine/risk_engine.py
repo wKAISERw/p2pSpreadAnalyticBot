@@ -26,7 +26,7 @@ from core.analysis.behavioral_analyzer import analyze_history
 from core.analysis.identity_analyzer import analyze_identity
 from core.utils.cache import TTLCache
 from core.utils.tasks import spawn
-from core.engine import terms_status
+from core.engine import terms_status, reviews_status
 from config.defaults import (
     MIN_ORDERS, MIN_COMPLETION,
     TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
@@ -153,6 +153,18 @@ def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
     )
 
 
+# Статуси, за яких свіжих відгуків у нас немає, живуть у reviews_status —
+# їх читає ще й рендер алерта та дзеркало вердикту на сайт, тож тримати
+# список тут означало б завести четверту копію правди.
+#
+# API_ERROR і SESSION_EXPIRED довго не входили в жоден такий список, хоча
+# `review_fetcher` їх видає: перший — коли біржа відповіла помилкою, другий
+# — коли сесія протухла на льоту. Обидва провалювались нижче, у гілку з
+# лічильниками, де pos=neg=0 давало total=0 і функція повертала порожній
+# список — тобто «претензій немає».
+REVIEWS_BLIND_STATUSES = reviews_status.BLIND
+
+
 def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     if not summary:
         return[]
@@ -169,8 +181,25 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     #
     # UNKNOWN не блокує (в рядку немає "BLOCK", і всі фільтри це поважають),
     # але тепер видно, що висновку просто немає.
-    if status in ("UNAVAILABLE", "NOT_SUPPORTED", "NO_AUTH", "UNKNOWN", "NO_SESSION"):
-        return [f"UNKNOWN:REVIEWS:{status}"]
+    stale_flag = ""
+    if status in REVIEWS_BLIND_STATUSES:
+        # Відколи фетчер перестав затирати відомі відгуки при збої
+        # (`mark_reviews_unavailable`), сліпий статус більше не означає
+        # порожню базу. Розрізняємо два різні стани:
+        #   немає даних зовсім      → UNKNOWN, висновку не буде;
+        #   є, але зібрані раніше   → рахуємо по них, позначивши вік.
+        # Друге чесніше за перше: мерчант зі свіжою скаргою на скам не
+        # перестає бути небезпечним через те, що сьогодні впала сесія.
+        if not reviews_status.has_data(summary):
+            return [f"UNKNOWN:REVIEWS:{status}"]
+
+        data_at = float(summary.get("data_at", 0) or 0)
+        age_h = max(0.0, (time.time() - data_at) / 3600.0)
+        stale_flag = f"STALE_REVIEWS:{status}:{age_h:.0f}h"
+
+    def _out(flags: list[str]) -> list[str]:
+        """Позначка про несвіжість іде першою, щоб її було видно в алерті."""
+        return ([stale_flag] + flags) if stale_flag else flags
 
     pos       = int(summary.get("positive",  0) or 0)
     neg       = int(summary.get("negative",  0) or 0)
@@ -188,7 +217,7 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
             if any(c in CRITICAL_CATEGORIES for c in cats):
                 cat_names = ", ".join(cats)
                 excerpt = str(bad_text_item.get("excerpt", ""))[:100]
-                return[f"NEEDS_LLM:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"]
+                return _out([f"NEEDS_LLM:BADREVIEWS:Критичний відгук ({cat_names}) | {excerpt}"])
             # Збираємо м'які сигнали для LLM-контексту
             soft_cats = [c for c in cats if c in SOFT_CATEGORIES]
             if soft_cats:
@@ -206,8 +235,8 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     if total <= 0:
         if bad_texts:
             sample = str(bad_texts[0]).replace("\n", " ").strip()[:120]
-            return[f"BADREVIEWS_TEXTS:відгуки є але лічильники відсутні | {sample}"]
-        return[]
+            return _out([f"BADREVIEWS_TEXTS:відгуки є але лічильники відсутні | {sample}"])
+        return _out([])
 
     neg_pct = (neg / total) * 100.0
     sample  = ""
@@ -221,13 +250,13 @@ def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
         reason += f" | {sample}"
 
     if neg >= REVIEW_BLOCK_MIN_NEG and neg_pct >= REVIEW_BLOCK_NEG_PCT:
-        return [f"NEEDS_LLM:BADREVIEWS:{reason}"] + soft_flags
+        return _out([f"NEEDS_LLM:BADREVIEWS:{reason}"] + soft_flags)
 
     if neg >= REVIEW_WARN_MIN_NEG and neg_pct >= REVIEW_WARN_NEG_PCT:
-        return [f"BADREVIEWS:{reason}"] + soft_flags
+        return _out([f"BADREVIEWS:{reason}"] + soft_flags)
 
     # Навіть без порогу — повертаємо м'які сигнали якщо є
-    return soft_flags
+    return _out(soft_flags)
 
 
 def _is_verdict_stale(analyzed_at: float) -> bool:

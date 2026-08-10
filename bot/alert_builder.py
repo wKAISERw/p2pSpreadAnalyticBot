@@ -87,6 +87,7 @@ async def send_single(
     }
 
     # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
+    _reviews_checked = False
     if notifier._db:
         try:
             b_rec, b_verdict, b_reason, b_terms, b_rev = await notifier._db.get_trade_recommendation_full(
@@ -107,6 +108,21 @@ async def send_single(
             # Також підвантажуємо актуальні відгуки та оновлюємо risk_flag і stats
             b_rev_sum = await notifier._db.get_reviews_summary(alert.buy_order.exchange, alert.buy_order.merchant_id)
             s_rev_sum = await notifier._db.get_reviews_summary(alert.sell_order.exchange, alert.sell_order.merchant_id)
+
+            # Вижимка відгуків живе в кеші вердиктів до 3 днів. Якщо відгуків
+            # зараз не видно і жодних збережених теж немає, ця вижимка описує
+            # те, чого ми не бачимо, — і подає це як поточний стан. Той самий
+            # захист, що `_drop_blind_terms` робить для умов.
+            #
+            # Мовчання тут достатньо: прапор UNKNOWN:REVIEWS уже малює
+            # «❔ НЕ ПЕРЕВІРЕНО: відгуки — …», тож другого пояснення не треба.
+            from core.engine import reviews_status as _rs
+
+            if _rs.is_dark(b_rev_sum):
+                alert.buy_reviews_analysis = ""
+            if _rs.is_dark(s_rev_sum):
+                alert.sell_reviews_analysis = ""
+            _reviews_checked = True
 
             from core.engine.risk_engine import _build_review_flags_from_summary
 
@@ -158,7 +174,13 @@ async def send_single(
                         f.startswith("BADREVIEWS_TEXTS") or
                         f.startswith("BADREVIEWS") or
                         f.startswith("REVIEW_SOFT") or
-                        f.startswith("REVIEW_UNFLAGGED")
+                        f.startswith("REVIEW_UNFLAGGED") or
+                        # Стан перевірки відгуків щойно перерахований вище з
+                        # свіжого rev_sum. Старий прапор лишати не можна:
+                        # у STALE_REVIEWS зашитий вік даних, і два різні віки
+                        # в одному алерті — це два рядки про одне й те саме.
+                        f.startswith("STALE_REVIEWS") or
+                        f.startswith("UNKNOWN:REVIEWS")
                     )
                     if not (is_llm_flag or is_review_flag):
                         flags.append(f)
@@ -192,6 +214,14 @@ async def send_single(
 
         except Exception as e:
             logger.error("Error refreshing LLM verdicts inside send_single: %s", e)
+
+        # Збій десь у блоці вище міг статись ДО перевірки стану відгуків —
+        # тоді вижимка лишилась би неперевіреною. Показувати її в такому разі
+        # означало б покластись на те, чого ми не підтвердили, тому мовчимо:
+        # правило «не знаю ≠ безпечно» діє і на власні збої теж.
+        if not _reviews_checked:
+            alert.buy_reviews_analysis = ""
+            alert.sell_reviews_analysis = ""
 
     title, silent = _alert_grade(alert.spread_pct)
     if is_sniper_match:

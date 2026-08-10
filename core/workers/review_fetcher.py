@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
@@ -202,6 +203,36 @@ class ReviewFetcher:
             self._processed, self._errors, self._in_flight,
         )
 
+    async def _last_known(
+            self, exchange: str, merchant_id: str, status: str, error_reason: str = "",
+    ) -> dict:
+        """
+        Відповідь при невдалому фетчі: останні відомі відгуки + чесний статус.
+
+        Раніше сюди поверталися нулі, і виклик у RiskEngine не міг відрізнити
+        «відгуків немає» від «цього разу не дістали». Тепер лічильники й
+        тексти беруться з бази (їх більше ніхто не стирає — див.
+        `mark_reviews_unavailable`), а `status` каже, що свіжих даних немає.
+
+        `data_at` у відповіді показує, наскільки старі ці дані. Нуль означає,
+        що успішного збору не було жодного разу — тоді нулі справжні.
+        """
+        fallback = {
+            "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
+            "status": status, "error_reason": error_reason, "data_at": 0,
+        }
+        try:
+            stored = await self._db.get_reviews_summary(exchange, merchant_id)
+        except Exception:
+            return fallback
+        if not stored:
+            return fallback
+
+        stored = dict(stored)
+        stored["status"] = status
+        stored["error_reason"] = error_reason
+        return stored
+
     async def fetch_now(self, exchange: str, merchant_id: str) -> dict:
         """
         🚀 СИНХРОННИЙ ФЕТЧ: Викликається напряму з RiskEngine для нових мерчантів,
@@ -209,15 +240,17 @@ class ReviewFetcher:
         ніж завантажаться його відгуки.
         """
         from state import state
-        if not state.stats.get("internet_connected", True):
-            return {
-                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                "status": "UNAVAILABLE", "error_reason": "Internet is offline"
-            }
 
         if not merchant_id:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "UNKNOWN",
-                    "error_reason": "empty merchant_id"}
+                    "error_reason": "empty merchant_id", "data_at": 0}
+
+        # Нижче — три причини не ходити на біржу взагалі. У всіх трьох стан
+        # бази не чіпаємо: це не нова інформація про мерчанта, а про нас.
+        # Але й нулі не вигадуємо — віддаємо останнє відоме зі статусом,
+        # який каже, що свіжого немає.
+        if not state.stats.get("internet_connected", True):
+            return await self._last_known(exchange, merchant_id, "UNAVAILABLE", "Internet is offline")
 
         # Degraded mode: після 3 підряд відмов біржа йде в cooldown, щоб не
         # довбати мертве API кожним циклом. Перенесено з _fetch_and_save —
@@ -225,23 +258,22 @@ class ReviewFetcher:
         # lazy-фетч довбав API без обмежень.
         if asyncio.get_event_loop().time() < self._exchange_cooldown.get(exchange, 0.0):
             logger.debug("fetch_now: %s у degraded mode, пропускаємо %s", exchange, merchant_id[:12])
-            return {
-                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                "status": "UNAVAILABLE",
-                "error_reason": f"{exchange} degraded mode (temporary cooldown)",
-            }
+            return await self._last_known(
+                exchange, merchant_id, "UNAVAILABLE",
+                f"{exchange} degraded mode (temporary cooldown)",
+            )
 
         if exchange not in RATE_LIMITS:
             # Біржа взагалі не підтримується (не в RATE_LIMITS)
             logger.debug("fetch_now: %s не підтримує API відгуків [%s]", exchange, merchant_id[:12])
+            reason = f"{exchange}: reviews API not supported"
             try:
-                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NOT_SUPPORTED")
+                await self._db.mark_reviews_unavailable(
+                    exchange, merchant_id, "NOT_SUPPORTED", reason,
+                )
             except Exception:
                 pass
-            return {
-                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                "status": "NOT_SUPPORTED", "error_reason": f"{exchange}: reviews API not supported"
-            }
+            return await self._last_known(exchange, merchant_id, "NOT_SUPPORTED", reason)
 
         # ── Перевірка доступності ПЕРЕД запитом (per-exchange логіка) ──────
         _client_map = {
@@ -252,43 +284,41 @@ class ReviewFetcher:
 
         if exchange in ("CryptoBot", "Wallet"):
             if not client:
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_AUTH"}
+                return await self._last_known(
+                    exchange, merchant_id, "NO_AUTH", f"{exchange} client is not initialized",
+                )
             if not getattr(client, "userbot", None):
-                await self._db.save_reviews(exchange, merchant_id, 0, 0, 0, [], status="NO_SESSION",
-                                            error_reason=f"{exchange} userbot not set")
-                return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "status": "NO_SESSION"}
+                await self._db.mark_reviews_unavailable(
+                    exchange, merchant_id, "NO_SESSION", f"{exchange} userbot not set",
+                )
+                return await self._last_known(exchange, merchant_id, "NO_SESSION",
+                                              f"{exchange} userbot not set")
 
         elif exchange == "MEXC":
             # MEXC: публічне API — тільки перевіряємо що клієнт є
             if not client:
-                return {
-                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                    "status": "NO_AUTH", "error_reason": "MEXC client is not initialized"
-                }
+                return await self._last_known(
+                    exchange, merchant_id, "NO_AUTH", "MEXC client is not initialized",
+                )
 
         elif exchange in ("Bybit", "Binance", "OKX"):
             # Bybit/Binance/OKX: всі три потребують браузерну сесію.
             # OKX використовує POST /v3/c2c/review/history (аналогічно Bybit/Binance).
             if not client:
-                return {
-                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                    "status": "NO_AUTH", "error_reason": f"{exchange} client is not initialized"
-                }
+                return await self._last_known(
+                    exchange, merchant_id, "NO_AUTH", f"{exchange} client is not initialized",
+                )
             session_h, _, _ = await self._db.get_auth_session(exchange)
             if not session_h:
                 logger.debug("fetch_now: %s [%s] — немає перехопленої сесії", exchange, merchant_id[:12])
+                reason = f"{exchange} browser session not captured"
                 try:
-                    await self._db.save_reviews(
-                        exchange, merchant_id, 0, 0, 0, [],
-                        status="NO_SESSION",
-                        error_reason=f"{exchange} browser session not captured"
+                    await self._db.mark_reviews_unavailable(
+                        exchange, merchant_id, "NO_SESSION", reason,
                     )
                 except Exception:
                     pass
-                return {
-                    "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                    "status": "NO_SESSION", "error_reason": f"{exchange} browser session not captured"
-                }
+                return await self._last_known(exchange, merchant_id, "NO_SESSION", reason)
 
         else:
             # Невідома біржа з клієнтом — без перевірки
@@ -366,6 +396,8 @@ class ReviewFetcher:
                 "bad_texts": bad_texts,
                 "status": save_status,
                 "error_reason": save_reason,
+                # Щойно зібрано — дані свіжі за визначенням.
+                "data_at": time.time(),
             }
         except Exception as e:
             logger.warning(f"fetch_now помилка для {merchant_id}: {e}")
@@ -385,16 +417,12 @@ class ReviewFetcher:
             elif "API_ERROR" in emsg:
                 status = "API_ERROR"
             try:
-                await self._db.save_reviews(
-                    exchange, merchant_id, 0, 0, 0, [],
-                    status=status, error_reason=emsg[:500]
+                await self._db.mark_reviews_unavailable(
+                    exchange, merchant_id, status, emsg[:500],
                 )
             except Exception:
                 pass
-            return {
-                "positive": 0, "negative": 0, "neutral": 0, "bad_texts": [],
-                "status": status, "error_reason": emsg[:500]
-            }
+            return await self._last_known(exchange, merchant_id, status, emsg[:500])
         finally:
             self._in_flight -= 1
 

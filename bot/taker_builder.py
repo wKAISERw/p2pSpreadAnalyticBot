@@ -316,7 +316,21 @@ async def send_taker_single(
             llm_rec = rec
             llm_reason = reason
             terms_summary = t_sum
-            rev_analysis = rev_analyz
+
+            # Вижимка відгуків із кешу вердиктів має право звучати, лише поки
+            # відгуки справді видно. Коли свіжих немає і збережених теж, вона
+            # описувала б те, чого ми не бачимо. Те саме робить alert_builder
+            # для спреду — тейкер ішов повз цей захист.
+            #
+            # Присвоюємо ПІСЛЯ перевірки, а не до неї: якщо запит стану впаде,
+            # rev_analysis лишиться порожнім. Мовчання при власному збої
+            # чесніше за показ непідтвердженого.
+            from core.engine import reviews_status as _rs
+
+            if not _rs.is_dark(
+                await notifier._db.get_reviews_summary(order.exchange, order.merchant_id)
+            ):
+                rev_analysis = rev_analyz
         except Exception:
             pass
 

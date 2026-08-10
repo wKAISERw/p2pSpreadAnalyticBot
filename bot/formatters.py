@@ -120,6 +120,8 @@ UNKNOWN_REASONS = {
     "SESSION_EXPIRED": "сесія біржі протухла",
     "NO_AUTH": "біржа не авторизує запит",
     "UNAVAILABLE": "біржа не відповідає",
+    "API_ERROR": "біржа відповіла помилкою",
+    "PENDING": "перевірка ще не завершилась",
     "NOT_SUPPORTED": "біржа не віддає ці дані через API",
     "FETCH_FAILED": "біржа не віддала відповідь",
     "UNKNOWN": "у відповіді біржі цих даних не було",
@@ -429,8 +431,40 @@ def _risk_badge(order: Order, short: bool = False) -> str:
     flags = [f.strip() for f in flag.split(",") if f.strip()]
     lines = []
     detected_risk_types: set[str] = set()   # для показу trade_terms
- 
+    unknown_gaps: list[str] = []            # чого саме ми не бачили
+
     for f in flags:
+        # ── «Не перевірили» — окремо від ризику ────────────────────────
+        #
+        # Раніше цієї гілки тут не було, і прапор UNKNOWN:REVIEWS:* не
+        # проходив жоден із фільтрів нижче: у словнику badges такого ключа
+        # немає, а startswith-гілок для нього не було. Тобто движок чесно
+        # писав «відгуків не бачили», а людина цього не бачила ніде.
+        #
+        # Пояснення про УМОВИ малює _terms_block з окремого поля
+        # terms_status, тому тут лишаємо тільки відгуки — інакше про умови
+        # буде сказано двічі й різними словами.
+        if f.startswith("UNKNOWN:"):
+            parts = f.split(":")
+            what = "Відгуки" if "REVIEWS" in parts else ""
+            if what:
+                why = UNKNOWN_REASONS.get(parts[-1], "технічна причина")
+                unknown_gaps.append(f"{what.lower()} — {why}")
+            continue
+
+        # ── Дані є, але зібрані раніше ────────────────────────────────
+        # Сесія впала сьогодні, а відгуки в базі з учора. Це не «немає
+        # відгуків» і не «свіжа перевірка» — третій стан, і його треба
+        # називати своїм ім'ям.
+        if f.startswith("STALE_REVIEWS:"):
+            parts = f.split(":")
+            age = parts[-1] if len(parts) > 2 else ""
+            age_note = f" ({age} тому)" if age else ""
+            lines.append(
+                f"🕰 ВІДГУКИ НЕ ОНОВЛЮВАЛИСЬ{age_note}\n" if not short else "🕰"
+            )
+            continue
+
         # ── Відгуки (NEEDS_LLM:BADREVIEWS: ПЕРЕД BADREVIEWS: !) ────────
         if f.startswith("NEEDS_LLM:BADREVIEWS:"):
             lines.append("🗣👎 ПОГАНІ ВІДГУКИ → AI ПЕРЕВІРКА\n" if not short else "🗣")
@@ -544,10 +578,21 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         # ── Fallback: bare flag in badges dict ────────────────────────
         if f in badges:
             lines.append(badges[f])
- 
+
+    # Пробіли в перевірці — окремим рядком і без бейджа ризику: це не
+    # звинувачення мерчанта, а межа нашої видимості. Ставимо в кінець,
+    # щоб знайдені ризики лишались першими.
+    if unknown_gaps:
+        if short:
+            lines.append("❔")
+        else:
+            lines.append(
+                "❔ НЕ ПЕРЕВІРЕНО: " + escape("; ".join(unknown_gaps)) + "\n"
+            )
+
     if not lines:
         return ""
- 
+
     result = "".join(lines)
  
     # ── Спойлер-блок: тільки уривок умов (якщо ризиковий тип) ──

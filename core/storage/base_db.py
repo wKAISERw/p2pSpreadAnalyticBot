@@ -739,6 +739,30 @@ class MerchantDB:
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
+        # Коли САМІ ВІДГУКИ востаннє успішно зібрано.
+        #
+        # `updated_at` для цього не годиться: він оновлюється і при невдалій
+        # спробі теж (на ньому тримається бекоф у needs_review_fetch). Без
+        # окремого поля неможливо відрізнити «зібрали годину тому» від
+        # «зібрали тиждень тому, відтоді лише невдачі», а це різні речі:
+        # у першому випадку дані свіжі, у другому їх треба показувати як
+        # останні відомі, а не як поточні.
+        await self._ensure_column("merchant_reviews", "data_at", "REAL DEFAULT 0")
+        # Разовий backfill для рядків, що вже лежали в базі до появи колонки.
+        #
+        # Без нього 1822 успішно зібраних мерчанти мали б data_at=0, тобто
+        # «успішного збору не було жодного разу» — і перший же збій сесії
+        # подав би їхні реальні відгуки як невідомі. Для status='OK' старий
+        # updated_at справді дорівнює моменту збору: у тодішньому коді ці два
+        # поля рухались разом.
+        #
+        # Рядки з технічним статусом навмисно не чіпаємо: там лежать нулі,
+        # затерті старою поведінкою, і видавати їх за зібрані дані не можна.
+        await self._db.execute(
+            "UPDATE merchant_reviews SET data_at = updated_at "
+            "WHERE COALESCE(data_at, 0) = 0 AND status = 'OK' AND updated_at > 0"
+        )
+        await self._db.commit()
         # 🔥 ДОДАНО СЕКЦІЮ ДЛЯ ПРОТУХШИХ СЕСІЙ
         await self._ensure_column("auth_sessions", "is_active", "INTEGER DEFAULT 1")
         # 🚀 МІГРАЦІЯ ДЛЯ ТОРГОВИХ СЕСІЙ

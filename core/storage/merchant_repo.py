@@ -495,8 +495,8 @@ class MerchantRepo:
             """
             INSERT INTO merchant_reviews
             (exchange, merchant_id, positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status,
-             error_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             error_reason, data_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 positive_count = excluded.positive_count,
                 negative_count = excluded.negative_count,
@@ -504,17 +504,58 @@ class MerchantRepo:
                 bad_texts_json = excluded.bad_texts_json,
                 updated_at = excluded.updated_at,
                 status = excluded.status,
-                error_reason = excluded.error_reason
+                error_reason = excluded.error_reason,
+                data_at = excluded.data_at
             """,
             (exchange, merchant_id, max(int(positive_count), 0), max(int(negative_count), 0),
-             max(int(neutral_count), 0), bad_texts_json, now, status, err),
+             max(int(neutral_count), 0), bad_texts_json, now, status, err, now),
+        )
+        await self._db.commit()
+
+    async def mark_reviews_unavailable(
+            self, exchange: str, merchant_id: str,
+            status: str, error_reason: str = "",
+    ) -> None:
+        """
+        Позначає, що відгуки зараз недоступні — НЕ чіпаючи вже відомі.
+
+        Раніше кожен технічний збій ішов через `save_reviews(..., 0, 0, 0, [])`,
+        а це upsert, який перезаписує всі колонки. Мерчант, чиї 500 відгуків і
+        тексти скарг ми успішно зібрали вчора, після однієї невдалої спроби
+        лишався з нулями: ми не просто не дізнались нового — ми стирали те,
+        що знали. У базі це видно як 2257 рядків NO_SESSION, усі з нульовими
+        лічильниками й без текстів.
+
+        Тут міняються тільки `status`, `error_reason` і `updated_at`. Лічильники
+        й тексти лишаються останніми відомими, і вердикт може чесно сказати
+        «свіжіших дістати не вдалось» замість «відгуків немає».
+
+        Рядок створюється, лише якщо його не було зовсім — тоді нулі чесні:
+        ми справді нічого не знаємо про цього мерчанта.
+        """
+        now = time.time()
+        err = (error_reason or "")[:500]
+
+        await self._db.execute(
+            """
+            INSERT INTO merchant_reviews
+            (exchange, merchant_id, positive_count, negative_count, neutral_count,
+             bad_texts_json, updated_at, status, error_reason)
+            VALUES (?, ?, 0, 0, 0, '[]', ?, ?, ?)
+            ON CONFLICT(exchange, merchant_id) DO UPDATE SET
+                updated_at   = excluded.updated_at,
+                status       = excluded.status,
+                error_reason = excluded.error_reason
+            """,
+            (exchange, merchant_id, now, status, err),
         )
         await self._db.commit()
 
     async def get_reviews_summary(self, exchange: str, merchant_id: str) -> dict:
         import json
         async with self._db.execute(
-                "SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status, COALESCE(error_reason, '') as error_reason "
+                "SELECT positive_count, negative_count, neutral_count, bad_texts_json, updated_at, status, "
+                "COALESCE(error_reason, '') as error_reason, COALESCE(data_at, 0) as data_at "
                 "FROM merchant_reviews WHERE exchange=? AND merchant_id=?",
                 (exchange, merchant_id),
         ) as cur:
@@ -522,7 +563,7 @@ class MerchantRepo:
 
         if not row:
             return {"positive": 0, "negative": 0, "neutral": 0, "bad_texts": [], "updated_at": 0, "status": "UNKNOWN",
-                    "error_reason": ""}
+                    "error_reason": "", "data_at": 0}
 
         try:
             bad_texts = json.loads(row["bad_texts_json"] or "[]")
@@ -537,6 +578,9 @@ class MerchantRepo:
             "updated_at": row["updated_at"] or 0,
             "status": row["status"] or "OK",
             "error_reason": row["error_reason"] or "",
+            # Коли зібрано самі відгуки. Нуль означає, що успішного збору не
+            # було жодного разу — тоді нулі в лічильниках чесні.
+            "data_at": row["data_at"] or 0,
         }
 
     async def add_snapshots_batch(self, orders: list, heartbeat_minutes: int = 10) -> int:

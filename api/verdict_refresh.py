@@ -85,7 +85,7 @@ def _drop_blind_terms(ai: dict, terms_status: Optional[str]) -> dict:
     """
     Прибирає вижимку умов, зроблену з умов, яких ми не бачили.
 
-    Вердикт живе в кеші до 12 годин і не перераховується, поки не змінився
+    Вердикт живе в кеші кілька днів і не перераховується, поки не змінився
     хеш умов. Але якщо умов не видно взагалі (немає сесії, біржа не віддала
     поле), хеш порожній і стабільний — тобто стара вижимка «Умови не
     вказані» переживе будь-яку кількість циклів і виглядатиме як свіжий
@@ -104,6 +104,33 @@ def _drop_blind_terms(ai: dict, terms_status: Optional[str]) -> dict:
     return {**ai, "termsSummary": ""}
 
 
+def _drop_blind_reviews(ai: dict, reviews_summary: Optional[dict]) -> dict:
+    """
+    Те саме для вижимки ВІДГУКІВ.
+
+    Симетрії тут довго не було, і причина повчальна: поле `reviewsAnalysis`
+    віддавалось у API, але завжди порожнім — `llm_worker._parse_json` не
+    повертав його зі словника, тож у базу лягав порожній рядок. Захищати
+    було нічого, і відсутність перевірки нікому не заважала.
+
+    Щойно розбір відповіді полагодили, поле ожило — разом із тією самою
+    пасткою, від якої `_drop_blind_terms` рятує умови: вижимка з кешу
+    описувала б відгуки, яких ми зараз не бачимо.
+
+    Не показуємо тільки в найсуворішому стані (`is_dark`): свіжого не
+    дістали І збереженого не маємо. Якщо збережені відгуки є, нехай і
+    вчорашні, вижимка по них лишається чесною — треба лише пам'ятати, що
+    вона про вчора.
+    """
+    from core.engine import reviews_status as rs
+
+    if not ai or not rs.is_dark(reviews_summary):
+        return ai
+    if not ai.get("reviewsAnalysis"):
+        return ai
+    return {**ai, "reviewsAnalysis": ""}
+
+
 async def refresh_flags(db, orders: list[dict]) -> int:
     """
     Оновлює `riskFlag` там, де вердикт дозрів, і додає блок `ai`.
@@ -120,6 +147,7 @@ async def refresh_flags(db, orders: list[dict]) -> int:
     # сама пара давала б по два запити на кожну.
     seen: dict[tuple[str, str], Optional[str]] = {}
     ai_seen: dict[tuple[str, str], Optional[dict]] = {}
+    rev_seen: dict[tuple[str, str], Optional[dict]] = {}
     changed = 0
 
     for order in orders:
@@ -136,7 +164,17 @@ async def refresh_flags(db, orders: list[dict]) -> int:
         if key not in ai_seen:
             ai_seen[key] = await _ai_view(db, exchange, merchant_id)
         if ai_seen[key]:
-            order["ai"] = _drop_blind_terms(ai_seen[key], order.get("termsStatus"))
+            # Стан відгуків тягнемо лише тоді, коли є що захищати: без
+            # вижимки зайвий запит на кожен ордер нічого не дає.
+            if ai_seen[key].get("reviewsAnalysis") and key not in rev_seen:
+                try:
+                    rev_seen[key] = await db.get_reviews_summary(exchange, merchant_id)
+                except Exception as e:
+                    logger.debug("reviews summary %s/%s: %s", exchange, merchant_id, e)
+                    rev_seen[key] = None
+
+            view = _drop_blind_terms(ai_seen[key], order.get("termsStatus"))
+            order["ai"] = _drop_blind_reviews(view, rev_seen.get(key))
 
         if not is_pending(order.get("riskFlag")):
             continue
