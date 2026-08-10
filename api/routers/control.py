@@ -1368,6 +1368,25 @@ async def get_cards(
     return dict_to_camel(jsonable_encoder(enriched))
 
 
+# Що з картки має право потрапити у відповідь матчингу.
+#
+# Whitelist, а не blacklist: рядок картки містить і повний номер, і токени
+# Monobank, і службові поля движка. Одне з них — `_max_single` — буває
+# `inf` (це «без обмеження»), а JSON такого числа не має: відповідь падала
+# з 500, і картковий блок на сайті просто зникав, ніби функції немає.
+_CARD_PUBLIC_FIELDS = (
+    "id", "bank_name", "last_four", "label", "category",
+    "balance", "status", "is_own", "is_warmed_up",
+)
+
+
+def _public_card(card: Optional[dict]) -> Optional[dict]:
+    """Картка у вигляді, придатному і для JSON, і для чужих очей."""
+    if not card:
+        return None
+    return {k: card.get(k) for k in _CARD_PUBLIC_FIELDS if k in card}
+
+
 @router.get("/cards/match")
 async def match_cards(
     bank: str = Query(..., description="Банк мерчанта: код або слаг"),
@@ -1453,8 +1472,10 @@ async def match_cards(
         "routeBanks": [bank_display_name(b) for b in (route.banks or [])],
         "interBank": bool(getattr(route, "inter_bank", False)),
         "status": result.status,
-        "bestCard": result.best_card,
-        "splitOptions": result.split_options,
+        "bestCard": _public_card(result.best_card),
+        "splitOptions": [
+            [_public_card(c) for c in option] for option in (result.split_options or [])
+        ],
         "availableUah": round(result.available_uah, 2),
         "rejections": dict_to_camel(result.rejection_report or []),
         "balances": balances,

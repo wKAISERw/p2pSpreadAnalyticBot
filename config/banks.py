@@ -159,6 +159,22 @@ BANKS: list[Bank] = [
 ]
 
 
+# Другі написання тих самих банків у відповідях бірж.
+#
+# `exchange_codes` тримає по одному коду на біржу, а біржі того самого
+# банку називають по-різному: Binance віддає і «A-Bank», і «ABank», і
+# «PUMBBank» замість «PUMB». Кожне таке написання випадало в невідомі —
+# у діагностиці бота вони й накопичились: ABank 1826 разів, PUMBBank 1481,
+# Izibank на OKX 1725. Це не нові банки, і заводити їх як нові не треба.
+_EXCHANGE_ALIASES: dict[tuple[str, str], str] = {
+    ("Binance", "abank"): "48",        # А-Банк
+    ("Binance", "a-bank (card)"): "48",
+    ("Binance", "pumbbank"): "64",     # ПУМБ
+    ("Binance", "pumb (card)"): "64",
+    ("OKX", "izibank"): "553",
+}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # BankRegistry — lookup таблиці (будуються один раз при імпорті)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -178,6 +194,8 @@ class BankRegistry:
         for bank in BANKS:
             for exchange, api_code in bank.exchange_codes.items():
                 cls._reverse[(exchange, str(api_code).lower())] = bank.internal_code
+        for (exchange, api_code), internal in _EXCHANGE_ALIASES.items():
+            cls._reverse[(exchange, api_code.lower())] = internal
 
     @classmethod
     def get_exchange_code(cls, internal_code: str, exchange: str) -> Optional[str]:
