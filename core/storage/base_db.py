@@ -72,14 +72,24 @@ class MerchantDB:
         # WAL: захист від database locked при паралельних async операціях.
         # LLMWorkerPool (2 воркери) + ReviewFetcher пишуть одночасно —
         # без WAL можливі помилки при конкурентному доступі.
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA synchronous=NORMAL")  # безпечно + швидше
-        await self._db.execute("PRAGMA cache_size=-65536")  # 64 MB кеш
-        await self._db.execute("PRAGMA foreign_keys=ON")
-        # Без busy_timeout дефолт = 0: будь-яка заблокована операція падає з
-        # "database is locked" МИТТЄВО, замість почекати. З добовим VACUUM це
-        # означало гарантований збій раз на добу.
-        await self._db.execute("PRAGMA busy_timeout=10000")  # 10s
+        #
+        # Курсор вичерпуємо ОБОВ'ЯЗКОВО. Частина PRAGMA повертає рядок
+        # (journal_mode → 'wal', busy_timeout → 10000), і поки той рядок не
+        # прочитано, statement для SQLite лишається незавершеним — на все
+        # життя процесу, бо повторно сюди ніхто не заходить. Саме через це
+        # добовий VACUUM падав із "cannot VACUUM - SQL statements in
+        # progress" щоразу з червня 2026 (див. core/workers/db_maintenance).
+        for pragma in (
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=NORMAL",   # безпечно + швидше
+            "PRAGMA cache_size=-65536",    # 64 MB кеш
+            "PRAGMA foreign_keys=ON",
+            # Без busy_timeout дефолт = 0: будь-яка заблокована операція падає
+            # з "database is locked" МИТТЄВО, замість почекати.
+            "PRAGMA busy_timeout=10000",   # 10s
+        ):
+            async with self._db.execute(pragma) as cur:
+                await cur.fetchall()
         await self._db.commit()
 
         # Check if sent_alerts has the correct primary key, if not, drop it (it's just a 30 min cache)

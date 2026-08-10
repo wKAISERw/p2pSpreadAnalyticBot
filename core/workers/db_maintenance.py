@@ -185,16 +185,87 @@ class DBMaintenanceTask:
                 deleted_verdicts, deleted_reviews,
             )
 
-            # 3. Стискаємо базу. VACUUM тримає ексклюзивний лок на БД —
-            # сканер на цей час стоїть, тому робимо це раз на добу і міряємо,
-            # скільки саме простою це коштує.
-            logger.info("Виконання команди VACUUM...")
-            vac_start = time.monotonic()
-            await conn.execute("VACUUM")
-            await conn.commit()
-            logger.info("VACUUM завершено за %.1fs.", time.monotonic() - vac_start)
+            # 3. Стискаємо базу окремим з'єднанням — див. _vacuum().
+            await self._vacuum()
 
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("Помилка виконання SQL у DB Maintenance: %s", e)
+
+    async def _vacuum(self) -> None:
+        """
+        Стиснення бази на ОКРЕМОМУ з'єднанні, з обов'язковим вичерпанням
+        курсорів.
+
+        Раніше VACUUM виконувався на спільному з'єднанні застосунку і падав
+        **щоразу** — в error.log це видно від червня до серпня 2026 рівно
+        одним рядком:
+
+            cannot VACUUM - SQL statements in progress
+
+        Спокуса пояснити це конкурентністю (мовляв, хтось тримає курсор)
+        хибна: причина статична й відома ще з моменту старту процесу.
+        SQLite забороняє VACUUM, поки на з'єднанні лишається хоч один
+        **незавершений** statement, а незавершеним рахується будь-який, що
+        повертає рядки і чий курсор не вичерпали. У `MerchantDB.start()`
+        таких два:
+
+            PRAGMA journal_mode=WAL     → повертає 'wal'
+            PRAGMA busy_timeout=10000   → повертає 10000
+
+        Курсор від них не закривають, тож вони висять на спільному з'єднанні
+        весь час життя процесу. Виміряно окремо: `PRAGMA synchronous`,
+        `foreign_keys` і `cache_size` рядків не повертають і VACUUM не
+        блокують, а `journal_mode`, `busy_timeout` і звичайний `SELECT 1`
+        блокують.
+
+        Тому тут два запобіжники одразу:
+          * власне з'єднання — на ньому немає чужих курсорів;
+          * кожен PRAGMA вичерпується через `async with … fetchall()`.
+
+        `isolation_level=None` вимикає неявний BEGIN драйвера — інакше
+        отримали б другу помилку, `cannot VACUUM from within a transaction`.
+
+        Checkpoint WAL перед стисненням потрібен, бо сторінки, які ще лежать
+        у -wal, у VACUUM не беруть участі.
+        """
+        import aiosqlite
+
+        path = getattr(self.db, "_path", None)
+        if not path:
+            logger.warning("VACUUM пропущено: невідомий шлях до бази.")
+            return
+
+        size_before = 0
+        try:
+            size_before = path.stat().st_size
+        except OSError:
+            pass
+
+        logger.info("Виконання команди VACUUM...")
+        vac_start = time.monotonic()
+        try:
+            async with aiosqlite.connect(str(path), isolation_level=None) as vac:
+                # fetchall() тут не за даними, а щоб statement завершився:
+                # невичерпаний курсор — і є та сама "SQL statements in progress".
+                for pragma in ("PRAGMA busy_timeout=30000", "PRAGMA wal_checkpoint(TRUNCATE)"):
+                    async with vac.execute(pragma) as cur:
+                        await cur.fetchall()
+                await vac.execute("VACUUM")
+        except Exception as e:
+            # Невдале стиснення не має валити решту обслуговування: чистка
+            # вище вже відпрацювала і закомічена.
+            logger.error("VACUUM не виконано: %s", e)
+            return
+
+        elapsed = time.monotonic() - vac_start
+        try:
+            size_after = path.stat().st_size
+            freed = size_before - size_after
+            logger.info(
+                "VACUUM завершено за %.1fs: %.1f MB → %.1f MB (звільнено %.1f MB).",
+                elapsed, size_before / 1048576, size_after / 1048576, freed / 1048576,
+            )
+        except OSError:
+            logger.info("VACUUM завершено за %.1fs.", elapsed)
