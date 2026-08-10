@@ -405,7 +405,6 @@ async def on_gset_click(call: CallbackQuery, state: FSMContext) -> None:
         "behavior_alert_score": "<i>Ціле число (напр. 60)</i>",
         "sticky_min_chain": "<i>Ціле число (напр. 3)</i>",
         "max_alerts_per_cycle": "<i>Ціле число (напр. 5)</i>",
-        "risk_mode": "<i>STRICT, WARNING або RELAXED</i>",
     }
     hint = _HINTS.get(key, "<i>Введи нове значення</i>")
     text = f"✏️ <b>{desc}</b>\n<code>{key}</code>\n\nПоточне: <b>{val}</b>\n\n{hint}"
@@ -429,10 +428,6 @@ async def on_gset_value_input(message: Message, state: FSMContext) -> None:
             formatted_value = str(round(float(raw_value), 2))
         elif key in ("behavior_alert_score", "sticky_min_chain", "max_alerts_per_cycle"):
             formatted_value = str(int(float(raw_value)))
-        elif key == "risk_mode":
-            formatted_value = raw_value.upper()
-            if formatted_value not in ("STRICT", "WARNING", "RELAXED"):
-                raise ValueError("Допустимі тільки STRICT, WARNING, RELAXED")
         elif key not in SETTING_DESCRIPTIONS and key not in ("min_spread_pct", "safety_buffer_pct"):
             raise ValueError(f"Параметр {key!r} не є глобальним налаштуванням")
     except ValueError as e:
@@ -781,7 +776,6 @@ async def _build_status_text(user_id: int) -> str:
                 _my_min_amount = float(u.get("min_amount", 0.0))
                 break
 
-    risk = runtime_config.get("risk_mode", settings.risk_mode)
     min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
 
     llm_q = _scanner_stats.get("llm_queue", 0)
@@ -820,7 +814,6 @@ async def _build_status_text(user_id: int) -> str:
             f"💼 Капітал: <code>{_my_capital} ₴</code>\n"
             f"📉 Спред: <code>{_my_spread}%</code>"
             f"{min_amount_line}\n"
-            f"🛡 Ризик: <code>{risk}</code>\n\n"
             "🔌 <b>API:</b>\n" + "\n".join(connected) + "\n\n"
                                                        "⚡ <b>Біржі:</b>\n" + "\n".join(ex_lines)
     )

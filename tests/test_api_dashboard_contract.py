@@ -103,13 +103,41 @@ class TestGlobalSettingsKeyCasing(unittest.IsolatedAsyncioTestCase):
     def test_unknown_keys_are_still_rejected(self):
         resp = self.client.post(
             "/api/v1/settings/global",
-            json={"riskMode": "STRICT", "totallyMadeUp": 1},
+            # riskMode тут стояв роками — і був одним із тих ключів, які
+            # приймались, зберігались і ні на що не впливали: клас, який його
+            # читав, спрацьовував ДО аналізу ризику й у дефолтному режимі
+            # пропускав усе. Прибраний разом із MerchantFilter.
+            json={"maxAlertsPerCycle": 7, "totallyMadeUp": 1},
             headers=_auth(ADMIN_ID),
         )
 
         body = resp.json()
-        self.assertEqual(body["applied"], {"risk_mode": "STRICT"})
+        self.assertEqual(body["applied"], {"max_alerts_per_cycle": "7"})
         self.assertEqual(body["rejected"], ["totally_made_up"])
+
+    def test_removed_keys_are_rejected_like_any_other_unknown(self):
+        # Ключ, який більше нічим не керує, має чесно відхилятись, а не
+        # мовчки зберігатись у базу. Коли в запиті НЕМАЄ жодного відомого
+        # ключа, ендпоінт віддає 400 — це наявна поведінка, не нова.
+        resp = self.client.post(
+            "/api/v1/settings/global",
+            json={"riskMode": "STRICT"},
+            headers=_auth(ADMIN_ID),
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("risk_mode", resp.json()["detail"])
+
+    def test_removed_key_does_not_block_the_rest_of_the_payload(self):
+        # Дашборд — окремий репозиторій і може ще слати riskMode. Решта
+        # налаштувань у тому ж запиті мусить доїхати.
+        resp = self.client.post(
+            "/api/v1/settings/global",
+            json={"riskMode": "STRICT", "maxAlertsPerCycle": 9},
+            headers=_auth(ADMIN_ID),
+        )
+        body = resp.json()
+        self.assertEqual(body["applied"], {"max_alerts_per_cycle": "9"})
+        self.assertEqual(body["rejected"], ["risk_mode"])
 
     def test_every_allowed_key_survives_the_camel_round_trip(self):
         # GET віддає camelCase; те саме значення має прийматись назад у POST.

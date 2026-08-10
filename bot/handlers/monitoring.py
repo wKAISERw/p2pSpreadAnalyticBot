@@ -612,7 +612,6 @@ async def cmd_status(message: Message) -> None:
     # Глобальні системні параметри
     capital = _my_capital
     spread = _my_spread
-    risk = runtime_config.get("risk_mode", settings.risk_mode)
     min_amount_line = f"\n📦 Мін. сума: <code>{_my_min_amount:.0f} ₴</code>" if _my_min_amount > 0 else ""
 
     llm_q = _scanner_stats.get("llm_queue", 0)
@@ -638,7 +637,6 @@ async def cmd_status(message: Message) -> None:
             f"💼 Капітал: <code>{capital} ₴</code>\n"
             f"📉 Спред: <code>{spread}%</code>\n"
             f"{min_amount_line}"
-            f"🛡 Ризик: <code>{risk}</code>\n\n"
             "🔌 <b>API:</b>\n" + "\n".join(connected) +
             ("\n\n⚡ <b>Circuit Breakers:</b>\n" + "\n".join(cb_lines) if cb_lines else "")
     )

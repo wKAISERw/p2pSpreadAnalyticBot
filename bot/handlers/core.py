@@ -334,7 +334,6 @@ class CardLimitStates(StatesGroup):
 # ── Словник описів для UI ──────────────────────────────────────────────────
 # Тільки системні параметри (персональні - в scanner_users через меню)
 SETTING_DESCRIPTIONS = {
-    "risk_mode": "🛡 Рівень антифроду",
     "behavior_alert_score": "🤖 Поріг балів ботів",
     "velocity_spike_per_hour": "⚡ Аномальна швидкість (угод/год)",
     "sticky_min_chain": "📌 Липкі ліміти (циклів)",
@@ -344,7 +343,6 @@ SETTING_DESCRIPTIONS = {
 
 # Відповідність ключ → опис для кнопок
 _KEY_LABELS = {
-    "risk_mode": "🛡 Антифрод",
     "behavior_alert_score": "🤖 Поріг ботів",
     "velocity_spike_per_hour": "⚡ Швидкість",
     "sticky_min_chain": "📌 Липкі ліміти",

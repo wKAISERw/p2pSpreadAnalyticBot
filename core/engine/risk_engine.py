@@ -27,10 +27,12 @@ from core.analysis.identity_analyzer import analyze_identity
 from core.utils.cache import TTLCache
 from core.utils.tasks import spawn
 from core.engine import terms_status, reviews_status
+from core.engine import risk_flags as risk_flags_mod
 from config.defaults import (
     MIN_ORDERS, MIN_COMPLETION,
     TRUSTED_MIN_ORDERS, TRUSTED_MIN_COMPLETION,
     TRUSTED_MAX_RISK_SCORE, TRUSTED_LLM_MIN_SCORE,
+    BEHAVIOR_ALERT_SCORE as BEHAVIOR_ALERT_SCORE_DEFAULT,
     BEHAVIOR_HISTORY_MINUTES, BOT_ALERT_COOLDOWN_SEC,
     DB_ASYNC_ANALYZE_CONCURRENCY,
     REVIEW_WARN_NEG_PCT, REVIEW_WARN_MIN_NEG,
@@ -39,8 +41,31 @@ from config.defaults import (
 
 logger = logging.getLogger("RiskEngine")
 
-BEHAVIOR_ALERT_SCORE       = 60
 _ASYNC_ANALYZE_CONCURRENCY = DB_ASYNC_ANALYZE_CONCURRENCY
+
+
+def _behavior_alert_score() -> int:
+    """
+    Поріг, з якого поведінка мерчанта вважається ботоподібною.
+
+    Раніше тут стояла локальна константа `BEHAVIOR_ALERT_SCORE = 60`, яка
+    навіть не імпортувалась із `config.defaults` — тобто та сама величина
+    існувала у двох екземплярах, і той, що в дефолтах, був мертвий. Пункт
+    меню «🤖 Поріг балів ботів» писав значення в `bot_settings`, звідки його
+    не читав ніхто.
+
+    Читаємо в момент рішення — інакше майбутній конфігуратор ризику
+    повторить цю ж долю (див. PLAN_RISK_ENGINE, етап 4).
+    """
+    try:
+        from config.runtime import runtime_config
+
+        raw = runtime_config.get("behavior_alert_score")
+        if raw is None or raw == "":
+            return BEHAVIOR_ALERT_SCORE_DEFAULT
+        return int(float(raw))
+    except Exception:
+        return BEHAVIOR_ALERT_SCORE_DEFAULT
 
 # Вердикт живе 3 дні (знижено з 7 — відгуки TTL=24h, 7d давало стейл вердикти).
 VERDICT_MAX_AGE_DAYS = 3
@@ -163,6 +188,54 @@ def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
 # лічильниками, де pos=neg=0 давало total=0 і функція повертала порожній
 # список — тобто «претензій немає».
 REVIEWS_BLIND_STATUSES = reviews_status.BLIND
+
+
+def _reviews_note(summary: dict | None) -> str:
+    """Що чесно сказати про відгуки, коли вердикт ухвалено без моделі."""
+    if reviews_status.is_dark(summary):
+        status = (summary or {}).get("status", reviews_status.UNKNOWN)
+        return f"Відгуків не бачили: {reviews_status.label(status)}."
+
+    s = summary or {}
+    pos = int(s.get("positive", 0) or 0)
+    neg = int(s.get("negative", 0) or 0)
+    total = pos + neg + int(s.get("neutral", 0) or 0)
+    if total <= 0:
+        return "Відгуків на біржі немає."
+
+    stale = " (дані не оновлювались)" if reviews_status.is_blind(s.get("status", "")) else ""
+    if neg == 0:
+        return f"Негативних відгуків немає ({pos} позитивних){stale}."
+    return f"Негативних {neg} з {total}, порогів не перевищено{stale}."
+
+
+def _terms_note(terms: str, status: str) -> str:
+    """Те саме для умов: або факт, або чесне «не бачили»."""
+    if terms_status.is_blind(status):
+        return f"Умов не бачили: {terms_status.label(status)}."
+    if not (terms or "").strip():
+        return "Мерчант не вказав умов."
+    return "Умови прочитано, заборонених вимог не знайдено."
+
+
+def _trusted_reason(order: Order, summary: dict | None, terms: str, status: str) -> str:
+    """
+    Пояснення для довіреного мерчанта, пропущеного повз модель.
+
+    Головне — не сказати «ризиків не виявлено» там, де ми їх не шукали.
+    """
+    base = (
+        f"Довірений мерчант ({order.month_order_count} угод, "
+        f"{order.finish_rate_pct:.1f}% успішності), поглиблена перевірка не запускалась."
+    )
+    gaps = []
+    if reviews_status.is_dark(summary):
+        gaps.append("відгуків не бачили")
+    if terms_status.is_blind(status):
+        gaps.append("умов не бачили")
+    if gaps:
+        return f"{base} Увага: {', '.join(gaps)} — висновок неповний."
+    return f"{base} За наявними даними ризиків не виявлено."
 
 
 def _note_terms_unavailable(order: Order, status: str) -> str:
@@ -662,7 +735,9 @@ class RiskEngine:
 
             # ── Blacklist: найвищий пріоритет ──────────────────────────────
             if is_bl:
-                order.risk_flag = f"BLOCK:BLACKLIST:{bl_reason}"
+                # Кома в причині рве прапор навпіл — рядок склеєний саме
+                # комами. `_build_cached_flag` це врахував, ця гілка ні.
+                order.risk_flag = f"BLOCK:BLACKLIST:{risk_flags_mod.scrub(bl_reason)}"
                 logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
                 return
 
@@ -678,7 +753,9 @@ class RiskEngine:
 
             from core.analysis.rules import HARD_DIRECT_BLOCK
             if regex_result.verdict == "BLOCK" and regex_result.risk_type in HARD_DIRECT_BLOCK:
-                order.risk_flag = f"BLOCK:{regex_result.risk_type}:{regex_result.reason}"
+                order.risk_flag = (
+                    f"BLOCK:{regex_result.risk_type}:{risk_flags_mod.scrub(regex_result.reason)}"
+                )
                 logger.warning("🚫 Regex Direct Fallback Block: %s [%s] — Category=%s, Reason=%s",
                                order.merchant_name, exchange, regex_result.risk_type, regex_result.reason)
                 return
@@ -780,7 +857,7 @@ class RiskEngine:
                     is_twin = True
                     behavior_flags.append(f"CROSS_EXCHANGE_BOT:{id_result.reason}")
 
-            if behavior_score >= BEHAVIOR_ALERT_SCORE or behavior_needs_llm:
+            if behavior_score >= _behavior_alert_score() or behavior_needs_llm:
                 behavior_flags.append(f"BEHAVIOR_BOTLIKE:S{behavior_score}")
                 signature = _behavior_signature(behavior_result.flags, behavior_score, behavior_reason)
                 if _should_log_behavior_alert(self._bot_alert_cache, exchange, mid, signature):
@@ -1054,14 +1131,23 @@ class RiskEngine:
                     order.risk_flag = _join_flags(_dedupe_flags(flags)) or "OK"
 
                     if self._db:
+                        # Ці три тексти — єдине, що людина побачить про
+                        # мерчанта, якого ми свідомо НЕ віддали моделі. Тому
+                        # вони мусять описувати рівно те, що ми перевірили.
+                        #
+                        # Раніше тут стояли три беззастережні рядки, зокрема
+                        # «Відгуки чисті, без скарг на шахрайство» — і гілка
+                        # спрацьовувала навіть тоді, коли відгуків не бачили
+                        # жодного разу: `has_review_concern` шукає підрядок
+                        # "BADREVIEWS", а прапор UNKNOWN:REVIEWS його не має.
                         await self._db.save_verdict(
                             exchange, mid, order.merchant_name,
                             terms, "OK", "NONE",
-                            f"Довірений мерчант ({order.month_order_count} угод, {order.finish_rate_pct:.1f}% успішності). Ризиків не виявлено.",
+                            _trusted_reason(order, rev_summary, terms, order.terms_status),
                             "trusted_skip",
                             trade_recommendation="APPROVE",
-                            terms_summary="Умови обміну перевірено, стандартні вимоги безпеки.",
-                            reviews_analysis="Відгуки чисті, без скарг на шахрайство."
+                            terms_summary=_terms_note(terms, order.terms_status),
+                            reviews_analysis=_reviews_note(rev_summary),
                         )
                     return
 
@@ -1135,8 +1221,13 @@ class RiskEngine:
                     "Автоматична перевірка: ризиків не виявлено.",
                     "risk_engine_pass",
                     trade_recommendation="APPROVE",
-                    terms_summary="Умови стандартні.",
-                    reviews_analysis="Загроз не виявлено."
+                    # Ті самі два поля, що й у trusted_skip: описують те, що
+                    # перевірили, а не те, що хотілося б написати. Сюди
+                    # потрапляють лише мерчанти з risk_flag == "OK", тобто
+                    # без прапорів UNKNOWN — але спиратись на цей побічний
+                    # ефект замість прямої перевірки не варто.
+                    terms_summary=_terms_note(terms, order.terms_status),
+                    reviews_analysis=_reviews_note(rev_summary),
                 )
 
         except Exception as e:

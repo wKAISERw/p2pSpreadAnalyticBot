@@ -69,7 +69,6 @@ class Settings(BaseSettings):
     anomaly_method: Literal["mean", "median", "mad"] = "mean"
 
     # ── Risk Engine та Безпека ──────────────────────────────────────────────
-    risk_mode: str = "WARNING"
     dry_run_mode: bool = False  # Блокує реальні POST/PUT запити на біржі
     public_url: Optional[str] = None
     use_cryptobot_userbot_scraper: bool = False  # Резервний/експериментальний клік-парсер

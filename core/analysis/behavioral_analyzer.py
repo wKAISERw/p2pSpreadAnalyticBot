@@ -12,6 +12,31 @@ from config.defaults import (
 
 MIN_SNAPSHOTS = 3
 
+
+def _tuned(key: str, fallback, cast):
+    """
+    Значення з `runtime_config` у момент рішення, а не при імпорті модуля.
+
+    Пункти меню «⚡ Аномальна швидкість» і «📌 Липкі ліміти» існували,
+    зберігались у `bot_settings` і не впливали ні на що: константи тягнулись
+    із `config.defaults` на рівні модуля, тобто фіксувались при першому
+    імпорті й переживали будь-яку зміну в базі.
+
+    Це той самий почерк, що й «налаштування без меню», тільки навпаки — меню
+    без налаштування. Для майбутнього конфігуратора ризику (див.
+    PLAN_RISK_ENGINE, етап 4) правило те саме: читати треба там, де
+    ухвалюється рішення.
+    """
+    try:
+        from config.runtime import runtime_config
+
+        raw = runtime_config.get(key)
+        if raw is None or raw == "":
+            return fallback
+        return cast(raw)
+    except Exception:
+        return fallback
+
 # Бали детекторів — тут бо специфічні для behavioral шару
 API_REPLENISH_SCORE = 50   # бот що авто-поповнює об'єм: sticky + delta > 0
 STATIC_DROP_SCORE   = 30   # фіксований дроп: sticky + exact + delta == 0
@@ -77,6 +102,9 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
     delta_orders = _to_int(newest.get("order_count", 0)) - _to_int(oldest.get("order_count", 0))
     time_span_hours = max(0.001, (_to_float(newest.get("recorded_at", 0.0)) - _to_float(oldest.get("recorded_at", 0.0))) / 3600.0)
 
+    sticky_min_chain = _tuned("sticky_min_chain", STICKY_MIN_CHAIN, int)
+    velocity_spike = _tuned("velocity_spike_per_hour", VELOCITY_SPIKE_PER_HOUR, float)
+
     sticky_count = 0
     for snap in reversed(snapshots):
         if _same_limit_pair(_to_float(snap.get("min_limit")), _to_float(snap.get("max_limit")), min_lim, max_lim):
@@ -85,7 +113,7 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
             break
 
     # 🚀 ФІКС 2: ПРАПОРЦІ БІЛЬШЕ НЕ ВЗАЄМОВИКЛЮЧНІ
-    if sticky_count >= STICKY_MIN_CHAIN:
+    if sticky_count >= sticky_min_chain:
         if delta_orders > 0:
             result.score += API_REPLENISH_SCORE
             result.flags.append(f"API_REPLENISH:{sticky_count}")
@@ -95,7 +123,7 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
 
     if time_span_hours >= VELOCITY_MIN_WINDOW_HOURS and delta_orders > 0:
         velocity = delta_orders / time_span_hours
-        if velocity >= VELOCITY_SPIKE_PER_HOUR:
+        if velocity >= velocity_spike:
             result.score += VELOCITY_SPIKE_SCORE
             result.flags.append(f"VELOCITY_SPIKE:{velocity:.1f}/h")
 
@@ -110,7 +138,7 @@ def analyze_history(current_order, snapshots: List[Dict[str, Any]]) -> Behaviora
 
     if result.flags:
         parts = [f"flags={','.join(result.flags)}", f"score={result.score}"]
-        if sticky_count >= STICKY_MIN_CHAIN:
+        if sticky_count >= sticky_min_chain:
             parts.append(f"sticky={sticky_count}")
         if time_span_hours >= VELOCITY_MIN_WINDOW_HOURS and delta_orders > 0:
             velocity = delta_orders / time_span_hours

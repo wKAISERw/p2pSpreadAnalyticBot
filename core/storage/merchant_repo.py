@@ -8,6 +8,15 @@ from pathlib import Path
 from core.storage.base_db import hash_terms, TTL, DEFAULT_TTL, VERDICT_SCORE, LLM_SOURCES
 logger = logging.getLogger(__name__)
 
+# Скільки чекати перед повтором після технічного збою збору відгуків.
+# П'ять хвилин — компроміс: сесія чи API встигають ожити, але кожен цикл
+# сканера (секунди) вже не б'ється в те саме місце.
+RETRY_AFTER_FAILURE_SEC = 300.0
+
+# «Відгуків немає» — не збій, але й не вічна істина: у мерчанта вони
+# з'являються. Перепитуємо частіше за звичайний TTL, та не щоцикла.
+NO_FEEDBACK_RECHECK_SEC = 3600.0
+
 class MerchantRepo:
     """Verdicts, blacklist, reviews, snapshots."""
 
@@ -372,8 +381,9 @@ class MerchantRepo:
             INSERT INTO merchant_verdict
             (exchange, merchant_id, merchant_name, terms_hash,
              verdict, risk_type, reason, risk_score,
-             llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary, reviews_analysis)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary, reviews_analysis,
+             llm_decision)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 merchant_name = excluded.merchant_name,
                 terms_hash = excluded.terms_hash,
@@ -392,7 +402,12 @@ class MerchantRepo:
                 updated_at = excluded.updated_at,
                 trade_recommendation = excluded.trade_recommendation,
                 terms_summary = excluded.terms_summary,
-                reviews_analysis = excluded.reviews_analysis
+                reviews_analysis = excluded.reviews_analysis,
+                /* Хто саме ухвалив рішення. Колонка існувала з самого
+                   початку, але в INSERT її не було жодного разу — у базі
+                   всі 1290 рядків мали 'UNKNOWN', і дізнатись, яка модель
+                   винесла вердикт, можна було лише з logs/llm_decisions. */
+                llm_decision = excluded.llm_decision
             """,
             (
                 exchange,
@@ -409,6 +424,7 @@ class MerchantRepo:
                 trade_recommendation,
                 terms_summary,
                 reviews_analysis,
+                (source or "unknown")[:64],
                 llm_inc,
             ),
         )
@@ -469,17 +485,32 @@ class MerchantRepo:
         updated_at = row["updated_at"] or 0
         status = row["status"] or "OK"
 
+        age = time.time() - updated_at
+
         # NO_SESSION: re-check кожні 10 хвилин — як тільки сесія з'явиться,
         # всі мерчанти підтягнуть відгуки протягом ~10m без ручних дій
         if status == "NO_SESSION":
-            return (time.time() - updated_at) > 600.0
+            return age > 600.0
 
-        # PENDING / технічні збої: завжди потребує перефетч
-        if status in ("PENDING", "UNAVAILABLE", "API_ERROR", "SESSION_EXPIRED", "NO_FEEDBACK"):
-            return True
+        # Технічні збої: повторюємо, але не щоцикла.
+        #
+        # Раніше тут стояло беззастережне `return True`, без огляду на
+        # updated_at. Тобто мерчант зі статусом API_ERROR перезапитувався
+        # КОЖЕН цикл сканера, нескінченно. Degraded-mode cooldown у
+        # `fetch_now` рятував лише частково: він вмикається після трьох
+        # відмов поспіль і діє на всю біржу, а не на конкретного мерчанта.
+        if status in ("PENDING", "UNAVAILABLE", "API_ERROR", "SESSION_EXPIRED"):
+            return age > RETRY_AFTER_FAILURE_SEC
 
+        # NO_FEEDBACK — не збій, а успішна відповідь: відгуків справді немає.
+        # Тримати його в списку «пробувати без упину» означало довбати API
+        # заради нуля, який ми вже знаємо. Перепитуємо за звичайним TTL, але
+        # частіше, ніж успішні: у мерчанта могли з'явитись перші відгуки.
         ttl_sec = review_ttl_hours * 3600.0
-        return (time.time() - updated_at) > ttl_sec
+        if status == "NO_FEEDBACK":
+            return age > min(ttl_sec, NO_FEEDBACK_RECHECK_SEC)
+
+        return age > ttl_sec
 
     async def save_reviews(
             self, exchange: str, merchant_id: str,

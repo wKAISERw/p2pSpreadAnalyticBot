@@ -12,7 +12,6 @@ logger = logging.getLogger("RuntimeConfig")
 # Ключі що дозволено змінювати через UI
 # Тільки системні параметри — персональні (capital/spread/banks) в scanner_users
 ALLOWED_KEYS = frozenset({
-    "risk_mode",
     "behavior_alert_score",
     "velocity_spike_per_hour",
     "sticky_min_chain",
@@ -24,8 +23,6 @@ ALLOWED_KEYS = frozenset({
     "min_spread_pct",
     "safety_buffer_pct",
     "show_spread_logs",
-    "block_fop_tov",
-    "block_banka_jar",
     "W_REGEX",
     "W_BEHAVIOR",
     "W_REVIEWS_PCT",

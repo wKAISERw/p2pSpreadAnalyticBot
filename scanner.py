@@ -37,7 +37,6 @@ from exchanges.mexc import MexcExchange
 from exchanges.okx import OkxExchange
 from exchanges.wallet import WalletExchange
 from exchanges.bingx import BingxExchange
-from filters.merchant_filter import MerchantFilter
 from filters.limit_filter import set_max_capital
 from infrastructure.http.binance_client import BinanceClient
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
@@ -303,7 +302,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
     exchange_manager.set_notify_callback(_exchange_down_notify)
 
     risk_engine = RiskEngine(db=merchant_db, llm_pool=llm_pool, review_fetcher=review_fetcher)
-    merchant_filter = MerchantFilter(risk_mode=getattr(settings, "risk_mode", "WARNING"))
 
     # 🚀 MakerAdMonitor — моніторинг вхідних ордерів на мейкер-оголошення
     maker_monitor = MakerAdMonitor(db=merchant_db, risk_engine=risk_engine)
@@ -647,19 +645,23 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         all_cycle_orders.extend(b_orders)
                         all_cycle_orders.extend(s_orders)
 
+                        # Фільтр MerchantFilter звідси прибрано. Він стояв
+                        # ДО аналізу ризику, коли risk_flag ще порожній, тож у
+                        # режимі WARNING (дефолт) пропускав усе, а в STRICT
+                        # падав із NameError. Реальні рішення ухвалюють
+                        # alert_dispatcher._user_wants і taker_scanner — там,
+                        # де вердикт уже є, і персонально під кожного юзера.
                         for o in b_orders:
-                            if merchant_filter.passed(o):
-                                # schedule() прибрано — відгуки тягнуться ТІЛЬКИ
-                                # для мерчантів у реальному спреді (lazy в risk_engine)
-                                for bank_code in o.bank_codes:
-                                    if bank_code in buy_grouped:
-                                        buy_grouped[bank_code].append(o)
+                            # schedule() прибрано — відгуки тягнуться ТІЛЬКИ
+                            # для мерчантів у реальному спреді (lazy в risk_engine)
+                            for bank_code in o.bank_codes:
+                                if bank_code in buy_grouped:
+                                    buy_grouped[bank_code].append(o)
 
                         for o in s_orders:
-                            if merchant_filter.passed(o):
-                                for bank_code in o.bank_codes:
-                                    if bank_code in sell_grouped:
-                                        sell_grouped[bank_code].append(o)
+                            for bank_code in o.bank_codes:
+                                if bank_code in sell_grouped:
+                                    sell_grouped[bank_code].append(o)
 
                     if all_cycle_orders:
                         spawn(
