@@ -1,5 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useSWRConfig } from 'swr';
+import { toast } from 'sonner';
+import { api } from '../services/api';
 import { useAppStore } from '../store';
 import { SyncSectionKey, SyncSettings } from '../types';
 
@@ -13,8 +15,16 @@ import { SyncSectionKey, SyncSettings } from '../types';
  * Розходження виникало не через «дві копії даних», а через кеш SWR: панелі
  * читали свої ендпоінти один раз при відкритті і більше не переймались.
  * Змінив щось у боті — на відкритій вкладці це лишалось невидимим до
- * перезавантаження сторінки. Саме це тут і лікується: раз на інтервал
- * помічені розділи перечитуються.
+ * перезавантаження сторінки.
+ *
+ * Перша версія лікувала це в лоб: раз на інтервал перечитувала всі
+ * увімкнені розділи. При десяти розділах і кроці 10 секунд це 60 запитів
+ * на хвилину, з яких майже всі повертали ті самі дані — і кожен усе одно
+ * перемальовував панель, бо SWR віддає новий об'єкт незалежно від вмісту.
+ *
+ * Тепер опитується один дешевий відбиток (GET /user/sync-state), а по дані
+ * хук іде лише туди, де сума змінилась. Заразом стає відомо, ЩО саме
+ * змінилось, — без цього повідомити людину не було б чим.
  *
  * Чому вибірково, а не «оновлювати все завжди»: панелі з чернетками
  * (Фільтри, Пороги мерчанта) тримають незбережені правки поверх серверних
@@ -78,6 +88,7 @@ export const SYNC_SECTION_LABELS: Record<SyncSectionKey, { title: string; hint: 
 export const DEFAULT_SYNC: SyncSettings = {
   enabled: true,
   intervalSeconds: 30,
+  notify: true,
   sections: {
     filters: true,
     taker: true,
@@ -99,6 +110,7 @@ export function resolveSync(sync?: SyncSettings): SyncSettings {
     enabled: sync.enabled ?? DEFAULT_SYNC.enabled,
     intervalSeconds: sync.intervalSeconds || DEFAULT_SYNC.intervalSeconds,
     sections: { ...DEFAULT_SYNC.sections, ...(sync.sections ?? {}) },
+    notify: sync.notify ?? DEFAULT_SYNC.notify,
   };
 }
 
@@ -112,6 +124,13 @@ export function useBotSync(active: boolean) {
   const { mutate } = useSWRConfig();
   const sync = resolveSync(useAppStore(state => state.userSettings.sync));
 
+  // Відбитки з минулого тіку. У ref, а не в стані: їх зміна не повинна
+  // перемальовувати нічого — вони лише привід сходити по дані.
+  const seen = useRef<Partial<Record<SyncSectionKey, string | null>>>({});
+  // Перший тік лише запам'ятовує відбитки. Інакше кожне відкриття вкладки
+  // рапортувало б про «зміни» у всіх десяти розділах одразу.
+  const primed = useRef(false);
+
   // Список у залежностях має бути стабільним рядком — інакше кожен рендер
   // перезапускав би таймер і оновлення не спрацьовувало б ніколи.
   const enabledSections = (Object.keys(sync.sections) as SyncSectionKey[])
@@ -120,21 +139,78 @@ export function useBotSync(active: boolean) {
     .join(',');
 
   useEffect(() => {
-    if (!active || !sync.enabled || !enabledSections) return;
+    if (!active || !sync.enabled || !enabledSections) {
+      primed.current = false;
+      return;
+    }
 
-    const prefixes = new Set(
-      enabledSections.split(',').flatMap(section => SECTION_KEYS[section as SyncSectionKey] ?? [])
-    );
-    if (!prefixes.size) return;
+    const enabled = enabledSections.split(',') as SyncSectionKey[];
+    let stopped = false;
 
-    const interval = setInterval(() => {
-      // Ревалідуємо без оптимістичних даних: хай SWR просто сходить на
-      // бекенд і оновить те, що змінилось.
-      mutate(key => matches(key, prefixes), undefined, { revalidate: true });
-    }, Math.max(5, sync.intervalSeconds) * 1000);
+    const tick = async () => {
+      let state: Awaited<ReturnType<typeof api.getSyncState>>;
+      try {
+        state = await api.getSyncState();
+      } catch {
+        // Бекенд не відповів — це не привід ані оновлювати, ані шуміти.
+        return;
+      }
+      if (stopped) return;
 
-    return () => clearInterval(interval);
-  }, [active, sync.enabled, sync.intervalSeconds, enabledSections, mutate]);
+      const fresh = state?.sections ?? {};
+      const changed: SyncSectionKey[] = [];
+
+      for (const section of enabled) {
+        const now = fresh[section];
+        // null означає «бекенд не зміг порахувати». Вважати це зміною не
+        // можна: розділ оновлювався б на кожному тіку, тобто рівно так,
+        // як до цієї переробки.
+        if (now == null) continue;
+        if (seen.current[section] !== now) changed.push(section);
+        seen.current[section] = now;
+      }
+
+      if (!primed.current) {
+        primed.current = true;
+        return;
+      }
+      if (!changed.length) return;
+
+      const prefixes = new Set(changed.flatMap(s => SECTION_KEYS[s] ?? []));
+      await mutate(key => matches(key, prefixes), undefined, { revalidate: true });
+
+      if (sync.notify !== false) notifyChanged(changed);
+    };
+
+    void tick();
+    const interval = setInterval(tick, Math.max(5, sync.intervalSeconds) * 1000);
+
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [active, sync.enabled, sync.intervalSeconds, sync.notify, enabledSections, mutate]);
+}
+
+/**
+ * Повідомлення про те, що змінилось.
+ *
+ * Перелік розділів, без конкретики: показати «капітал 5100 → 7000» можна
+ * лише порівнявши старі дані з новими, а їх на цей момент уже перезаписано.
+ * Та й при кількох правках підряд така стрічка перетворюється на журнал,
+ * якого ніхто не читає. Назва розділу відповідає на єдине питання, яке тут
+ * справді стоїть: куди подивитись.
+ */
+function notifyChanged(sections: SyncSectionKey[]) {
+  const titles = sections.map(s => SYNC_SECTION_LABELS[s]?.title ?? s);
+
+  if (titles.length === 1) {
+    toast.info(`Оновлено з бота: ${titles[0]}`);
+    return;
+  }
+  toast.info('Оновлено з бота', {
+    description: titles.join(' · '),
+  });
 }
 
 /** Разове перечитування всіх увімкнених розділів — кнопка «Оновити зараз». */

@@ -5,7 +5,10 @@ import { CreditCard, Loader2, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { api } from '../../services/api';
-import { CardDetailLevel, CardDisplaySettings, CardOutputMode } from '../../types';
+import {
+  CardDetailLevel, CardDisplaySettings, CardOutputMode, CardSplitMode,
+  ShowRejectedOrders,
+} from '../../types';
 
 /**
  * Картковий модуль виводу — те саме меню, що в боті під «Налаштування
@@ -15,6 +18,21 @@ import { CardDetailLevel, CardDisplaySettings, CardOutputMode } from '../../type
  * UPSERT усього рядка з дефолтами, тож без merge зміна одного поля
  * скидала б решту.
  */
+/**
+ * Повний набір режимів. Який із них показати — вирішує бек полем
+ * `availableSplitModes`: міжбанк живе за експериментальною фічею, і
+ * пропонувати його завжди означало б отримати 400 у відповідь.
+ */
+const SPLIT_OPTIONS: { value: CardSplitMode; label: string; hint: string }[] = [
+  { value: 'off', label: 'Вимкнено', hint: 'Тільки одна картка й один переказ' },
+  { value: 'intra_bank', label: 'У межах банку', hint: 'Кілька карток одного банку' },
+  {
+    value: 'inter_bank',
+    label: 'Між банками',
+    hint: 'Збирати суму з карток різних банків — потребує узгодження в чаті',
+  },
+];
+
 export default function CardDisplaySection() {
   const { data, error, isLoading, mutate } = useSWR<CardDisplaySettings>(
     '/user/card-display',
@@ -124,6 +142,67 @@ export default function CardDisplaySection() {
             />
             <Hint>Скільки максимум пропускати через картку, яка ще не «прогріта» обігом.</Hint>
           </Field>
+
+          <div className="pt-2 border-t border-slate-800/60">
+            <h3 className="text-sm font-bold text-white mb-4">Складання суми під ордер</h3>
+
+            <div className="space-y-6">
+              <Field label="Спліт між картками" sub="card_split_mode">
+                <Picker<CardSplitMode>
+                  value={data.cardSplitMode}
+                  onChange={v => patch('cardSplitMode', v)}
+                  options={SPLIT_OPTIONS.filter(o =>
+                    (data.availableSplitModes ?? ['off', 'intra_bank']).includes(o.value)
+                  )}
+                />
+                {!(data.availableSplitModes ?? []).includes('inter_bank') && (
+                  <Hint>
+                    Набір суми з карток <b>різних</b> банків — експеримент, і
+                    вмикається окремо: «Можливості» → «Картки та маршрути» →
+                    «Кошики карток між банками». Саме через це обмеження
+                    31 000 ₴ на трьох картках перетворювались на 21 000 ₴
+                    доступних.
+                  </Hint>
+                )}
+              </Field>
+
+              <Field label="Карток на угоду" sub="max_cards_per_order">
+                <Picker<string>
+                  value={String(data.maxCardsPerOrder)}
+                  onChange={v => patch('maxCardsPerOrder', Number(v))}
+                  options={[
+                    { value: '1', label: '1', hint: 'Один переказ — найменше питань' },
+                    { value: '2', label: '2', hint: 'Два перекази' },
+                    { value: '3', label: '3', hint: 'Три перекази' },
+                  ]}
+                />
+                <Hint>
+                  Таймер угоди — зазвичай 15 хвилин, і кожен зайвий переказ
+                  через ще один застосунок це реальний ризик апеляції, а не
+                  просто «повільніше».
+                </Hint>
+              </Field>
+
+              <Field label="Відкинуті ордери" sub="show_rejected_orders">
+                <Picker<ShowRejectedOrders>
+                  value={data.showRejectedOrders}
+                  onChange={v => patch('showRejectedOrders', v)}
+                  options={[
+                    {
+                      value: 'with_reason',
+                      label: 'Показувати з причиною',
+                      hint: 'Видно, що ордер був і чому не пройшов',
+                    },
+                    { value: 'hide', label: 'Ховати', hint: 'Тільки те, що пройшло' },
+                  ]}
+                />
+                <Hint>
+                  Порожній список сам по собі не каже, ринку немає чи карток
+                  не вистачило.
+                </Hint>
+              </Field>
+            </div>
+          </div>
         </div>
       )}
     </Shell>

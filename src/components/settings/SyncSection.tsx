@@ -118,7 +118,7 @@ export default function SyncSection() {
               </span>
               <span className="block text-[11px] text-slate-500">
                 {sync.enabled
-                  ? `Кожні ${sync.intervalSeconds} с для ${activeCount} розділів`
+                  ? `Перевірка змін кожні ${sync.intervalSeconds} с · ${activeCount} розділів`
                   : 'Дані оновляться при перезаході на сторінку або кнопкою вище'}
               </span>
             </span>
@@ -143,6 +143,41 @@ export default function SyncSection() {
           </div>
         </div>
       </div>
+
+      {/* Повідомлення про зміни. Окремо від головного вимикача: підхоплювати
+          зміни мовчки — теж робочий режим, особливо коли вкладка на екрані
+          весь час. */}
+      <button
+        onClick={() => patch({ notify: !(sync.notify ?? true) })}
+        disabled={!sync.enabled}
+        className={cn(
+          'w-full flex items-center gap-3 p-3 mb-4 rounded-2xl border text-left transition-all disabled:opacity-40',
+          sync.notify ?? true
+            ? 'bg-accent-500/5 border-accent-500/25'
+            : 'bg-slate-950/50 border-slate-800'
+        )}
+      >
+        <div className={cn(
+          'w-9 h-5 rounded-full relative transition-colors shrink-0',
+          (sync.notify ?? true) ? 'bg-accent-500' : 'bg-slate-700'
+        )}>
+          <div className={cn(
+            'absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all',
+            (sync.notify ?? true) ? 'right-0.5' : 'left-0.5'
+          )} />
+        </div>
+        <span className="min-w-0">
+          <span className={cn(
+            'block text-sm font-bold',
+            (sync.notify ?? true) ? 'text-accent-400' : 'text-slate-300'
+          )}>
+            Повідомляти про зміни
+          </span>
+          <span className="block text-[11px] text-slate-500 leading-snug">
+            Спливне повідомлення з переліком розділів, які щойно оновились
+          </span>
+        </span>
+      </button>
 
       {/* Розділи */}
       <div className="flex items-center justify-between mb-3">
@@ -204,10 +239,11 @@ export default function SyncSection() {
         <span>
           Копіювання тут не відбувається: фільтри, картки, ліміти й пресети
           зберігаються в одному місці — базі бота, — тож сайт і Telegram
-          завжди показують те саме. Ці перемикачі керують лише тим, як швидко
-          відкрита вкладка помітить зміну. Вимикати варто розділ, який ти
-          саме зараз редагуєш на сайті: інакше незбережену чернетку може
-          перебити значення з бота.
+          завжди показують те саме. За інтервал сайт лише питає, чи щось
+          змінилось; самі дані тягнуться тільки для розділів, де зміна
+          справді сталась. Вимикати варто розділ, який ти саме зараз
+          редагуєш на сайті: інакше незбережену чернетку може перебити
+          значення з бота.
         </span>
       </div>
     </motion.section>

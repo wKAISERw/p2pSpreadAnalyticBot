@@ -11,12 +11,23 @@ import { api } from '../services/api';
 import { useAppStore } from '../store';
 import { Card, CardCategory, CardReportRow, CardTransaction } from '../types';
 import { CardSettings } from './cards/CardSettings';
+import { RejectionStats } from './cards/RejectionStats';
+import { useBankProfiles } from '../hooks/useBankProfiles';
 import LoadingVeil from './LoadingVeil';
 
 const uah = (v: number) => `${Math.round(v ?? 0).toLocaleString('uk-UA')} ₴`;
 
-/** Ліміти приходять із get_card_effective_limits — ключі можуть відрізнятись
- *  залежно від того, чи є в картки власні override-и. Дістаємо м'яко. */
+/**
+ * Ліміт картки з `get_card_effective_limits`.
+ *
+ * Ключі камелізовані на беку: `daily_out_max` → `dailyOutMax`. Тут довго
+ * шукалось `daily_out` / `dailyOut` / `day_out` — жодного з них не існує,
+ * тож усі прогрес-бари мовчки писали «ліміт не заданий», хоча движок
+ * лімітами користувався.
+ *
+ * −1 означає «без обмеження» (config.banks.UNLIMITED) — шкали для такого
+ * немає, тому теж null.
+ */
 const limitOf = (card: Card, ...keys: string[]): number | null => {
   for (const key of keys) {
     const v = card.limits?.[key];
@@ -93,19 +104,94 @@ export default function CardsPanel() {
         </div>
       )}
 
+      <RejectionStats />
+
       <CardsReport />
     </div>
   );
 }
 
-const BANKS: { value: string; label: string }[] = [
+/** Поки довідник летить — щоб форма не була порожньою. */
+const BANK_FALLBACK: { value: string; label: string }[] = [
   { value: 'monobank', label: 'Monobank' },
-  { value: 'privatbank', label: 'PrivatBank' },
+  { value: 'privatbank', label: 'ПриватБанк' },
   { value: 'pumb', label: 'ПУМБ' },
-  { value: 'a-bank', label: 'А-Банк' },
-  { value: 'izibank', label: 'izibank' },
-  { value: 'sense', label: 'Sense' },
 ];
+
+const TIER_TITLES: Record<number, string> = {
+  1: 'Найкраще тримають оборот',
+  2: 'Робочі',
+  3: 'Обережно',
+};
+
+/**
+ * Вибір банку з довідника, а не з копії списку.
+ *
+ * Тут довго жили шість жорстко вписаних банків, тож завести через сайт
+ * картку Ощадбанку чи Таскомбанку було неможливо — хоч бот їх знає й
+ * рахує їхні ліміти. Групування за tier — не прикраса: від нього залежать
+ * дефолтні ліміти, які картка отримає одразу після створення.
+ */
+function BankPicker({
+  value, onChange,
+}: { value: string; onChange: (slug: string) => void }) {
+  const { profiles, isLoading } = useBankProfiles();
+
+  if (isLoading || profiles.length === 0) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        {BANK_FALLBACK.map(bank => (
+          <button
+            key={bank.value}
+            onClick={() => onChange(bank.value)}
+            className={cn(
+              'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
+              value === bank.value
+                ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+            )}
+          >
+            {bank.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  const tiers = [1, 2, 3].filter(t => profiles.some(p => p.tier === t));
+  const picked = profiles.find(p => p.slug === value);
+
+  return (
+    <div className="space-y-2">
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm font-bold text-white focus:border-accent-500 focus:ring-2 focus:ring-accent-500/40 outline-none transition-all"
+      >
+        {tiers.map(tier => (
+          <optgroup key={tier} label={TIER_TITLES[tier] ?? `Tier ${tier}`}>
+            {profiles
+              .filter(p => p.tier === tier)
+              .map(p => (
+                <option key={p.slug} value={p.slug}>{p.name}</option>
+              ))}
+          </optgroup>
+        ))}
+      </select>
+
+      {picked && (
+        <p className="text-xs text-slate-500">
+          Ліміти за замовчуванням:{' '}
+          {picked.safeMonthlyUah
+            ? `${uah(picked.safeMonthlyUah)} на місяць`
+            : 'загальні'}
+          {picked.safeTxPerDay ? ` · до ${picked.safeTxPerDay} переказів на добу` : ''}
+          {picked.licenseGroup ? ' · спільна ліцензія з банком-партнером' : ''}
+        </p>
+      )}
+    </div>
+  );
+}
 
 const CATEGORIES: { value: CardCategory; label: string }[] = [
   { value: 'self', label: '🙋 Власна' },
@@ -160,22 +246,7 @@ function AddCardForm({ onDone }: { onDone: () => Promise<void> }) {
     <div className="bg-slate-900/50 border border-slate-800/50 rounded-3xl p-6 space-y-5">
       <div>
         <FieldLabel>Банк</FieldLabel>
-        <div className="flex flex-wrap gap-2">
-          {BANKS.map(bank => (
-            <button
-              key={bank.value}
-              onClick={() => setBankName(bank.value)}
-              className={cn(
-                'px-3 py-1.5 rounded-lg text-xs font-bold border transition-all',
-                bankName === bank.value
-                  ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
-                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-              )}
-            >
-              {bank.label}
-            </button>
-          ))}
-        </div>
+        <BankPicker value={bankName} onChange={setBankName} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -287,10 +358,10 @@ const CardItem: React.FC<{ card: Card; onChanged: () => void }> = ({ card, onCha
   const [panel, setPanel] = useState<'none' | 'transactions' | 'settings' | 'edit'>('none');
   const [busy, setBusy] = useState(false);
 
-  const dailyOut = limitOf(card, 'daily_out', 'dailyOut', 'day_out');
-  const monthlyOut = limitOf(card, 'monthly_out', 'monthlyOut', 'month_out');
-  const dailyIn = limitOf(card, 'daily_in', 'dailyIn', 'day_in');
-  const monthlyIn = limitOf(card, 'monthly_in', 'monthlyIn', 'month_in');
+  const dailyOut = limitOf(card, 'dailyOutMax');
+  const monthlyOut = limitOf(card, 'monthlyOutMax');
+  const dailyIn = limitOf(card, 'dailyInMax');
+  const monthlyIn = limitOf(card, 'monthlyInMax');
 
   const isFrozen = card.status === 'frozen_funds';
 

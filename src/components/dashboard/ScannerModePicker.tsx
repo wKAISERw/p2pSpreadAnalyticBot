@@ -101,7 +101,10 @@ export function ScannerModePicker() {
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute top-full left-0 mt-2 z-50 w-72 bg-slate-900 border border-slate-800 rounded-2xl p-2 shadow-xl">
+          {/* На телефоні список кріпиться до країв екрана, а не до кнопки:
+              фіксовані 288px при ширині 375 вилазили за правий край, і щоб
+              дочитати підпис режиму, доводилось тягнути екран убік. */}
+          <div className="fixed inset-x-3 top-20 sm:absolute sm:inset-x-auto sm:top-full sm:left-0 sm:mt-2 sm:w-72 z-50 bg-slate-900 border border-slate-800 rounded-2xl p-2 shadow-xl">
             <div className="px-3 py-2 text-[10px] uppercase tracking-widest text-slate-600 font-bold">
               Режими сканера
             </div>

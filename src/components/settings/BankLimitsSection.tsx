@@ -1,15 +1,20 @@
 import React, { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
-import { Landmark, Loader2, Info } from 'lucide-react';
+import { Landmark, Loader2, Info, Moon, CalendarDays, Link2, Percent } from 'lucide-react';
 import { toast } from 'sonner';
-import { cn } from '../../lib/utils';
+import { cn, toCamel } from '../../lib/utils';
 import { api } from '../../services/api';
-import { Bank, BankLimits, LimitField } from '../../types';
+import { BankLimits, BankProfile, LimitField, UNLIMITED_LIMIT } from '../../types';
+import { useBankProfiles, licensePartners } from '../../hooks/useBankProfiles';
 
 /**
- * Глобальні ліміти по банках. Ліміти конкретної картки перебивають ці —
- * пріоритет такий: override картки → ліміт банку → хардкодний дефолт.
+ * Ліміти по банках. Пріоритет: override картки → ліміт банку → довідник.
+ *
+ * Раніше поля показували нулі, поки користувач нічого не задав, — тобто
+ * реальні числа, за якими працює движок, на сайті були невидимі. Тепер
+ * бекенд віддає ефективні значення, а тут видно, які з них узяті з
+ * довідника, а які людина виставила руками.
  */
 
 const FIELDS: { key: LimitField; label: string; step: number }[] = [
@@ -23,9 +28,8 @@ const FIELDS: { key: LimitField; label: string; step: number }[] = [
   { key: 'cooldown_hours', label: 'Пауза після ліміту (год)', step: 1 },
 ];
 
-/** snake_case поля з бекенда приходять камелізованими. */
-const camel = (key: string) =>
-  key.replace(/_([a-z])/g, (_, c) => c.toUpperCase()) as keyof BankLimits;
+/** snake_case поля з бекенда приходять камелізованими — див. lib/utils. */
+const camel = (key: string) => toCamel<string>(key) as keyof BankLimits;
 
 export default function BankLimitsSection() {
   const { data: limits = [], mutate, isLoading } = useSWR<BankLimits[]>(
@@ -33,18 +37,17 @@ export default function BankLimitsSection() {
     () => api.getBankLimits(),
     { shouldRetryOnError: false }
   );
-  const { data: banks = [] } = useSWR<Bank[]>('/banks', () => api.getBanks(), {
-    shouldRetryOnError: false,
-  });
+  const { profiles } = useBankProfiles();
 
   const [bank, setBank] = useState('');
   const [draft, setDraft] = useState<Record<string, number>>({});
   const [saving, setSaving] = useState(false);
 
-  // Банк тут — це назва в БД (monobank, privatbank), а не код зі списку
-  // банків біржі, тому беремо з уже збережених лімітів або з довідника.
+  // Ключ банку — канонічний слаг (monobank, a-bank), той самий, що в БД.
+  // Брати його з людської назви не можна: `'ПУМБ'.toLowerCase()` дає
+  // «пумб», якого движок не знає, і ліміти лягали б у неіснуючий банк.
   const knownBanks = Array.from(
-    new Set([...limits.map(l => l.bankName), ...banks.map(b => b.name.toLowerCase())])
+    new Set([...profiles.map(p => p.slug), ...limits.map(l => l.bankName)])
   ).sort();
 
   useEffect(() => {
@@ -54,8 +57,18 @@ export default function BankLimitsSection() {
   useEffect(() => { setDraft({}); }, [bank]);
 
   const stored = limits.find(l => l.bankName === bank);
-  const value = (key: LimitField) =>
-    draft[key] !== undefined ? draft[key] : Number(stored?.[camel(key)] ?? 0);
+  const profile = profiles.find(p => p.slug === bank);
+  const userSet = new Set(stored?.userSet ?? []);
+
+  // Бекенд уже злив довідник із тим, що задав користувач, тож тут завжди
+  // те саме число, за яким піде движок.
+  const effective = (key: LimitField): number => {
+    if (draft[key] !== undefined) return draft[key];
+    const fromApi = stored?.[camel(key)];
+    if (typeof fromApi === 'number') return fromApi;
+    const fromProfile = profile?.defaultLimits?.[key];
+    return typeof fromProfile === 'number' ? fromProfile : 0;
+  };
 
   const hasChanges = Object.keys(draft).length > 0;
 
@@ -63,7 +76,7 @@ export default function BankLimitsSection() {
     setSaving(true);
     try {
       await api.setBankLimits(bank, draft);
-      toast.success(`Ліміти ${bank} збережено`);
+      toast.success(`Ліміти ${profile?.name ?? bank} збережено`);
       setDraft({});
       await mutate();
     } catch (e: any) {
@@ -109,48 +122,78 @@ export default function BankLimitsSection() {
       ) : (
         <>
           <div className="flex flex-wrap gap-2 mb-5">
-            {knownBanks.map(name => (
-              <button
-                key={name}
-                onClick={() => setBank(name)}
-                className={cn(
-                  'px-4 py-2 rounded-xl text-xs font-bold border transition-all capitalize',
-                  bank === name
-                    ? 'bg-blue-500/10 border-blue-500/30 text-blue-300'
-                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                )}
-              >
-                {name}
-                {limits.some(l => l.bankName === name) && (
-                  <span className="ml-1.5 text-blue-400">●</span>
-                )}
-              </button>
-            ))}
+            {knownBanks.map(slug => {
+              const p = profiles.find(x => x.slug === slug);
+              return (
+                <button
+                  key={slug}
+                  onClick={() => setBank(slug)}
+                  title={p ? `Tier ${p.tier}` : undefined}
+                  className={cn(
+                    'px-4 py-2 rounded-xl text-xs font-bold border transition-all',
+                    bank === slug
+                      ? 'bg-blue-500/10 border-blue-500/30 text-blue-300'
+                      : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                  )}
+                >
+                  {p?.name ?? slug}
+                  {limits.some(l => l.bankName === slug && (l.userSet?.length ?? 0) > 0) && (
+                    <span className="ml-1.5 text-blue-400" title="Є власні налаштування">●</span>
+                  )}
+                </button>
+              );
+            })}
           </div>
 
+          {profile && <BankProfileCard profile={profile} profiles={profiles} />}
+
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {FIELDS.map(field => (
-              <div key={field.key}>
-                <div className="text-xs font-bold text-white mb-0.5">{field.label}</div>
-                <div className="text-[10px] text-slate-500 font-mono mb-2">{field.key}</div>
-                <input
-                  type="number"
-                  step={field.step}
-                  value={value(field.key)}
-                  onChange={e =>
-                    setDraft(prev => ({ ...prev, [field.key]: parseFloat(e.target.value) || 0 }))
-                  }
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-sm font-bold text-white focus:border-accent-500 outline-none tabular-nums"
-                />
-              </div>
-            ))}
+            {FIELDS.map(field => {
+              const isUserSet = userSet.has(field.key) || draft[field.key] !== undefined;
+              const val = effective(field.key);
+              return (
+                <div key={field.key}>
+                  <div className="text-xs font-bold text-white mb-0.5">{field.label}</div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-[10px] text-slate-500 font-mono">{field.key}</span>
+                    <span
+                      className={cn(
+                        'text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded',
+                        isUserSet
+                          ? 'bg-blue-500/15 text-blue-300'
+                          : 'bg-slate-800 text-slate-500'
+                      )}
+                    >
+                      {isUserSet ? 'вручну' : 'довідник'}
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    step={field.step}
+                    value={val}
+                    onChange={e =>
+                      setDraft(prev => ({ ...prev, [field.key]: parseFloat(e.target.value) || 0 }))
+                    }
+                    className={cn(
+                      'w-full bg-slate-950 border rounded-xl px-3 py-2 text-sm font-bold text-white focus:border-accent-500 outline-none tabular-nums',
+                      isUserSet ? 'border-blue-500/25' : 'border-slate-800'
+                    )}
+                  />
+                  {val === UNLIMITED_LIMIT && (
+                    <div className="text-[10px] text-slate-500 mt-1">без обмеження</div>
+                  )}
+                </div>
+              );
+            })}
           </div>
 
           <div className="flex items-start gap-1.5 mt-4 text-[11px] text-slate-500 leading-snug">
             <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>
-              Нуль = без обмеження. Окрема картка може мати власні ліміти — вони
-              перебивають банківські.
+              <b>−1 = без обмеження.</b> Нуль означає буквально нуль, тобто
+              через картку не пройде нічого. Поля з позначкою «довідник»
+              беруться з операційного профілю банку — їх можна не чіпати.
+              Окрема картка може мати власні ліміти, вони перебивають ці.
             </span>
           </div>
         </>
@@ -158,3 +201,101 @@ export default function BankLimitsSection() {
     </motion.section>
   );
 }
+
+/**
+ * Що відомо про банк, крім цифр у полях.
+ *
+ * Ліміти без цього контексту виглядають як магічні числа: незрозуміло,
+ * чому в Izibank стоїть 3 транзакції, а в Monobank 15, і чому переказ
+ * коштує 2%, хоч у сусідньому банку нічого.
+ */
+const BankProfileCard: React.FC<{ profile: BankProfile; profiles: BankProfile[] }> = ({
+  profile, profiles,
+}) => {
+  const partners = licensePartners(profiles, profile.slug);
+  const fee = profile.p2pFee;
+  const night = profile.nightWindow;
+
+  const facts: { icon: React.ReactNode; text: React.ReactNode }[] = [];
+
+  if (fee && (fee.pct > 0 || fee.fixedUah > 0)) {
+    facts.push({
+      icon: <Percent className="w-3.5 h-3.5" />,
+      text: fee.label || `${fee.pct}%${fee.fixedUah ? ` + ${fee.fixedUah} ₴` : ''}`,
+    });
+  }
+
+  if (night) {
+    facts.push({
+      icon: <Moon className="w-3.5 h-3.5" />,
+      text: night.maxUah === null
+        ? `${night.fromHour}:00–${night.toHour}:00 перекази не проходять`
+        : `${night.fromHour}:00–${night.toHour}:00 не більше ${night.maxUah.toLocaleString('uk-UA')} ₴`,
+    });
+  }
+
+  if (profile.businessDaysOnly) {
+    facts.push({
+      icon: <CalendarDays className="w-3.5 h-3.5" />,
+      text: 'IBAN відправляє лише в робочі дні',
+    });
+  }
+
+  if (partners.length > 0) {
+    facts.push({
+      icon: <Link2 className="w-3.5 h-3.5" />,
+      text: (
+        <>
+          Спільна ліцензія й фінмон із{' '}
+          <b>{partners.map(p => p.name).join(', ')}</b> — блок на одному
+          банку тягне другий
+        </>
+      ),
+    });
+  }
+
+  if (profile.note) {
+    facts.push({ icon: <Info className="w-3.5 h-3.5" />, text: profile.note });
+  }
+
+  return (
+    <div className="mb-5 p-4 rounded-2xl bg-slate-950/40 border border-slate-800/60">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2">
+        <span className="text-sm font-bold text-white">{profile.name}</span>
+        <span
+          className={cn(
+            'text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded',
+            profile.tier === 1
+              ? 'bg-accent-500/15 text-accent-400'
+              : profile.tier === 2
+                ? 'bg-blue-500/15 text-blue-300'
+                : 'bg-slate-800 text-slate-400'
+          )}
+        >
+          tier {profile.tier}
+        </span>
+        {profile.safeMonthlyUah && (
+          <span className="text-[11px] text-slate-500 tabular-nums">
+            безпечно до {profile.safeMonthlyUah.toLocaleString('uk-UA')} ₴/міс
+          </span>
+        )}
+        {profile.safeTxPerDay && (
+          <span className="text-[11px] text-slate-500 tabular-nums">
+            · {profile.safeTxPerDay} переказів/добу
+          </span>
+        )}
+      </div>
+
+      {facts.length > 0 && (
+        <div className="space-y-1">
+          {facts.map((f, i) => (
+            <div key={i} className="flex items-start gap-2 text-[11px] text-slate-400 leading-snug">
+              <span className="text-slate-600 shrink-0 mt-px">{f.icon}</span>
+              <span>{f.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};

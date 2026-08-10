@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
-import { SlidersHorizontal, Wallet, Percent, Building2, Users, Loader2, Save, Bell, BellOff, Check } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
+import { SlidersHorizontal, Wallet, Percent, Building2, Users, Loader2, Save, Bell, BellOff, Check, Crosshair, UserCheck, Target } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { api } from '../services/api';
@@ -36,6 +37,16 @@ const SPREAD_STRATEGIES: { value: SpreadStrategy; label: string }[] = [
  * Пишуться точково через POST /user/filters: ендпоінт оновлює лише передані
  * поля, тож редагування з сайту не затирає те, що виставлено в Telegram.
  */
+export type FilterSectionId =
+  | 'modes' | 'taker' | 'capital' | 'spread' | 'banks' | 'merchant' | 'sniper';
+
+const FILTER_SECTION_IDS: FilterSectionId[] = [
+  'modes', 'taker', 'capital', 'spread', 'banks', 'merchant', 'sniper',
+];
+
+/** Перший показ — усе розгорнуте, як було до появи вибору розділів. */
+const DEFAULT_FILTER_SECTIONS = FILTER_SECTION_IDS;
+
 export default function FiltersPanel() {
   // Особа береться з підтвердженої сесії — раніше тут був ID,
   // введений руками в налаштуваннях, тобто будь-який.
@@ -53,6 +64,30 @@ export default function FiltersPanel() {
 
   const [draft, setDraft] = useState<UserFiltersPatch>({});
   const [isSaving, setIsSaving] = useState(false);
+
+  // Які розділи розгорнуті. В URL, а не в стані компонента: посилання на
+  // «спред + банки» має відкриватись тим самим, і перезавантаження не
+  // повинно скидати розкладку.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const visible = React.useMemo<Set<FilterSectionId>>(() => {
+    const raw = searchParams.get('s');
+    if (raw === null) return new Set(DEFAULT_FILTER_SECTIONS);
+    const ids = raw.split(',').filter(Boolean) as FilterSectionId[];
+    return new Set(ids.filter(id => FILTER_SECTION_IDS.includes(id)));
+  }, [searchParams]);
+
+  const toggleSection = (id: FilterSectionId, only = false) => {
+    // Подвійний клік лишає один розділ: коли треба зосередитись на
+    // чомусь одному, знімати решту по черзі — зайва робота.
+    const next = only
+      ? new Set<FilterSectionId>([id])
+      : new Set(visible);
+    if (!only) {
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+    }
+    setSearchParams({ s: [...next].join(',') }, { replace: true });
+  };
 
   // Чернетка живе поверх завантажених фільтрів: показуємо draft ?? server.
   useEffect(() => { setDraft({}); }, [filters?.userId]);
@@ -156,7 +191,10 @@ export default function FiltersPanel() {
         </div>
       </div>
 
+      <SectionPicker visible={visible} toggle={toggleSection} />
+
       {/* Режими сканера */}
+      {visible.has('modes') && (
       <Section icon={<SlidersHorizontal className="w-5 h-5 text-accent-400" />} title="Режими сканера">
         <p className="text-xs text-slate-400 -mt-2 mb-4">
           Можна тримати кілька одночасно — наприклад, і купівлю, і продаж.
@@ -200,6 +238,7 @@ export default function FiltersPanel() {
           })}
         </div>
       </Section>
+      )}
 
       {/*
         Тейкер-налаштування.
@@ -213,16 +252,20 @@ export default function FiltersPanel() {
         Колонки в базі різні (taker_buy_* і taker_sell_*), тож редагування
         неактивного набору нічого не ламає — воно просто чекає свого режиму.
       */}
-      <TakerWorkspace
-        activeMode={activeMode}
-        filters={filters as any}
-        value={value}
-        set={set}
-        exchangeNames={exchangeNames}
-      />
+      {visible.has('taker') && (
+        <TakerWorkspace
+          activeMode={activeMode}
+          filters={filters as any}
+          value={value}
+          set={set}
+          exchangeNames={exchangeNames}
+        />
+      )}
 
       {/* Капітал і спред */}
+      {(visible.has('capital') || visible.has('spread')) && (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {visible.has('capital') && (
         <Section icon={<Wallet className="w-5 h-5 text-blue-400" />} title="Капітал">
           <Field label="Робочий капітал (₴)" sub="working_capital">
             <NumberInput
@@ -249,8 +292,9 @@ export default function FiltersPanel() {
             </div>
           </Field>
         </Section>
+        )}
 
-        {activeModes.includes('SPREAD') && (
+        {visible.has('spread') && activeModes.includes('SPREAD') && (
         <Section icon={<Percent className="w-5 h-5 text-yellow-400" />} title="Спред">
           <Field label="Мінімальний спред (%)" sub="min_spread_pct">
             <NumberInput
@@ -285,8 +329,10 @@ export default function FiltersPanel() {
         </Section>
         )}
       </div>
+      )}
 
       {/* Банки */}
+      {visible.has('banks') && (
       <Section icon={<Building2 className="w-5 h-5 text-purple-400" />} title="Банки">
         <BankScopes
           banks={banks}
@@ -305,10 +351,72 @@ export default function FiltersPanel() {
           }}
         />
       </Section>
+      )}
 
-      <MerchantThresholds exchangeNames={exchangeNames} onSaved={mutate} />
+      {visible.has('merchant') && (
+        <MerchantThresholds exchangeNames={exchangeNames} onSaved={mutate} />
+      )}
 
-      <SniperRules exchangeNames={exchangeNames} />
+      {visible.has('sniper') && <SniperRules exchangeNames={exchangeNames} />}
+
+      {visible.size === 0 && (
+        <div className="p-8 border-2 border-dashed border-slate-800 rounded-2xl text-center text-sm text-slate-500">
+          Усі розділи сховані — вибери, що показати, кнопками вище.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Які розділи фільтрів показувати.
+ *
+ * Тут не вкладки: розділів сім, і майже завжди правиш два-три пов'язані
+ * між собою — спред разом із банками, тейкер разом із капіталом. Вкладка
+ * змусила б стрибати туди-сюди й тримати попередній екран у голові, а
+ * суцільна стрічка — це кілька екранів прокрутки без орієнтиру.
+ *
+ * Вибір лежить в URL: посилання на «спред + банки» можна відкрити знову й
+ * побачити те саме, а перезавантаження не скидає розкладку.
+ */
+const FILTER_SECTIONS: { id: FilterSectionId; label: string; icon: React.ElementType }[] = [
+  { id: 'modes', label: 'Режими', icon: SlidersHorizontal },
+  { id: 'taker', label: 'Тейкер', icon: Crosshair },
+  { id: 'capital', label: 'Капітал', icon: Wallet },
+  { id: 'spread', label: 'Спред', icon: Percent },
+  { id: 'banks', label: 'Банки', icon: Building2 },
+  { id: 'merchant', label: 'Мерчанти', icon: UserCheck },
+  { id: 'sniper', label: 'Снайпер', icon: Target },
+];
+
+function SectionPicker({
+  visible, toggle,
+}: {
+  visible: Set<FilterSectionId>;
+  toggle: (id: FilterSectionId, only?: boolean) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {FILTER_SECTIONS.map(({ id, label, icon: Icon }) => {
+        const on = visible.has(id);
+        return (
+          <button
+            key={id}
+            onClick={() => toggle(id)}
+            onDoubleClick={() => toggle(id, true)}
+            title={on ? 'Прибрати розділ' : 'Показати розділ'}
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors',
+              on
+                ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                : 'bg-slate-900/50 border-slate-800 text-slate-500 hover:text-slate-300'
+            )}
+          >
+            <Icon className="w-3.5 h-3.5" />
+            {label}
+          </button>
+        );
+      })}
     </div>
   );
 }

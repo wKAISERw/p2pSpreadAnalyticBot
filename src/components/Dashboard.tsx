@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers, SlidersHorizontal } from 'lucide-react';
-import { ArbitrageOpportunity, Order, UserFilters } from '../types';
+import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers, SlidersHorizontal, ChevronDown, ChevronUp } from 'lucide-react';
+import { ArbitrageOpportunity, CapitalMode, Order, TransferLeg, UserFilters } from '../types';
 import { cn } from '../lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore } from '../store';
@@ -15,10 +15,23 @@ import { ViewToggle } from './dashboard/ViewToggle';
 import { ScannerModePicker } from './dashboard/ScannerModePicker';
 import { TakerOrdersList } from './dashboard/TakerOrdersList';
 import { ExchangeHealth } from './dashboard/ExchangeHealth';
+import { RiskPanel } from './RiskPanel';
+import { BankChips, useBankChips } from './BankChips';
+import { ReadinessNotice } from './dashboard/ReadinessNotice';
+import { UsdtInventory } from './dashboard/UsdtInventory';
 import MakerWorkspace from './maker/MakerWorkspace';
 import { useExchanges } from '../hooks/useExchanges';
 import { useSpreadFilters, SortOption } from '../hooks/useSpreadFilters';
 import { useChangeFlash } from '../hooks/useChangeFlash';
+
+/** Підпис згорнутої панелі — щоб було видно, на що дивишся. */
+const VIEW_TITLES: Record<string, string> = {
+  spread: 'Спреди',
+  buy: 'Тейкер · купівля',
+  sell: 'Тейкер · продаж',
+  both: 'Тейкер · обидві',
+  maker: 'Мейкер',
+};
 
 const BANK_NAMES_MAP: Record<string, string> = {
   "43": "Monobank",
@@ -98,6 +111,23 @@ export default function Dashboard() {
   const isScannerActive = stats?.isScannerActive ?? false;
   const [isTogglingScanner, setIsTogglingScanner] = useState(false);
   const [showTuning, setShowTuning] = useState(false);
+
+  // Панель керування згортається сама, коли гортаєш список — на телефоні
+  // вона інакше з'їдає третину екрана рівно тоді, коли треба дивитись
+  // ордери. Назад розгортається лише вручну: самовільно вистрибувати
+  // назустріч пальцю — гірше, ніж лишитись згорнутою.
+  const [collapsed, setCollapsed] = useState(false);
+
+  useEffect(() => {
+    if (window.innerWidth >= 768) return;
+
+    const onScroll = () => {
+      if (window.scrollY > 220) setCollapsed(true);
+      else if (window.scrollY < 40) setCollapsed(false);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
   const { names: exchangeNames } = useExchanges();
 
   /**
@@ -168,6 +198,7 @@ export default function Dashboard() {
             />
             <GoalProgressCard
               currentCapital={filters?.capital}
+              capitalMode={filters?.capitalMode}
               goalCapital={userSettings.goalCapital}
             />
           </div>
@@ -187,8 +218,36 @@ export default function Dashboard() {
           Верхній ярус — те, що потрібне постійно. Налаштування вибірки
           (біржі, сортування, фільтри) сховані під кнопку.
         */}
-        <div className="sticky top-16 md:top-0 z-10 bg-slate-900/80 backdrop-blur-md border border-slate-800 rounded-2xl shadow-lg">
-          <div className="p-3 md:p-4 flex flex-wrap items-center gap-3">
+        {/* Хедер на телефоні `absolute`, тобто при скролі він їде вгору —
+            тож прилипати треба майже до самого верху. Раніше тут стояв
+            відступ під нерухому шапку, якої немає, і панель зависала
+            посеред порожнечі. */}
+        <div className="sticky top-1 md:top-0 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-2xl shadow-lg">
+          {/* Згорнутий вигляд для телефона.
+              Розгорнута панель займає до третини екрана й лишається там на
+              весь скрол — тобто саме тоді, коли потрібен список, а не
+              керування ним. Тут лишається те, що має бути видно завжди:
+              чи живе ядро і на що ти дивишся. */}
+          {collapsed ? (
+            <button
+              onClick={() => setCollapsed(false)}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left"
+            >
+              <span className={cn(
+                'w-2 h-2 rounded-full shrink-0',
+                isScannerActive ? 'bg-accent-500' : 'bg-slate-600'
+              )} />
+              <span className="text-xs font-bold text-white">Сканер</span>
+              <span className="text-[11px] text-slate-500 truncate">
+                {VIEW_TITLES[view] ?? ''}
+              </span>
+              <ChevronDown className="w-4 h-4 text-slate-500 ml-auto shrink-0" />
+            </button>
+          ) : (
+          // На телефоні контроли йдуть рядками: стан і режим бота зверху,
+          // вигляд сторінки під ними на всю ширину. Одним flex-wrap рядом
+          // вони різались краєм екрана.
+          <div className="p-2.5 md:p-4 flex flex-wrap items-center gap-2 md:gap-3">
             {/* Стан ядра — реальний із /stats, не локальний прапорець */}
             <div className="flex items-center gap-2 shrink-0">
               <motion.span
@@ -222,7 +281,12 @@ export default function Dashboard() {
             {/* Режим бота і вигляд сторінки — дві різні речі, тому й два
                 контроли поруч, а не один. */}
             <ScannerModePicker />
-            <ViewToggle />
+
+            {/* Вигляд сторінки — на телефоні окремим рядом на всю ширину:
+                двоярусний перемикач у спільному ряду ламав розкладку. */}
+            <div className="w-full md:w-auto order-last md:order-none">
+              <ViewToggle />
+            </div>
 
             {view === "spread" && (
               <>
@@ -295,8 +359,19 @@ export default function Dashboard() {
               >
                 {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
+
+              {/* Тільки на вузькому екрані: на десктопі панель нікому не
+                  заважає, і ховати її нема потреби. */}
+              <button
+                onClick={() => setCollapsed(true)}
+                className="md:hidden p-2 rounded-lg border border-slate-800 bg-slate-950 text-slate-400 hover:text-white transition-colors"
+                title="Згорнути панель"
+              >
+                <ChevronUp className="w-4 h-4" />
+              </button>
             </div>
           </div>
+          )}
 
           <AnimatePresence initial={false}>
             {showTuning && (
@@ -382,7 +457,18 @@ export default function Dashboard() {
           />
         )}
         {(view === 'buy' || view === 'sell' || view === 'both') && (
-          <TakerOrdersList side={view} />
+          <div className="space-y-4">
+            {/* Причина, з якої алертів не буде, лежить у налаштуваннях і
+                видна ще до першого циклу — раніше вона з'ясовувалась лише
+                мовчанням сканера. */}
+            <ReadinessNotice
+              mode={view === 'sell' ? 'TAKER_SELL' : view === 'buy' ? 'TAKER_BUY' : undefined}
+            />
+            {/* Для продажу важливо не «скільки USDT», а «скільки з них
+                можна продати прямо зараз» — фандинг проти споту й Earn. */}
+            {(view === 'sell' || view === 'both') && <UsdtInventory />}
+            <TakerOrdersList side={view} />
+          </div>
         )}
         {view === 'maker' && <MakerWorkspace />}
       </div>
@@ -507,12 +593,18 @@ function StatCard({ icon, label, value, subValue, trend, trendUp, isLoading }: a
  * зберігався й ні на що не впливав: картка показувала прогрес до цілі за
  * капіталом, якого не існує.
  *
+ * Поруч на екрані живуть ще два числа — скільки грошей на картках і
+ * скільки з них піде в одну угоду. Три схожі суми без пояснення читаються
+ * як помилка в одній із них, тому джерело підписане явно: у ручному режимі
+ * ця цифра з картками не пов'язана взагалі.
+ *
  * Ціль лишається річчю сайту: у боті такого поняття немає.
  */
 function GoalProgressCard({
-  currentCapital, goalCapital,
+  currentCapital, capitalMode, goalCapital,
 }: {
   currentCapital?: number;
+  capitalMode?: CapitalMode;
   goalCapital?: number;
 }) {
   const hasGoal = Boolean(goalCapital && goalCapital > 0);
@@ -543,6 +635,16 @@ function GoalProgressCard({
       ) : (
         <div className="text-2xl font-bold text-white mb-2 tabular-nums">
           <CountUp end={currentCapital} duration={1} separator=" " /> ₴
+        </div>
+      )}
+
+      {/* Без цього рядка ручна цифра стоїть поруч із сумою на картках і
+          читається як та сама величина — а вона з нею не пов'язана. */}
+      {capitalMode && (
+        <div className="text-[11px] text-slate-500 mb-2 leading-snug">
+          {capitalMode === 'auto'
+            ? 'Рахується з балансів карток автоматично.'
+            : 'Задано вручну — з балансами карток не пов’язано.'}
         </div>
       )}
 
@@ -578,6 +680,47 @@ function GoalProgressCard({
  */
 const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'detailed'|'compact' }> = ({ opp, viewMode }) => {
   const isHighRisk = (opp.buyOrder.riskScore || 0) >= 50 || (opp.sellOrder.riskScore || 0) >= 50;
+
+  const resolveBanks = useBankChips();
+  const routeBanks = resolveBanks([opp.buyBank, opp.sellBank]);
+
+  // Мережа переказу: сканер рахує за найдешевшою, але возити можна тією,
+  // якою ти справді користуєшся. Різниця в комісії відома точно, тож
+  // перерахунок тут — арифметика, а не оцінка.
+  //
+  // Зберігається на беку, а не локально: тим самим значенням користується
+  // відбір алертів, інакше сайт показував би один спред, а Telegram слав
+  // ордери за іншим.
+  const telegramId = useAppStore(state => state.auth?.telegramId);
+  const { data: filters, mutate: mutateFilters } = useSWR<UserFilters>(
+    telegramId ? ['/user/filters', telegramId] : null,
+    () => api.getUserFilters(telegramId!),
+    { shouldRetryOnError: false, revalidateOnFocus: false }
+  );
+  const preferred = filters?.preferredNetwork ?? '';
+
+  const pickNetwork = async (network: string) => {
+    if (!telegramId) return;
+    const next = network === preferred ? '' : network;
+    await mutateFilters({ ...(filters as UserFilters), preferredNetwork: next }, false);
+    try {
+      await api.updateUserFilters(telegramId, { preferredNetwork: next });
+      await mutateFilters();
+    } catch (e: any) {
+      await mutateFilters();
+      toast.error(`Не збережено: ${e?.message ?? 'помилка'}`);
+    }
+  };
+
+  const picked = opp.transfer?.options?.find(o => o.network === preferred);
+  const extraFeeUah = picked && opp.transfer
+    ? picked.feeUah - opp.transfer.feeUah
+    : 0;
+
+  const shownProfit = opp.netProfit - extraFeeUah;
+  const shownSpread = opp.dealAmount > 0
+    ? opp.netSpread - (extraFeeUah / opp.dealAmount) * 100
+    : opp.netSpread;
 
   const ageInSeconds = Math.floor((Date.now() - opp.timestamp) / 1000);
   const initialProgress = Math.max(0, 100 - (ageInSeconds / 60) * 100);
@@ -738,8 +881,12 @@ const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'deta
                   {opp.routeType}
                 </span>
               </div>
-              <div className="text-xs text-slate-400 font-mono uppercase tracking-widest">
-                {opp.buyBank} → {opp.sellBank}
+              {/* Маршрут показуємо назвами банків, а не кодами: «328 → 43»
+                  читала лише людина з мапою кодів у голові. */}
+              <div className="text-xs text-slate-400 tracking-wide">
+                {routeBanks[0]?.label ?? opp.buyBank}
+                {' → '}
+                {routeBanks[1]?.label ?? opp.sellBank}
               </div>
             </div>
           </div>
@@ -754,7 +901,7 @@ const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'deta
                     : 'text-accent-400'
                 )}
               >
-                +{opp.netSpread.toFixed(2)}%
+                +{shownSpread.toFixed(2)}%
               </span>
               {spreadShift && (
                 <span
@@ -769,14 +916,39 @@ const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'deta
               )}
             </div>
             <div className="text-base font-bold text-slate-200 tabular-nums mt-1">
-              {opp.netProfit.toFixed(0)} ₴
+              {shownProfit.toFixed(0)} ₴
               <span className="text-xs font-medium text-slate-500 ml-1.5">чистими</span>
             </div>
+
+            {/* «Чистими» без розшифровки — це слово, яке треба брати на
+                віру. Комісії вже відняті, тож видно, скільки саме. */}
+            {(opp.totalFeeUah ?? 0) > 0 && (
+              <div
+                className="text-[11px] text-slate-500 tabular-nums mt-0.5"
+                title={(opp.fees ?? []).map(f => `${f.label}: ${f.amountUah.toFixed(2)} ₴`).join('\n')}
+              >
+                комісій на {Math.round((opp.totalFeeUah ?? 0) + extraFeeUah)} ₴
+                {extraFeeUah > 0 && (
+                  <span className="text-orange-400/80">
+                    {' '}· +{Math.round(extraFeeUah)} за {preferred}
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Крок переказу стоїть саме між ногами: у цьому місці він і
+            відбувається насправді. */}
+        <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] gap-3 md:gap-2 items-stretch">
           <OrderDetails side="BUY" order={opp.buyOrder} onCopy={handleCopy} />
+          <TransferStep
+            transfer={opp.transfer}
+            selected={preferred || (opp.transfer?.network ?? '')}
+            // Вибір спільний для всіх карток і для бота: возиш ти однією
+            // мережею, а не окремою під кожен спред.
+            onSelect={pickNetwork}
+          />
           <OrderDetails side="SELL" order={opp.sellOrder} onCopy={handleCopy} />
         </div>
       </div>
@@ -844,6 +1016,112 @@ const OpportunityCard = React.memo(OpportunityCardBase, (prev, next) =>
   prev.opp.sellOrder.riskFlag === next.opp.sellOrder.riskFlag
 );
 
+/**
+ * Що відбувається між купівлею і продажем.
+ *
+ * На різних біржах монети треба ще перевезти: обрати мережу, дочекатись
+ * підтверджень, заплатити комісію. Комісія й раніше сиділа в чистому
+ * спреді, але сам крок ніде не показувався — дві ноги стояли поруч так,
+ * ніби USDT опиняється на біржі продажу сам собою. А це рівно та дія, яку
+ * людина робить руками, і на неї витрачається час угоди.
+ *
+ * Порожньо, коли обидві ноги на одній біржі: там переказ внутрішній.
+ */
+function TransferStep({
+  transfer, selected, onSelect,
+}: {
+  transfer?: TransferLeg | null;
+  selected: string;
+  onSelect: (network: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (!transfer) {
+    return (
+      <div className="hidden md:flex items-center justify-center px-1">
+        <div className="w-px h-full bg-slate-800" />
+      </div>
+    );
+  }
+
+  const { unroutable, options = [] } = transfer;
+  const current = options.find(o => o.network === selected)
+    ?? { network: transfer.network, feeUsdt: transfer.feeUsdt, feeUah: transfer.feeUah };
+  const canChoose = options.length > 1 && !unroutable;
+
+  return (
+    <div className={cn(
+      'relative flex md:flex-col items-center justify-center gap-2 px-3 py-2 md:py-4 rounded-2xl border',
+      unroutable
+        ? 'bg-red-500/10 border-red-500/25'
+        : 'bg-slate-950/60 border-slate-800/60'
+    )}>
+      <ArrowRightLeft className={cn(
+        'w-4 h-4 shrink-0 md:rotate-0 rotate-90',
+        unroutable ? 'text-red-400' : 'text-slate-500'
+      )} />
+
+      {unroutable ? (
+        <div className="text-center">
+          <div className="text-[10px] font-bold text-red-400 leading-tight">
+            немає спільної мережі
+          </div>
+          <div className="text-[9px] text-red-400/70 leading-tight mt-0.5">
+            переказ неможливий
+          </div>
+        </div>
+      ) : (
+        <>
+          <button
+            onClick={() => canChoose && setOpen(v => !v)}
+            disabled={!canChoose}
+            title={canChoose ? 'Обрати мережу переказу' : undefined}
+            className={cn(
+              'text-center rounded-lg px-1.5 py-0.5 transition-colors',
+              canChoose && 'hover:bg-slate-800/60 cursor-pointer'
+            )}
+          >
+            <div className="text-[10px] font-black text-slate-300 tracking-wide flex items-center gap-0.5">
+              {current.network}
+              {canChoose && <ChevronDown className="w-2.5 h-2.5 opacity-60" />}
+            </div>
+            <div className="text-[9px] text-slate-500 tabular-nums leading-tight mt-0.5">
+              {current.feeUsdt} ₮
+            </div>
+          </button>
+
+          {open && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+              <div className="absolute z-50 top-full mt-1 left-1/2 -translate-x-1/2 w-40 bg-slate-900 border border-slate-800 rounded-xl p-1 shadow-xl">
+                {options.map(opt => (
+                  <button
+                    key={opt.network}
+                    onClick={() => { onSelect(opt.network); setOpen(false); }}
+                    className={cn(
+                      'w-full flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-[11px] transition-colors',
+                      opt.network === current.network
+                        ? 'bg-accent-500/10 text-accent-400'
+                        : 'text-slate-400 hover:bg-slate-800'
+                    )}
+                  >
+                    <span className="font-bold">{opt.network}</span>
+                    <span className="tabular-nums opacity-70">{opt.feeUsdt} ₮</span>
+                  </button>
+                ))}
+                <div className="px-2 py-1.5 text-[9px] text-slate-600 leading-snug border-t border-slate-800 mt-1">
+                  Обрана мережа діє і на відбір алертів у Telegram.
+                  Найдешевша тут — {transfer.network}.
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Order, onCopy: (text: string|number, label: string) => void }) {
   const score = order.riskScore || (order as any).risk_score || 0;
   // Python backend sends snake_case — handle both
@@ -883,35 +1161,18 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
         <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
       </div>
 
+      {/* Які банки приймає ця нога і чи є серед них твій. Без цього
+          доводилось відкривати ордер на біржі, щоб зрозуміти, чи взагалі
+          зможеш його взяти. */}
+      {(order.bankCodes?.length ?? 0) > 0 && (
+        <div className="mb-3">
+          <BankChips codes={order.bankCodes} size="sm" />
+        </div>
+      )}
+
       {isRisk && (
-        <div className="flex flex-wrap gap-1.5 mt-3">
-          {score > 0 && (
-            <div className={cn(
-              "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
-              score >= 50
-                ? "bg-red-500/10 text-red-400 border-red-500/20"
-                : "bg-orange-500/10 text-orange-400 border-orange-500/20"
-            )}>
-              <AlertTriangle className="w-2.5 h-2.5" />
-              SCORE: {score}
-            </div>
-          )}
-          {riskFlag && riskFlag !== 'OK' && riskFlag.split(/[:,\s]+/).map((flag, idx) => {
-            const trimmed = flag.trim();
-            if (!trimmed || trimmed.match(/^\d+$/)) return null;
-            const emoji = getRiskEmoji(trimmed);
-            return (
-              <div key={idx} className={cn(
-                "flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-bold uppercase tracking-tight border",
-                score >= 50
-                  ? "bg-red-500/10 text-red-400 border-red-500/20"
-                  : "bg-orange-500/10 text-orange-400 border-orange-500/20"
-              )}>
-                {emoji && <span className="text-[11px] leading-none">{emoji}</span>}
-                {trimmed}
-              </div>
-            );
-          })}
+        <div className="mt-3">
+          <RiskPanel riskFlag={riskFlag} score={score} />
         </div>
       )}
     </div>

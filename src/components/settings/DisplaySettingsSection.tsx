@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
-import { MessageSquare, Clock, Plus, Trash2, Loader2, Info } from 'lucide-react';
+import { MessageSquare, Clock, Plus, Trash2, Loader2, Info, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { api } from '../../services/api';
@@ -15,15 +15,34 @@ import { AutoCooldownTier, DisplaySettings, FilterMode } from '../../types';
  * одного прапорця скидало б решту у дефолти.
  */
 
-const FLAGS: { key: keyof DisplaySettings; label: string; hint: string }[] = [
+/**
+ * Що показувати — діє і в картці ордера на сайті, і в алерті Telegram.
+ *
+ * Це той самий набір, що в боті під «Налаштування виводу повідомлень»:
+ * налаштування живе в одній базі, тож перемикач у будь-якому з двох місць
+ * змінює обидва.
+ */
+const CONTENT_FLAGS: { key: keyof DisplaySettings; label: string; hint: string }[] = [
   { key: 'showAiTermsSummary', label: 'Підсумок умов від AI', hint: 'Коротка вижимка умов мерчанта' },
   { key: 'showFullTerms', label: 'Повний текст умов', hint: 'Оригінальний текст оголошення' },
   { key: 'showAiLogic', label: 'Логіка рішення AI', hint: 'Чому виставлено саме такий вердикт' },
   { key: 'showBankDetails', label: 'Реквізити банку', hint: 'Які банки приймає мерчант' },
   { key: 'showLlmSummary', label: 'Висновок LLM', hint: 'Текстовий підсумок аналізу відгуків' },
-  { key: 'groupActiveAlerts', label: 'Групувати активні алерти', hint: 'Складати кілька зв\'язок в одне повідомлення' },
+  { key: 'isHybridRoutesEnabled', label: 'Гібридні маршрути', hint: "Показувати зв'язки між різними біржами" },
+];
+
+/**
+ * Те, що має сенс лише в чаті.
+ *
+ * Групування кількох зв'язок в одне повідомлення — прийом проти флуду в
+ * Telegram: там кожен алерт це окреме сповіщення. На сторінці зв'язки й
+ * так стоять списком, і «складати їх в одну» нема куди. Тримати ці
+ * перемикачі поруч із рештою означало б обіцяти зміну вигляду сайту,
+ * якої не станеться.
+ */
+const TELEGRAM_FLAGS: { key: keyof DisplaySettings; label: string; hint: string }[] = [
+  { key: 'groupActiveAlerts', label: 'Групувати активні алерти', hint: "Складати кілька зв'язок в одне повідомлення" },
   { key: 'groupScannerAlerts', label: 'Групувати алерти сканера', hint: 'Те саме для потоку зі сканера' },
-  { key: 'isHybridRoutesEnabled', label: 'Гібридні маршрути', hint: 'Показувати зв\'язки між різними біржами' },
 ];
 
 const FILTER_MODES: { value: FilterMode; label: string }[] = [
@@ -81,12 +100,12 @@ export default function DisplaySettingsSection() {
       <Section>
         <Header
           icon={<MessageSquare className="w-5 h-5 text-blue-400" />}
-          title="Вивід повідомлень"
-          subtitle="Що показувати в алертах бота"
+          title="Вивід ордерів"
+          subtitle="Що показувати в картці ордера — тут і в Telegram"
         />
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {FLAGS.map(flag => (
+          {CONTENT_FLAGS.map(flag => (
             <Toggle
               key={flag.key}
               label={flag.label}
@@ -96,6 +115,29 @@ export default function DisplaySettingsSection() {
               onChange={v => patch(flag.key as string, v)}
             />
           ))}
+        </div>
+
+        <div className="mt-6 pt-5 border-t border-slate-800/60">
+          <div className="flex items-center gap-2 mb-1">
+            <Send className="w-3.5 h-3.5 text-slate-500" />
+            <h3 className="text-sm font-bold text-white">Тільки для Telegram</h3>
+          </div>
+          <p className="text-[11px] text-slate-500 mb-3 leading-snug">
+            На сайті зв'язки й так стоять списком — складати їх в одну нема
+            куди. Ці перемикачі міняють лише вигляд повідомлень у чаті.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {TELEGRAM_FLAGS.map(flag => (
+              <Toggle
+                key={flag.key}
+                label={flag.label}
+                hint={flag.hint}
+                checked={Boolean(data[flag.key])}
+                busy={saving === flag.key}
+                onChange={v => patch(flag.key as string, v)}
+              />
+            ))}
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
@@ -162,9 +204,21 @@ function CooldownSection({
     <Section>
       <Header
         icon={<Clock className="w-5 h-5 text-orange-400" />}
-        title="Пауза між алертами"
+        title="Пауза між алертами в Telegram"
         subtitle="Щоб при напливі спредів не залити чат"
       />
+
+      {/* Найчастіше питання про цю паузу — чи не гальмує вона пошук.
+          Ні: сканер віддає алерти в чергу нотифікатора й далі не чекає,
+          а сайт бере зв'язки з циклу, а не з тієї черги. */}
+      <div className="flex items-start gap-1.5 mb-4 text-[11px] text-slate-500 leading-snug">
+        <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+        <span>
+          На швидкість сканера не впливає: пауза діє у черзі відправки в
+          Telegram, а не в циклі пошуку. На сайті ордери з'являються
+          одразу, незалежно від цього значення.
+        </span>
+      </div>
 
       <div className="flex flex-wrap gap-2 mb-5">
         <Chip label="Авто" active={usesAuto} onClick={() => patch('alertCooldown', -1)} />

@@ -26,6 +26,11 @@ import {
   UserFiltersPatch,
   MerchantThresholds,
   Bank,
+  BankProfile,
+  RejectionStats,
+  ReadinessReport,
+  SyncState,
+  UsdtInventory,
   ScannerState,
   Card,
   CardCreatePayload,
@@ -408,6 +413,39 @@ export const api = {
     ),
 
   getBanks: () => apiClient.get<any, Bank[]>('/banks'),
+
+  /**
+   * Операційні профілі банків: ліміти, комісії, нічні вікна, спільні
+   * ліцензії. Довідник статичний, тож кешується надовго.
+   */
+  getBankProfiles: () => apiClient.get<any, BankProfile[]>('/banks/profiles'),
+
+  /**
+   * Розклад причин, чому картковий модуль не пропускав ордери.
+   * Те саме, що /card_rejections у боті.
+   */
+  getTakerRejections: (days = 7) =>
+    apiClient.get<any, RejectionStats>('/taker/rejections', { params: { days } }),
+
+  /**
+   * Що завадить тейкер-режиму ще до першого алерта. Без mode береться
+   * поточний режим користувача.
+   */
+  getTakerReadiness: (mode?: string) =>
+    apiClient.get<any, ReadinessReport>('/taker/readiness', {
+      params: mode ? { mode } : {},
+    }),
+
+  /** Де лежить USDT: фандинг продається зараз, спот і Earn — ще ні. */
+  getUsdtInventory: (force = false) =>
+    apiClient.get<any, UsdtInventory>('/inventory/usdt', { params: { force } }),
+
+  /**
+   * Відбитки розділів. Один дешевий запит замість опитування десяти —
+   * порівнявши їх, видно, що саме змінилось у боті.
+   */
+  getSyncState: () =>
+    apiClient.get<any, SyncState>('/user/sync-state'),
 
   getScannerState: () => apiClient.get<any, ScannerState>('/scanner/state'),
   startScanner: () => apiClient.post('/scanner/start'),

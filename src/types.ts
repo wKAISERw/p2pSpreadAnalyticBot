@@ -41,6 +41,41 @@ export interface ArbitrageOpportunity {
   actualEntryUah?: number;
   grossSpreadPct?: number;
   totalFee?: number;
+  /** null — обидві ноги на одній біржі, везти нема куди. */
+  transfer?: TransferLeg | null;
+  /** Розбивка комісій, які вже враховані в netSpread. */
+  fees?: { label: string; amountUah: number }[];
+  totalFeeUah?: number;
+}
+
+/**
+ * Крок між ногами зв'язки: чим везти USDT на біржу продажу.
+ *
+ * Комісія мережі й раніше сиділа в `netSpread`, але сам крок ніде не був
+ * видний — дві ноги стояли поруч так, ніби монети опиняються на другій
+ * біржі самі собою.
+ */
+export interface TransferLeg {
+  fromExchange: string;
+  toExchange: string;
+  /** Найдешевша спільна мережа — саме за нею пораховано netSpread. */
+  network: string;
+  feeUsdt: number;
+  feeUah: number;
+  /** Спільної мережі немає — маршрут насправді неможливий. */
+  unroutable: boolean;
+  /**
+   * Усі спільні мережі, від найдешевшої. Дешевша не завжди бажана: можна
+   * роками ходити через TRC20 і не хотіти заводити гаманець у мережі,
+   * якою користуєшся раз.
+   */
+  options?: NetworkOption[];
+}
+
+export interface NetworkOption {
+  network: string;
+  feeUsdt: number;
+  feeUah: number;
 }
 
 export interface ApiKeyConfig {
@@ -114,9 +149,21 @@ export type SyncSectionKey =
 export interface SyncSettings {
   /** Головний вимикач: без нього жоден розділ не оновлюється сам. */
   enabled: boolean;
-  /** Як часто перечитувати, секунди. */
+  /** Як часто питати бекенд, чи змінилось хоч щось, секунди. */
   intervalSeconds: number;
   sections: Record<SyncSectionKey, boolean>;
+  /** Показувати повідомлення про те, що саме змінилось. Типово так. */
+  notify?: boolean;
+}
+
+/**
+ * Відбитки розділів (GET /user/sync-state).
+ *
+ * Значення непрозорі: порівнювати можна лише з попереднім своїм. `null` —
+ * бекенд не зміг порахувати, тоді розділ читається звичайним шляхом.
+ */
+export interface SyncState {
+  sections: Partial<Record<SyncSectionKey, string | null>>;
 }
 
 /**
@@ -309,13 +356,191 @@ export interface TakerOrder {
   tradeTerms: string;
   isNewUserSubsidy: boolean;
   side: string;
+  /**
+   * Комісія банку за переказ фіату під цей ордер. null — комісії немає
+   * або це продаж (там фіат відправляє мерчант і платить він).
+   */
+  transferFee?: TransferFee | null;
 }
+
+/**
+ * При спреді 0.5–1% комісія переказу здатна з'їсти весь профіт, тож
+ * порівнювати ордери треба за `effectivePrice`, а не за «чистою» ціною.
+ */
+export interface TransferFee {
+  bank: string;
+  amountUah: number;
+  description: string;
+  /** Курс із закладеною комісією. */
+  effectivePrice: number;
+  /** Від якої суми пораховано — у комісій є пороги. */
+  onAmountUah: number;
+}
+
+/**
+ * Чому не пройшла конкретна КАРТКА (core/engine/rejection_codes.Rejection).
+ * Код — для групування, reason — готовий рядок для людини з цифрами.
+ */
+export interface CardRejection {
+  code: RejectionCode | string;
+  reason: string;
+  cardId: string | null;
+  lastFour: string;
+  bank: string;
+  /** Скільки саме не вистачило, ₴. 0 — причина не про суму. */
+  shortfallUah: number;
+}
+
+/**
+ * Чому не пройшов ОРДЕР загалом (core/engine/taker_scanner.OrderRejection).
+ * `details` — розклад по кожній картці, яку движок пробував.
+ */
+export interface OrderRejection {
+  orderId: string;
+  merchantName: string;
+  exchange: string;
+  bank: string;
+  price: number;
+  minLimit: number;
+  code: RejectionCode | string;
+  reason: string;
+  shortfallUah: number;
+  details: CardRejection[];
+}
+
+export type RejectionCode =
+  | 'no_cards_for_bank' | 'no_active_cards' | 'unknown_bank_code' | 'cooldown'
+  | 'insufficient_balance' | 'limits_exhausted' | 'max_tx_per_day'
+  | 'cold_card' | 'night_window' | 'business_days_only'
+  | 'below_min_trade' | 'below_merchant_min'
+  | 'split_impossible' | 'split_disabled'
+  | 'split_needs_inter_bank' | 'split_needs_more_cards'
+  | 'no_crypto'
+  // Спостереження: ордер пройшов, але не таким, як задумано.
+  | 'volume_scaled_down';
+
+/**
+ * Коди, за якими грошей вистачає, а заважає налаштування.
+ * Дія користувача тут інша, ніж «поповнити картку».
+ */
+export const SETTINGS_BLOCKED_CODES: RejectionCode[] = [
+  'split_needs_inter_bank', 'split_needs_more_cards', 'split_disabled',
+];
 
 export interface TakerOrdersResponse {
   buy: TakerOrder[];
   sell: TakerOrder[];
+  /**
+   * Ордери, які ринок дав, а картки не пропустили. Порожній buy/sell сам
+   * по собі не каже, ринку немає чи грошей не вистачило — це каже.
+   */
+  rejected: { buy: OrderRejection[]; sell: OrderRejection[] };
+  /**
+   * Бажана сума проти тієї, з якою реально можна зайти зараз.
+   * null — бажана сума не задана або видача порожня.
+   */
+  budget: BuyBudget | null;
   /** false — сканер ще не завершив жодного циклу, це не помилка. */
   scanned: boolean;
+}
+
+/**
+ * Введена користувачем сума більше не перезаписується — вона незмінний
+ * вхід, а `effectiveUsdt` рахується під кожен ордер наживо. Поповнилась
+ * картка — знову шукається повна `desiredUsdt`, без жодних дій.
+ */
+export interface BuyBudget {
+  desiredUsdt: number;
+  effectiveUsdt: number;
+  /**
+   * Скільки піде в одну угоду. Без кошиків це максимум в ОДНОМУ банку,
+   * з кошиками — сума по всіх.
+   */
+  availableUah: number;
+  price: number;
+  /** Ефективна менша за бажану. */
+  scaled: boolean;
+  /** Не набирається навіть мінімальна угода. */
+  blocked: boolean;
+  /**
+   * Банк, у якому лежить максимум. Порожній при `interBank` — маршрут іде
+   * з кількох банків, і одна назва вводила б в оману.
+   */
+  bestBank: string;
+  /** Діє міжбанківський набір (фіча `inter_bank_matching`). */
+  interBank: boolean;
+  /** Скільки грошей на картках узагалі — може бути більше за availableUah. */
+  totalUah: number;
+}
+
+// ─── Готовність режиму (GET /taker/readiness) ─────────────────────────────
+
+/** blocker — алертів не буде взагалі; warning — будуть, але не такі; note — до відома. */
+export type ReadinessLevel = 'blocker' | 'warning' | 'note';
+
+export interface ReadinessCheck {
+  level: ReadinessLevel;
+  text: string;
+  hint: string;
+  /** До якого режиму належить — режимів може бути кілька одночасно. */
+  mode: string;
+}
+
+export interface ReadinessReport {
+  mode: string;
+  /** Усі тейкерські режими, які перевірялись. */
+  modes: string[];
+  /** Порожньо — все сходиться. */
+  checks: ReadinessCheck[];
+  hasBlockers: boolean;
+}
+
+// ─── Де лежить USDT (GET /inventory/usdt) ─────────────────────────────────
+
+/**
+ * Три різні відстані до угоди, а не три однакові кошики: фандинг
+ * продається зараз, спот вимагає кліку всередині біржі, Earn — викупу.
+ */
+export interface ExchangeWallets {
+  exchange: string;
+  funding: number;
+  spot: number;
+  earn: number;
+  /** false — Earn на цій біржі ми не бачимо, і нуль тут нічого не означає. */
+  earnKnown: boolean;
+  total: number;
+}
+
+export interface UsdtInventory {
+  /** false — ключів немає або біржі не відповіли. Це не те саме, що нуль. */
+  known: boolean;
+  exchanges: ExchangeWallets[];
+  totals: { funding?: number; spot?: number; earn?: number; total?: number };
+}
+
+/** GET /taker/rejections — розклад причин за N днів. */
+export interface RejectionStatsRow {
+  code: RejectionCode | string;
+  /** Людська назва з CODE_LABELS. */
+  title: string;
+  hits: number;
+  sharePct: number;
+  avgShortfall: number;
+  maxShortfall: number;
+  banks: string[];
+}
+
+export interface RejectionStats {
+  days: number;
+  /** Лише відмови. Спостереження сюди не входять — інакше вийшло б «90% відмов» по ордерах, які прийшли. */
+  total: number;
+  since: string;
+  codes: RejectionStatsRow[];
+  /**
+   * Ордер пройшов, але не таким, як задумано (напр. обсяг ужато під один
+   * банк). Найцінніші дані для рішення, чи потрібні кошики між банками.
+   */
+  observations?: RejectionStatsRow[];
 }
 
 /**
@@ -440,6 +665,14 @@ export interface UserFilters {
   makerBuyPrice: number;
   targetMargin: number;
   isAlertsActive?: number;
+  /**
+   * Мережа, якою ти справді возиш USDT між біржами.
+   *
+   * Сканер відбирає зв'язки за найдешевшою спільною. Якщо возиш дорожчою
+   * (TRC20 — 1 ₮ проти 0.01 у TON), реальний спред нижчий, і поріг тепер
+   * застосовується саме до нього. Порожнє — поведінка як була.
+   */
+  preferredNetwork?: string;
 }
 
 /**
@@ -467,11 +700,62 @@ export interface UserFiltersPatch extends Partial<TakerSellSettings>, Partial<Ta
   isAlertsActive?: boolean;
   targetMargin?: number;
   makerBuyPrice?: number;
+  /** Порожній рядок повертає поведінку «найдешевша спільна мережа». */
+  preferredNetwork?: string;
 }
 
 export interface Bank {
   code: string;
   name: string;
+}
+
+// ─── Довідник банків (GET /banks/profiles) ────────────────────────────────
+//
+// Операційний профіль: ліміти, за якими банк не привертає уваги, комісії за
+// переказ, нічні вікна, спільні ліцензії. Джерело — config/banks.py.
+
+export interface P2PFeeProfile {
+  pct: number;
+  fixedUah: number;
+  /** Безкоштовно, поки місячний оборот нижчий. null — порогу немає. */
+  freeUntilUah: number | null;
+  /** …або поки переказів за місяць менше. */
+  freeTxPerMonth: number | null;
+  /** Комісія тільки за переказ в інший банк. */
+  crossBankOnly: boolean;
+  label: string;
+}
+
+/** max_uah = null означає, що вночі перекази заборонені зовсім. */
+export interface NightWindowProfile {
+  fromHour: number;
+  toHour: number;
+  maxUah: number | null;
+}
+
+export interface BankProfile {
+  /** Канонічний слаг (normalize_bank), не код біржі. */
+  slug: string;
+  name: string;
+  /** 1 — найкраще тримає оборот, 3 — використовувати обережно. */
+  tier: number;
+  /** false — банк є в довіднику, але жодна біржа його не віддає. */
+  tradable: boolean;
+  safeMonthlyUah: number | null;
+  maxMonthlyUah: number | null;
+  safeTxPerDay: number | null;
+  /** null — стелі на один переказ немає. */
+  singleTxLimitUah: number | null;
+  businessDaysOnly: boolean;
+  /** Непорожнє — банк ділить ліцензію й фінмон з іншими членами групи. */
+  licenseGroup: string;
+  terminationFeePct: number;
+  thirdPartyFriendly: boolean | null;
+  note: string;
+  p2pFee: P2PFeeProfile | null;
+  nightWindow: NightWindowProfile | null;
+  /** Що движок підставить картці цього банку без налаштувань користувача. */
+  defaultLimits: Record<string, number>;
 }
 
 export interface ScannerState {
@@ -716,6 +1000,14 @@ export type CardOutputMode = 'inline' | 'reply';
 export type CardDetailLevel = 'full' | 'compact';
 export type CardModuleMode = 'off' | 'on';
 
+/**
+ * Як складати суму під ордер (config/card_limits.py).
+ * `inter_bank` доступний лише коли ввімкнено експериментальну фічу
+ * `inter_bank_matching` — бек інакше відхилить це значення.
+ */
+export type CardSplitMode = 'off' | 'intra_bank' | 'inter_bank';
+export type ShowRejectedOrders = 'with_reason' | 'hide';
+
 export interface CardDisplaySettings {
   cardModuleMode: CardModuleMode;
   cardOutputMode: CardOutputMode;
@@ -725,6 +1017,17 @@ export interface CardDisplaySettings {
   showBalancesBreakdown: boolean;
   showTransferTips: boolean;
   coldCardLimit: number;
+  /** Скільки карток максимум в одній угоді (1–3). */
+  maxCardsPerOrder: number;
+  cardSplitMode: CardSplitMode;
+  showRejectedOrders: ShowRejectedOrders;
+  /**
+   * Режими, які движок уміє саме для цього користувача. Міжбанк тут
+   * з'являється лише з увімкненою фічею — решту бек відхилить.
+   */
+  availableSplitModes: CardSplitMode[];
+  /** Ключ фічі, яка розблоковує міжбанк (для посилання в «Можливості»). */
+  interBankFeature: string;
 }
 
 // ─── Ліміти ───────────────────────────────────────────────────────────────
@@ -737,6 +1040,11 @@ export const LIMIT_FIELDS = [
 
 export type LimitField = (typeof LIMIT_FIELDS)[number];
 
+/**
+ * Ефективні ліміти банку: дефолти довідника, перекриті тим, що задав
+ * користувач. Числа тут — ті самі, за якими працює движок, тож порожніх
+ * полів більше немає. Що саме задане вручну, каже `userSet`.
+ */
 export interface BankLimits {
   userId: number;
   bankName: string;
@@ -748,7 +1056,15 @@ export interface BankLimits {
   maxSingleTxIn?: number;
   maxTxPerDay?: number;
   cooldownHours?: number;
+  /** Імена полів (snake_case), які задав користувач, а не довідник. */
+  userSet?: LimitField[];
 }
+
+/** -1 у полі ліміту означає «не обмежувати» (config.banks.UNLIMITED). */
+export const UNLIMITED_LIMIT = -1;
+
+export const isUnlimitedLimit = (value: number | null | undefined): boolean =>
+  value === UNLIMITED_LIMIT;
 
 // ─── Monobank-трекер ──────────────────────────────────────────────────────
 

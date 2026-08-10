@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import useSWR from 'swr';
 import { SlidersHorizontal, Bell, Loader2, Info, Save } from 'lucide-react';
 import { toast } from 'sonner';
-import { cn } from '../../lib/utils';
+import { cn, toCamel } from '../../lib/utils';
 import { api } from '../../services/api';
 import { Card, LimitField, MonoTracker, TrackerMode } from '../../types';
 
@@ -67,8 +67,12 @@ function LimitsEditor({ card, onSaved }: { card: Card; onSaved: () => void }) {
   const [saving, setSaving] = useState(false);
 
   const isCustom = Boolean((card as any).isCustomLimits);
+
+  // Писати треба snake_case (так приймає бек), а читати camelCase: у
+  // відповіді ключі камелізовані. Без цієї конвертації редактор показував
+  // нулі незалежно від реальних лімітів — і збереження затирало їх.
   const value = (key: LimitField) =>
-    draft[key] !== undefined ? draft[key] : Number(card.limits?.[key] ?? 0);
+    draft[key] !== undefined ? draft[key] : Number(card.limits?.[toCamel(key)] ?? 0);
 
   const hasChanges = Object.keys(draft).length > 0;
 
