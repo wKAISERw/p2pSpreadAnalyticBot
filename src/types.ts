@@ -43,6 +43,12 @@ export interface BankRef {
   slug: string;
   name: string;
   known: boolean;
+  /**
+   * «Bank Transfer» / «Банковский перевод» — не банк, а спосіб оплати:
+   * переказ приймається з будь-якого. Такий метод не звужує вибір карток,
+   * а знімає обмеження.
+   */
+  anyBank?: boolean;
 }
 
 /**
@@ -590,6 +596,10 @@ export interface CardMatch {
   bankName: string;
   amountUah: number;
   direction: 'buy' | 'sell';
+  /** Банки, з яких дозволено брати картки. Більше одного — це вже кошик. */
+  routeBanks?: string[];
+  /** Діє фіча «Кошики карток між банками». */
+  interBank?: boolean;
   /** success | needs_split | no_cards | disabled | no_crypto */
   status: string;
   bestCard: Record<string, any> | null;

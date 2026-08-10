@@ -441,9 +441,15 @@ export const api = {
    * Які картки підходять під конкретну угоду — те саме, що бот шле
    * окремим повідомленням після алерта.
    */
-  getCardMatch: (bank: string, amount: number, direction: 'buy' | 'sell') =>
+  getCardMatch: (
+    bank: string,
+    amount: number,
+    direction: 'buy' | 'sell',
+    /** Усі банки ордера — без них кошик між банками не збереться. */
+    banks: string[] = [],
+  ) =>
     apiClient.get<any, CardMatch>('/cards/match', {
-      params: { bank, amount, direction },
+      params: { bank, amount, direction, banks: banks.join(',') },
     }),
 
   /** Де лежить USDT: фандинг продається зараз, спот і Earn — ще ні. */

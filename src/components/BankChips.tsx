@@ -136,7 +136,9 @@ export function BankChips({
         code: b.code,
         label: b.name,
         slug: b.slug,
-        mine: b.known && mineOf.has(b.slug),
+        // «Переказ з будь-якого банку» підходить під усі картки — тож він
+        // «свій», щойно в тебе взагалі є хоч одна активна.
+        mine: b.anyBank ? mineOf.size > 0 : b.known && mineOf.has(b.slug),
       }))
     : resolve(codes);
   const hasMine = banks.some(b => b.mine);

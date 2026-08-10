@@ -42,14 +42,29 @@ export function CardMatchBlock({
   //
   // Це не заміна движку: він усередині банку сам збере суму з кількох
   // карток. Тут лише вибір, ПРО ЯКИЙ банк його питати.
-  const usable = banks
-    .filter(b => b.known && balances.has(b.slug))
-    .sort((a, b) => (balances.get(b.slug) ?? 0) - (balances.get(a.slug) ?? 0));
+  // «Переказ з будь-якого банку» — не банк, а знята умова: підходить
+  // кожна власна картка. Тому такий метод розкривається у ВСІ свої банки,
+  // а не відсіюється як невідомий.
+  const acceptsAny = banks.some(b => b.anyBank);
+  const candidates: { slug: string }[] = acceptsAny
+    ? [...balances.keys()].map(slug => ({ slug }))
+    : banks.filter(b => b.known && balances.has(b.slug));
+
+  const usable = [...candidates].sort(
+    (a, b) => (balances.get(b.slug) ?? 0) - (balances.get(a.slug) ?? 0)
+  );
   const bank = usable[0]?.slug ?? '';
 
+  // Усі банки ордера, не лише обраний: із увімкненими кошиками движок
+  // збирає суму з карток кількох банків, і без цього списку він про них
+  // не дізнається.
+  const allSlugs = banks.filter(b => b.known).map(b => b.slug);
+
   const { data } = useSWR<CardMatch>(
-    telegramId && bank && amount > 0 ? ['/cards/match', bank, amount, direction] : null,
-    () => api.getCardMatch(bank, amount, direction),
+    telegramId && bank && amount > 0
+      ? ['/cards/match', bank, amount, direction, allSlugs.join(',')]
+      : null,
+    () => api.getCardMatch(bank, amount, direction, allSlugs),
     { revalidateOnFocus: false, shouldRetryOnError: false, dedupingInterval: 15000 }
   );
 
@@ -114,6 +129,15 @@ export function CardMatchBlock({
 
       {open && (
         <div className="px-3 pb-3 space-y-3">
+          {/* Коли банків більше одного, сума збирається звідусіль — і це
+              треба сказати: інакше «не вистачає» читається як вирок по
+              одному банку, хоча рахувались усі. */}
+          {(data.routeBanks?.length ?? 0) > 1 && (
+            <div className="text-[11px] text-slate-500 leading-snug">
+              Кошик між банками: {data.routeBanks!.join(' + ')}
+            </div>
+          )}
+
           {/* Чому не підходить. Коди ті самі, що в статистиці відмов, тож
               «не вистачає балансу» тут і в дайджесті — одне й те саме. */}
           {data.rejections.length > 0 && (
