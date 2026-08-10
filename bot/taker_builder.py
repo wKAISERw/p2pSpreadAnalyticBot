@@ -25,6 +25,66 @@ from bot.formatters import (
 logger = logging.getLogger(__name__)
 
 
+async def _transfer_fee(notifier, chat_id: int | None, order: Order, is_buy: bool):
+    """
+    Комісія банку за переказ фіату під цей ордер: (сума ₴, опис, курс із комісією).
+
+    Повертає None, коли комісії немає або рахувати нема від чого.
+
+    Навіщо взагалі: калькулятор комісій існував, але викликався рівно з
+    одного місця — `cross_matcher`, тобто лише в спред-режимі. А банківський
+    переказ фіату відбувається саме в тейкерських: там комісія завжди
+    показувалась нулем. При спреді 0.5–1% комісія А-Банку 2% з'їдає весь
+    профіт, і побачити це було нізвідки.
+
+    Тільки для TAKER_BUY: у TAKER_SELL фіат відправляє мерчант, і комісію
+    свого банку платить він, а не ми.
+    """
+    if not is_buy or not order.bank_codes:
+        return None
+
+    from config.banks import normalize_bank
+    from core.utils.fees import bank_transfer_fee
+
+    bank = normalize_bank(order.bank_codes[0])
+
+    # У тейкері переказ завжди йде на той самий банк: движок добирає картку
+    # рівно того банку, який приймає мерчант. Тож «міжбанківські» комісії
+    # (ПриватБанк, Monobank) тут не виникають.
+    fee_obj = bank_transfer_fee(bank, bank)
+    if fee_obj is None:
+        return None
+
+    price = float(order.price)
+    if price <= 0:
+        return None
+
+    # Сума, яку реально відправимо. Беремо обсяг користувача, а не мінімалку
+    # ордера: комісія з порогом («до 20к — 0%») від суми залежить прямо.
+    amount_uah = float(order.min_limit)
+    try:
+        if notifier._db and chat_id:
+            user = await notifier._db.get_user_by_id(chat_id)
+            desired = float((user or {}).get("taker_buy_amount", 0) or 0)
+            if desired > 0:
+                amount_uah = max(
+                    float(order.min_limit),
+                    min(desired * price, float(order.max_limit)),
+                )
+    except Exception as e:
+        logger.debug("Не вдалось узяти обсяг купівлі для комісії: %s", e)
+
+    if amount_uah <= 0:
+        return None
+
+    result = fee_obj.calculate(amount_uah, price)
+    if result.amount <= 0:
+        return None
+
+    effective_price = price * (1 + result.amount / amount_uah)
+    return result.amount, result.description, effective_price
+
+
 async def send_taker_to_user(
     notifier, chat_id: int, orders: list[Order], mode: str,
     group: bool | None = None,
@@ -130,6 +190,19 @@ async def send_taker_combined(
             f"   🏦 Банки: <code>{banks}</code>\n"
             f"   💵 Ліміти: <code>{escape(str(order.min_limit))}–{escape(str(order.max_limit))} ₴</code> ({float(order.available_amount):.1f} USDT)\n"
         )
+        # Комісія переказу. У зведеному списку вона важить навіть більше, ніж
+        # в одиночному алерті: тут ордери стоять поруч і порівнюються за
+        # ціною, а «найдешевший» за курсом може виявитись не найдешевшим
+        # після комісії банку.
+        fee_info = await _transfer_fee(notifier, chat_id, order, is_buy)
+        if fee_info:
+            fee_uah, _fee_desc, eff_price = fee_info
+            fee_str = f"{fee_uah:,.0f}".replace(",", " ")
+            text += (
+                f"   💳 З комісією: <b>{eff_price:.4f} ₴</b> "
+                f"<i>(+{fee_str} ₴ за переказ)</i>\n"
+            )
+
         if llm_reason and display_settings.get("show_ai_logic", True):
             reason_short = llm_reason[:120] + "..." if len(llm_reason) > 120 else llm_reason
             text += f"   🧠 <i>{escape(reason_short)}</i>\n"
@@ -291,6 +364,46 @@ async def send_taker_single(
         f"{warn_block if warn_block else ''}"
     )
 
+    # ── Міжбіржовий переказ USDT (тільки для продажу) ──
+    #
+    # Продаємо ми те, що вже маємо, і воно лежить на конкретній біржі.
+    # Якщо ордер на іншій — USDT доведеться перевести, а це комісія мережі,
+    # яка при спреді 0.5–1% помітна. Досі цього не рахував ніхто: калькулятор
+    # мереж викликався лише зі спред-режиму.
+    if not is_buy:
+        try:
+            from core.engine.usdt_inventory import (
+                plan_transfer, render_plan, usdt_by_exchange,
+            )
+
+            uid = chat_id or notifier._chat_id
+            sell_amount = float((await notifier._db.get_user_by_id(uid) or {})
+                                .get("taker_sell_amount", 0) or 0)
+            if sell_amount > 0:
+                balances = await usdt_by_exchange(notifier._db, uid)
+                plan_line = render_plan(
+                    plan_transfer(balances, order.exchange, sell_amount),
+                    price_uah=float(order.price),
+                )
+                if plan_line:
+                    text += plan_line
+        except Exception as e:
+            logger.debug("Не вдалось порахувати міжбіржовий переказ: %s", e)
+
+    # ── Комісія банківського переказу ──
+    fee_info = await _transfer_fee(notifier, chat_id or notifier._chat_id, order, is_buy)
+    if fee_info:
+        fee_uah, fee_desc, eff_price = fee_info
+        # Пробіл-роздільник ставимо лише в числі: .replace на всьому рядку
+        # покалічив би опис комісії, якби в ньому колись з'явилась кома.
+        fee_str = f"{fee_uah:,.2f}".replace(",", " ")
+        text += (
+            f"💳 Комісія переказу: <code>{fee_str} ₴</code> "
+            f"<i>({escape(fee_desc)})</i>\n"
+            f"📉 Курс із комісією: <code>{eff_price:.4f}</code> "
+            f"<i>(замість {float(order.price):.4f})</i>\n"
+        )
+
     # ── Блок умов ──
     terms_blk = _terms_block(
         terms_raw,
@@ -411,6 +524,16 @@ async def send_taker_single(
             card_direction = "buy" if is_buy else "sell"
             card_order_id = str(ad_id) if ad_id else ""
 
+            # Маршрут рахуємо тим самим кодом, що й сканер: якщо алерт
+            # намалює картки не з тих банків, які движок вважав придатними,
+            # розбіжність спливе аж у момент угоди.
+            from core.engine.card_routing import resolve_route
+
+            route = await resolve_route(
+                notifier._db, chat_id or notifier._chat_id,
+                order.bank_codes, primary_bank=card_bank,
+            )
+
             # 🚀 ФІКС ТУПЛА: Розпаковуємо 3 значення, ігноруючи словник карти через "_"
             card_text, card_rows, _ = await notifier.card_notifier.get_card_block(
                 chat_id=chat_id or notifier._chat_id,
@@ -418,6 +541,8 @@ async def send_taker_single(
                 direction=card_direction,
                 bank=card_bank,
                 order_id=card_order_id,
+                route_banks=route.banks or None,
+                declared_banks=route.declared,
             )
 
             if card_text:

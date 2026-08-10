@@ -1215,6 +1215,18 @@ async def on_tsell_speed(call: CallbackQuery, state: FSMContext) -> None:
             )
 
 
+async def _readiness_block(user_id: int, mode: str) -> str:
+    """
+    Що завадить режиму працювати так, як його щойно налаштували.
+
+    Показуємо саме на запуску, а не мовчимо до першого циклу сканера: усі ці
+    перевірки й раніше існували, але спрацьовували вже всередині матчингу,
+    коли ордер тихо зникав.
+    """
+    from core.engine.readiness import readiness_block
+    return await readiness_block(_db, user_id, mode)
+
+
 @router.callback_query(F.data.in_({"tsell:launch", "tsell:save_and_launch"}))
 async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
@@ -1249,7 +1261,8 @@ async def on_tsell_launch(call: CallbackQuery, state: FSMContext) -> None:
             "🚀 <b>TAKER SELL запущено!</b>\n\n"
             f"🔒 Ціна продажу: <b>{price_label}</b>\n"
             f"📦 Об'єм: <b>{data['amount']:.1f} USDT</b>\n\n"
-            "<i>Сканер шукає ордери — алерт прийде як тільки знайдеться підходящий.</i>",
+            "<i>Сканер шукає ордери — алерт прийде як тільки знайдеться підходящий.</i>"
+            + await _readiness_block(call.from_user.id, "TAKER_SELL"),
             reply_markup=scanner_mode_kb(await _get_scanner_modes(call.from_user.id)),
         )
     await call.answer("🚀 Запущено!")
@@ -1460,6 +1473,12 @@ async def on_tbuy_type_selected(call: CallbackQuery, state: FSMContext) -> None:
     with suppress(TelegramBadRequest):
         await call.message.edit_text(msg_text, reply_markup=keyboards.back_to_main_kb())
     await call.answer()
+
+
+# Декоратора тут не було взагалі, тож кнопка «⚡ Увімкнути авто-масштабування»
+# з алерту про нестачу коштів не була ні до чого прив'язана: натискання
+# просто нічого не робило.
+@router.callback_query(F.data == "tbuy_scale_on")
 async def on_tbuy_scale_on(call: CallbackQuery, state: FSMContext) -> None:
     user_id = call.from_user.id
     if _db:
@@ -1467,7 +1486,12 @@ async def on_tbuy_scale_on(call: CallbackQuery, state: FSMContext) -> None:
         from core.engine.taker_scanner import trigger_buy_autoscale_check
         await trigger_buy_autoscale_check(_db, user_id)
     with suppress(TelegramBadRequest):
-        await call.message.edit_text("✅ <b>Авто-масштабування під баланс карт увімкнено!</b>\nТепер об'єм купівлі підлаштовується під картки автоматично.")
+        await call.message.edit_text(
+            "✅ <b>Авто-масштабування під баланс карт увімкнено!</b>\n"
+            "Ваш обсяг купівлі лишається як є — коли грошей на картках менше, "
+            "бот шукає під наявну суму, а після поповнення сам повертається "
+            "до вашої цифри."
+        )
     await call.answer("Увімкнено!")
 
 
@@ -1901,7 +1925,8 @@ async def on_tbuy_launch(call: CallbackQuery, state: FSMContext) -> None:
             "🚀 <b>TAKER BUY запущено!</b>\n\n"
             f"📦 Шукаю ордери для купівлі <b>{data['amount']:.1f} USDT</b>\n"
             + mp_line
-            + "\n<i>Алерти надходять одразу як з'являються підходящі ордери.</i>",
+            + "\n<i>Алерти надходять одразу як з'являються підходящі ордери.</i>"
+            + await _readiness_block(call.from_user.id, "TAKER_BUY"),
             reply_markup=scanner_mode_kb(await _get_scanner_modes(call.from_user.id)),
         )
     await call.answer("🚀 Запущено!")

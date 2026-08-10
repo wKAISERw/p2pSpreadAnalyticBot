@@ -2,7 +2,7 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 
 from state import state
@@ -93,8 +93,71 @@ async def get_detailed_stats(
     return dict_to_camel(jsonable_encoder(data))
 
 @router.get("/opportunities")
-async def get_opportunities():
-    return dict_to_camel(jsonable_encoder(state.opportunities))
+async def get_opportunities(
+    personal: bool = Query(default=True, description="Застосувати фільтри користувача"),
+    show_rejected: bool = Query(default=False, description="Лишити відсіяні, з причиною"),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Спред-зв'язки останнього циклу — за фільтрами того, хто питає.
+
+    Довго віддавався глобальний `state.opportunities`: те, що знайшов
+    сканер, без жодної персоналізації. На сайті були видні зв'язки, яких
+    цей користувач у Telegram не отримав би ніколи — не проходили ні за
+    капіталом, ні за спредом, ні за банками, ні за порогами мерчанта. І
+    навпаки: розбіжність «на сайті густо, у чаті тихо» пояснити було нічим.
+
+    Рішення ухвалює той самий `AlertDispatcher._user_wants`, що й для
+    алертів: друга копія цих перевірок неминуче розійшлася б із першою.
+
+    Без сесії або з `personal=false` поведінка стара — сирий список.
+    """
+    opps = state.opportunities
+
+    # Вердикт міг дозріти вже після того, як цикл поклав зв'язку в стан:
+    # LLM працює асинхронно. У Telegram повідомлення в такому разі
+    # редагується, тут — підставляємо свіже на момент запиту.
+    try:
+        from bot.handlers.core import _db as _verdict_db
+        from api.verdict_refresh import refresh_opportunity_flags
+
+        await refresh_opportunity_flags(_verdict_db, opps)
+    except Exception as e:
+        logger.debug("opportunities verdict refresh: %s", e)
+
+    if not personal or not opps:
+        return dict_to_camel(jsonable_encoder(opps))
+
+    try:
+        telegram_id = resolve_user_id(telegram_id, session_user_id)
+    except HTTPException:
+        # Не залогінений — показуємо як було. Це вітрина, а не чужі дані.
+        return dict_to_camel(jsonable_encoder(opps))
+
+    from bot.handlers.core import _db as db
+    from core.engine.alert_dispatcher import AlertDispatcher
+
+    try:
+        verdicts = await AlertDispatcher(db, None).wants_which(
+            telegram_id, state.opportunities_raw or {}
+        )
+    except Exception as e:
+        logger.warning("opportunities personal filter: %s", e)
+        return dict_to_camel(jsonable_encoder(opps))
+
+    result = []
+    for opp in opps:
+        reason = verdicts.get(opp["id"])
+        # Немає вердикту — зв'язка з попереднього циклу, сирого opp під неї
+        # вже немає. Ховати її було б гірше: людина побачила б порожньо там,
+        # де насправді просто не встигли перерахувати.
+        if reason is None or reason == "":
+            result.append(opp)
+        elif show_rejected:
+            result.append({**opp, "rejectedReason": reason})
+
+    return dict_to_camel(jsonable_encoder(result))
 
 @router.get("/logs")
 async def get_logs(limit: int = 200):

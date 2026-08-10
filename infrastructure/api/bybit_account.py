@@ -79,15 +79,84 @@ class BybitAccountClient(BaseHttpClient):
             logger.warning("get_balance: %s", e); return []
 
     async def get_funding_balance(self) -> list[dict]:
-        """Баланс Funding акаунта (для P2P)."""
+        """
+        Баланс Funding акаунта (для P2P).
+
+        Bybit віддає фандинг НЕ через `/v5/account/wallet-balance`: там
+        accountType знає лише UNIFIED і CONTRACT, а FUND повертає помилку.
+        Правильний ендпоінт — `/v5/asset/transfer/query-account-coins-balance`
+        (дозвіл «Активи → Гаманець»).
+
+        Стара реалізація кликала wallet-balance з FUND, ловила виняток у
+        warning і повертала порожньо — тобто фандинг Bybit мовчки вважався
+        нулем. Для P2P це найгірша з можливих помилок: саме там лежать
+        монети, готові до продажу.
+
+        Фолбек на стару поведінку лишений свідомо: перевірити на живому
+        акаунті можливості не було, і якщо припущення хибне — працюватиме
+        як раніше, а не зламається.
+        """
+        if not self.is_authenticated: return []
+        query = "accountType=FUND&coin=USDT"
+        try:
+            data = await self._get(
+                f"{BASE_URL}/v5/asset/transfer/query-account-coins-balance?{query}",
+                headers=self._sign_headers(query),
+            )
+            rows = data.get("result", {}).get("balance", []) or []
+            parsed = [{"coin": r.get("coin", "USDT"),
+                       "free": float(r.get("transferBalance") or 0),
+                       "locked": 0.0,
+                       "total": float(r.get("walletBalance") or 0)}
+                      for r in rows if float(r.get("walletBalance") or 0) > 0]
+            if parsed:
+                return parsed
+        except Exception as e:
+            logger.warning("get_funding_balance (assets): %s", e)
+
         return await self.get_balance("FUND")
 
+    async def get_earn_balance(self) -> list[dict]:
+        """
+        Баланс гнучкого Earn (Savings).
+
+        Тільки FlexibleSaving: locked-продукти достроково не викупиш.
+
+        Написано за документацією й не перевірялось на живому акаунті.
+        Порожній результат викликач трактує як «Earn не видно», а не як нуль.
+        """
+        if not self.is_authenticated: return []
+        query = "category=FlexibleSaving&coin=USDT"
+        try:
+            data = await self._get(f"{BASE_URL}/v5/earn/position?{query}",
+                                   headers=self._sign_headers(query))
+            rows = data.get("result", {}).get("list", []) or []
+            return [{"coin": r.get("coin", "USDT"), "free": float(r.get("amount") or 0),
+                     "locked": 0.0, "total": float(r.get("amount") or 0)}
+                    for r in rows if float(r.get("amount") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_earn_balance: %s", e); return []
+
+    # ── P2P: заглушки, але не тому, що API немає ──────────────────────────
+    #
+    # У докстрінгах тут роками стояло «Bybit не віддає P2P дані через
+    # звичайний API». Це неправда: екран дозволів ключа має цілий розділ
+    # «Торгівля фіатними валютами» з окремими правами на перегляд ордерів і
+    # заявок та на їх зміну — таких дозволів не було б без ендпоінтів.
+    #
+    # Що сталось насправді: перша спроба дістала 404, і причину записали як
+    # властивість біржі замість «ми стукаємо не туди». Різниця принципова —
+    # перше закриває напрямок назавжди, друге лишає його відкритим.
+    #
+    # Правильний шлях — розділ /v5/p2p/* з дозволом «Торгівля фіатними
+    # валютами» на ключі. Не реалізовано, бо не було на чому перевірити.
+
     async def get_my_ads(self, status: str = "ONLINE") -> list[dict]:
-        """Заглушка: Bybit не віддає P2P дані через звичайний API (повертає 404)"""
+        """Не реалізовано: потрібен /v5/p2p/* і дозвіл «Торгівля фіатними валютами»."""
         return []
 
     async def get_my_orders(self, status: str = "TRADING", limit: int = 20) -> list[dict]:
-        """Заглушка: Bybit не віддає P2P дані через звичайний API"""
+        """Не реалізовано: потрібен /v5/p2p/* і дозвіл «Торгівля фіатними валютами»."""
         return []
 
     async def get_account_info(self) -> dict:

@@ -265,7 +265,10 @@ async def test_engine_cooldown_rejects_card(db):
     engine = CardMatchingEngine(db)
     result = await engine.run(TEST_USER_ID, "monobank", 10000.0, "buy")
     assert result.status == "no_cards"
-    assert any("cooldown" in r.get("reason", "").lower() for r in result.rejection_report)
+    # Причина тепер має код — саме за ним рахується статистика відмов,
+    # тоді як `reason` це рядок для людини й може бути перефразований.
+    assert any(r.get("code") == "cooldown" for r in result.rejection_report)
+    assert any("Кулдаун" in r.get("reason", "") for r in result.rejection_report)
 
 
 @pytest.mark.asyncio
@@ -294,11 +297,16 @@ async def test_engine_multi_card_split(db):
 
 @pytest.mark.asyncio
 async def test_internal_split_single_card(db):
-    """When amount > max_single_tx but card has enough daily capacity, 
+    """When amount > max_single_tx but card has enough daily capacity,
     internal split should produce 2 legs on same card."""
-    # max_single_tx_out = 29999 by default. Card has 100k balance.
     await _setup_user_and_card(db, balance=100000.0, last_four="5555")
-    
+
+    # Стелю одного переказу задаємо явно: у довіднику банків Monobank іде
+    # «без ліміту», тож покладатись тут на дефолт означало б перевіряти не
+    # спліт, а вміст довідника.
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "max_single_tx_out", 29999.0)
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "monthly_out_max", 400000.0)
+
     engine = CardMatchingEngine(db)
     # 40000 > 29999 (max_single_tx), but < 100000 (balance) and < 150000 (daily)
     result = await engine.run(TEST_USER_ID, "monobank", 40000.0, "buy")
@@ -394,8 +402,19 @@ async def test_set_bank_limit_creates_row(db):
     limits = await db.get_user_bank_limits(TEST_USER_ID, "privatbank")
     assert limits is not None
     assert limits["daily_out_max"] == 100000.0
-    # Other fields should have defaults
-    assert limits["daily_in_max"] == 150000.0
+
+    # Решта полів лишається порожньою — це і є ознака «користувач не задавав».
+    # Раніше рядок створювався зі спільними для всіх банків DEFAULT-ами, тож
+    # правка одного поля мовчки фіксувала ще сім, і довідник банку до них уже
+    # не дотягувався.
+    assert limits["daily_in_max"] is None
+
+    # А ефективний ліміт при цьому не порожній — його дає довідник.
+    from config.card_limits import default_limits_for_bank
+    card_id = await _setup_user_and_card(db, balance=1000.0, bank="privatbank", last_four="9911")
+    effective = await db.get_card_effective_limits(card_id, TEST_USER_ID, "privatbank")
+    assert effective["daily_out_max"] == 100000.0
+    assert effective["daily_in_max"] == default_limits_for_bank("privatbank")["daily_in_max"]
 
 
 @pytest.mark.asyncio
@@ -530,18 +549,22 @@ async def test_get_user_auto_capital(db):
     c3 = await _setup_user_and_card(db, balance=30000.0, bank="monobank", last_four="3333")
     await db.update_card(c3, {"cooldown_until": time.time() + 3600})
     
-    # Initial auto-capital should sum healthy card balances (15000 + 200000 [bounded by daily_out_max=150000] = 165000)
+    # Капітал обмежує місячна межа з довідника банків: у ПриватБанку це
+    # 100 000 ₴, тож із 200к балансу в угоду піде 100к, а не всі 200.
+    # 15000 (Mono) + 100000 (Privat) = 115000.
+    from config.card_limits import default_limits_for_bank
+    privat_monthly = default_limits_for_bank("privatbank")["monthly_out_max"]
+    assert privat_monthly == 100000.0
+
     cap = await db.get_user_auto_capital(TEST_USER_ID)
-    assert cap == pytest.approx(165000.0)
-    
-    # Exhaust privatbank limits by recording transactions (limits: daily_out_max=150000)
-    # If we spend 140000 from c2 (available daily becomes 10000)
-    # Available amount on c2 will be min(balance=60000, daily_avail=10000) = 10000.
-    # Total auto-capital should become 15000 (c1) + 10000 (c2) = 25000.
+    assert cap == pytest.approx(15000.0 + privat_monthly)
+
+    # Вичерпуємо ліміти ПриватБанку транзакцією на 140к: денний залишок 10к,
+    # але місячний уже в мінусі, тож із цієї картки не піде нічого.
     await db.confirm_transaction(c2, 140000.0, "out", "work", source="test")
-    
+
     cap2 = await db.get_user_auto_capital(TEST_USER_ID)
-    assert cap2 == pytest.approx(25000.0)
+    assert cap2 == pytest.approx(15000.0)
 
 
 @pytest.mark.asyncio
@@ -550,11 +573,12 @@ async def test_disabled_limits_ignored_by_engine(db):
     card_id = await _setup_user_and_card(db, balance=250000.0, bank="monobank")
     
     # 1. Test global limits set to -1
-    # By default, max_single_tx_out is 29999.0, and daily_out_max is 150000.0.
-    # Set them to -1.0
+    # Знімаємо всі три стелі: разова, добова й місячна. Місячну довідник
+    # ставить у 100 000 ₴ для Monobank, тож без неї 200к не пройшли б.
     await db.set_user_bank_limit(TEST_USER_ID, "monobank", "max_single_tx_out", -1.0)
     await db.set_user_bank_limit(TEST_USER_ID, "monobank", "daily_out_max", -1.0)
-    
+    await db.set_user_bank_limit(TEST_USER_ID, "monobank", "monthly_out_max", -1.0)
+
     # Run engine with 200,000.0. This exceeds default daily out max (150000) and max single (29999).
     engine = CardMatchingEngine(db)
     result = await engine.run(TEST_USER_ID, "monobank", 200000.0, "buy")

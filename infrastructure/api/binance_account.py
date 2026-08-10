@@ -71,6 +71,30 @@ class BinanceAccountClient(BaseHttpClient):
         except Exception as e:
             logger.warning("get_spot_balance: %s", e); return []
 
+    async def get_earn_balance(self) -> list[dict]:
+        """
+        Баланс гнучкого Simple Earn.
+
+        Тільки FLEXIBLE: locked-продукти достроково не викупиш, тож видавати
+        їх за доступні під 15-хвилинний таймер угоди означало б обіцяти
+        гроші, яких не буде.
+
+        Написано за документацією й не перевірялось на живому акаунті —
+        ключів під рукою не було. Помилка тут не мовчазна: викликач бачить
+        порожній результат і окремо каже, що Earn не видно.
+        """
+        if not self.is_authenticated: return []
+        try:
+            data = await self._signed_get(
+                f"{BASE_URL}/sapi/v1/simple-earn/flexible/position"
+            )
+            rows = data.get("rows", []) if isinstance(data, dict) else []
+            return [{"coin": r["asset"], "free": float(r.get("totalAmount") or 0),
+                     "locked": 0.0, "total": float(r.get("totalAmount") or 0)}
+                    for r in rows if float(r.get("totalAmount") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_earn_balance: %s", e); return []
+
     async def get_balance(self) -> list[dict]:
         """Комбінований баланс Spot + Funding акаунтів."""
         spot = await self.get_spot_balance()

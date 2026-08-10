@@ -15,7 +15,12 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
+
+# Ліміт «без обмежень». Та сама домовленість, що вже діє в БД лімітів карток:
+# -1 означає «не обмежувати», а не «нуль».
+UNLIMITED = -1.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Модель банку
@@ -33,6 +38,11 @@ class Bank:
     def get_code(self, exchange: str) -> Optional[str]:
         """Повертає API-код банку для конкретної біржі або None."""
         return self.exchange_codes.get(exchange)
+
+    @property
+    def profile(self) -> "BankProfile":
+        """Операційний профіль банку — ліміти, комісії, режим роботи."""
+        return get_bank_profile(self.internal_code)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,6 +256,25 @@ _BANK_ALIASES: dict[str, str] = {
     "ощадбанк": "oschadbank", "oschad": "oschadbank",
     "raiffeisen bank": "raiffeisen", "райф": "raiffeisen",
     "otp bank": "otp", "отп": "otp",
+    # Банки, які є в довіднику лімітів (BANK_PROFILES), але не в BANKS:
+    # жодна з підключених бірж їх не віддає, а картки в них користувач має.
+    "таскомбанк": "taskombank", "tascombank": "taskombank", "таском": "taskombank",
+    "бвр": "bvr", "bvr bank": "bvr",
+    "банк восток": "vostok", "восток": "vostok", "bank vostok": "vostok",
+    "глобус": "globus", "globus bank": "globus",
+    "кредобанк": "kredobank", "kredo": "kredobank",
+    "кредит дніпро": "credit-dnipro", "credit dnipro": "credit-dnipro",
+    "creditdnipro": "credit-dnipro",
+    "грант": "grant", "grant bank": "grant",
+    "банк львів": "lviv", "львів": "lviv", "bank lviv": "lviv",
+    "прокредит": "procredit", "procredit bank": "procredit",
+    "радабанк": "rada", "рада": "rada",
+    "комінбанк": "cominbank", "комінвестбанк": "cominbank",
+    "укрсиббанк": "ukrsibbank", "укрсиб": "ukrsibbank", "ukrsib": "ukrsibbank",
+    "юнекс": "unex", "unex bank": "unex",
+    "південний": "pivdenny", "pivdennyi": "pivdenny",
+    "креді агріколь": "credit-agricole", "credit agricole": "credit-agricole",
+    "creditagricole": "credit-agricole",
 }
 
 # Внутрішній код («43») → канонічна коротка назва («monobank»).
@@ -296,3 +325,267 @@ def normalize_banks(values) -> set[str]:
     if isinstance(values, str):
         values = [chunk for chunk in values.replace(";", ",").split(",")]
     return {normalize_bank(v) for v in values if str(v).strip()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Операційний профіль банку
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# До цього ліміти були спільні для всіх банків: 150к/добу, 400к/місяць,
+# 29 999 за переказ, 15 транзакцій. Тобто бот спокійно розписував 15 переказів
+# на Izibank, де безпечно 2–3, і вважав доступними 400к там, де верхня межа
+# 60–100к. Це не похибка округлення — це маршрут, який веде до блокування
+# картки.
+#
+# Правило заповнення: None означає «даних немає». Порожнє поле падає на
+# глобальний дефолт (config/card_limits.py), і це чесніше за вигадану цифру.
+# Джерело — операційна зведенка з профільного каналу (08.04.2026) плюс дані
+# користувача; див. PLAN_CARD_MATCHING.md, розділ 7.
+
+
+@dataclass(frozen=True)
+class P2PFee:
+    """
+    Комісія банку за вихідний P2P-переказ.
+
+    Майже всі банки тарифікують порогом: безкоштовно до якоїсь суми або
+    кількості переказів на місяць, далі відсоток (іноді плюс фікс).
+    """
+    pct: float = 0.0
+    fixed_uah: float = 0.0
+    free_until_uah: Optional[float] = None      # безкоштовно, поки оборот нижчий
+    free_tx_per_month: Optional[int] = None     # …або поки переказів менше
+    cross_bank_only: bool = False               # комісія лише в інший банк
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class NightWindow:
+    """Нічне вікно, коли банк обмежує перекази. max_uah=None — заборонено зовсім."""
+    from_hour: int
+    to_hour: int
+    max_uah: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class BankProfile:
+    tier: int = 3                                # вага у скорингу картки
+    safe_monthly_uah: Optional[float] = None     # рекомендована місячна межа
+    max_monthly_uah: Optional[float] = None      # вище — ризик блоку різко зростає
+    safe_tx_per_day: Optional[int] = None        # скільки переказів не привертає уваги
+    single_tx_limit_uah: Optional[float] = None  # стеля одного переказу; UNLIMITED = без неї
+    p2p_fee: Optional[P2PFee] = None
+    business_days_only: bool = False             # IBAN не піде у вихідні
+    night_window: Optional[NightWindow] = None
+    license_group: str = ""                      # спільна ліцензія + спільний фінмон
+    termination_fee_pct: float = 0.0             # комісія при розриві контракту
+    third_party_friendly: Optional[bool] = None
+    note: str = ""
+
+
+# Ключ — канонічний слаг із normalize_bank(), а не internal_code: у BANKS
+# живуть лише банки, які підтримує хоч одна біржа, а картку користувач може
+# завести в будь-якому. Таскомбанк і БВР бірж не цікавлять, але їхні ліміти
+# й спільна ліцензія цікавлять матчинг.
+BANK_PROFILES: dict[str, BankProfile] = {
+    # ── Tier 1 ────────────────────────────────────────────────────────────
+    "monobank": BankProfile(
+        tier=1,
+        safe_monthly_uah=100_000, max_monthly_uah=150_000,
+        safe_tx_per_day=15,
+        single_tx_limit_uah=UNLIMITED,
+        p2p_fee=P2PFee(pct=0.0, label="Monobank (0% по Україні)"),
+        note="часті фінмони; 2+ чарджбеки → перевірка → розрив",
+    ),
+    "privatbank": BankProfile(
+        tier=1,
+        safe_monthly_uah=100_000, max_monthly_uah=150_000,
+        safe_tx_per_day=20,
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=0.5, cross_bank_only=True,
+                       label="ПриватБанк міжбанк (0.5%)"),
+    ),
+    "pumb": BankProfile(
+        tier=1,
+        safe_monthly_uah=70_000, max_monthly_uah=100_000,
+        # tx/день, стеля переказу й комісія — даних немає, дозаповнити
+        # з першоджерела. Порожнє поле піде на глобальний дефолт.
+    ),
+    "globus": BankProfile(
+        tier=1,
+        safe_monthly_uah=100_000,
+        safe_tx_per_day=10,
+        single_tx_limit_uah=24_999,
+        p2p_fee=P2PFee(pct=1.0, free_until_uah=50_000, free_tx_per_month=10,
+                       label="Глобус (1% понад 50к / 10 переказів)"),
+        business_days_only=True,
+        note="між банками 1 переказ на день",
+    ),
+
+    # ── Tier 2 ────────────────────────────────────────────────────────────
+    "oschadbank": BankProfile(
+        tier=2,
+        safe_monthly_uah=80_000,
+        # «не критично» — окремої цифри джерело не дає
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=1.0, fixed_uah=5.0, label="Ощадбанк (1% + 5 ₴)"),
+        night_window=NightWindow(from_hour=22, to_hour=7, max_uah=5_000),
+    ),
+    "kredobank": BankProfile(
+        tier=2,
+        safe_monthly_uah=80_000,
+        safe_tx_per_day=7,
+        single_tx_limit_uah=24_999,
+        p2p_fee=P2PFee(pct=0.7, fixed_uah=2.5, label="KredoBank (0.7% + 2.5 ₴)"),
+    ),
+    "sense": BankProfile(
+        tier=2,
+        safe_monthly_uah=70_000, max_monthly_uah=100_000,
+        safe_tx_per_day=10,
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=1.0, fixed_uah=5.0, free_until_uah=20_000,
+                       label="Sense (1% + 5 ₴ понад 20к)"),
+        note="IBAN 24/7",
+    ),
+    "a-bank": BankProfile(
+        tier=2,
+        safe_monthly_uah=60_000, max_monthly_uah=100_000,
+        safe_tx_per_day=5,
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=2.0, free_until_uah=100_000,
+                       label="А-Банк (2% понад 100к)"),
+        termination_fee_pct=30.0,
+    ),
+    "izibank": BankProfile(
+        tier=2,
+        safe_monthly_uah=60_000, max_monthly_uah=100_000,
+        safe_tx_per_day=3,
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=2.0, fixed_uah=5.0, free_until_uah=100_000,
+                       free_tx_per_month=20,
+                       label="Izibank (2% + 5 ₴ понад 100к / 20 переказів)"),
+        license_group="tascombank",
+        termination_fee_pct=20.0,
+    ),
+    "taskombank": BankProfile(
+        tier=2,
+        safe_monthly_uah=50_000,
+        safe_tx_per_day=5,
+        single_tx_limit_uah=24_999,
+        p2p_fee=P2PFee(pct=0.5, fixed_uah=10.0, label="Таскомбанк (0.5% + 10 ₴)"),
+        license_group="tascombank",
+        termination_fee_pct=20.0,
+    ),
+    "bvr": BankProfile(
+        tier=2,
+        safe_monthly_uah=40_000,
+        safe_tx_per_day=7,
+        single_tx_limit_uah=29_999,
+        p2p_fee=P2PFee(pct=0.5, free_tx_per_month=5,
+                       label="БВР (0.5% після 5 переказів)"),
+        business_days_only=True,
+        license_group="vostok",
+        termination_fee_pct=30.0,
+    ),
+    "vostok": BankProfile(
+        tier=2,
+        license_group="vostok",
+    ),
+
+    # ── Банки, про які джерело дає лише окремі факти ───────────────────────
+    # Решта полів свідомо порожня: краще глобальний дефолт, ніж вигадана цифра.
+    "otp": BankProfile(single_tx_limit_uah=UNLIMITED),
+    "credit-dnipro": BankProfile(single_tx_limit_uah=99_999, business_days_only=True),
+    "lviv": BankProfile(single_tx_limit_uah=24_999),
+    "grant": BankProfile(single_tx_limit_uah=20_000, safe_tx_per_day=5,
+                         safe_monthly_uah=50_000, business_days_only=True),
+    "procredit": BankProfile(business_days_only=True),
+    "rada": BankProfile(business_days_only=True),
+    "cominbank": BankProfile(business_days_only=True),
+    "ukrsibbank": BankProfile(business_days_only=True),
+    "unex": BankProfile(business_days_only=True),
+    "pivdenny": BankProfile(business_days_only=True),
+    "credit-agricole": BankProfile(business_days_only=True,
+                                   note="відділення працює 10:00–16:00"),
+}
+
+# Профіль за замовчуванням для банку, якого немає в довіднику.
+# Порожній: усі рішення падають на глобальні дефолти з config/card_limits.py.
+DEFAULT_BANK_PROFILE = BankProfile()
+
+
+def get_bank_profile(bank: str) -> BankProfile:
+    """
+    Профіль банку за будь-яким написанням — кодом, слагом, назвою.
+    Невідомий банк отримує порожній профіль, а не виняток.
+    """
+    return BANK_PROFILES.get(normalize_bank(bank), DEFAULT_BANK_PROFILE)
+
+
+# Людські назви для слагів. BANKS покриває лише банки, які віддає хоч одна
+# біржа, тож для «карткових» банків із довідника назви задані тут.
+BANK_SLUG_NAMES: dict[str, str] = {
+    **{_CODE_TO_SLUG[b.internal_code]: b.name
+       for b in BANKS if b.internal_code in _CODE_TO_SLUG},
+    "izibank": "Izibank",
+    "globus": "Глобус",
+    "kredobank": "KredoBank",
+    "taskombank": "Таскомбанк",
+    "bvr": "БВР",
+    "vostok": "Банк Восток",
+    "credit-dnipro": "Кредит Дніпро",
+    "grant": "Грант",
+    "lviv": "Банк Львів",
+    "procredit": "ProCredit",
+    "rada": "РадаБанк",
+    "cominbank": "Комінбанк",
+    "ukrsibbank": "Укрсиббанк",
+    "unex": "Unex",
+    "pivdenny": "Південний",
+    "credit-agricole": "CreditAgricole",
+}
+
+# Банки, доступні для вибору при додаванні картки й налаштуванні лімітів.
+# Порядок — за tier довідника: спершу ті, з якими працювати безпечніше.
+# Додати банк у BANK_PROFILES достатньо, щоб він тут з'явився.
+CARD_BANK_SLUGS: list[str] = [
+    slug for slug, _ in sorted(
+        ((s, p) for s, p in BANK_PROFILES.items() if p.safe_monthly_uah),
+        key=lambda kv: (kv[1].tier, -(kv[1].safe_monthly_uah or 0)),
+    )
+]
+
+
+def bank_display_name(bank: str) -> str:
+    """Слаг/код/назва → людська назва для кнопок і алертів."""
+    slug = normalize_bank(bank)
+    if slug in BANK_SLUG_NAMES:
+        return BANK_SLUG_NAMES[slug]
+    if is_unmapped_code(slug):
+        # Не вигадуємо назву коду, якого не знаємо: «Банк 545» виглядав би
+        # як справжній банк і ховав би те, що реєстр неповний.
+        return f"код {slug}"
+    return slug.capitalize()
+
+
+def is_unmapped_code(bank: str) -> bool:
+    """
+    Чи це числовий код біржі, якого немає в реєстрі.
+
+    Такий код проходить `normalize_bank` наскрізь і далі поводиться як
+    окремий «банк»: під нього не знайдеться жодної картки, ордер відпаде, і
+    в статистиці причин з'явиться рядок «немає активних карток — 545».
+    Виглядає як факт про картки, а насправді це прогалина в `_CODE_TO_SLUG`.
+    """
+    slug = normalize_bank(bank)
+    return bool(slug) and slug.isdigit() and slug not in _CODE_TO_SLUG
+
+
+def license_group_of(bank: str) -> str:
+    """
+    Група спільної ліцензії або '' — тоді банк сам по собі.
+
+    Спільна тут не лише стеля лімітів, а й фінансовий моніторинг: блок на
+    одному банку групи тягне другий.
+    """
+    return get_bank_profile(bank).license_group

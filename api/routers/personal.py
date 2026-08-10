@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 from api.auth import optional_session, require_admin, require_session, resolve_user_id
 from api.security import require_api_key
 from api.utils import dict_to_camel
+from config.card_limits import (
+    FEATURE_INTER_BANK, LIMIT_FIELDS, SPLIT_INTRA_BANK,
+    available_split_modes, merge_limits,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["Personal"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger("ApiPersonal")
@@ -222,6 +226,10 @@ _CARD_DISPLAY_DEFAULTS = {
     "show_balances_breakdown": True,
     "show_transfer_tips": True,
     "cold_card_limit": 2000.0,
+    # Етап 4 плану — налаштування матчингу.
+    "max_cards_per_order": 3,
+    "card_split_mode": SPLIT_INTRA_BANK,
+    "show_rejected_orders": "with_reason",
 }
 
 
@@ -231,8 +239,21 @@ async def get_card_display(
     session_user_id: Optional[int] = Depends(optional_session),
 ):
     telegram_id = resolve_user_id(telegram_id, session_user_id)
-    current = await _db().get_user_card_settings(telegram_id)
-    return dict_to_camel(jsonable_encoder({**_CARD_DISPLAY_DEFAULTS, **(current or {})}))
+    db = _db()
+    current = await db.get_user_card_settings(telegram_id)
+
+    # Які режими спліту движок вміє САМЕ ДЛЯ ЦЬОГО користувача: міжбанк
+    # ховається за експериментальною фічею. Без цього поля дашборд або
+    # приховував би доступний режим, або пропонував той, який бек відхилить.
+    inter_bank = await db.get_feature_status(telegram_id, FEATURE_INTER_BANK)
+
+    payload = {
+        **_CARD_DISPLAY_DEFAULTS,
+        **(current or {}),
+        "available_split_modes": list(available_split_modes(inter_bank)),
+        "inter_bank_feature": FEATURE_INTER_BANK,
+    }
+    return dict_to_camel(jsonable_encoder(payload))
 
 
 class CardDisplayPayload(BaseModel):
@@ -245,6 +266,9 @@ class CardDisplayPayload(BaseModel):
     showBalancesBreakdown: Optional[bool] = None
     showTransferTips: Optional[bool] = None
     coldCardLimit: Optional[float] = Field(default=None, ge=0)
+    maxCardsPerOrder: Optional[int] = Field(default=None, ge=1, le=3)
+    cardSplitMode: Optional[str] = None
+    showRejectedOrders: Optional[str] = None
 
 
 @router.post("/user/card-display")
@@ -270,6 +294,9 @@ async def update_card_display(
         "show_balances_breakdown": payload.showBalancesBreakdown,
         "show_transfer_tips": payload.showTransferTips,
         "cold_card_limit": payload.coldCardLimit,
+        "max_cards_per_order": payload.maxCardsPerOrder,
+        "card_split_mode": payload.cardSplitMode,
+        "show_rejected_orders": payload.showRejectedOrders,
     }
     patch = {k: v for k, v in patch.items() if v is not None}
 
@@ -277,6 +304,14 @@ async def update_card_display(
         ("card_module_mode", _CARD_MODULE_MODES),
         ("card_output_mode", _CARD_OUTPUT_MODES),
         ("card_detail_level", _CARD_DETAIL_LEVELS),
+        # Приймаємо лише режими, які движок реально вміє. inter_bank буде
+        # тут, коли з'явиться міжбанківський набір карток (етап 3 плану) —
+        # прийняти його зараз означало б зберегти налаштування, яке нічого
+        # не змінює.
+        ("card_split_mode", set(available_split_modes(
+            await db.get_feature_status(telegram_id, FEATURE_INTER_BANK)
+        ))),
+        ("show_rejected_orders", {"with_reason", "hide"}),
     ):
         if field in patch and patch[field] not in allowed:
             raise HTTPException(
@@ -299,12 +334,9 @@ async def update_card_display(
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Набір, який приймає card_repo.set_user_bank_limit / update_card_limit_override.
-# Тримаємо копію тут, щоб віддати 400 замість мовчазного ігнорування:
-# репозиторій на невідоме поле просто робить return.
-_LIMIT_FIELDS = {
-    "daily_out_max", "daily_in_max", "monthly_out_max", "monthly_in_max",
-    "max_single_tx_out", "max_single_tx_in", "max_tx_per_day", "cooldown_hours",
-}
+# Джерело — config/card_limits: копія тут розійшлася б із репозиторієм, а він
+# на невідоме поле просто робить return, тобто мовчки нічого не зберігає.
+_LIMIT_FIELDS = frozenset(LIMIT_FIELDS)
 
 
 @router.get("/user/bank-limits")
@@ -312,7 +344,14 @@ async def get_bank_limits(
     telegram_id: Optional[int] = None,
     session_user_id: Optional[int] = Depends(optional_session),
 ):
-    """Глобальні ліміти по банках. Картка може мати власний override."""
+    """
+    Ефективні ліміти по банках. Картка може мати власний override.
+
+    Віддаємо злиті з довідником значення, а не сирий рядок: у ньому NULL
+    означає «користувач не задавав», і дашборд показував би порожні поля
+    замість чисел, за якими реально працює движок. Окремо йде userSet —
+    які саме поля задав користувач.
+    """
     telegram_id = resolve_user_id(telegram_id, session_user_id)
     db = _db()
 
@@ -322,7 +361,17 @@ async def get_bank_limits(
     ) as cur:
         rows = await cur.fetchall()
 
-    return dict_to_camel(jsonable_encoder([dict(r) for r in rows]))
+    result = []
+    for row in rows:
+        raw = dict(row)
+        bank = raw.get("bank_name", "")
+        merged = merge_limits(bank, raw)
+        merged["user_id"] = raw.get("user_id")
+        merged["bank_name"] = bank
+        merged["user_set"] = sorted(f for f in LIMIT_FIELDS if raw.get(f) is not None)
+        result.append(merged)
+
+    return dict_to_camel(jsonable_encoder(result))
 
 
 class BankLimitPayload(BaseModel):

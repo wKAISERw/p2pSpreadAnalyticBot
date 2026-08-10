@@ -48,10 +48,10 @@ class CardNotifier:
         tx_count = await self._db.get_card_transactions_count(card_id, hours=24)
 
         # Визначаємо константи залежно від напрямку
-        max_single = limits.get("max_single_tx_out" if direction == "buy" else "max_single_tx_in", 29999.0)
-        daily_max = limits.get("daily_out_max" if direction == "buy" else "daily_in_max", 150000.0)
-        monthly_max = limits.get("monthly_out_max" if direction == "buy" else "monthly_in_max", 400000.0)
-        max_tx = limits.get("max_tx_per_day", 15)
+        max_single = limits["max_single_tx_out" if direction == "buy" else "max_single_tx_in"]
+        daily_max = limits["daily_out_max" if direction == "buy" else "daily_in_max"]
+        monthly_max = limits["monthly_out_max" if direction == "buy" else "monthly_in_max"]
+        max_tx = limits["max_tx_per_day"]
 
         # Прорахунок проєкції Балансу
         bal_before = c.get("balance", 0.0)
@@ -165,10 +165,10 @@ class CardNotifier:
 
             # Fetch destination IN limits
             dest_limits = await self._db.get_card_effective_limits(dest_id)
-            dest_single_in = dest_limits.get("max_single_tx_in", 29999.0)
-            dest_daily_in = dest_limits.get("daily_in_max", 150000.0)
-            dest_monthly_in = dest_limits.get("monthly_in_max", 400000.0)
-            dest_max_tx = dest_limits.get("max_tx_per_day", 15)
+            dest_single_in = dest_limits["max_single_tx_in"]
+            dest_daily_in = dest_limits["daily_in_max"]
+            dest_monthly_in = dest_limits["monthly_in_max"]
+            dest_max_tx = dest_limits["max_tx_per_day"]
 
             # Check if destination can accept this single transaction amount
             if dest_single_in != -1 and dest_single_in != -1.0 and needed_transfer > dest_single_in:
@@ -197,10 +197,10 @@ class CardNotifier:
                 
                 # Fetch source OUT limits
                 src_limits = await self._db.get_card_effective_limits(src_id)
-                src_single_out = src_limits.get("max_single_tx_out", 29999.0)
-                src_daily_out = src_limits.get("daily_out_max", 150000.0)
-                src_monthly_out = src_limits.get("monthly_out_max", 400000.0)
-                src_max_tx = src_limits.get("max_tx_per_day", 15)
+                src_single_out = src_limits["max_single_tx_out"]
+                src_daily_out = src_limits["daily_out_max"]
+                src_monthly_out = src_limits["monthly_out_max"]
+                src_max_tx = src_limits["max_tx_per_day"]
 
                 # Check if source can send this single transaction amount
                 if src_single_out != -1 and src_single_out != -1.0 and needed_transfer > src_single_out:
@@ -309,10 +309,10 @@ class CardNotifier:
             try:
                 # Отримуємо ефективні ліміти для конкретної картки
                 limits = await self._db.get_card_effective_limits(card_id)
-                max_single  = limits.get("max_single_tx_in" if direction == "sell" else "max_single_tx_out", 29999.0)
-                daily_max   = limits.get("daily_in_max" if direction == "sell" else "daily_out_max", 150000.0)
-                monthly_max = limits.get("monthly_in_max" if direction == "sell" else "monthly_out_max", 400000.0)
-                max_tx      = limits.get("max_tx_per_day", 15)
+                max_single  = limits["max_single_tx_in" if direction == "sell" else "max_single_tx_out"]
+                daily_max   = limits["daily_in_max" if direction == "sell" else "daily_out_max"]
+                monthly_max = limits["monthly_in_max" if direction == "sell" else "monthly_out_max"]
+                max_tx      = limits["max_tx_per_day"]
 
                 # 1. Cooldown
                 cooldown_until = float(c.get("cooldown_until", 0))
@@ -485,7 +485,9 @@ class CardNotifier:
             cache_key: str = None,
             buy_card_spent_fiat: float = 0.0,
             buy_card_id: str = None,
-            show_breakdown: bool = True
+            show_breakdown: bool = True,
+            route_banks: Optional[list] = None,
+            declared_banks: Optional[list] = None,
     ) -> tuple[str, list, Optional[dict]]:
         """
         Повертає (text_block, keyboard_rows, chosen_card_dict) для вбудовування в алерт.
@@ -509,7 +511,14 @@ class CardNotifier:
             cache_key = f"cm_{order_id[:10]}_{int(time.time())}"
             _card_matching_cache[cache_key] = {"order_id": order_id, "target_amount": target_amount, "direction": direction, "bank": bank, "excluded_cards": [], "found_cards": []}
 
-        result = await engine.run(chat_id, bank, target_amount, direction, crypto_available=True, excluded_cards=excluded if excluded else None)
+        # Маршрут може виходити за межі банку мерчанта — див. етап 3 плану
+        # й фічі /features → КАРТКИ. Список банків збирає викликач (сканер),
+        # тут лише передаємо його далі разом із заявленими банками ордера.
+        result = await engine.run(
+            chat_id, bank, target_amount, direction, crypto_available=True,
+            excluded_cards=excluded if excluded else None,
+            banks=route_banks, declared_banks=declared_banks,
+        )
 
         if result.status in ("no_cards", "disabled"):
             if result.status == "disabled":
@@ -531,6 +540,21 @@ class CardNotifier:
             text += diagnosis
             return text, [], None
 
+        # Маршрут виходить за межі того, що мерчант заявив в оголошенні.
+        # Це не помилка — мерчанти часто перелічують не всі банки, які
+        # приймають, — але це й не узгоджено. Питання «чи можна з ПУМБ?»
+        # коштує одного повідомлення в чаті, а неузгоджений переказ —
+        # апеляції, тож попередження стоїть ПЕРЕД кнопкою «взяти».
+        confirm_block = ""
+        if result.needs_confirmation_banks:
+            from config.banks import bank_display_name
+
+            names = ", ".join(bank_display_name(b) for b in result.needs_confirmation_banks)
+            confirm_block = (
+                f"❓ <b>Спитайте в чаті перед оплатою:</b> мерчант не вказував "
+                f"<b>{names}</b> в оголошенні. Уточніть, чи приймає переказ звідти.\n"
+            )
+
         c = cards[0]
         card_id = c.get("id") or c.get("card_id")
         drop_text = "Власна" if c.get("is_own", 1) else "Дроп"
@@ -539,10 +563,10 @@ class CardNotifier:
 
         # Стягуємо актуальні ліміти для побудови проєкції (ефективні з урахуванням локальних)
         limits = await self._db.get_card_effective_limits(card_id)
-        max_single = limits.get("max_single_tx_in" if direction == "sell" else "max_single_tx_out", 29999.0)
-        daily_max = limits.get("daily_in_max" if direction == "sell" else "daily_out_max", 150000.0)
-        monthly_max = limits.get("monthly_in_max" if direction == "sell" else "monthly_out_max", 400000.0)
-        max_tx = limits.get("max_tx_per_day", 15)
+        max_single = limits["max_single_tx_in" if direction == "sell" else "max_single_tx_out"]
+        daily_max = limits["daily_in_max" if direction == "sell" else "daily_out_max"]
+        monthly_max = limits["monthly_in_max" if direction == "sell" else "monthly_out_max"]
+        max_tx = limits["max_tx_per_day"]
 
         used_daily = await self._db.get_rolling_used(card_id, direction, hours=24)
         used_monthly = await self._db.get_monthly_used(card_id, direction)
@@ -625,11 +649,13 @@ class CardNotifier:
         if use_smart_spoiler and is_red_zone:
             prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text} | {warmth_badge}) 🚨\n"
             warn_msg = f"⚠️ <b>РИЗИК ФІНМОНУ: {', '.join(warning_reasons)}</b>\n"
-            text = f"{prefix_header}{warn_msg}{card_info_body}"  # Без блокуblockquote!
+            text = f"{prefix_header}{warn_msg}{confirm_block}{card_info_body}"  # Без блокуblockquote!
         else:
-            # Звичайний безпечний режим — ховаємо все під спойлер
+            # Звичайний безпечний режим — ховаємо все під спойлер.
+            # Попередження про неузгоджений банк лишається ЗОВНІ спойлера:
+            # питання до мерчанта має бути видно без розгортання.
             prefix_header = f"{prefix}<b>{c['bank_name'].capitalize()} *{c['last_four']}</b> ({drop_text} | {warmth_badge})\n"
-            text = f"{prefix_header}<blockquote expandable>{card_info_body}</blockquote>"
+            text = f"{prefix_header}{confirm_block}<blockquote expandable>{card_info_body}</blockquote>"
 
         # Check settings to decide if we append balance breakdown
         show_breakdown_config = bool(card_settings.get("show_balances_breakdown", 1))

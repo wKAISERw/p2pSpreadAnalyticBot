@@ -430,6 +430,13 @@ class TelegramNotifier:
         from bot.taker_builder import send_taker_single
         await send_taker_single(self, order, mode, chat_id=chat_id, display_settings=display_settings)
 
+    async def send_plain(self, chat_id: int, text: str) -> None:
+        """Службове повідомлення без картки ордера — пояснення, дайджести."""
+        try:
+            await self._bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.debug("send_plain → %s: %s", chat_id, e)
+
     async def send_maker_buy_suggestion(self, chat_id: int, advice: dict) -> None:
         from bot.maker_builder import send_maker_buy_suggestion
         await send_maker_buy_suggestion(self, chat_id, advice)
@@ -449,6 +456,8 @@ class TelegramNotifier:
             BotCommand(command="stop", description="🛑 Зупинити мій сканер"),
             BotCommand(command="cards", description="💳 Дашборд моїх карток"),
             BotCommand(command="report", description="📊 Звіт по оборотах карток"),
+            BotCommand(command="checkup", description="🩺 Перевірити налаштування режиму"),
+            BotCommand(command="card_rejections", description="🔍 Чому ордери не проходять по картках"),
             BotCommand(command="set_bank_limits", description="⚙️ Налаштування банківських лімітів"),
             BotCommand(command="active", description="📡 Активні спреди зараз"),
             BotCommand(command="mode", description="🎯 Режим сканування"),

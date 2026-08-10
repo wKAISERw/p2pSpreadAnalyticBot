@@ -3,6 +3,8 @@ import asyncio
 import time
 from typing import List, Tuple
 from decimal import Decimal
+from config.banks import BankRegistry
+from core.engine import bank_discovery
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.bybit_p2p_client import BybitP2PClient
 
@@ -17,13 +19,21 @@ class BybitExchange(BaseExchange):
 
     def _parse_order(self, item: dict) -> Order:
         """Перетворює сирий JSON Bybit на строгу модель Order з точною математикою (Decimal)."""
+        # Bybit — єдина біржа, яка кладе сирий paymentType без мапінгу через
+        # BankRegistry. Коди, що збігаються з внутрішніми (43, 14, 64…),
+        # працюють випадково; решта стає псевдобанком, під який картка не
+        # знайдеться ніколи. Поведінку лишаємо як була (код іде далі як є —
+        # інакше зміниться склад bank_codes і матчинг), але невідоме
+        # фіксуємо разом із назвою, яку біржа й так прислала.
         raw_payments = item.get("payments", [])
         parsed_banks = []
         for p in raw_payments:
-            if isinstance(p, dict):
-                parsed_banks.append(str(p.get("paymentType", "")))
-            else:
-                parsed_banks.append(str(p))
+            code = str(p.get("paymentType", "")) if isinstance(p, dict) else str(p)
+            if not code:
+                continue
+            if BankRegistry.from_api_code(code, "Bybit") is None:
+                bank_discovery.note("Bybit", code, p)
+            parsed_banks.append(code)
 
         is_online = bool(item.get("isOnline"))
         last_online_mins = 0

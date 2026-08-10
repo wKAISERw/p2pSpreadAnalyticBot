@@ -547,3 +547,58 @@ def _risk_badge(order: Order, short: bool = False) -> str:
             result += f"<blockquote expandable>{spoiler_text}</blockquote>\n"
  
     return result
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Капітал: скільки грошей є проти скільки піде в одну угоду
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def format_capital(breakdown: dict, capital_mode: str, manual_capital: float,
+                   card_module_enabled: bool) -> tuple[str, str]:
+    """
+    Два рядки про капітал: сама цифра і, за потреби, стеля однієї угоди.
+
+    Капітал — це СУМА грошей на картках, і називати так максимум по одному
+    банку неправильно: людина бачить у гаманці 31 123 ₴, а не 21 298 ₴.
+    Раніше два екрани розходились у цьому між собою — дашборд показував
+    суму, меню фільтрів максимум по банку, і обидва підписували це словом
+    «Капітал».
+
+    Але й ховати стелю не можна: движок збирає суму в межах ОДНОГО банку
+    (див. PLAN_CARD_MATCHING.md, 2.2), тож в угоду піде менше. Тому це два
+    різні рядки з різними назвами, а не одна цифра з приміткою.
+
+    Повертає (значення капіталу, окремий рядок про угоду або "").
+    """
+    total = float(breakdown.get("total", 0.0))
+    usable = float(breakdown.get("usable", 0.0))
+    best_bank = str(breakdown.get("best_bank", "") or "")
+
+    def _uah(value: float) -> str:
+        return f"{value:,.0f}".replace(",", " ")
+
+    if capital_mode == "auto":
+        capital_text = f"{total:,.1f} (Авто)".replace(",", " ")
+    else:
+        capital_text = f"{manual_capital:,.1f}".replace(",", " ")
+        if card_module_enabled and 0 < total < manual_capital:
+            capital_text += f" (на картках {_uah(total)})"
+
+    # Рядок пояснює рівно одну річ: гроші лежать у різних банках, а мерчант
+    # приймає один. Тож показуємо його лише коли стелю задає САМЕ це, а не
+    # ручний ліміт, який людина поставила собі сама — інакше пояснення
+    # називало б причиною те, що причиною не є.
+    bank_split_binds = usable + 1 < total
+    if capital_mode != "auto":
+        bank_split_binds = bank_split_binds and usable <= manual_capital
+
+    if bank_split_binds and usable > 0:
+        bank_note = f" · {best_bank}" if best_bank else ""
+        trade_line = (
+            f"В одну угоду: <b>{_uah(usable)} ₴</b>{bank_note} "
+            f"<i>(гроші в різних банках, а мерчант приймає один)</i>"
+        )
+    else:
+        trade_line = ""
+
+    return capital_text, trade_line

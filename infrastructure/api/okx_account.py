@@ -88,6 +88,25 @@ class OKXAccountClient(BaseHttpClient):
         except Exception as e:
             logger.warning("get_funding_balance: %s", e); return []
 
+    async def get_earn_balance(self, currencies: str = "USDT") -> list[dict]:
+        """
+        Баланс Simple Earn (Savings).
+
+        `redemptAmt` не віднімаємо: те, що вже в процесі викупу, все одно
+        прийде на фандинг, і рахувати його недоступним було б заниженням.
+
+        Написано за документацією й не перевірялось на живому акаунті.
+        """
+        if not self.is_authenticated: return []
+        path = f"/api/v5/finance/savings/balance?ccy={currencies}"
+        try:
+            data = await self._get(f"{BASE_URL}{path}", headers=self._sign_headers("GET", path))
+            return [{"coin": d["ccy"], "free": float(d.get("amt") or 0),
+                     "locked": 0.0, "total": float(d.get("amt") or 0)}
+                    for d in data.get("data", []) if float(d.get("amt") or 0) > 0]
+        except Exception as e:
+            logger.warning("get_earn_balance: %s", e); return []
+
     async def get_my_p2p_orders(self, state: str = "ongoing", limit: int = 20) -> list[dict]:
         """Заглушка: OKX не віддає приватні P2P дані без спеціальних дозволів (повертає 404)"""
         return []

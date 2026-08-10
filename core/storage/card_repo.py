@@ -3,6 +3,10 @@
 from __future__ import annotations
 import logging, time, uuid
 from config.banks import normalize_bank
+from config.card_limits import (
+    FEATURE_INTER_BANK, LIMIT_FIELDS, SPLIT_INTRA_BANK,
+    available_split_modes, default_limits_for_bank, merge_limits,
+)
 from typing import Optional
 import aiohttp
 import aiosqlite
@@ -37,11 +41,37 @@ class CardRepo:
         show_transfer_tips = 1 if settings_dict.get("show_transfer_tips", True) else 0
         cold_card_limit = float(settings_dict.get("cold_card_limit", 2000.0))
 
+        # max_cards_per_order існував у схемі з самого початку і його читав
+        # движок сплітів, але жодне меню його не показувало — і жоден запис
+        # сюди не доходив. При цьому card_notifier радив користувачу
+        # «перевірте max_cards_per_order у налаштуваннях».
+        #        ↓ саме так, а не `... or 3`: нуль теж значення, і `0 or 3`
+        #        мовчки перетворив би його на трійку замість того, щоб
+        #        затиснути в дозволений діапазон.
+        raw_max_cards = settings_dict.get("max_cards_per_order")
+        try:
+            max_cards_per_order = max(1, min(3, int(raw_max_cards)))
+        except (TypeError, ValueError):
+            max_cards_per_order = 3
+
+        # Приймаємо лише режими, які движок реально вміє для цього
+        # користувача: inter_bank потребує увімкненої експериментальної фічі,
+        # інакше це було б налаштування, яке нічого не змінює.
+        split_mode = str(settings_dict.get("card_split_mode") or SPLIT_INTRA_BANK)
+        inter_bank_on = await self.get_feature_status(user_id, FEATURE_INTER_BANK)
+        if split_mode not in available_split_modes(inter_bank_on):
+            split_mode = SPLIT_INTRA_BANK
+
+        show_rejected = str(settings_dict.get("show_rejected_orders", "with_reason") or "with_reason")
+        if show_rejected not in ("with_reason", "hide"):
+            show_rejected = "with_reason"
+
         await self._db.execute(
             """
             INSERT INTO user_card_settings (user_id, card_output_mode, enable_smart_spoiler, card_detail_level,
-                                            enable_in_single_modes, show_balances_breakdown, show_transfer_tips, cold_card_limit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
+                                            enable_in_single_modes, show_balances_breakdown, show_transfer_tips,
+                                            cold_card_limit, max_cards_per_order, card_split_mode, show_rejected_orders)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user_id) DO
             UPDATE SET
                 card_output_mode = EXCLUDED.card_output_mode,
                 enable_smart_spoiler = EXCLUDED.enable_smart_spoiler,
@@ -49,9 +79,14 @@ class CardRepo:
                 enable_in_single_modes = EXCLUDED.enable_in_single_modes,
                 show_balances_breakdown = EXCLUDED.show_balances_breakdown,
                 show_transfer_tips = EXCLUDED.show_transfer_tips,
-                cold_card_limit = EXCLUDED.cold_card_limit
+                cold_card_limit = EXCLUDED.cold_card_limit,
+                max_cards_per_order = EXCLUDED.max_cards_per_order,
+                card_split_mode = EXCLUDED.card_split_mode,
+                show_rejected_orders = EXCLUDED.show_rejected_orders
             """,
-            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level, enable_in_single_modes, show_balances_breakdown, show_transfer_tips, cold_card_limit)
+            (user_id, card_output_mode, enable_smart_spoiler, card_detail_level,
+             enable_in_single_modes, show_balances_breakdown, show_transfer_tips,
+             cold_card_limit, max_cards_per_order, split_mode, show_rejected)
         )
         await self._db.commit()
 
@@ -109,18 +144,26 @@ class CardRepo:
             return dict(row) if row else None
 
     async def set_user_bank_limit(self, user_id: int, bank_name: str, field: str, value: float) -> None:
-        """Оновлює одне поле лімітів банку. Створює рядок з дефолтами якщо його немає."""
+        """
+        Оновлює одне поле лімітів банку. Створює порожній рядок, якщо його немає.
+
+        Саме порожній: NULL у колонці означає «користувач це поле не чіпав»,
+        і тоді діє довідник банку. Раніше рядок створювався з DEFAULT-ами DDL,
+        тож натиснути «Макс TX/день» означало заразом мовчки зафіксувати ще сім
+        лімітів на старих спільних цифрах — і жоден профіль банку до них уже не
+        дотягувався.
+        """
         if not self._db:
             return
-        allowed = {
-            "daily_out_max", "daily_in_max", "monthly_out_max", "monthly_in_max",
-            "max_single_tx_out", "max_single_tx_in", "max_tx_per_day", "cooldown_hours"
-        }
-        if field not in allowed:
+        if field not in LIMIT_FIELDS:
             return
-        # Upsert: insert default row if missing
+        # NULL-и виставляємо явно: у вже створених базах DDL несе старі
+        # DEFAULT-и, і CREATE TABLE IF NOT EXISTS їх не перепише.
+        nulls = ", ".join(LIMIT_FIELDS)
+        placeholders = ", ".join(["NULL"] * len(LIMIT_FIELDS))
         await self._db.execute(
-            "INSERT OR IGNORE INTO user_bank_limits (user_id, bank_name) VALUES (?, ?)",
+            f"INSERT OR IGNORE INTO user_bank_limits (user_id, bank_name, {nulls}) "
+            f"VALUES (?, ?, {placeholders})",
             (user_id, bank_name)
         )
         await self._db.execute(
@@ -131,18 +174,12 @@ class CardRepo:
 
     async def get_card_effective_limits(self, card_id: str, owner_id: int = None, bank_name: str = None) -> dict:
         """Returns the effective limits for a card, merging global bank limits with local overrides.
-        
-        Priority: card-local override > global bank limit > hardcoded default.
+
+        Priority: card-local override > global bank limit > довідник банку > глобальний дефолт.
         If owner_id/bank_name are not provided, they are fetched from the card row.
         """
-        defaults = {
-            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
-            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
-            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
-            "max_tx_per_day": 15, "cooldown_hours": 24
-        }
         if not self._db:
-            return defaults
+            return default_limits_for_bank(bank_name)
 
         # Resolve owner_id/bank_name if not passed
         if owner_id is None or bank_name is None:
@@ -152,7 +189,7 @@ class CardRepo:
             ) as cur:
                 row = await cur.fetchone()
             if not row:
-                return defaults
+                return default_limits_for_bank(bank_name)
             owner_id = row["owner_id"]
             bank_name = row["bank_name"]
             is_custom = row["is_custom_limits"]
@@ -166,36 +203,25 @@ class CardRepo:
             is_custom = row["is_custom_limits"] if row else 0
             override_json = (row["limits_override_json"] if row else None) or "{}"
 
-        # Layer 1: global bank limits
+        # Шар 1: глобальні ліміти банку (NULL у колонці = поле не задане)
         global_limits = await self.get_user_bank_limits(owner_id, bank_name)
-        result = {**defaults}
-        if global_limits:
-            for k in defaults:
-                if k in global_limits and global_limits[k] is not None:
-                    result[k] = global_limits[k]
 
-        # Layer 2: card-local overrides (if enabled)
+        # Шар 2: локальні override-и картки (якщо увімкнені)
+        overrides = None
         if is_custom:
             import json
             try:
                 overrides = json.loads(override_json)
             except (json.JSONDecodeError, TypeError):
-                overrides = {}
-            for k, v in overrides.items():
-                if k in result and v is not None:
-                    result[k] = v
+                overrides = None
 
-        return result
+        return merge_limits(bank_name, global_limits, overrides)
 
     async def update_card_limit_override(self, card_id: str, field: str, value: float) -> None:
         """Update a single limit field for a specific card (local override)."""
         if not self._db:
             return
-        allowed = {
-            "daily_out_max", "daily_in_max", "monthly_out_max", "monthly_in_max",
-            "max_single_tx_out", "max_single_tx_in", "max_tx_per_day", "cooldown_hours"
-        }
-        if field not in allowed:
+        if field not in LIMIT_FIELDS:
             return
 
         import json
@@ -385,8 +411,11 @@ class CardRepo:
             # 4. Авто-cooldown при 95% денного ліміту (C7) — використовує локальні ліміти якщо задано
             limits = await self.get_card_effective_limits(card_id)
             if limits:
-                    daily_max = limits.get(f"daily_{direction}_max", 150000.0)
-                    cooldown_hours = limits.get("cooldown_hours", 24)
+                    # get_card_effective_limits завжди повертає повний набір
+                    # полів, тож фолбеки тут не потрібні — і не потрібні копії
+                    # дефолтів, які колись розійшлись між файлами.
+                    daily_max = limits[f"daily_{direction}_max"]
+                    cooldown_hours = limits["cooldown_hours"]
                     # Підрахунок rolling used за 24г (включаючи щойно записану TX)
                     cutoff_24h = now - (24 * 3600)
                     async with self._db.execute(
@@ -407,6 +436,51 @@ class CardRepo:
         except Exception as e:
             await self._db.rollback()
             logger.error("confirm_transaction failed: %s", e)
+            return
+
+        # Попередження про наближення до ліміту — ПІСЛЯ коміту, окремо від
+        # транзакції. Не всередині try: збій сповіщення не має відкочувати
+        # записану транзакцію, а вона вже успішно записана.
+        await self._warn_on_limit_threshold(card_id, direction)
+
+    async def _warn_on_limit_threshold(self, card_id: str, direction: str) -> None:
+        """
+        Каже людині, що картка ось-ось упреться в стелю.
+
+        Ця перевірка в проєкті вже була — в дашборді карток, тобто
+        спрацьовувала лише якщо відкрити меню. Тепер вона там, де стається
+        сама подія; поруч, у цьому ж методі, з тих самих міркувань живе
+        авто-кулдаун на 95%.
+        """
+        try:
+            import datetime
+
+            from core.engine.limit_watch import check_card_limits, should_notify
+
+            warning = await check_card_limits(self, card_id, direction)
+            if not warning:
+                return
+            if not should_notify(warning, datetime.date.today().isoformat()):
+                return
+
+            async with self._db.execute(
+                "SELECT owner_id FROM cards WHERE id=?", (card_id,)
+            ) as cur:
+                row = await cur.fetchone()
+            if not row:
+                return
+
+            # Пізній імпорт бота — той самий прийом, що вже застосований у
+            # taker_scanner: шар даних не має знати про Telegram на рівні
+            # імпортів модуля.
+            from bot.handlers.core import _bot
+
+            if _bot:
+                await _bot.send_message(
+                    chat_id=row["owner_id"], text=warning.render(), parse_mode="HTML"
+                )
+        except Exception as e:
+            logger.debug("Попередження про ліміт не надіслано: %s", e)
 
     async def release_expired_reservations(self) -> int:
         """
@@ -696,21 +770,21 @@ class CardRepo:
             
             # 2. Get limits (default to buy/out limits since capital is buy budget)
             limits = await self.get_card_effective_limits(card_id)
-            max_tx = limits.get("max_tx_per_day", 15)
-            daily_out = limits.get("daily_out_max", 150000.0)
-            monthly_out = limits.get("monthly_out_max", 400000.0)
-            
+            max_tx = limits["max_tx_per_day"]
+            daily_out = limits["daily_out_max"]
+            monthly_out = limits["monthly_out_max"]
+
             # 3. Daily tx count check
             tx_count = await self.get_card_transactions_count(card_id, hours=24)
-            if tx_count >= max_tx:
+            if max_tx != -1 and tx_count >= max_tx:
                 continue
-                
+
             # 4. Rolling used limits
             used_daily = await self.get_rolling_used(card_id, "out", hours=24)
             used_monthly = await self.get_monthly_used(card_id, "out")
-            
-            avail_daily = max(0.0, daily_out - used_daily)
-            avail_monthly = max(0.0, monthly_out - used_monthly)
+
+            avail_daily = float("inf") if daily_out == -1 else max(0.0, daily_out - used_daily)
+            avail_monthly = float("inf") if monthly_out == -1 else max(0.0, monthly_out - used_monthly)
             
             # Money we can actually spend from this card: bounded by balance and limits
             card_avail = min(
@@ -760,19 +834,28 @@ class CardRepo:
         Навіщо окремо від get_user_auto_capital: та повертає одне число, і
         яке саме — залежить від того, чи передали allowed_banks. Меню
         «Фільтри» кликало її без банків і показувало СУМУ по всіх картках,
-        а движок під час угоди бере максимум по одному банку. Через це в
+        а движок під час угоди брав максимум по одному банку. Через це в
         інтерфейсі стояв, скажімо, «Капітал: 31 123 ₴», тоді як угода
         обмежувалась 21 298 ₴ — і розбіжність нічим не пояснювалась.
 
+        Після етапу 3 стеля залежить від фічі `inter_bank_matching`: з нею
+        движок збирає суму з карток різних банків, і «максимум по одному
+        банку» перестає бути правдою. Тому тут читається стан фічі — інакше
+        інтерфейс і далі показував би обмеження, якого вже немає.
+
         Повертає:
-          total    — сума доступного по всіх банках (скільки грошей узагалі);
-          usable   — максимум в одному банку (скільки піде в одну угоду);
-          bestBank — де саме цей максимум;
-          banks    — розклад, щоб було видно, чому числа різні.
+          total     — сума доступного по всіх банках (скільки грошей узагалі);
+          usable    — скільки піде в одну угоду;
+          bestBank  — де саме максимум (порожньо, коли кошик міжбанківський);
+          interBank — чи діє міжбанківський набір;
+          banks     — розклад, щоб було видно, чому числа різні.
         """
+        inter_bank = await self.get_feature_status(user_id, FEATURE_INTER_BANK)
+
         cards = await self.get_cards(user_id, status="active")
         if not cards:
-            return {"total": 0.0, "usable": 0.0, "best_bank": "", "banks": {}}
+            return {"total": 0.0, "usable": 0.0, "best_bank": "",
+                    "inter_bank": inter_bank, "banks": {}}
 
         banks: dict[str, float] = {}
         for card in cards:
@@ -792,15 +875,137 @@ class CardRepo:
 
         banks = {b: v for b, v in banks.items() if v > 0}
         if not banks:
-            return {"total": 0.0, "usable": 0.0, "best_bank": "", "banks": {}}
+            return {"total": 0.0, "usable": 0.0, "best_bank": "",
+                    "inter_bank": inter_bank, "banks": {}}
 
+        total = round(sum(banks.values()), 2)
         best_bank = max(banks, key=banks.get)
+
+        # З міжбанківським кошиком стеля однієї угоди — це вся сума, а не
+        # найбільший банк. Назву банку тоді не показуємо: маршрут збирається
+        # з кількох, і одна назва вводила б в оману.
+        if inter_bank:
+            return {
+                "total": total, "usable": total, "best_bank": "",
+                "inter_bank": True,
+                "banks": {b: round(v, 2) for b, v in sorted(banks.items(), key=lambda kv: -kv[1])},
+            }
+
         return {
-            "total": round(sum(banks.values()), 2),
+            "total": total,
             "usable": round(banks[best_bank], 2),
             "best_bank": best_bank,
+            "inter_bank": False,
             "banks": {b: round(v, 2) for b, v in sorted(banks.items(), key=lambda kv: -kv[1])},
         }
+
+    # ── Статистика відмов карткового модуля ──────────────────────────────
+    #
+    # Етап 3 плану (кошики, міжбанківський набір карток) свідомо не почато
+    # доти, доки не видно, які причини реально переважають. Якщо 90% відмов
+    # має одну просту причину, складна система з 25 кошиками надлишкова, а
+    # будувати її наосліп — це вгадування.
+
+    async def log_rejections(self, user_id: int, mode: str, rejections: list) -> int:
+        """
+        Записує причини відмов за поточний день. Повертає кількість НОВИХ рядків.
+
+        Дедуп за (день, режим, ордер, код): один ордер, що провисів у стакані
+        годину, дає одну одиницю статистики, а не шістдесят.
+        """
+        if not self._db or not rejections:
+            return 0
+
+        import datetime
+        day = datetime.date.today().isoformat()
+        now = time.time()
+
+        added = 0
+        try:
+            for r in rejections:
+                item = r.as_dict() if hasattr(r, "as_dict") else dict(r)
+                code = item.get("code") or ""
+                order_id = item.get("order_id") or ""
+                if not code or not order_id:
+                    continue
+                async with self._db.execute(
+                    """
+                    INSERT OR IGNORE INTO card_rejection_log
+                        (user_id, day, mode, order_id, code, bank, reason,
+                         shortfall_uah, first_seen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, day, mode, order_id, code,
+                     item.get("bank") or "", item.get("reason") or "",
+                     float(item.get("shortfall_uah") or 0.0), now),
+                ) as cur:
+                    added += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+            await self._db.commit()
+        except Exception as e:
+            logger.error("log_rejections failed: %s", e)
+        return added
+
+    async def get_rejection_stats(self, user_id: int, days: int = 7) -> dict:
+        """Розклад причин відмов за останні N днів."""
+        if not self._db:
+            return {"days": days, "total": 0, "codes": [], "since": ""}
+
+        import datetime
+        since = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
+
+        async with self._db.execute(
+            """
+            SELECT code,
+                   COUNT(*)                AS hits,
+                   AVG(NULLIF(shortfall_uah, 0)) AS avg_shortfall,
+                   MAX(shortfall_uah)      AS max_shortfall,
+                   GROUP_CONCAT(DISTINCT bank) AS banks
+            FROM card_rejection_log
+            WHERE user_id = ? AND day >= ?
+            GROUP BY code
+            ORDER BY hits DESC
+            """,
+            (user_id, since),
+        ) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+
+        from core.engine.rejection_codes import OBSERVATION_CODES
+
+        for r in rows:
+            r["avg_shortfall"] = round(r["avg_shortfall"] or 0.0, 2)
+            r["max_shortfall"] = round(r["max_shortfall"] or 0.0, 2)
+            r["banks"] = [b for b in (r.get("banks") or "").split(",") if b]
+
+        # Спостереження (ордер пройшов, але меншим) не входять у частку
+        # відмов: інакше вийшло б «90% відмов» по ордерах, які користувач
+        # насправді отримав.
+        codes = [r for r in rows if r["code"] not in OBSERVATION_CODES]
+        observations = [r for r in rows if r["code"] in OBSERVATION_CODES]
+
+        total = sum(r["hits"] for r in codes)
+        for r in codes:
+            r["share_pct"] = round(r["hits"] * 100.0 / total, 1) if total else 0.0
+        for r in observations:
+            r["share_pct"] = 0.0
+
+        return {
+            "days": days, "since": since, "total": total, "codes": codes,
+            "observations": observations,
+            "observed_total": sum(r["hits"] for r in observations),
+        }
+
+    async def prune_rejection_log(self, retention_days: int = 14) -> int:
+        """Прибирає старі рядки — таблиця службова, вічно рости їй нема чого."""
+        if not self._db:
+            return 0
+        import datetime
+        cutoff = (datetime.date.today() - datetime.timedelta(days=retention_days)).isoformat()
+        async with self._db.execute(
+            "DELETE FROM card_rejection_log WHERE day < ?", (cutoff,)
+        ) as cur:
+            deleted = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        await self._db.commit()
+        return deleted
 
     async def get_card_warmth_stats(self, card_id: str) -> tuple[int, float]:
         """

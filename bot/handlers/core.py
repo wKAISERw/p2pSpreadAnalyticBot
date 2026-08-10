@@ -127,7 +127,37 @@ EXPERIMENTAL_FEATURES = {
                 "desc": "Сканер підтягуватиме суму закупівлі до мінімального ліміту BUY-мерчанта, якщо дзеркальний об'єм замалий. Частина крипти буде продана одразу з шаленим профітом, а залишок осяде у твоєму інвентарі за супер-дешевою ціною закупівлі."
             }
         }
-    }
+    },
+    "cards": {
+        "title": "💳 КАРТКИ ТА МАРШРУТИ",
+        "features": {
+            "inter_bank_matching": {
+                "name": "Кошики карток між банками",
+                "desc": (
+                    "Дозволяє збирати суму угоди з карток РІЗНИХ банків, а не лише "
+                    "того одного, який вказав мерчант. Саме через це обмеження 31 000 ₴ "
+                    "на трьох картках перетворювались на 21 000 ₴ доступних.\n\n"
+                    "Розблоковує режим «Спліт: між банками» в налаштуваннях карток і "
+                    "робить капітал сумою по всіх банках.\n\n"
+                    "⚠️ Експеримент: мерчант може відмовитись приймати переказ з банку, "
+                    "якого немає в його оголошенні. Бот попередить, коли маршрут "
+                    "потребує узгодження в чаті."
+                )
+            },
+            "ignore_merchant_bank_filter": {
+                "name": "Ігнорувати фільтр банків мерчанта",
+                "desc": (
+                    "Показувати ордери, навіть якщо жоден із ваших банків не вказаний "
+                    "в оголошенні мерчанта, і пропонувати під них ваші картки.\n\n"
+                    "Мерчанти часто вказують не всі банки, які насправді приймають. "
+                    "Бот у такому разі підбере картки й нагадає СПИТАТИ В ЧАТІ, чи "
+                    "можна з них переказувати.\n\n"
+                    "⚠️ Експеримент: узгодження з мерчантом — на вас. Без підтвердження "
+                    "переказ з невказаного банку може закінчитись апеляцією."
+                )
+            },
+        }
+    },
 }
 
 
@@ -428,26 +458,29 @@ def bump_stat(key: str, amount: int = 1) -> None:
 async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
     user_capital = str(settings.working_capital_uah)
     user_min_amount = "без обмежень"
-    user_spread = "0.50"
+    user_spread = "0.50%"
+    capital_trade_line = ""
     if _db:
         active_users = await _db.get_active_users()
         for u in active_users:
             if u["user_id"] == user_id:
                 card_settings = await _db.get_user_card_settings(user_id)
-                card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
-                if u.get("capital_mode") == "auto":
-                    auto_cap = await _db.get_user_auto_capital(user_id)
-                    user_capital = f"{auto_cap:.1f} (Авто)"
-                else:
-                    manual_cap = float(u['capital'])
-                    if card_module_enabled:
-                        auto_cap = await _db.get_user_auto_capital(user_id)
-                        if auto_cap > 0 and auto_cap < manual_cap:
-                            user_capital = f"{manual_cap:.1f} (Обмеж. до {auto_cap:.1f})"
-                        else:
-                            user_capital = f"{manual_cap:.1f}"
-                    else:
-                        user_capital = f"{manual_cap:.1f}"
+                card_module_enabled = bool(
+                    card_settings and card_settings.get("card_module_mode") != "off"
+                )
+                # Формат капіталу спільний із меню фільтрів. Дві копії цієї
+                # логіки вже встигли розійтись: дашборд показував суму по
+                # всіх картках, меню — максимум по одному банку, і обидва
+                # підписували це словом «Капітал».
+                from bot.formatters import format_capital
+
+                breakdown = await _db.get_user_capital_breakdown(user_id)
+                user_capital, capital_trade_line = format_capital(
+                    breakdown,
+                    u.get("capital_mode") or "manual",
+                    float(u["capital"]),
+                    card_module_enabled,
+                )
                 strategy = u.get("spread_strategy", "min")
                 min_sp = u.get("min_spread", 0.5)
                 max_sp = u.get("max_spread", 0.0)
@@ -473,8 +506,12 @@ async def _generate_dashboard_text(user_id: int) -> tuple[str, bool]:
         f"Статус ядра: {status_text}\n\n"
         "🛠 <b>Твої персональні фільтри:</b>\n"
         f"├ Капітал: <b>{user_capital} ₴</b>\n"
-        f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
-        f"└ Мін. спред: <b>{user_spread}%</b>\n\n"
+        + (f"├ {capital_trade_line}\n" if capital_trade_line else "")
+        + f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
+        # Знак відсотка вже входить у user_spread (він буває «≥ 0.50%»,
+        # «0.50% – 1.20%»), тож у шаблоні його бути не повинно: виходило
+        # «≥ 0.50%%».
+        f"└ Мін. спред: <b>{user_spread}</b>\n\n"
         "<i>👇 Використовуй меню нижче для управління:</i>"
     )
     return text, is_active

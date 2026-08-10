@@ -27,6 +27,15 @@ class AppState:
         }
 
         self.opportunities = []
+        # Ті самі зв'язки в сирому вигляді, ключ — id із opportunities.
+        #
+        # `opportunities` уже серіалізовані під фронт, а персональні фільтри
+        # (капітал, спред, банки, пороги мерчанта, чорний список) написані
+        # для сирого opp з об'єктами Order — саме їх читає
+        # AlertDispatcher._user_wants. Без цієї пари сайт міг би або
+        # показувати всім однаковий глобальний список, або отримати другу
+        # копію логіки фільтрації, яка неминуче розійдеться з першою.
+        self.opportunities_raw = {}
         self.current_alerts = []      # SpreadAlert objects for /active command
         self.last_buy_grouped = {}
         self.last_sell_grouped = {}

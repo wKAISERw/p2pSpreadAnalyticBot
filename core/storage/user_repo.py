@@ -417,7 +417,8 @@ class UserRepo:
                              -- поводився як CARD_ENFORCED незалежно від налаштування.
                               COALESCE(buy_balance_mode, 'CARD_ENFORCED') AS buy_balance_mode,
                               COALESCE(buy_auto_scale_down, 1)       AS buy_auto_scale_down,
-                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up
+                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up,
+                              COALESCE(preferred_network, '')        AS preferred_network
                        FROM scanner_users
                        WHERE is_active = 1
                          AND COALESCE(is_alerts_active, 1) = 1"""
@@ -481,6 +482,8 @@ class UserRepo:
                     "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
                     "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down", 1)),
                     "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up", 1)),
+                    # Порожнє = найдешевша спільна мережа (стара поведінка).
+                    "preferred_network": (r_dict.get("preferred_network") or "").upper(),
                 })
             return result
         except Exception as e:
@@ -537,7 +540,8 @@ class UserRepo:
                              -- поводився як CARD_ENFORCED незалежно від налаштування.
                               COALESCE(buy_balance_mode, 'CARD_ENFORCED') AS buy_balance_mode,
                               COALESCE(buy_auto_scale_down, 1)       AS buy_auto_scale_down,
-                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up
+                              COALESCE(buy_auto_scale_up, 1)         AS buy_auto_scale_up,
+                              COALESCE(preferred_network, '')        AS preferred_network
                        FROM scanner_users
                        WHERE user_id = ?""",
                     (user_id,),
@@ -598,6 +602,7 @@ class UserRepo:
                 "buy_balance_mode": r_dict.get("buy_balance_mode") or "CARD_ENFORCED",
                 "buy_auto_scale_down": int(r_dict.get("buy_auto_scale_down", 1)),
                 "buy_auto_scale_up": int(r_dict.get("buy_auto_scale_up", 1)),
+                "preferred_network": (r_dict.get("preferred_network") or "").upper(),
             }
         except Exception as e:
             logger.error("get_user_by_id [%d]: %s", user_id, e)

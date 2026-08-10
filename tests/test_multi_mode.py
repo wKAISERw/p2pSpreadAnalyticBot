@@ -126,10 +126,14 @@ class TestTakerPathCoversEveryMode(unittest.IsolatedAsyncioTestCase):
 
         seen_modes: list[str] = []
 
+        from core.engine.taker_scanner import TakerScanResult
+
         class FakeScanner:
-            async def find_orders_for_user(self, user, buy_grouped, sell_grouped):
+            db = None
+
+            async def scan(self, user, buy_grouped, sell_grouped):
                 seen_modes.append(user["scanner_mode"])
-                return []
+                return TakerScanResult()
 
         user = {
             "user_id": USER_ID, "chat_id": USER_ID,
@@ -154,9 +158,13 @@ class TestTakerPathCoversEveryMode(unittest.IsolatedAsyncioTestCase):
         dedup.seen.return_value = False
         dedup.mark.side_effect = marked.append
 
+        from core.engine.taker_scanner import TakerScanResult
+
         class FakeScanner:
-            async def find_orders_for_user(self, user, buy_grouped, sell_grouped):
-                return [_order()]
+            db = None
+
+            async def scan(self, user, buy_grouped, sell_grouped):
+                return TakerScanResult(orders=[_order()])
 
         notifier = MagicMock()
         notifier.send_taker_to_user = MagicMock(return_value=_noop())

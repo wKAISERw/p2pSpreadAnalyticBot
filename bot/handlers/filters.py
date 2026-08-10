@@ -30,6 +30,7 @@ from bot.handlers.core import (
 from config.runtime import runtime_config
 from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
 from config import settings
+from core.engine.readiness import readiness_block
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -43,7 +44,8 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
     user_capital = str(settings.working_capital_uah)
     user_min_amount = "без обмежень"
     user_spread = "0.50"
-    
+    capital_trade_line = ""
+
     if _db:
         conn = getattr(_db, "db", None) or getattr(_db, "_db", _db)
         async with conn.execute(
@@ -56,32 +58,19 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
             card_settings = await _db.get_user_card_settings(call.from_user.id)
             card_module_enabled = card_settings and card_settings.get("card_module_mode") != "off"
             
-            # Капітал показуємо тим числом, яким реально можна оперувати.
+            # Капітал — це сума грошей на картках. Максимум по одному банку —
+            # окремий рядок, бо це інша величина: скільки з них піде в ОДНУ
+            # угоду. Раніше тут стояла спроба втиснути обидві цифри в один
+            # рядок, і слово «Капітал» діставалось не тій із них.
             #
-            # get_user_auto_capital() без банків повертає СУМУ по всіх
-            # картках, а угода йде з карток одного банку — движок бере
-            # максимум по банку. Через це в меню стояло, скажімо,
-            # «31 123 ₴», а масштабування під ордер писало «21 298 ₴», і
-            # розбіжність нічим не пояснювалась. Тепер основна цифра —
-            # доступна в угоді, а загальна сума йде поруч як довідка.
+            # Формат спільний із дашбордом (/start): дві копії цієї логіки
+            # вже одного разу розійшлись між собою.
+            from bot.formatters import format_capital
+
             breakdown = await _db.get_user_capital_breakdown(call.from_user.id)
-            usable = float(breakdown.get("usable", 0.0))
-            total = float(breakdown.get("total", 0.0))
-            best_bank = str(breakdown.get("best_bank", "") or "")
-
-            spread_note = ""
-            if total > usable + 1:
-                spread_note = f" <i>(на картках {total:,.0f}, у різних банках)</i>".replace(",", " ")
-
-            if cap_mode == "auto":
-                bank_note = f" · {best_bank}" if best_bank else ""
-                user_capital = f"{usable:.1f} (Авто{bank_note}){spread_note}"
-            else:
-                manual_cap = float(row[0])
-                if card_module_enabled and usable > 0 and usable < manual_cap:
-                    user_capital = f"{manual_cap:.1f} (Обмеж. до {usable:.1f}){spread_note}"
-                else:
-                    user_capital = f"{manual_cap:.1f}"
+            user_capital, capital_trade_line = format_capital(
+                breakdown, cap_mode, float(row[0]), bool(card_module_enabled)
+            )
             _min_amt = float(row[1] or 0.0)
             user_min_amount = f"{_min_amt:.0f} ₴" if _min_amt > 0 else "без обмежень"
             user_spread = f"{row[2]:.2f}"
@@ -92,7 +81,8 @@ async def on_filters_menu(call: CallbackQuery, state: FSMContext) -> None:
         "🎛 <b>ARBIX QUANTUM | Налаштування фільтрів</b>\n\n"
         "Тут ви можете змінити свої особисті обмеження для спредів та алертів:\n"
         f"├ Капітал: <b>{user_capital} ₴</b>\n"
-        f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
+        + (f"├ {capital_trade_line}\n" if capital_trade_line else "")
+        + f"├ Мін. сума угоди: <b>{user_min_amount}</b>\n"
         f"├ Мін. спред: <b>{user_spread}%</b>\n"
         f"├ Режим сканування: <b>{scanner_mode}</b>\n"
         f"└ Алерти: <b>{'ВКЛЮЧЕНІ 🔔' if is_alerts_active else 'ВИМКНЕНІ 🔕'}</b>\n\n"
@@ -1608,6 +1598,36 @@ def _get_taker_sell_preset(user_row: dict | None) -> dict | None:
     return None
 
 
+async def _effective_buy_usdt(user_id: int, user_row: dict | None, preset: dict) -> float | None:
+    """
+    Скільки USDT виходить під поточні баланси карток, або None.
+
+    Рахується на льоту й нікуди не зберігається — саме тому введена
+    користувачем сума більше не зникає після просадки балансу.
+    """
+    if not _db or not user_row:
+        return None
+    if preset.get("buy_balance_mode") != "AUTO_SCALE":
+        return None
+    try:
+        from core.engine.bank_scope import resolve_banks
+        from core.engine.buy_budget import resolve_buy_budget
+
+        banks = resolve_banks(user_row, "TAKER_BUY", "buy") or None
+        available = await _db.get_user_auto_capital(user_id, allowed_banks=banks)
+        rate = float(preset.get("max_price", 0.0)) or float(preset.get("price_from", 0.0)) or 40.0
+        budget = resolve_buy_budget(
+            preset.get("amount", 0.0), available, rate,
+            allow_scale_down=bool(int(preset.get("buy_auto_scale_down", 1))),
+        )
+        if budget.blocked:
+            return 0.0
+        return budget.effective_usdt
+    except Exception as e:
+        logger.debug("Не вдалось порахувати ефективний обсяг купівлі: %s", e)
+        return None
+
+
 def _get_taker_buy_preset(user_row: dict | None) -> dict | None:
     if not user_row:
         return None
@@ -1733,7 +1753,15 @@ def _sell_preset_text(p: dict, current_rate: float = 0.0) -> str:
     )
 
 
-def _buy_preset_text(p: dict) -> str:
+def _buy_preset_text(p: dict, effective_usdt: float | None = None) -> str:
+    """
+    Збережені налаштування TAKER BUY.
+
+    effective_usdt — скільки виходить за поточних балансів карток. Це
+    похідна величина, а не збережена: об'єм користувача лишається таким, як
+    він його ввів. Показуємо обидві цифри, бо інакше в меню стоїть 700, а
+    алерти приходять на 480, і зв'язку між ними не видно.
+    """
     strategy_labels = {
         "any": "🔓 Будь-яка",
         "max": "⬇️ Макс. ціна",
@@ -1770,10 +1798,17 @@ def _buy_preset_text(p: dict) -> str:
         up = "✅" if int(p.get("buy_auto_scale_up", 1)) else "❌"
         bal_line += f"    └ 📉 Авто-зменшення: {down} | 📈 Авто-збільшення: {up}\n"
 
+    eff_line = ""
+    if effective_usdt is not None and effective_usdt < amount_usdt - 0.01:
+        eff_line = (
+            f"  • Зараз під баланс карток: <b>{effective_usdt:,.2f} USDT "
+            f"(~{effective_usdt * est_rate:,.0f} ₴)</b>\n"
+        )
+
     return (
         f"💾 <b>TAKER BUY — збережені налаштування</b>\n\n"
         f"  • Об'єм: <b>{amount_usdt:,.2f} USDT (~{equiv_uah:,.0f} ₴)</b>\n"
-        f"{strat_line}{mp_line}{lim_line}{bal_line}"
+        f"{eff_line}{strat_line}{mp_line}{lim_line}{bal_line}"
         f"  • Швидкість: {speed}\n\n"
         f"Що робимо?"
     )
@@ -1987,7 +2022,11 @@ async def on_scanner_mode_set(call: CallbackQuery, state: FSMContext) -> None:
             await state.update_data(pending_mode="TAKER_BUY")
             with suppress(TelegramBadRequest):
                 await call.message.edit_text(
-                    _buy_preset_text(preset),
+                    _buy_preset_text(
+                        preset,
+                        await _effective_buy_usdt(call.from_user.id, user_row, preset),
+                    )
+                    + await readiness_block(_db, call.from_user.id, "TAKER_BUY"),
                     reply_markup=_taker_preset_kb("TAKER_BUY"),
                 )
             return await call.answer()
@@ -2024,7 +2063,8 @@ async def on_taker_quick_start(call: CallbackQuery, state: FSMContext) -> None:
                 "🚀 <b>TAKER SELL запущено!</b>\n\n"
                 f"🔒 Мін. ціна продажу: <b>{preset.get('min_sell_price', 0):.4f} ₴</b>\n"
                 f"📦 Об'єм: <b>{preset['amount']:.1f} USDT</b>\n\n"
-                "<i>Алерти надходять як тільки з'являються ордери вище мін. ціни.</i>",
+                "<i>Алерти надходять як тільки з'являються ордери вище мін. ціни.</i>"
+                + await readiness_block(_db, call.from_user.id, "TAKER_SELL"),
                 reply_markup=scanner_mode_kb("TAKER_SELL"),
             )
     elif mode == "TAKER_BUY":
@@ -2037,7 +2077,8 @@ async def on_taker_quick_start(call: CallbackQuery, state: FSMContext) -> None:
                 "🚀 <b>TAKER BUY запущено!</b>\n\n"
                 f"📦 Шукаю ордери для купівлі <b>{preset['amount']:.1f} USDT</b>\n"
                 + (f"💰 Макс. ціна: <b>{preset['max_price']:.2f} ₴</b>\n" if preset.get("max_price", 0) > 0 else "")
-                + "\n<i>Алерти надходять одразу.</i>",
+                + "\n<i>Алерти надходять одразу.</i>"
+                + await readiness_block(_db, call.from_user.id, "TAKER_BUY"),
                 reply_markup=scanner_mode_kb("TAKER_BUY"),
             )
     await call.answer("🚀 Запущено!")

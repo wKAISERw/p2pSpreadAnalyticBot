@@ -7,6 +7,25 @@ getcontext().prec = 28
 logger = logging.getLogger("CrossMatcher")
 
 
+def _leg_network(buy_exchange: str, sell_exchange: str) -> dict:
+    """
+    Мережа, за якою пораховано цей спред, і скільки вона коштує.
+
+    Матчер один на всіх користувачів, тож рахує найдешевшою спільною — і це
+    правильний дефолт. Але хто возить, скажімо, лише TRC20, платить 1 ₮
+    замість 0.01, і його реальний спред нижчий за той, що тут вийшов. Щоб
+    персональний шар міг це врахувати, він мусить знати, від чого
+    відштовхуватись.
+    """
+    if buy_exchange == sell_exchange:
+        return {"name": "INTRA", "fee_usdt": 0.0}
+
+    from core.engine.network_fee_engine import NetworkFeeEngine
+
+    name, fee = NetworkFeeEngine.get_optimal_network(buy_exchange, sell_exchange)
+    return {"name": name, "fee_usdt": float(fee)}
+
+
 class CrossMatchingEngine:
     def __init__(
         self,
@@ -143,6 +162,11 @@ class CrossMatchingEngine:
                                     "net_spread_pct": float(net_spread_pct),
                                     "total_fee": float(total_fee),
                                     "fee_details": fee_details,
+                                    # За якою мережею пораховано цей спред.
+                                    # Потрібне персоналізації: хто возить
+                                    # не найдешевшою, має бачити свій спред,
+                                    # а не чужий.
+                                    "network": _leg_network(buy.exchange, sell.exchange),
                                     "is_asymmetric": is_asymmetric_deal,
                                     "asymmetric_details": {
                                         "buy_required": float(actual_buy_fiat),

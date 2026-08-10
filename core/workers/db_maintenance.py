@@ -108,6 +108,12 @@ class DBMaintenanceTask:
             released = await self.db.release_expired_reservations()
             if released > 0:
                 logger.info("🧹 DB Maintenance: звільнено %d протермінованих резервів карток", released)
+
+            # Журнал відмов карткового модуля — службовий, тримаємо два тижні.
+            # Тижневий зріз статистики читається з нього, глибше нікому не треба.
+            rej_deleted = await self.db.prune_rejection_log(retention_days=14)
+            if rej_deleted > 0:
+                logger.info("🧹 DB Maintenance: видалено %d старих записів причин відмов", rej_deleted)
         except asyncio.CancelledError:
             raise
         except Exception as e:

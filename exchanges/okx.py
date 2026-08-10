@@ -7,6 +7,7 @@ from decimal import Decimal
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.okx_client import OkxClient
 from config.banks import BankRegistry
+from core.engine import bank_discovery
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,11 @@ class OkxExchange(BaseExchange):
             code = BankRegistry.from_api_code(name, "OKX")
             if code:
                 bank_codes.append(code)
+            elif name:
+                # Як і в Binance: невідомий метод випадав зі списку банків
+                # ордера мовчки. Фіксуємо, щоб реєстр можна було доповнити
+                # за фактом, а не за здогадкою.
+                bank_discovery.note("OKX", name, method)
 
         if not bank_codes:
             logger.debug("⚠️ Не вдалося розпізнати банки в ордері OKX: %s", raw_methods)

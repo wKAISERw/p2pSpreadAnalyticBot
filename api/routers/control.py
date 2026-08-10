@@ -59,6 +59,9 @@ _EDITABLE_FILTERS: dict[str, type] = {
     "is_alerts_active": int,
     "target_margin": float,
     "maker_buy_price": float,
+    # Мережа, якою людина справді возить USDT між біржами. Порожнє —
+    # найдешевша спільна, як було завжди.
+    "preferred_network": str,
     # ── TAKER SELL ────────────────────────────────────────────────────────
     "taker_sell_amount": float,
     "taker_sell_price": float,
@@ -111,7 +114,7 @@ _BUY_BALANCE_MODES = {"CARD_ENFORCED", "AUTO_SCALE", "FREE"}
 _CORE_FILTER_KEYS = (
     "user_id", "capital", "capital_mode", "min_amount", "min_spread", "max_spread",
     "spread_strategy", "bank_codes", "buy_bank_codes", "sell_bank_codes",
-    "scanner_mode", "scanner_modes", "is_alerts_active",
+    "scanner_mode", "scanner_modes", "is_alerts_active", "preferred_network",
 )
 
 _TAKER_FILTER_KEYS = (
@@ -688,11 +691,103 @@ async def update_auto_cooldown(
     return {"status": "success", "tiers": tiers}
 
 
+@router.get("/user/sync-state")
+async def get_sync_state(
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Відбиток кожного розділу — щоб дашборд перечитував лише змінене.
+
+    Відкрита вкладка опитувала всі десять розділів на кожному тіку: при
+    інтервалі 10 секунд це 60 запитів на хвилину, з яких майже всі
+    повертали ті самі дані, ще й перемальовуючи панелі. Тепер один дешевий
+    запит каже, де саме сталась зміна.
+
+    Значення — непрозорі рядки: порівнювати їх можна лише з попередніми,
+    покладатись на вміст не можна. `null` означає «порахувати не вдалось»,
+    і розділ треба перечитати звичайним шляхом.
+    """
+    from api.sync_state import build_sync_state
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    await _user_or_404(telegram_id)
+    return {"sections": await build_sync_state(_db(), telegram_id)}
+
+
 @router.get("/banks")
 async def get_banks():
     """Довідник банків — щоб фронтенд не тримав власну копію кодів."""
     from config.banks import BANK_NAMES
     return [{"code": code, "name": name} for code, name in sorted(BANK_NAMES.items())]
+
+
+@router.get("/banks/profiles")
+async def get_bank_profiles():
+    """
+    Операційні профілі банків: ліміти, комісії, нічні вікна, спільні ліцензії.
+
+    Потрібні дашборду, щоб показувати, звідки взялись ефективні ліміти
+    картки. Без цього поле «місячний ліміт 60 000» виглядає як магічне
+    число, і незрозуміло, чи його задав користувач, чи довідник.
+
+    Ключ — канонічний слаг (`normalize_bank`), а не код біржі: профілі є й
+    для банків, яких біржі не знають (Таскомбанк, БВР), а їхні ліміти й
+    спільна ліцензія на матчинг впливають.
+    """
+    from config.banks import (
+        BANK_NAMES, BANK_PROFILES, UNLIMITED, bank_display_name, normalize_bank,
+    )
+    from config.card_limits import default_limits_for_bank
+
+    # Слаги банків, які підтримує хоч одна біржа — решта доступна лише як
+    # банк картки. Фронту це потрібно, щоб не пропонувати фільтр по банку,
+    # якого в стакані не буде.
+    tradable = {normalize_bank(code) for code in BANK_NAMES}
+
+    result = []
+    for slug, profile in sorted(BANK_PROFILES.items()):
+        fee = profile.p2p_fee
+        window = profile.night_window
+        result.append({
+            "slug": slug,
+            "name": bank_display_name(slug),
+            "tier": profile.tier,
+            "tradable": slug in tradable,
+            "safe_monthly_uah": profile.safe_monthly_uah,
+            "max_monthly_uah": profile.max_monthly_uah,
+            "safe_tx_per_day": profile.safe_tx_per_day,
+            # UNLIMITED (-1) віддаємо як null: для фронта це «без стелі», і
+            # -1 у полі суми він показав би як мінус тридцять тисяч.
+            "single_tx_limit_uah": (
+                None if profile.single_tx_limit_uah in (None, UNLIMITED)
+                else profile.single_tx_limit_uah
+            ),
+            "business_days_only": profile.business_days_only,
+            "license_group": profile.license_group,
+            "termination_fee_pct": profile.termination_fee_pct,
+            "third_party_friendly": profile.third_party_friendly,
+            "note": profile.note,
+            "p2p_fee": None if fee is None else {
+                "pct": fee.pct,
+                "fixed_uah": fee.fixed_uah,
+                "free_until_uah": fee.free_until_uah,
+                "free_tx_per_month": fee.free_tx_per_month,
+                "cross_bank_only": fee.cross_bank_only,
+                "label": fee.label,
+            },
+            "night_window": None if window is None else {
+                "from_hour": window.from_hour,
+                "to_hour": window.to_hour,
+                "max_uah": window.max_uah,
+            },
+            # Те, що движок реально підставить картці цього банку, якщо
+            # користувач нічого не задавав.
+            "default_limits": default_limits_for_bank(slug),
+        })
+    # camelCase — як решта ендпоінтів. Чіпаються лише ключі: коди банків і
+    # слаги лишаються значеннями й не мангляться.
+    return dict_to_camel(result)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -928,24 +1023,277 @@ async def get_taker_orders(
         return {"buy": [], "sell": [], "scanned": False}
 
     scanner = TakerScanner(_db())
-    result: dict[str, Any] = {"buy": [], "sell": [], "scanned": True}
+    result: dict[str, Any] = {"buy": [], "sell": [], "rejected": {}, "scanned": True}
 
     wanted = ("buy", "sell") if side == "both" else (side,)
     for want in wanted:
         mode = "TAKER_BUY" if want == "buy" else "TAKER_SELL"
         try:
-            orders = await scanner.find_orders_for_user(
+            scan = await scanner.scan(
                 {**user, "scanner_mode": mode}, buy_grouped, sell_grouped
             )
         except Exception as e:
             logger.error("taker/orders %s: %s", mode, e)
             raise HTTPException(status_code=500, detail=f"{mode}: {e}") from e
 
+        orders = scan.orders
         # TAKER_BUY шукає найдешевше, TAKER_SELL — найдорожче.
         orders.sort(key=lambda o: float(o.price), reverse=(mode == "TAKER_SELL"))
         result[want] = [_order_to_dict(o) for o in orders[:limit]]
 
+        # Відкинуті — з причиною. Порожній список ордерів сам по собі не
+        # каже, ринку немає чи карток не вистачило; тепер каже.
+        result["rejected"][want] = dict_to_camel(
+            [r.as_dict() for r in scan.rejections[:limit]]
+        )
+
+    # Вердикт LLM міг дозріти після того, як сканер віддав ордер: у чаті
+    # повідомлення в такому разі редагується, тут підставляємо свіже.
+    try:
+        from api.verdict_refresh import refresh_flags
+
+        for side_key in ("buy", "sell"):
+            await refresh_flags(_db(), result.get(side_key) or [])
+    except Exception as e:
+        logger.debug("taker verdict refresh: %s", e)
+
+    budget = await _buy_budget_view(telegram_id, user, result["buy"])
+    result["budget"] = budget
+
+    # Комісія рахується від суми, яку реально відправимо: у неї пороги
+    # («до 20к — 0%»), тож від обсягу вона залежить прямо.
+    for row in result["buy"]:
+        amount = _fee_base_uah(row, budget)
+        row["transferFee"] = _transfer_fee_view(row, amount)
+
     return result
+
+
+def _fee_base_uah(order_row: dict, budget: Optional[dict]) -> float:
+    """Скільки ₴ реально піде в цей ордер — у межах його min/max."""
+    price = float(order_row.get("price") or 0.0)
+    lo = float(order_row.get("minLimit") or 0.0)
+    hi = float(order_row.get("maxLimit") or 0.0)
+
+    if budget and price > 0:
+        wanted = float(budget.get("effectiveUsdt") or 0.0) * price
+        if wanted > 0:
+            return max(lo, min(wanted, hi)) if hi > 0 else max(lo, wanted)
+    return lo
+
+
+async def _buy_budget_view(
+    telegram_id: int, user: dict, buy_orders: list[dict]
+) -> Optional[dict]:
+    """
+    Бажана сума проти того, з чим реально можна зайти зараз.
+
+    Раніше різниця між ними ніде не існувала: авто-масштабування
+    перезаписувало `taker_buy_amount`, і введені 700 USDT зникали назавжди.
+    Тепер бажане лишається недоторканим, а «скільки виходить сьогодні» —
+    похідна величина. Але похідну треба показати, інакше людина бачить 700
+    і не розуміє, чому бот заходить на 480.
+
+    Рахуємо за найкращою ціною з видачі: це найоптимістичніший варіант, і
+    якщо навіть він менший за бажаний — упор точно в гроші, а не в ціну.
+    """
+    desired = float(user.get("taker_buy_amount") or 0.0)
+    if desired <= 0 or not buy_orders:
+        return None
+
+    try:
+        from core.engine.buy_budget import resolve_buy_budget
+
+        breakdown = await _db().get_user_capital_breakdown(telegram_id)
+        available = float(breakdown.get("usable") or 0.0)
+        price = min(float(o["price"]) for o in buy_orders if o.get("price"))
+
+        budget = resolve_buy_budget(desired, available, price)
+        return {
+            "desiredUsdt": round(budget.desired_usdt, 2),
+            "effectiveUsdt": round(budget.effective_usdt, 2),
+            "availableUah": round(budget.available_uah, 2),
+            "price": round(budget.price, 2),
+            "scaled": budget.scaled,
+            "blocked": budget.blocked,
+            # Порожній bestBank при interBank=true — не втрата даних: маршрут
+            # іде з кількох банків, і одна назва вводила б в оману.
+            "bestBank": breakdown.get("best_bank") or "",
+            "interBank": bool(breakdown.get("inter_bank")),
+            "totalUah": round(float(breakdown.get("total") or 0.0), 2),
+        }
+    except Exception as e:  # показ бюджету не має ламати видачу ордерів
+        logger.debug("buy budget view: %s", e)
+        return None
+
+
+def _transfer_fee_view(order_row: dict, amount_uah: float) -> Optional[dict]:
+    """
+    Комісія банку за переказ фіату під цей ордер — і курс із нею всередині.
+
+    Те саме, що бот уже пише в алерті (`bot/taker_builder._transfer_fee`),
+    але на сайті ордер досі виглядав вигіднішим, ніж є: при спреді 0.5–1%
+    комісія А-Банку 2% з'їдає весь профіт.
+
+    Тільки для купівлі: у TAKER_SELL фіат відправляє мерчант і комісію
+    свого банку платить він.
+    """
+    banks = order_row.get("bankCodes") or []
+    price = float(order_row.get("price") or 0.0)
+    if not banks or price <= 0 or amount_uah <= 0:
+        return None
+
+    try:
+        from config.banks import bank_display_name, normalize_bank
+        from core.utils.fees import bank_transfer_fee
+
+        bank = normalize_bank(banks[0])
+        # У тейкері переказ іде на той самий банк: движок добирає картку
+        # рівно того банку, який приймає мерчант. Тож «міжбанківські»
+        # комісії (ПриватБанк, Monobank) тут не виникають.
+        fee_obj = bank_transfer_fee(bank, bank)
+        if fee_obj is None:
+            return None
+
+        result = fee_obj.calculate(amount_uah, price)
+        if result.amount <= 0:
+            return None
+
+        return {
+            "bank": bank_display_name(bank),
+            "amountUah": round(result.amount, 2),
+            "description": result.description,
+            # Курс, у який комісія вже закладена: саме його треба порівнювати
+            # з цінами інших ордерів, а не «чисту» ціну.
+            "effectivePrice": round(price * (1 + result.amount / amount_uah), 4),
+            "onAmountUah": round(amount_uah, 2),
+        }
+    except Exception as e:  # комісія не має ламати видачу ордерів
+        logger.debug("transfer fee view: %s", e)
+        return None
+
+
+@router.get("/inventory/usdt")
+async def get_usdt_inventory(
+    force: bool = Query(default=False, description="Обійти кеш балансів"),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Де саме лежить USDT — по біржах і по гаманцях.
+
+    «Є на Bybit 500 USDT» не означає «можу продати зараз»: після купівлі на
+    P2P монети падають на спот, а продаються з фандингу. `get_balance()` у
+    клієнтів зливає обидва гаманці в одне число, тож різницю не було видно
+    ніде — вона з'ясовувалась уже під таймер угоди.
+
+    `known: false` означає «не знаємо» — ключів немає або біржі не
+    відповіли. Це не те саме, що нуль: нуль веде до висновку «треба
+    переказувати», а невідоме не веде ні до якого висновку.
+    """
+    from core.engine.usdt_inventory import usdt_by_exchange
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    await _user_or_404(telegram_id)
+
+    balances = await usdt_by_exchange(_db(), telegram_id, force=force)
+    if balances is None:
+        return {"known": False, "exchanges": [], "totals": {}}
+
+    rows = []
+    for name, w in sorted(balances.items()):
+        rows.append({
+            "exchange": name,
+            # Три різні відстані до угоди, а не три однакові кошики.
+            "funding": round(w.funding, 2),   # продається зараз
+            "spot": round(w.spot, 2),         # один клік усередині біржі
+            "earn": round(w.earn, 2),         # спершу викупити
+            "earnKnown": w.earn_known,
+            "total": round(w.total, 2),
+        })
+
+    return {
+        "known": True,
+        "exchanges": rows,
+        "totals": {
+            "funding": round(sum(r["funding"] for r in rows), 2),
+            "spot": round(sum(r["spot"] for r in rows), 2),
+            "earn": round(sum(r["earn"] for r in rows), 2),
+            "total": round(sum(r["total"] for r in rows), 2),
+        },
+    }
+
+
+@router.get("/taker/readiness")
+async def get_taker_readiness(
+    mode: str = Query(default="", description="TAKER_BUY | TAKER_SELL; порожнє — режим користувача"),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Що завадить тейкер-режиму працювати так, як його щойно налаштували.
+
+    Ці перевірки жили в циклі сканера й спрацьовували вже після запуску:
+    людина вмикала режим і чекала, а причина тиші лежала в налаштуваннях і
+    була видна одразу — обрано банки, карток яких немає; обсяг більший за
+    все, що є на картках; місячна межа банку майже вибрана.
+
+    Порожній список означає «все сходиться».
+    """
+    from core.engine.readiness import check_taker_readiness
+    from core.engine.scanner_helpers import _user_modes
+
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    user = await _user_or_404(telegram_id)
+
+    # Без явного режиму перевіряємо всі увімкнені тейкерські — так само, як
+    # /checkup у боті. Брати тут `scanner_mode` було б помилкою: режимів
+    # може бути кілька одночасно, і одиничне поле показало б лише один.
+    if mode:
+        modes = [mode] if mode in ("TAKER_BUY", "TAKER_SELL") else []
+    else:
+        modes = [m for m in _user_modes(user) if m in ("TAKER_BUY", "TAKER_SELL")]
+
+    db = _db()
+    checks: list[dict] = []
+    for m in modes:
+        for c in await check_taker_readiness(db, user, m):
+            checks.append({"level": c.level, "text": c.text, "hint": c.hint, "mode": m})
+
+    return {
+        "mode": mode or ",".join(modes),
+        "modes": modes,
+        "checks": checks,
+        "hasBlockers": any(c["level"] == "blocker" for c in checks),
+    }
+
+
+@router.get("/taker/rejections")
+async def get_taker_rejections(
+    days: int = Query(default=7, ge=1, le=14),
+    telegram_id: Optional[int] = None,
+    session_user_id: Optional[int] = Depends(optional_session),
+):
+    """
+    Статистика причин відмов карткового модуля за N днів.
+
+    Дедуп за ордером і днем уже застосований на записі, тож числа тут — це
+    скільки РІЗНИХ ордерів відсіялось, а не скільки кіл зробив сканер.
+    """
+    telegram_id = resolve_user_id(telegram_id, session_user_id)
+    await _user_or_404(telegram_id)
+    stats = await _db().get_rejection_stats(telegram_id, days=days)
+
+    from config.banks import bank_display_name
+    from core.engine.rejection_codes import label
+
+    for row in stats["codes"] + stats.get("observations", []):
+        row["title"] = label(row["code"])
+        # У базі лежать слаги й сирі коди бірж. «545» серед назв банків
+        # читається як банк, і людина шукає помилку у своїх картках — тоді
+        # як під цей код картка не підбереться, поки його немає в реєстрі.
+        row["banks"] = [bank_display_name(b) for b in row.get("banks", [])]
+    return dict_to_camel(stats)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

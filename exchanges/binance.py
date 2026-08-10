@@ -7,6 +7,7 @@ from typing import List, Tuple
 from exchanges.base import BaseExchange, Order
 from infrastructure.http.binance_client import BinanceClient
 from config.banks import BankRegistry
+from core.engine import bank_discovery
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,11 @@ class BinanceExchange(BaseExchange):
             code = BankRegistry.from_api_code(identifier, "Binance")
             if code:
                 bank_codes.append(code)
+            elif identifier:
+                # Невідомий метод мовчки випадав зі списку банків ордера —
+                # тобто ордер міг відпасти як «не той банк», хоч насправді
+                # приймав саме наш. Тепер це видно в /checkup.
+                bank_discovery.note("Binance", identifier, m)
 
         finish_rate = float(user.get("monthFinishRate", 0)) * 100
         order_count = int(user.get("monthOrderCount", 0))

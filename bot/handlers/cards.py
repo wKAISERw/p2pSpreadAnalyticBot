@@ -21,7 +21,13 @@ from bot.handlers.core import (
     CardAddStates, CardEditStates, CardUpdateStates, MonoStates, BankLimitStates, CardLimitStates,
     SettingStates
 )
-from config.banks import DEFAULT_BANK_CODES, BANK_NAMES
+from config.banks import (
+    DEFAULT_BANK_CODES, BANK_NAMES, DEFAULT_BANK_PROFILE, get_bank_profile,
+)
+from config.card_limits import (
+    FEATURE_INTER_BANK, LIMIT_FIELDS, SPLIT_INTER_BANK, SPLIT_INTRA_BANK,
+    available_split_modes, merge_limits,
+)
 from config import settings
 
 router = Router()
@@ -32,6 +38,109 @@ async def cmd_cards_dashboard(message: Message) -> None:
     if not _db:
         return await message.answer("❌ БД не підключена.")
     await _show_cards_dashboard(message.from_user.id, message)
+
+
+@router.message(Command("checkup"))
+async def cmd_checkup(message: Message) -> None:
+    """
+    Перевірка налаштувань тейкер-режимів — до того, як чекати алертів.
+
+    Онбординг у цьому проєкті означав «увімкни й дивись, чи прийде»: усі
+    перевірки жили всередині циклу сканера, а коли ордер не проходив, він
+    просто зникав. Тут ті самі перевірки, але наперед і з поясненням.
+    """
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    from core.engine.readiness import check_taker_readiness, render_checks
+    from core.engine.scanner_helpers import _user_modes
+
+    user = await _db.get_user_by_id(message.from_user.id)
+    if not user:
+        return await message.answer("❌ Не вдалося завантажити ваші налаштування.")
+
+    modes = [m for m in _user_modes(user) if m in ("TAKER_BUY", "TAKER_SELL")]
+    if not modes:
+        return await message.answer(
+            "🩺 <b>Перевірка налаштувань</b>\n\n"
+            "Жоден тейкер-режим не увімкнено — перевіряти нічого.\n"
+            "<i>Увімкнути можна через /mode.</i>"
+        )
+
+    blocks = []
+    for mode in modes:
+        checks = await check_taker_readiness(_db, user, mode)
+        if checks:
+            blocks.append(render_checks(checks, title=f"🩺 {mode}"))
+        else:
+            blocks.append(f"🩺 <b>{mode}</b>\n✅ Усе сходиться — перешкод не видно.")
+
+    # Банки, які біржі віддають, а реєстр не знає. Це не про налаштування
+    # користувача, а про повноту `config/banks.py` — але наслідок той самий:
+    # частина ордерів не має шансів пройти, і причина не видна нізвідки.
+    from core.engine import bank_discovery
+
+    unknown = bank_discovery.render()
+    if unknown:
+        blocks.append(unknown)
+
+    await message.answer("\n\n".join(blocks))
+
+
+@router.message(Command("card_rejections"))
+async def cmd_card_rejections(message: Message) -> None:
+    """
+    Чому картковий модуль відкидав ордери цього тижня.
+
+    Раніше відкинутий ордер зникав без сліду, і «сканер нічого не знаходить»
+    не відрізнялось від «ринку немає». Тут видно, що саме заважає — і чи є
+    сенс у складних маршрутах, чи все впирається в одну просту причину.
+    """
+    if not _db:
+        return await message.answer("❌ БД не підключена.")
+
+    stats = await _db.get_rejection_stats(message.from_user.id, days=7)
+    if not stats["total"] and not stats.get("observed_total"):
+        return await message.answer(
+            "📊 <b>Причини відмов за тиждень</b>\n\n"
+            "Записів немає — картковий модуль нічого не відкидав "
+            "(або сканер ще не працював у тейкер-режимі)."
+        )
+
+    from core.engine.rejection_codes import label
+
+    def _row(row: dict, with_share: bool) -> str:
+        head = f"• <b>{label(row['code'])}</b> — {row['hits']}"
+        if with_share:
+            head += f" ({row['share_pct']:.0f}%)"
+        if row["avg_shortfall"]:
+            avg = f"{row['avg_shortfall']:,.0f}".replace(",", " ")
+            head += f"\n   └ у середньому бракувало {avg} ₴"
+        if row["banks"]:
+            head += f"\n   └ банки: {', '.join(row['banks'][:4])}"
+        return head
+
+    lines = [f"📊 <b>Причини відмов за тиждень</b>", f"<i>з {stats['since']}</i>"]
+
+    if stats["total"]:
+        lines.append(f"\n🚫 <b>Відхилено ордерів: {stats['total']}</b>")
+        lines.extend(_row(r, True) for r in stats["codes"])
+
+    # Спостереження — окремою секцією, бо це не відмови: ордер прийшов, але
+    # меншим. Саме ці записи й показують, чого коштує стеля одного банку.
+    observations = stats.get("observations") or []
+    if observations:
+        lines.append(
+            f"\n📉 <b>Пройшли, але меншим обсягом: {stats['observed_total']}</b>"
+        )
+        lines.extend(_row(r, False) for r in observations)
+        lines.append(
+            "\n<i>Це не відмови — ці ордери ви отримали. Але саме тут стеля "
+            "одного банку коштує обсягу: рядок «бракувало» показує, скільки "
+            "втрачено через те, що гроші лежать у різних банках.</i>"
+        )
+
+    await message.answer("\n".join(lines))
 
 
 async def _show_cards_dashboard(user_id: int, message_or_call) -> None:
@@ -132,8 +241,8 @@ async def cb_card_diagnostics(call: CallbackQuery):
                 warnings.append(f"⚠️ <b>{bank} *{last_four}</b> ({label}): Webhook підключено, але не прив'язано до рахунку в API.")
                 
         limits = await _db.get_card_effective_limits(card_id, user_id, c["bank_name"])
-        daily_in_max = limits.get("daily_in_max", 150000.0)
-        daily_out_max = limits.get("daily_out_max", 150000.0)
+        daily_in_max = limits["daily_in_max"]
+        daily_out_max = limits["daily_out_max"]
         
         used_in = await _db.get_rolling_used(card_id, "in", 24)
         used_out = await _db.get_rolling_used(card_id, "out", 24)
@@ -877,16 +986,18 @@ async def cb_report_period(call: CallbackQuery) -> None:
         total_personal_out += pers_out
         total_tx += tx_count
 
-        # Ліміти
-        limits = await _db.get_user_bank_limits(user_id, card["bank_name"])
+        # Ліміти. Беремо ефективні, а не рядок user_bank_limits: у ньому
+        # тепер NULL там, де користувач нічого не задавав, і звіт показував би
+        # порожнечу замість дефолтів довідника.
         limit_line = ""
-        if limits and hours <= 24:
+        if hours <= 24:
+            limits = await _db.get_card_effective_limits(card_id, user_id, card["bank_name"])
             used_in_24 = await _db.get_rolling_used(card_id, "in", 24)
             used_out_24 = await _db.get_rolling_used(card_id, "out", 24)
-            daily_in_max = limits.get("daily_in_max", 150000)
-            daily_out_max = limits.get("daily_out_max", 150000)
+            daily_in_max = limits["daily_in_max"]
+            daily_out_max = limits["daily_out_max"]
             tx_today = await _db.get_card_transactions_count(card_id, 24)
-            max_tx = limits.get("max_tx_per_day", 15)
+            max_tx = limits["max_tx_per_day"]
             limit_line = (
                 f"\n   📏 Ліміти: IN {used_in_24:.0f}/{daily_in_max:.0f} | "
                 f"OUT {used_out_24:.0f}/{daily_out_max:.0f} | "
@@ -970,19 +1081,29 @@ async def cb_limits_back(call: CallbackQuery, state: FSMContext) -> None:
 async def cb_limits_bank(call: CallbackQuery) -> None:
     bank = call.data.split(":")[2]
     user_id = call.from_user.id
-    limits = await _db.get_user_bank_limits(user_id, bank)
-    if not limits:
-        # Показуємо дефолтні значення
-        limits = {
-            "daily_out_max": 150000.0, "daily_in_max": 150000.0,
-            "monthly_out_max": 400000.0, "monthly_in_max": 400000.0,
-            "max_single_tx_out": 29999.0, "max_single_tx_in": 29999.0,
-            "max_tx_per_day": 15, "cooldown_hours": 24
-        }
+    row = await _db.get_user_bank_limits(user_id, bank)
+
+    # Порожнє поле в рядку означає «не задавав» — там діє довідник банку.
+    # Показуємо саме те число, за яким працює движок, і позначаємо, що з
+    # нього ввів користувач: інакше меню показує 100 000, а звідки воно —
+    # незрозуміло.
+    user_set = {f for f in LIMIT_FIELDS if row and row.get(f) is not None}
+    limits = merge_limits(bank, row)
+
+    profile = get_bank_profile(bank)
+    if profile is DEFAULT_BANK_PROFILE:
+        src_line = "<i>Банку немає в довіднику — діють загальні дефолти.</i>\n"
+    else:
+        rec = ""
+        if profile.safe_monthly_uah:
+            rec = ", реком. " + f"{profile.safe_monthly_uah:,.0f}".replace(",", " ") + " ₴/міс"
+        src_line = f"<i>Дефолти — з довідника банків (tier {profile.tier}{rec}).</i>\n"
+
     await call.message.edit_text(
         f"⚙️ <b>Ліміти: {bank.capitalize()}</b>\n"
-        f"<i>Натисніть на поле для зміни значення:</i>",
-        reply_markup=keyboards.bank_limits_fields_kb(bank, limits)
+        f"{src_line}"
+        f"<i>✏️ — задано вами. Натисніть на поле для зміни значення:</i>",
+        reply_markup=keyboards.bank_limits_fields_kb(bank, limits, user_set)
     )
     await call.answer()
 
@@ -1268,7 +1389,7 @@ async def cb_open_card_display_menu(call: CallbackQuery):
 
         await call.message.edit_text(
             text=text,
-            reply_markup=card_display_settings_kb(current_settings)
+            reply_markup=card_display_settings_kb(current_settings, await _db.get_feature_status(chat_id, FEATURE_INTER_BANK))
         )
     except Exception as e:
         logging.getLogger("Commands").error(f"Помилка відкриття меню карт: {e}")
@@ -1324,12 +1445,71 @@ async def cb_toggle_card_display_fields(call: CallbackQuery):
 
         # 4. Робимо моментальний безшовний ререндер клавіатури в ТГ
         await call.message.edit_reply_markup(
-            reply_markup=card_display_settings_kb(current_settings)
+            reply_markup=card_display_settings_kb(current_settings, await _db.get_feature_status(chat_id, FEATURE_INTER_BANK))
         )
         await call.answer("⚙️ Налаштування актуалізовано")
 
     except Exception as e:
         logging.getLogger("Commands").error(f"Помилка зміни параметра виводу карт: {e}")
+        await call.answer("🔥 Помилка під час збереження змін", show_alert=True)
+
+
+@router.callback_query(F.data.in_({
+    "disp:cycle:card_split_mode",
+    "disp:cycle:max_cards_per_order",
+    "disp:cycle:show_rejected_orders",
+}))
+async def cb_cycle_card_matching_fields(call: CallbackQuery):
+    """
+    Перемикачі з трьома і більше значеннями — по колу.
+
+    Окремо від disp:toggle, бо там кожен пункт має рівно два стани, а тут
+    цикл: off → intra_bank → (inter_bank) і 1 → 2 → 3.
+    """
+    if not _db:
+        return await call.answer("❌ БД не підключена.", show_alert=True)
+
+    field = call.data.split(":")[2]
+    chat_id = call.message.chat.id
+
+    try:
+        current = await _db.get_user_card_settings(chat_id) or {}
+        inter_bank_on = await _db.get_feature_status(chat_id, FEATURE_INTER_BANK)
+
+        if field == "card_split_mode":
+            # Крутимо лише доступними режимами. «Між банками» вмикається
+            # експериментальною фічею — доки її немає, вибрати цей режим не
+            # можна, і краще сказати чому, ніж дати кнопку, яка мовчки нічого
+            # не змінює.
+            modes = list(available_split_modes(inter_bank_on))
+            cur = current.get("card_split_mode") or SPLIT_INTRA_BANK
+            idx = modes.index(cur) if cur in modes else 0
+            current["card_split_mode"] = modes[(idx + 1) % len(modes)]
+
+        elif field == "max_cards_per_order":
+            cur = int(current.get("max_cards_per_order", 3) or 3)
+            current["max_cards_per_order"] = cur % 3 + 1
+
+        elif field == "show_rejected_orders":
+            cur = current.get("show_rejected_orders") or "with_reason"
+            current["show_rejected_orders"] = "hide" if cur == "with_reason" else "with_reason"
+
+        await _db.update_user_card_settings(chat_id, current)
+        await call.message.edit_reply_markup(
+            reply_markup=card_display_settings_kb(current, inter_bank_on)
+        )
+
+        if field == "card_split_mode" and not inter_bank_on:
+            await call.answer(
+                "«Між банками» вмикається в /features → 💳 КАРТКИ → "
+                "Кошики карток між банками",
+                show_alert=True,
+            )
+        else:
+            await call.answer("⚙️ Налаштування актуалізовано")
+
+    except Exception as e:
+        logging.getLogger("Commands").error("Помилка зміни параметра матчингу: %s", e)
         await call.answer("🔥 Помилка під час збереження змін", show_alert=True)
 
 
@@ -1391,5 +1571,5 @@ async def process_cold_card_limit_input(message: Message, state: FSMContext):
     
     await message.answer(
         text=text,
-        reply_markup=card_display_settings_kb(current_settings)
+        reply_markup=card_display_settings_kb(current_settings, await _db.get_feature_status(chat_id, FEATURE_INTER_BANK))
     )

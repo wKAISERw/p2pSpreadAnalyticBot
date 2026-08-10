@@ -13,6 +13,60 @@ from core.utils.tasks import spawn
 logger = logging.getLogger("Scanner.AlertDispatcher")
 
 
+def network_penalty_uah(user: dict, opp: dict) -> float:
+    """
+    Наскільки дорожчий переказ мережею, якою людина возить насправді.
+
+    Матчер один на всіх, тож рахує найдешевшою спільною. Але TRC20 коштує
+    1 ₮ проти 0.01 у TON — і хто возить лише ним, отримував алерти, які в
+    його реальності порога не проходять. Різниця відома точно, тож це
+    арифметика, а не оцінка.
+
+    0.0 — переваги немає, або вона й так найдешевша, або цієї мережі між
+    цими біржами не існує. Останнє важливо: підставляти чужу ціну тому,
+    хто тут своєю мережею не проїде, було б гірше за мовчання.
+    """
+    preferred = (user.get("preferred_network") or "").upper()
+    if not preferred:
+        return 0.0
+
+    network = opp.get("network") or {}
+    base_name = str(network.get("name") or "").upper()
+    if not base_name or base_name in ("INTRA", "UNKNOWN") or base_name == preferred:
+        return 0.0
+
+    try:
+        from core.engine.network_fee_engine import NetworkFeeEngine
+
+        buy_o, sell_o = opp["buy_order"], opp["sell_order"]
+        options = dict(
+            NetworkFeeEngine.get_all_options(buy_o.exchange, sell_o.exchange)
+        )
+        if preferred not in options:
+            return 0.0
+
+        delta_usdt = float(options[preferred]) - float(network.get("fee_usdt") or 0.0)
+        if delta_usdt <= 0:
+            return 0.0
+        return delta_usdt * float(buy_o.price)
+    except Exception as e:
+        logger.debug("network penalty: %s", e)
+        return 0.0
+
+
+def personal_net_spread(user: dict, opp: dict) -> float:
+    """Чистий спред у перерахунку на мережу, якою возить саме цей юзер."""
+    net_spread = float(opp["net_spread_pct"])
+    penalty = network_penalty_uah(user, opp)
+    if penalty <= 0:
+        return net_spread
+
+    entry = float(opp.get("actual_entry_uah") or 0.0)
+    if entry <= 0:
+        return net_spread
+    return net_spread - (penalty / entry) * 100.0
+
+
 class AlertDispatcher:
     """
     Відповідає за персоналізовану розсилку алертів.
@@ -255,7 +309,7 @@ class AlertDispatcher:
         spread_strategy = user.get("spread_strategy", "min")
         min_spread = float(user["min_spread"])
         max_spread = float(user.get("max_spread", 0.0))
-        net_spread = float(opp["net_spread_pct"])
+        net_spread = personal_net_spread(user, opp)
 
         if spread_strategy == "min":
             if net_spread < min_spread:
@@ -316,6 +370,76 @@ class AlertDispatcher:
                     return False, f"{side_label} merchant last online {last_online}m > {max_offline}m", entry
 
         return True, "", scaled_entry
+
+    async def wants_which(self, user_id: int, opps: dict[str, dict]) -> dict[str, str]:
+        """
+        Які зв'язки проходять фільтри користувача, і чому решта — ні.
+
+        Потрібне дашборду: `state.opportunities` — глобальний список того,
+        що знайшов сканер, і до нього не застосовано жодного персонального
+        фільтра. Тобто на сайті було видно ордери, які цей користувач у
+        Telegram не отримав би ніколи — ні за капіталом, ні за спредом, ні
+        за банками. Розбіжність між «бачу на сайті» і «приходить у чат»
+        пояснити було нічим.
+
+        Рішення саме таке, а не «додати фільтри в API»: причина відсіву
+        мусить збігатись із тією, що діє для алертів. Друга копія цих
+        перевірок розійшлась би з першою — цей проєкт уже сім разів на
+        цьому обпікся, — тож рішення тут ухвалює той самий `_user_wants`.
+
+        Повертає {id: ""} для тих, що проходять, і {id: причина} для решти.
+        """
+        if not self._db or not opps:
+            return {}
+
+        user = await self._db.get_user_by_id(user_id)
+        if not user:
+            return {}
+
+        # Той самий контекст, що збирає dispatch_batch перед перевіркою:
+        # без нього особистий чорний список і субсидії просто не діяли б.
+        used_subsidies = await self._db.get_used_subsidies(user_id)
+        personal_bl = await self._db._user_blacklist_index(user_id)
+        card_settings = await self._db.get_user_card_settings(user_id)
+        card_module_enabled = bool(
+            card_settings and card_settings.get("card_module_mode") != "off"
+        )
+        user_buy_names = self._clean_and_normalize_banks(
+            resolve_banks(user, "SPREAD", "buy")
+        )
+
+        auto_cap_cache: dict[frozenset, float] = {}
+        result: dict[str, str] = {}
+
+        for opp_id, opp in opps.items():
+            allowed_buy = self._clean_and_normalize_banks(opp.get("buy_banks_fit")) & user_buy_names
+            key = frozenset(allowed_buy)
+            if key not in auto_cap_cache:
+                auto_cap_cache[key] = await self._db.get_user_auto_capital(
+                    user_id, allowed_banks=allowed_buy
+                )
+            auto_cap = auto_cap_cache[key]
+
+            local_user = copy.copy(user)
+            if local_user.get("capital_mode") == "auto":
+                local_user["capital"] = auto_cap
+            elif card_module_enabled and auto_cap > 0:
+                local_user["capital"] = min(float(local_user["capital"]), auto_cap)
+
+            local_user["_used_subsidies"] = used_subsidies
+            local_user["_personal_blacklist"] = personal_bl
+
+            try:
+                wants, reason, _ = self._user_wants(local_user, opp)
+            except Exception as e:
+                # Помилка перевірки не має ховати зв'язку: краще показати
+                # зайве, ніж мовчки прибрати те, що людина мала побачити.
+                logger.debug("wants_which %s: %s", opp_id, e)
+                wants, reason = True, ""
+
+            result[opp_id] = "" if wants else (reason or "не проходить фільтри")
+
+        return result
 
     async def dispatch_batch(self, items: list[tuple[SpreadAlert, dict]]) -> None:
         """

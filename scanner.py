@@ -65,6 +65,57 @@ def safe_float(val) -> float:
         return 0.0
 
 
+def _transfer_leg(opp: dict, buy_o, sell_o) -> dict | None:
+    """
+    Крок між ногами зв'язки: чим і за скільки везти USDT на другу біржу.
+
+    На екрані дві ноги стояли поруч так, ніби куплені монети опиняються на
+    біржі продажу самі собою. Насправді між ними або внутрішній переказ
+    (та сама біржа — безкоштовно), або мережевий переказ із власною
+    комісією й часом. Комісія й раніше сиділа в `net_spread`, але побачити
+    сам крок було нізвідки — а він і є те, що людина мусить зробити руками
+    під таймер угоди.
+
+    None означає «однакова біржа»: везти нема куди.
+    """
+    buy_ex = getattr(buy_o, "exchange", "")
+    sell_ex = getattr(sell_o, "exchange", "")
+    if not buy_ex or not sell_ex or buy_ex == sell_ex:
+        return None
+
+    try:
+        from core.engine.network_fee_engine import NetworkFeeEngine
+
+        network, fee_usdt = NetworkFeeEngine.get_optimal_network(buy_ex, sell_ex)
+        options = NetworkFeeEngine.get_all_options(buy_ex, sell_ex)
+    except Exception as e:
+        logger.debug("transfer leg %s→%s: %s", buy_ex, sell_ex, e)
+        return None
+
+    price = safe_float(getattr(buy_o, "price", 0))
+    # UNKNOWN — спільної мережі немає, і маршрут насправді неможливий.
+    # Показати його як звичайний означало б відправити людину переказувати
+    # те, що не переказується.
+    unroutable = network == "UNKNOWN"
+
+    return {
+        "fromExchange": buy_ex,
+        "toExchange": sell_ex,
+        "network": network,
+        "feeUsdt": 0.0 if unroutable else safe_float(fee_usdt),
+        "feeUah": 0.0 if unroutable else safe_float(fee_usdt) * price,
+        "unroutable": unroutable,
+        # Усі спільні мережі, не лише найдешевша. Дешевша не завжди
+        # означає бажана: людина може роками ходити через TRC20 і не
+        # хотіти заводити гаманець у мережі, якою користується раз.
+        "options": [
+            {"network": n, "feeUsdt": safe_float(f), "feeUah": safe_float(f) * price}
+            for n, f in options
+            if n != "UNKNOWN"
+        ],
+    }
+
+
 # Extracted classes and helpers have been moved to:
 # - core/engine/alert_dispatcher.py (AlertDispatcher)
 # - core/engine/credentials.py (AccountClients, load_credentials, bind_http_credentials)
@@ -660,6 +711,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                     # 1. Створюємо новий пустий список для актуальних ордерів
                     current_frontend_opps = []
+                    current_raw_opps = {}
                     current_cycle_alerts = []
                     # ----------------------------
 
@@ -804,7 +856,18 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             "netProfit": safe_float(opp.get("net_profit", 0)),
                             "buyBank": opp.get("buy_bank", ""),
                             "sellBank": opp.get("sell_bank", ""),
-                            "routeType": opp.get("route_type", "UNKNOWN")
+                            "routeType": opp.get("route_type", "UNKNOWN"),
+                            # Крок між ногами: на різних біржах монети треба
+                            # ще перевезти. Комісія мережі вже сидить у
+                            # net_spread, але сам крок ніде не було видно —
+                            # на екрані дві ноги стояли так, ніби USDT
+                            # опиняється на другій біржі сам собою.
+                            "transfer": _transfer_leg(opp, buy_o, sell_o),
+                            "fees": [
+                                {"label": f.description, "amountUah": safe_float(f.amount)}
+                                for f in (opp.get("fee_details") or [])
+                            ],
+                            "totalFeeUah": safe_float(opp.get("total_fee", 0)),
                         }
                         is_blocked = False
                         if "BLOCK" in (getattr(buy_o, "risk_flag", "") or ""):
@@ -816,6 +879,9 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         if not is_blocked:
                             current_frontend_opps.append(frontend_opp)
+                            # Сирий opp поруч: за ним дашборд відсіє те, що
+                            # не проходить фільтри конкретного користувача.
+                            current_raw_opps[frontend_opp["id"]] = opp
                         current_cycle_alerts.append(alert)
                         if sent_count >= current_max_alerts:
                             logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)
@@ -856,6 +922,11 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             logger_=logger,
                         )
                     state.opportunities = current_frontend_opps[:50]
+                    state.opportunities_raw = {
+                        fo["id"]: current_raw_opps[fo["id"]]
+                        for fo in state.opportunities
+                        if fo["id"] in current_raw_opps
+                    }
                     state.current_alerts = current_cycle_alerts[:50]
                     state.last_buy_grouped = buy_grouped
                     state.last_sell_grouped = sell_grouped

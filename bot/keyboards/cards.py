@@ -5,7 +5,12 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-def card_display_settings_kb(current: dict) -> InlineKeyboardMarkup:
+from config.banks import CARD_BANK_SLUGS, bank_display_name
+from config.card_limits import (
+    SPLIT_INTRA_BANK, SPLIT_MODE_LABELS, available_split_modes,
+)
+
+def card_display_settings_kb(current: dict, inter_bank_enabled: bool = False) -> InlineKeyboardMarkup:
     """
     Категоризоване меню налаштувань відображення карткового модуля.
     """
@@ -45,6 +50,36 @@ def card_display_settings_kb(current: dict) -> InlineKeyboardMarkup:
     ccl = current.get("cold_card_limit", 2000.0)
     ccl_text = f"🌱 Ліміт непрогрітих: {ccl:.0f} ₴" if ccl > 0 else "🌱 Ліміт непрогрітих: Вимкнено"
     builder.row(InlineKeyboardButton(text=ccl_text, callback_data="disp:set:cold_card_limit"))
+
+    # 8. Режим спліту карток.
+    #
+    # «Між банками» показуємо, але позначаємо замком: движок уміє збирати
+    # суму лише в межах одного банку. Пункт, який мовчки нічого не змінює,
+    # гірший за видимий замок із поясненням.
+    split = current.get("card_split_mode") or SPLIT_INTRA_BANK
+    lock = "" if split in available_split_modes(inter_bank_enabled) else " 🔒"
+    builder.row(InlineKeyboardButton(
+        text=f"🔀 Спліт карток: {SPLIT_MODE_LABELS.get(split, split)}{lock}",
+        callback_data="disp:cycle:card_split_mode",
+    ))
+
+    # 9. Максимум карток на угоду.
+    #
+    # Поле max_cards_per_order існувало в схемі з самого початку, і движок
+    # сплітів його читав — але жодне меню не давало його змінити.
+    mcpo = int(current.get("max_cards_per_order", 3) or 3)
+    builder.row(InlineKeyboardButton(
+        text=f"💳 Максимум карток на угоду: {mcpo}",
+        callback_data="disp:cycle:max_cards_per_order",
+    ))
+
+    # 10. Показ відхилених ордерів
+    sro = current.get("show_rejected_orders") or "with_reason"
+    sro_text = "📋 З причиною" if sro == "with_reason" else "🙈 Приховати"
+    builder.row(InlineKeyboardButton(
+        text=f"🚫 Відхилені ордери: {sro_text}",
+        callback_data="disp:cycle:show_rejected_orders",
+    ))
 
     builder.row(InlineKeyboardButton(text="⬅️ Назад", callback_data="set:display_menu"))
     return builder.as_markup()
@@ -87,9 +122,8 @@ def cards_dashboard_kb(cards: list[dict], module_mode: str) -> InlineKeyboardMar
 def card_banks_kb() -> InlineKeyboardMarkup:
     """Вибір банку при додаванні картки."""
     builder = InlineKeyboardBuilder()
-    banks = ["monobank", "privatbank", "pumb", "izibank", "a-bank", "sense"]
-    for bank in banks:
-        builder.button(text=bank.capitalize(), callback_data=f"card_add:bank:{bank}")
+    for bank in CARD_BANK_SLUGS:
+        builder.button(text=bank_display_name(bank), callback_data=f"card_add:bank:{bank}")
     builder.adjust(2)
     builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="card:cancel"))
     return builder.as_markup()
@@ -176,9 +210,8 @@ def report_period_kb() -> InlineKeyboardMarkup:
 def bank_limits_bank_kb() -> InlineKeyboardMarkup:
     """Вибір банку для налаштування лімітів."""
     builder = InlineKeyboardBuilder()
-    banks = ["monobank", "privatbank", "pumb", "izibank", "a-bank", "sense"]
-    for bank in banks:
-        builder.button(text=bank.capitalize(), callback_data=f"limits:bank:{bank}")
+    for bank in CARD_BANK_SLUGS:
+        builder.button(text=bank_display_name(bank), callback_data=f"limits:bank:{bank}")
     builder.adjust(2)
     builder.row(InlineKeyboardButton(text="🔙 Скасувати", callback_data="menu:main"))
     return builder.as_markup()
@@ -196,8 +229,13 @@ LIMIT_FIELD_LABELS = {
 
 
 
-def bank_limits_fields_kb(bank: str, current: dict) -> InlineKeyboardMarkup:
-    """Показує поточні ліміти банку з кнопками для редагування."""
+def bank_limits_fields_kb(bank: str, current: dict, user_set: set | None = None) -> InlineKeyboardMarkup:
+    """
+    Показує ефективні ліміти банку з кнопками для редагування.
+
+    user_set — поля, які користувач задав власноруч; решта приїхала з
+    довідника банків, і позначка це розрізняє.
+    """
     builder = InlineKeyboardBuilder()
     for field, label in LIMIT_FIELD_LABELS.items():
         val = current.get(field, "—")
@@ -207,8 +245,9 @@ def bank_limits_fields_kb(bank: str, current: dict) -> InlineKeyboardMarkup:
             val_str = f"{val:.0f}"
         else:
             val_str = str(val)
+        mark = " ✏️" if user_set and field in user_set else ""
         builder.row(InlineKeyboardButton(
-            text=f"{label}: {val_str}",
+            text=f"{label}: {val_str}{mark}",
             callback_data=f"limits:field:{bank}:{field}"
         ))
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="limits:back"))

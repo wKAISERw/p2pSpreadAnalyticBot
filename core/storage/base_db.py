@@ -551,17 +551,23 @@ class MerchantDB:
                                          cold_card_limit      REAL DEFAULT 2000.0
                                      );
 
+                                     /* NULL = «користувач це поле не задавав», і тоді
+                                        діє довідник банку (config/card_limits.py).
+                                        Раніше тут стояли спільні для всіх банків
+                                        DEFAULT-и, тож рядок, створений заради одного
+                                        поля, мовчки фіксував ще сім — і профіль банку
+                                        до них уже не дотягувався. */
                                      CREATE TABLE IF NOT EXISTS user_bank_limits (
                                          user_id              INTEGER NOT NULL,
                                          bank_name            TEXT NOT NULL,
-                                         daily_out_max        REAL DEFAULT 150000.0,
-                                         daily_in_max         REAL DEFAULT 150000.0,
-                                         monthly_out_max      REAL DEFAULT 400000.0,
-                                         monthly_in_max       REAL DEFAULT 400000.0,
-                                         max_single_tx_out    REAL DEFAULT 29999.0,
-                                         max_single_tx_in     REAL DEFAULT 29999.0,
-                                         max_tx_per_day       INTEGER DEFAULT 15,
-                                         cooldown_hours       INTEGER DEFAULT 24,
+                                         daily_out_max        REAL DEFAULT NULL,
+                                         daily_in_max         REAL DEFAULT NULL,
+                                         monthly_out_max      REAL DEFAULT NULL,
+                                         monthly_in_max       REAL DEFAULT NULL,
+                                         max_single_tx_out    REAL DEFAULT NULL,
+                                         max_single_tx_in     REAL DEFAULT NULL,
+                                         max_tx_per_day       INTEGER DEFAULT NULL,
+                                         cooldown_hours       INTEGER DEFAULT NULL,
                                          PRIMARY KEY (user_id, bank_name)
                                      );
 
@@ -633,6 +639,27 @@ class MerchantDB:
                                          FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE CASCADE
                                      );
                                      CREATE INDEX IF NOT EXISTS idx_card_txs_time ON card_transactions(card_id, timestamp);
+
+                                     /* Причини, з яких картковий модуль відсіяв ордер.
+                                        Ключ включає order_id і день: сканер проходить
+                                        стакан щохвилини, тож без дедупу статистика
+                                        показувала б не «які причини переважають», а
+                                        «скільки кіл встиг зробити сканер». Рядки старші
+                                        за два тижні прибирає DBMaintenanceTask. */
+                                     CREATE TABLE IF NOT EXISTS card_rejection_log (
+                                         user_id       INTEGER NOT NULL,
+                                         day           TEXT NOT NULL,
+                                         mode          TEXT NOT NULL,
+                                         order_id      TEXT NOT NULL,
+                                         code          TEXT NOT NULL,
+                                         bank          TEXT NOT NULL DEFAULT '',
+                                         reason        TEXT NOT NULL DEFAULT '',
+                                         shortfall_uah REAL NOT NULL DEFAULT 0,
+                                         first_seen    REAL NOT NULL DEFAULT 0,
+                                         PRIMARY KEY (user_id, day, mode, order_id, code)
+                                     );
+                                     CREATE INDEX IF NOT EXISTS idx_card_rejection_day
+                                         ON card_rejection_log(user_id, day);
 
                                      CREATE TABLE IF NOT EXISTS used_subsidies (
                                          id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -763,12 +790,32 @@ class MerchantDB:
         await self._ensure_column("cards", "mono_tracker_mode", "TEXT DEFAULT 'INCOME'")
         await self._ensure_column("cards", "mono_tracker_fields", "TEXT DEFAULT '{\"amount\":1,\"sender\":1,\"comment\":1,\"time\":1,\"card\":1,\"balance\":1,\"p2p\":1}'")
 
+        # Етап 4 плану: налаштування матчингу карток.
+        #
+        # card_split_mode: off / intra_bank / inter_bank. Дефолт intra_bank —
+        # це поточна поведінка движка, тож у вже налаштованих користувачів
+        # нічого не змінюється. inter_bank лишається недоступним, доки движок
+        # не вміє збирати суму з карток різних банків (етап 3).
+        await self._ensure_column("user_card_settings", "card_split_mode", "TEXT DEFAULT 'intra_bank'")
+        # show_rejected_orders: with_reason / hide. Дефолт with_reason —
+        # мовчазне зникнення ордера і було тим дефектом, який лікував етап 2.
+        await self._ensure_column("user_card_settings", "show_rejected_orders", "TEXT DEFAULT 'with_reason'")
+
         await self._ensure_column("scanner_users", "buy_balance_mode", "TEXT DEFAULT 'CARD_ENFORCED'")
         await self._ensure_column("scanner_users", "buy_auto_scale_down", "INTEGER DEFAULT 1")
         await self._ensure_column("scanner_users", "buy_auto_scale_up", "INTEGER DEFAULT 1")
 
+        # Мережа, якою людина справді возить USDT між біржами.
+        #
+        # Сканер відбирає зв'язки за найдешевшою спільною, і це правильний
+        # дефолт. Але TRC20 коштує 1 ₮ проти 0.01 у TON, і хто возить саме
+        # ним — отримував алерти, які в його реальності порога не проходять.
+        # Порожнє значення лишає стару поведінку: найдешевша.
+        await self._ensure_column("scanner_users", "preferred_network", "TEXT DEFAULT ''")
+
         await self._drop_redundant_indexes()
         await self._migrate_inflated_risk_scores()
+        await self._migrate_legacy_bank_limits()
 
     async def _drop_redundant_indexes(self) -> None:
         """
@@ -872,6 +919,55 @@ class MerchantDB:
                 logger.info("🧮 Міграція risk_score: нормалізовано %d роздутих записів", fixed)
         except Exception as e:
             logger.warning("Міграція risk_score не виконана: %s", e)
+
+    async def _migrate_legacy_bank_limits(self) -> None:
+        """
+        Звільняє місце під довідник банків у вже створених базах.
+
+        DEFAULT у DDL — не просто копія константи: значення вже ЗАПИСАНІ в
+        рядки. Змінити число в Python недостатньо, у базі й далі лежатимуть
+        400 000 — і профіль банку не спрацює жодного разу.
+
+        Занулюємо лише ті поля, які дорівнюють колишньому спільному дефолту:
+        їх ніхто не вводив, вони приїхали з DDL. Усе інше — свідомий вибір
+        користувача, і він сильніший за довідник.
+
+        Чесна межа методу: якщо користувач власноруч ввів рівно 400 000, це
+        значення не відрізнити від дефолту, і його теж занулить. Записів, які
+        б розрізняли ці два випадки, у базі не існує; далі така двозначність
+        не з'являється, бо set_user_bank_limit тепер пише NULL-и явно.
+        """
+        from config.card_limits import LEGACY_DEFAULTS
+
+        flag_key = "_migration_bank_limits_nullable_v1"
+        try:
+            async with self._db.execute(
+                "SELECT value FROM bot_settings WHERE user_id = 0 AND key = ?", (flag_key,)
+            ) as cur:
+                if await cur.fetchone():
+                    return
+
+            cleared = 0
+            for field, legacy in LEGACY_DEFAULTS.items():
+                async with self._db.execute(
+                    f"UPDATE user_bank_limits SET {field} = NULL WHERE {field} = ?",
+                    (legacy,),
+                ) as cur:
+                    cleared += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+            await self._db.execute(
+                "INSERT OR REPLACE INTO bot_settings (user_id, key, value, updated_at) "
+                "VALUES (0, ?, ?, ?)",
+                (flag_key, "done", time.time()),
+            )
+            await self._db.commit()
+            if cleared > 0:
+                logger.info(
+                    "🏦 Міграція лімітів: звільнено %d полів під довідник банків "
+                    "(там, де лежав старий спільний дефолт)", cleared
+                )
+        except Exception as e:
+            logger.warning("Міграція лімітів банків не виконана: %s", e)
 
     async def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         async with self._db.execute(f"PRAGMA table_info({table})") as cur:

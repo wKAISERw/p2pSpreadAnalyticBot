@@ -23,6 +23,68 @@ def _user_modes(user: dict) -> list[str]:
     return [str(user.get("scanner_mode") or "SPREAD").upper()]
 
 
+# Дайджест «ордери були, але картки не тягнуть» — не частіше разу на 6 годин
+# на кожну (людину, режим, причину). Причина в ключі навмисне: коли змінилась
+# причина, ситуація справді інша, і про це варто сказати. Коли не змінилась —
+# людина вже все зрозуміла з першого разу.
+_last_rejection_digest: dict[tuple, float] = {}
+_REJECTION_DIGEST_TTL = 6 * 3600
+
+
+async def _notify_all_rejected(notifier, user: dict, mode: str, rejections: list,
+                               show_rejected: str = "with_reason") -> None:
+    """
+    Пояснює порожній прохід, коли причина — картки, а не ринок.
+
+    Досі порожній результат виглядав однаково і коли ордерів справді немає,
+    і коли їх десяток, але жоден не проходить через ліміти карток. Різниця
+    для людини принципова: у першому випадку робити нічого, у другому —
+    поповнити картку або підняти ліміт.
+
+    show_rejected='hide' вимикає це повідомлення повністю: користувач так
+    вирішив у налаштуваннях, статистика в /card_rejections лишається.
+    """
+    if not rejections or show_rejected == "hide":
+        return
+
+    import time
+    from collections import Counter
+    from core.engine import rejection_codes as rc
+
+    counts = Counter(r.code for r in rejections)
+    top_code, top_hits = counts.most_common(1)[0]
+
+    key = (user.get("user_id"), mode, top_code)
+    now = time.time()
+    if now - _last_rejection_digest.get(key, 0.0) < _REJECTION_DIGEST_TTL:
+        return
+    _last_rejection_digest[key] = now
+
+    # Найдорожчі відмови — ті, де видно, скільки саме не вистачило.
+    ranked = sorted(rejections, key=lambda r: -r.shortfall_uah)[:5]
+    lines = []
+    for r in ranked:
+        price = f"{r.price:.2f}".rstrip("0").rstrip(".")
+        lines.append(f"  ├ <i>{r.merchant_name}</i> · {price} ₴ — {r.reason}")
+    if len(rejections) > len(ranked):
+        lines.append(f"  └ <i>…і ще {len(rejections) - len(ranked)}</i>")
+
+    text = (
+        f"🔍 <b>{mode}: ордери є, але жоден не проходить по картках</b>\n\n"
+        f"Перевірено {len(rejections)}, головна причина — "
+        f"<b>{rc.label(top_code).lower()}</b> ({top_hits}).\n\n"
+        + "\n".join(lines)
+        + "\n\n<i>Розклад за тиждень — /card_rejections. "
+          "Вимкнути ці повідомлення — у налаштуваннях карток.</i>"
+    )
+
+    chat_id = user.get("chat_id") or user.get("user_id")
+    try:
+        await notifier.send_plain(chat_id, text)
+    except Exception as e:
+        logger.debug("Не вдалось надіслати дайджест причин відмов: %s", e)
+
+
 def calculate_search_amounts(active_users: list[dict], default_amounts: list[float]) -> list[float]:
     """Будує динамічну сітку сум для пошуку на основі капіталів активних юзерів."""
     _grid: set[float] = {1000.0, 2500.0}
@@ -66,10 +128,34 @@ async def process_taker_path(
 
     for t_user, t_mode in taker_jobs:
         try:
-            t_orders = await taker_scanner.find_orders_for_user(
+            scan = await taker_scanner.scan(
                 {**t_user, "scanner_mode": t_mode}, buy_grouped, sell_grouped,
             )
+            t_orders = scan.orders
+
+            # Причини пишемо завжди — і коли ордери знайшлись, і коли ні.
+            # Порожній прохід виглядав як «ринку немає», хоча ордери були,
+            # просто картки не тягнули; а прохід, де автоскейл ужав обсяг,
+            # не лишав узагалі нічого, хоча саме він і показує, чого коштує
+            # стеля одного банку.
+            if scan.logged and getattr(taker_scanner, "db", None):
+                try:
+                    await taker_scanner.db.log_rejections(
+                        t_user["user_id"], t_mode, scan.logged
+                    )
+                except Exception as log_err:
+                    logger.debug("Не вдалось записати причини відмов: %s", log_err)
+
             if not t_orders:
+                show_rejected = "with_reason"
+                if getattr(taker_scanner, "db", None):
+                    card_settings = await taker_scanner.db.get_user_card_settings(
+                        t_user["user_id"]
+                    ) or {}
+                    show_rejected = card_settings.get("show_rejected_orders") or "with_reason"
+                await _notify_all_rejected(
+                    notifier, t_user, t_mode, scan.rejections, show_rejected
+                )
                 continue
 
             # Кандидати, які ще не відправлялись. Позначку в dedup ставимо НЕ
