@@ -68,6 +68,38 @@ export default function OrderCardSection() {
         </button>
       </div>
 
+      {/* Не «що показувати», а «наскільки щільно» — тому окремо від
+          перемикачів полів. */}
+      <div className="mb-5">
+        <div className="text-sm font-bold text-white mb-0.5">Вигляд картки</div>
+        <div className="text-[11px] text-slate-500 mb-2">
+          Ті самі дані, різна висота списку
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {([
+            { value: 'compact', label: 'Щільний', hint: 'Рядком, як у спред-зв\'язках' },
+            { value: 'roomy', label: 'Просторий', hint: 'Цифри плитками, картка вища' },
+          ] as const).map(opt => {
+            const active = (userSettings.orderLayout ?? "compact") === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => setUserSettings({ ...userSettings, orderLayout: opt.value })}
+                title={opt.hint}
+                className={cn(
+                  'px-4 py-2 rounded-xl text-xs font-bold border transition-all',
+                  active
+                    ? 'bg-accent-500/10 border-accent-500/30 text-accent-400'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         {ORDER_CARD_LABELS.map(({ key, title, hint }) => {
           const on = fields[key];

@@ -17,11 +17,50 @@ export interface Order {
   exchange: string;
   link: string;
   bankCodes: string[];
+  /** Ті самі банки, але з назвами: мапу код→назва тримає бек. */
+  banks?: BankRef[];
   riskScore?: number;
   riskFlag?: string;
   isVerified?: boolean;
   // Сканер віддає це поле з березня, у типі його не було.
   lastOnlineMins?: number | null;
+  tradeTerms?: string;
+  /** Чому умов не видно — див. TakerOrder.termsStatus. */
+  termsStatus?: string;
+  /** Висновок моделі — лежить окремо від riskFlag, у merchant_verdict. */
+  ai?: AiVerdict | null;
+}
+
+/**
+ * Банк ордера з уже розв'язаною назвою.
+ *
+ * Одному банку відповідає кілька кодів біржі («43» і «1» — Monobank), і
+ * мапа для цього одна — на беку. `known: false` означає, що коду немає в
+ * реєстрі бота: під нього картка не підбереться, скільки б їх не завести.
+ */
+export interface BankRef {
+  code: string;
+  slug: string;
+  name: string;
+  known: boolean;
+}
+
+/**
+ * Те, що модель сказала про мерчанта.
+ *
+ * Живе не в `riskFlag`, а в таблиці вердиктів, тому на сайті довго не було
+ * ні вижимки умов, ні пояснення для «безпечних» ордерів — прапорець у них
+ * порожній, і показувати без цього блоку було нічого.
+ */
+export interface AiVerdict {
+  recommendation: 'APPROVE' | 'CONDITIONAL' | 'REJECT' | 'PENDING' | 'RECHECKING' | string;
+  recommendationLabel: string;
+  verdict: string;
+  /** Чому саме такий вердикт. */
+  reason: string;
+  /** Вижимка умов оголошення — мерчанти пишуть їх абзацами. */
+  termsSummary: string;
+  reviewsAnalysis: string;
 }
 
 export interface ArbitrageOpportunity {
@@ -123,6 +162,13 @@ export interface UserSettings {
    * саме наповнення перетворює список на стіну тексту. Тип — з lib/orderCard.
    */
   orderCard?: Partial<OrderCardFields>;
+  /**
+   * Як щільно показувати картку ордера в тейкер-режимах.
+   *
+   * `compact` — рядком, як у спред-нозі. `roomy` — плитками: ті самі цифри,
+   * але картка вдвічі вища, і в списку з двадцяти ордерів це помітно.
+   */
+  orderLayout?: 'compact' | 'roomy';
 }
 
 /**
@@ -354,8 +400,23 @@ export interface TakerOrder {
   reviewScore: number;
   reviewNegPct: number;
   tradeTerms: string;
+  /**
+   * Чому умови саме такі: OK / EMPTY / NO_SESSION / SESSION_EXPIRED /
+   * FETCH_FAILED / NOT_SUPPORTED / UNKNOWN.
+   *
+   * Порожні умови означали дві протилежні речі — «мерчант нічого не
+   * написав» і «ми не змогли дістати». Перше факт про мерчанта, друге про
+   * нас, і плутати їх не можна.
+   */
+  termsStatus?: string;
+  /** Готове пояснення, лише коли умов НЕ видно. Порожньо — пояснювати нічого. */
+  termsStatusLabel?: string;
   isNewUserSubsidy: boolean;
   side: string;
+  /** Банки з назвами — див. BankRef. */
+  banks?: BankRef[];
+  /** Висновок моделі: вердикт, пояснення, вижимка умов. */
+  ai?: AiVerdict | null;
   /**
    * Комісія банку за переказ фіату під цей ордер. null — комісії немає
    * або це продаж (там фіат відправляє мерчант і платить він).
@@ -518,6 +579,49 @@ export interface UsdtInventory {
   totals: { funding?: number; spot?: number; earn?: number; total?: number };
 }
 
+// ─── Картки під угоду (GET /cards/match) ──────────────────────────────────
+
+/**
+ * Що бот шле окремим повідомленням після алерта: яка картка підходить,
+ * чому решта ні, і які перекази це виправлять.
+ */
+export interface CardMatch {
+  bank: string;
+  bankName: string;
+  amountUah: number;
+  direction: 'buy' | 'sell';
+  /** success | needs_split | no_cards | disabled | no_crypto */
+  status: string;
+  bestCard: Record<string, any> | null;
+  splitOptions: Record<string, any>[][];
+  /** Скільки картки цього банку разом можуть провести. */
+  availableUah: number;
+  rejections: CardRejection[];
+  balances: CardBalance[];
+  /** Порожньо для продажу: там фіат приходить нам, переказувати нічого. */
+  transferTips: TransferTip[];
+}
+
+export interface CardBalance {
+  id: string;
+  bank: string;
+  bankName: string;
+  lastFour: string;
+  label: string;
+  balance: number;
+  isWarmedUp: boolean;
+}
+
+export interface TransferTip {
+  fromCardId: string;
+  fromBank: string;
+  fromLastFour: string;
+  toCardId: string;
+  toBank: string;
+  toLastFour: string;
+  amountUah: number;
+}
+
 /** GET /taker/rejections — розклад причин за N днів. */
 export interface RejectionStatsRow {
   code: RejectionCode | string;
@@ -669,7 +773,7 @@ export interface UserFilters {
    * Мережа, якою ти справді возиш USDT між біржами.
    *
    * Сканер відбирає зв'язки за найдешевшою спільною. Якщо возиш дорожчою
-   * (TRC20 — 1 ₮ проти 0.01 у TON), реальний спред нижчий, і поріг тепер
+   * (TRC20 — 1 USDT проти 0.01 у TON), реальний спред нижчий, і поріг тепер
    * застосовується саме до нього. Порожнє — поведінка як була.
    */
   preferredNetwork?: string;

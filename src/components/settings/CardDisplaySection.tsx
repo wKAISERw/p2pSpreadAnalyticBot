@@ -1,7 +1,7 @@
 import React from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
-import { CreditCard, Loader2, Info } from 'lucide-react';
+import { CreditCard, Loader2, Info, Send } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 import { api } from '../../services/api';
@@ -83,17 +83,6 @@ export default function CardDisplaySection() {
         </Muted>
       ) : (
         <div className="space-y-6">
-          <Field label="Вивід карток" sub="card_output_mode">
-            <Picker<CardOutputMode>
-              value={data.cardOutputMode}
-              onChange={v => patch('cardOutputMode', v)}
-              options={[
-                { value: 'inline', label: 'У тексті спреду', hint: 'Вбудувати прямо в повідомлення' },
-                { value: 'reply', label: 'Окремою відповіддю', hint: 'Надіслати Reply на алерт' },
-              ]}
-            />
-          </Field>
-
           <Field label="Деталізація" sub="card_detail_level">
             <Picker<CardDetailLevel>
               value={data.cardDetailLevel}
@@ -106,12 +95,6 @@ export default function CardDisplaySection() {
           </Field>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <Toggle
-              label="Смарт-спойлер"
-              hint="Автоматично розгортати картку при загрозі фінмоніторингу"
-              checked={data.enableSmartSpoiler}
-              onChange={v => patch('enableSmartSpoiler', v)}
-            />
             <Toggle
               label="В окремих режимах"
               hint="Показувати картки і в тейкер/мейкер-режимах, не лише у спреді"
@@ -201,6 +184,41 @@ export default function CardDisplaySection() {
                   не вистачило.
                 </Hint>
               </Field>
+            </div>
+          </div>
+
+          {/* Те, що описує форму повідомлення, а не його зміст.
+              «Окремою відповіддю» і «спойлер» — поняття Telegram: на
+              сторінці картковий блок стоїть просто в ордері й розгортається
+              кліком, тож ці перемикачі там нічого не міняють. */}
+          <div className="pt-4 border-t border-slate-800/60">
+            <div className="flex items-center gap-2 mb-1">
+              <Send className="w-3.5 h-3.5 text-slate-500" />
+              <h3 className="text-sm font-bold text-white">Тільки для Telegram</h3>
+            </div>
+            <p className="text-[11px] text-slate-500 mb-3 leading-snug">
+              На сайті картки показуються всередині ордера й розгортаються
+              кліком — окремого повідомлення й спойлера там немає.
+            </p>
+
+            <div className="space-y-4">
+              <Field label="Вивід карток" sub="card_output_mode">
+                <Picker<CardOutputMode>
+                  value={data.cardOutputMode}
+                  onChange={v => patch('cardOutputMode', v)}
+                  options={[
+                    { value: 'inline', label: 'У тексті спреду', hint: 'Вбудувати прямо в повідомлення' },
+                    { value: 'reply', label: 'Окремою відповіддю', hint: 'Надіслати Reply на алерт' },
+                  ]}
+                />
+              </Field>
+
+              <Toggle
+                label="Смарт-спойлер"
+                hint="Автоматично розгортати картку при загрозі фінмоніторингу"
+                checked={data.enableSmartSpoiler}
+                onChange={v => patch('enableSmartSpoiler', v)}
+              />
             </div>
           </div>
         </div>

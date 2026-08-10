@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+﻿import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { TrendingUp, ArrowRightLeft, ShieldAlert, ExternalLink, AlertTriangle, Clock, Copy, Maximize2, Minimize2, LayoutList, LayoutGrid, Target, Activity, ArrowUpDown, Layers, SlidersHorizontal, ChevronDown, ChevronUp } from 'lucide-react';
 import { ArbitrageOpportunity, CapitalMode, Order, TransferLeg, UserFilters } from '../types';
@@ -17,6 +17,7 @@ import { TakerOrdersList } from './dashboard/TakerOrdersList';
 import { ExchangeHealth } from './dashboard/ExchangeHealth';
 import { RiskPanel } from './RiskPanel';
 import { BankChips, useBankChips } from './BankChips';
+import { CardMatchBlock } from './CardMatchBlock';
 import { ReadinessNotice } from './dashboard/ReadinessNotice';
 import { UsdtInventory } from './dashboard/UsdtInventory';
 import MakerWorkspace from './maker/MakerWorkspace';
@@ -118,15 +119,32 @@ export default function Dashboard() {
   // назустріч пальцю — гірше, ніж лишитись згорнутою.
   const [collapsed, setCollapsed] = useState(false);
 
+  // Панель прилипла — тобто між нею і верхом вікна лишився просвіт, крізь
+  // який видно контент, що їде. Сам просвіт потрібен (панель не має
+  // зростатися з краєм екрана), а от рухомий текст у ньому мулить око.
+  const [stuck, setStuck] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    if (window.innerWidth >= 768) return;
+    // Сторінка скролиться не у вікні, а всередині <main class="overflow-y-auto">
+    // (див. AppShell). Через це `window.scrollY` тут завжди 0, і перевірки
+    // за ним не спрацьовували жодного разу — ні заслінка, ні згортання.
+    const scroller = panelRef.current?.closest('.overflow-y-auto') as HTMLElement | null;
+    if (!scroller) return;
 
     const onScroll = () => {
-      if (window.scrollY > 220) setCollapsed(true);
-      else if (window.scrollY < 40) setCollapsed(false);
+      const y = scroller.scrollTop;
+      setStuck(y > 8);
+      // Згортання — лише на телефоні: на широкому екрані панель нікому
+      // не заважає, і ховати її нема потреби.
+      if (window.innerWidth >= 768) return;
+      if (y > 220) setCollapsed(true);
+      else if (y < 40) setCollapsed(false);
     };
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
+
+    onScroll();
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    return () => scroller.removeEventListener('scroll', onScroll);
   }, []);
   const { names: exchangeNames } = useExchanges();
 
@@ -222,7 +240,26 @@ export default function Dashboard() {
             тож прилипати треба майже до самого верху. Раніше тут стояв
             відступ під нерухому шапку, якої немає, і панель зависала
             посеред порожнечі. */}
-        <div className="sticky top-1 md:top-0 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-2xl shadow-lg">
+        <div
+          ref={panelRef}
+          className="sticky top-1 md:top-0 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-2xl shadow-lg"
+        >
+          {/* Заслінка над панеллю.
+              Відступ від краю потрібен — впритул панель зростається з
+              екраном. Але крізь цей просвіт видно текст, що прокручується
+              під ним, і око чіпляється саме за рух. Тут не фон, а розмиття:
+              смуга суцільного кольору читалась би як обрізаний край
+              сторінки, а розмите лишається тлом.
+              Тільки на телефоні: на десктопі панель стоїть впритул. */}
+          {stuck && (
+            <div
+              aria-hidden
+              // Висота з запасом: точний просвіт залежить від відступів
+              // контейнера й висоти шапки, і замість вгадувати — смуга
+              // тягнеться вище. Зайве перекриє шапка, у якої z-index більший.
+              className="absolute -top-20 -left-3 -right-3 h-20 backdrop-blur-md bg-slate-950/70 pointer-events-none -z-10"
+            />
+          )}
           {/* Згорнутий вигляд для телефона.
               Розгорнута панель займає до третини екрана й лишається там на
               весь скрол — тобто саме тоді, коли потрібен список, а не
@@ -941,7 +978,7 @@ const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'deta
         {/* Крок переказу стоїть саме між ногами: у цьому місці він і
             відбувається насправді. */}
         <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] gap-3 md:gap-2 items-stretch">
-          <OrderDetails side="BUY" order={opp.buyOrder} onCopy={handleCopy} />
+          <OrderDetails side="BUY" order={opp.buyOrder} onCopy={handleCopy} dealAmount={opp.dealAmount} />
           <TransferStep
             transfer={opp.transfer}
             selected={preferred || (opp.transfer?.network ?? '')}
@@ -949,7 +986,7 @@ const OpportunityCardBase: React.FC<{ opp: ArbitrageOpportunity, viewMode: 'deta
             // мережею, а не окремою під кожен спред.
             onSelect={pickNetwork}
           />
-          <OrderDetails side="SELL" order={opp.sellOrder} onCopy={handleCopy} />
+          <OrderDetails side="SELL" order={opp.sellOrder} onCopy={handleCopy} dealAmount={opp.dealAmount} />
         </div>
       </div>
 
@@ -1086,7 +1123,7 @@ function TransferStep({
               {canChoose && <ChevronDown className="w-2.5 h-2.5 opacity-60" />}
             </div>
             <div className="text-[9px] text-slate-500 tabular-nums leading-tight mt-0.5">
-              {current.feeUsdt} ₮
+              {current.feeUsdt} USDT
             </div>
           </button>
 
@@ -1106,7 +1143,7 @@ function TransferStep({
                     )}
                   >
                     <span className="font-bold">{opt.network}</span>
-                    <span className="tabular-nums opacity-70">{opt.feeUsdt} ₮</span>
+                    <span className="tabular-nums opacity-70">{opt.feeUsdt} USDT</span>
                   </button>
                 ))}
                 <div className="px-2 py-1.5 text-[9px] text-slate-600 leading-snug border-t border-slate-800 mt-1">
@@ -1122,11 +1159,82 @@ function TransferStep({
   );
 }
 
-function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Order, onCopy: (text: string|number, label: string) => void }) {
+/** Онлайн мерчанта біля ніка — те саме, що в тейкер-картці. */
+function SpreadOnlineDot({ minutes }: { minutes: number }) {
+  const fresh = minutes <= 5;
+  const recent = minutes <= 30;
+  return (
+    <span
+      title={minutes === 0 ? 'Онлайн зараз' : `Був онлайн ${minutes} хв тому`}
+      className={cn(
+        'flex items-center gap-1 text-[10px] font-bold shrink-0',
+        fresh ? 'text-accent-400' : recent ? 'text-slate-400' : 'text-slate-600'
+      )}
+    >
+      <span className={cn(
+        'w-1.5 h-1.5 rounded-full',
+        fresh ? 'bg-accent-500' : recent ? 'bg-slate-500' : 'bg-slate-700'
+      )} />
+      {minutes === 0 ? 'зараз' : `${minutes} хв`}
+    </span>
+  );
+}
+
+/**
+ * Умови мерчанта в спред-нозі.
+ *
+ * Порожньо тут означало дві протилежні речі — «нічого не написав» і «ми не
+ * дістали». Друге стосується нас, і мовчати про нього не можна.
+ */
+function SpreadTerms({ text, status }: { text: string; status?: string }) {
+  const [open, setOpen] = useState(false);
+
+  const blind = !text && status && !['OK', 'EMPTY'].includes(status);
+  if (blind) {
+    return (
+      <div className="text-[11px] text-slate-400 leading-snug">
+        ❔ Умов не видно. Це не означає, що їх немає — перевір в застосунку біржі.
+      </div>
+    );
+  }
+  if (!text) return null;
+
+  const isLong = text.length > 160;
+  return (
+    <div>
+      <p className={cn(
+        'text-[11px] text-slate-400 leading-snug whitespace-pre-line',
+        !open && isLong && 'line-clamp-2'
+      )}>
+        {text}
+      </p>
+      {isLong && (
+        <button
+          onClick={() => setOpen(v => !v)}
+          className="mt-1 text-[11px] font-bold text-slate-500 hover:text-slate-300 transition-colors"
+        >
+          {open ? 'Згорнути' : 'Показати повністю'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function OrderDetails({
+  side, order, onCopy, dealAmount = 0,
+}: {
+  side: 'BUY' | 'SELL';
+  order: Order;
+  onCopy: (text: string | number, label: string) => void;
+  /** Сума угоди — під неї добираються картки. */
+  dealAmount?: number;
+}) {
   const score = order.riskScore || (order as any).risk_score || 0;
   // Python backend sends snake_case — handle both
   const riskFlag: string = order.riskFlag || (order as any).risk_flag || '';
-  const isRisk = score > 0 || (riskFlag && riskFlag !== 'OK');
+  // Умови «показувати тільки за наявності ризику» тут більше немає:
+  // панель сама вирішує, чи є що сказати, і «✅ Безпечно» з поясненням —
+  // теж відповідь, якої раніше не було видно взагалі.
 
   return (
      <div className="bg-slate-950/50 rounded-2xl p-4 border border-slate-800/50">
@@ -1142,10 +1250,17 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
         </div>
       </div>
 
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-sm font-bold text-white truncate max-w-[120px]">{order.merchantName}</div>
+      <div className="flex items-baseline justify-between gap-2 mb-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-[15px] font-bold text-white truncate">
+            {order.merchantName}
+          </span>
+          {typeof order.lastOnlineMins === 'number' && (
+            <SpreadOnlineDot minutes={order.lastOnlineMins} />
+          )}
+        </div>
         <div
-          className="text-lg font-black text-white cursor-pointer hover:text-accent-400 transition-colors group flex items-center gap-1 tabular-nums"
+          className="text-xl font-black text-white cursor-pointer hover:text-accent-400 transition-colors group flex items-center gap-1 tabular-nums shrink-0"
           onClick={() => onCopy(order.price, `${side} Price`)}
         >
           {(order.price ?? 0).toFixed(2)}
@@ -1154,10 +1269,20 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
       </div>
 
       <div
-        className="text-xs text-slate-400 mb-3 font-mono cursor-pointer hover:text-white transition-colors group flex items-center gap-1 tabular-nums"
+        className="text-xs text-slate-400 mb-3 cursor-pointer hover:text-white transition-colors group flex items-center gap-1.5 tabular-nums"
         onClick={() => onCopy(`${order.minLimit} - ${order.maxLimit}`, `${side} Limits`)}
       >
-        Limits: {order.minLimit} - {order.maxLimit} ₴
+        <span>
+          {Math.round(order.minLimit).toLocaleString('uk-UA')}–
+          {Math.round(order.maxLimit).toLocaleString('uk-UA')} ₴
+        </span>
+        {/* Ліміти кажуть, скільки мерчант готовий провести за раз, а це —
+            чи є в нього стільки взагалі. */}
+        {order.availableAmount > 0 && (
+          <span className="text-slate-500">
+            · {Math.round(order.availableAmount).toLocaleString('uk-UA')} USDT
+          </span>
+        )}
         <Copy className="w-3 h-3 opacity-0 group-hover:opacity-100" />
       </div>
 
@@ -1166,14 +1291,26 @@ function OrderDetails({ side, order, onCopy }: { side: 'BUY' | 'SELL', order: Or
           зможеш його взяти. */}
       {(order.bankCodes?.length ?? 0) > 0 && (
         <div className="mb-3">
-          <BankChips codes={order.bankCodes} size="sm" />
+          <BankChips codes={order.bankCodes} banks={order.banks} size="sm" />
         </div>
       )}
 
-      {isRisk && (
-        <div className="mt-3">
-          <RiskPanel riskFlag={riskFlag} score={score} />
-        </div>
+      {/* Вердикт і бейджі, під ними умови, і аж потім висновок моделі. */}
+      <div className="mb-3">
+        <RiskPanel riskFlag={riskFlag} score={score} ai={order.ai}>
+          {(order.tradeTerms || order.termsStatus) && (
+            <SpreadTerms text={order.tradeTerms ?? ''} status={order.termsStatus} />
+          )}
+        </RiskPanel>
+      </div>
+
+      {/* Чим заходити в цю ногу — останнім: це вже про дію, а не про оцінку. */}
+      {dealAmount > 0 && (order.banks?.length ?? 0) > 0 && (
+        <CardMatchBlock
+          banks={order.banks ?? []}
+          amount={dealAmount}
+          direction={side === 'BUY' ? 'buy' : 'sell'}
+        />
       )}
     </div>
   );

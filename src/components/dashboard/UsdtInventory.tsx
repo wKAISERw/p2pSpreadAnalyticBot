@@ -6,7 +6,7 @@ import { ExchangeWallets, UsdtInventory as Inventory } from '../../types';
 import { useAppStore } from '../../store';
 import { cn } from '../../lib/utils';
 
-const usdt = (v: number) => `${v.toFixed(2)} ₮`;
+const usdt = (v: number) => `${v.toFixed(2)} USDT`;
 
 /**
  * Де саме лежить USDT — по біржах і по гаманцях.

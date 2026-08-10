@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+﻿import React, { useState } from 'react';
 import useSWR from 'swr';
 import { motion } from 'motion/react';
 import {
   ExternalLink, Copy, ShieldAlert, BadgeCheck, Clock, Gift, TrendingDown, TrendingUp,
-  Smartphone, Filter, ChevronDown, Wallet, Percent,
+  Smartphone, Filter, ChevronDown, Wallet, Percent, HelpCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -15,6 +15,7 @@ import {
 } from '../../types';
 import { RiskPanel } from '../RiskPanel';
 import { BankChips } from '../BankChips';
+import { CardMatchBlock } from '../CardMatchBlock';
 import { resolveOrderCardFields } from '../../lib/orderCard';
 import { isMobileDevice } from '../../lib/device';
 
@@ -152,16 +153,16 @@ function BudgetNote({ budget }: { budget: BuyBudget | null }) {
         {budget.blocked ? (
           <span className="text-red-300">
             Доступно {money(budget.availableUah)} ₴ {source} — не набирається
-            навіть мінімальна угода. Бажані {budget.desiredUsdt} ₮ збережені
+            навіть мінімальна угода. Бажані {budget.desiredUsdt} USDT збережені
             й чекають поповнення.
           </span>
         ) : (
           <span className="text-orange-200">
-            Заходимо на <b>{budget.effectiveUsdt} ₮</b> замість{' '}
-            <b>{budget.desiredUsdt} ₮</b>: доступно{' '}
+            Заходимо на <b>{budget.effectiveUsdt} USDT</b> замість{' '}
+            <b>{budget.desiredUsdt} USDT</b>: доступно{' '}
             {money(budget.availableUah)} ₴ {source}. Введена сума не змінена —
             щойно балансу вистачить, бот знову шукатиме повні{' '}
-            {budget.desiredUsdt} ₮.
+            {budget.desiredUsdt} USDT.
           </span>
         )}
 
@@ -306,6 +307,9 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
   // у налаштуваннях застосується одразу до всіх карток.
   const savedFields = useAppStore(state => state.userSettings.orderCard);
   const fields = resolveOrderCardFields(savedFields);
+  // Щільний вигляд — той самий, що в спред-нозі. Просторий лишається для
+  // тих, кому зручніше читати цифри плитками.
+  const layout = useAppStore(state => state.userSettings.orderLayout) ?? 'compact';
 
   const isRisky = Boolean(order.riskFlag) || order.compositeScore >= 50;
 
@@ -323,18 +327,26 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
         isRisky ? 'border-orange-500/25' : 'border-slate-800/60'
       )}
     >
-      <div className="flex items-start justify-between gap-3 mb-3">
+      {/* Шапка: хто і почім. Онлайн стоїть біля ніка, а не в метриках —
+          «був 40 хвилин тому» змінює рішення так само, як ціна, і шукати
+          його серед решти цифр незручно. */}
+      <div className="flex items-start justify-between gap-3 mb-2.5">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
-            <span className="font-bold text-white truncate">{order.merchantName}</span>
+            <span className="font-bold text-[15px] text-white truncate">
+              {order.merchantName}
+            </span>
             {fields.verified && order.isVerified && (
               <BadgeCheck className="w-3.5 h-3.5 text-blue-400 shrink-0" titleAccess="Верифікований" />
             )}
             {fields.subsidy && order.isNewUserSubsidy && (
               <Gift className="w-3.5 h-3.5 text-pink-400 shrink-0" titleAccess="Субсидія новачка" />
             )}
+            {fields.online && order.lastOnlineMins !== null && (
+              <OnlineDot minutes={order.lastOnlineMins} />
+            )}
           </div>
-          <div className="text-[11px] text-slate-500">
+          <div className="text-xs text-slate-500 mt-0.5">
             {order.exchange}
             {fields.stats && (
               <> · {order.monthOrderCount} угод · {order.finishRatePct.toFixed(1)}%</>
@@ -344,7 +356,7 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
 
         <div className="text-right shrink-0">
           <div className={cn(
-            'text-lg font-black tabular-nums',
+            'text-xl font-black tabular-nums leading-none',
             side === 'buy' ? 'text-blue-400' : 'text-accent-400'
           )}>
             {uah(order.price)}
@@ -353,16 +365,23 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
               при спреді 0.5–1% комісія банку 2% з'їдає весь профіт. */}
           {order.transferFee && (
             <div
-              className="text-[11px] text-orange-400 tabular-nums"
+              className="text-[11px] text-orange-400 tabular-nums mt-1"
               title={`${order.transferFee.description} — від ${Math.round(order.transferFee.onAmountUah).toLocaleString('uk-UA')} ₴`}
             >
               з комісією {uah(order.transferFee.effectivePrice)}
             </div>
           )}
-          <div className="text-[11px] text-slate-500 tabular-nums">
+          <div className="text-xs text-slate-400 tabular-nums mt-1">
             {Math.round(order.minLimit).toLocaleString('uk-UA')}–
             {Math.round(order.maxLimit).toLocaleString('uk-UA')} ₴
           </div>
+          {/* Скільки крипти в мерчанта взагалі: ліміти кажуть, скільки він
+              готовий провести за раз, а це — чи є в нього стільки. */}
+          {fields.volume && order.availableAmount > 0 && (
+            <div className="text-[11px] text-slate-500 tabular-nums">
+              {Math.round(order.availableAmount).toLocaleString('uk-UA')} USDT в ордері
+            </div>
+          )}
         </div>
       </div>
 
@@ -382,14 +401,34 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
           він приймає», а «чи є серед них мій». */}
       {fields.banks && (order.bankCodes?.length ?? 0) > 0 && (
         <div className="mb-3">
-          <BankChips codes={order.bankCodes} />
+          <BankChips codes={order.bankCodes} banks={order.banks} />
         </div>
       )}
 
-      {(fields.volume || fields.age || fields.online || fields.reviews) && (
+
+      {/* Той самий набір цифр, але рядком, а не плитками: у спред-нозі
+          вони саме так і стоять, і сітка з чотирьох квадратів робила
+          тейкер-картку вдвічі вищою за ту, що показує ту саму інформацію.
+          Плитки лишились як «просторий» вигляд у налаштуваннях. */}
+      {/* Обсяг і онлайн переїхали в шапку — тут лишилось те, що впливає на
+          рішення рідше і читається довідкою. */}
+      {layout === 'compact' && (fields.age || fields.reviews) && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1 mb-3 text-[11px] text-slate-500">
+          {fields.age && order.accountAgeDays > 0 && (
+            <span className="tabular-nums">акаунту {order.accountAgeDays} дн</span>
+          )}
+          {fields.reviews && order.reviewNegPct > 0 && (
+            <span className={cn('tabular-nums', order.reviewNegPct >= 10 && 'text-red-400')}>
+              негатив {order.reviewNegPct.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      )}
+
+      {layout === 'roomy' && (fields.volume || fields.age || fields.online || fields.reviews) && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
           {fields.volume && (
-            <Metric label="Доступно" value={`${Math.round(order.availableAmount)} ₮`} />
+            <Metric label="Доступно" value={`${Math.round(order.availableAmount)} USDT`} />
           )}
           {fields.age && (
             <Metric
@@ -417,14 +456,32 @@ const OrderCardBase: React.FC<{ order: TakerOrder; side: 'buy' | 'sell' }> = ({ 
         </div>
       )}
 
-      {fields.risk && isRisky && (
+      {/* Вердикт, бейджі, вижимка умов, далі самі умови, і аж потім
+          висновок моделі — у порядку, в якому це читають. Панель показуємо
+          і без ризиків: «✅ Безпечно» з поясненням теж відповідь. */}
+      {fields.risk && (
         <div className="mb-3">
-          <RiskPanel riskFlag={order.riskFlag} score={order.compositeScore} />
+          <RiskPanel riskFlag={order.riskFlag} score={order.compositeScore} ai={order.ai}>
+            {/* Показуємо і тоді, коли тексту немає: якщо умов НЕ ВИДНО, про
+                це треба сказати, а не мовчати так само, як про справді
+                порожні. */}
+            {fields.terms && (order.tradeTerms || order.termsStatusLabel) && (
+              <TradeTerms text={order.tradeTerms} blindLabel={order.termsStatusLabel} />
+            )}
+          </RiskPanel>
         </div>
       )}
 
-      {fields.terms && order.tradeTerms && (
-        <TradeTerms text={order.tradeTerms} />
+      {/* Чим брати цей ордер — останнім блоком: це вже про дію, а не про
+          оцінку. Бот шле те саме окремим повідомленням після алерта. */}
+      {(order.banks?.length ?? 0) > 0 && (
+        <div className="mb-3">
+          <CardMatchBlock
+            banks={order.banks ?? []}
+            amount={order.minLimit}
+            direction={side}
+          />
+        </div>
       )}
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -501,8 +558,24 @@ const OrderCard = React.memo(
  * але сам текст мусить бути доступний повністю: саме в ньому мерчант
  * пише про третіх осіб, ФОП і вимогу писати в чат.
  */
-function TradeTerms({ text }: { text: string }) {
+function TradeTerms({ text, blindLabel }: { text: string; blindLabel?: string }) {
   const [open, setOpen] = useState(false);
+
+  // «Умов немає» і «умов не видно» — різні речі, і друге стосується нас, а
+  // не мерчанта. Мовчазна порожнеча читалась як факт про контрагента.
+  if (!text && blindLabel) {
+    return (
+      <div className="flex items-start gap-1.5 mb-3 text-[11px] text-slate-400 leading-snug">
+        <HelpCircle className="w-3.5 h-3.5 shrink-0 mt-px text-slate-500" />
+        <span>
+          Умов не видно — {blindLabel}. Це не означає, що їх немає:
+          перевір в застосунку біржі перед угодою.
+        </span>
+      </div>
+    );
+  }
+  if (!text) return null;
+
   const isLong = text.length > 180;
 
   return (
@@ -522,6 +595,34 @@ function TradeTerms({ text }: { text: string }) {
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Онлайн мерчанта біля його ніка.
+ *
+ * Стояв серед решти метрик, і там губився — а «був 40 хвилин тому» змінює
+ * рішення так само, як ціна: під таймер угоди в 15 хвилин зниклий мерчант
+ * означає апеляцію. Колір робить головну роботу, підпис уточнює.
+ */
+function OnlineDot({ minutes }: { minutes: number }) {
+  const fresh = minutes <= 5;
+  const recent = minutes <= 30;
+
+  return (
+    <span
+      title={minutes === 0 ? 'Онлайн зараз' : `Був онлайн ${minutes} хв тому`}
+      className={cn(
+        'flex items-center gap-1 text-[10px] font-bold shrink-0',
+        fresh ? 'text-accent-400' : recent ? 'text-slate-400' : 'text-slate-600'
+      )}
+    >
+      <span className={cn(
+        'w-1.5 h-1.5 rounded-full',
+        fresh ? 'bg-accent-500' : recent ? 'bg-slate-500' : 'bg-slate-700'
+      )} />
+      {minutes === 0 ? 'зараз' : `${minutes} хв`}
+    </span>
   );
 }
 

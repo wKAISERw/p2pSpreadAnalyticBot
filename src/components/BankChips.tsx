@@ -2,7 +2,7 @@ import React from 'react';
 import useSWR from 'swr';
 import { api } from '../services/api';
 import { useAppStore } from '../store';
-import { Bank, Card } from '../types';
+import { Bank, BankRef, Card } from '../types';
 import { useBankProfiles } from '../hooks/useBankProfiles';
 import { cn } from '../lib/utils';
 
@@ -32,9 +32,44 @@ export function bankLabelFrom(code: string, known: Record<string, string>): stri
     ?? (/^\d+$/.test(code) ? `код ${code}` : code);
 }
 
+/** Слаги банків, під які є активна картка. */
+export function useMyBankSlugs(): Set<string> {
+  return new Set(useMyBankBalances().keys());
+}
+
+/**
+ * Скільки грошей лежить у кожному банку — сумою по активних картках.
+ *
+ * Потрібне не для показу, а для вибору: мерчант приймає кілька банків, і
+ * питати матчинг треба про той, де грошей найбільше. Інакше блок бере
+ * перший банк зі списку, натикається на 5 000 ₴ і каже «не вистачає»,
+ * тоді як у сусідньому банку того ж списку лежить 21 000 ₴.
+ */
+export function useMyBankBalances(): Map<string, number> {
+  const telegramId = useAppStore(state => state.auth?.telegramId);
+  const { data: cards } = useSWR<Card[]>(
+    telegramId ? ['/cards', telegramId] : null,
+    () => api.getCards(telegramId!),
+    { revalidateOnFocus: false, shouldRetryOnError: false }
+  );
+
+  return React.useMemo(() => {
+    const out = new Map<string, number>();
+    for (const c of cards ?? []) {
+      if (c.status !== 'active') continue;
+      const slug = String(c.bankName ?? '').toLowerCase();
+      if (!slug) continue;
+      out.set(slug, (out.get(slug) ?? 0) + (c.balance ?? 0));
+    }
+    return out;
+  }, [cards]);
+}
+
 /**
  * Спільні дані для чипів: реєстр банків, довідник профілів і свої картки.
  * Усі три через SWR, тож між картками ордерів запит один.
+ *
+ * Потрібне лише як запасний шлях — коли бекенд не віддав готових назв.
  */
 export function useBankChips() {
   const { data: bankList } = useSWR<Bank[]>('/banks', () => api.getBanks(), {
@@ -79,15 +114,31 @@ export function useBankChips() {
 }
 
 export function BankChips({
-  codes, size = 'md',
+  codes, banks: fromApi, size = 'md',
 }: {
   codes: string[];
+  /**
+   * Готові назви з бекенда. Мають перевагу над кодами: одному банку
+   * відповідає кілька кодів («43» і «1» — Monobank), і мапа для цього
+   * одна — там, де живе реєстр. Клієнт із самими кодами показував «код 1»
+   * як невідомий банк.
+   */
+  banks?: BankRef[];
   size?: 'sm' | 'md';
 }) {
   const resolve = useBankChips();
-  if (!codes?.length) return null;
+  const mineOf = useMyBankSlugs();
 
-  const banks = resolve(codes);
+  if (!fromApi?.length && !codes?.length) return null;
+
+  const banks = fromApi?.length
+    ? fromApi.map(b => ({
+        code: b.code,
+        label: b.name,
+        slug: b.slug,
+        mine: b.known && mineOf.has(b.slug),
+      }))
+    : resolve(codes);
   const hasMine = banks.some(b => b.mine);
 
   return (

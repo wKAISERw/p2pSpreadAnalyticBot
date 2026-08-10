@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { AlertTriangle, ChevronDown, Brain, HelpCircle } from 'lucide-react';
+import { AlertTriangle, ChevronDown, Brain, HelpCircle, FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { parseRiskFlag, RISK_TONE, RiskLevel } from '../lib/riskFlags';
+import { AiVerdict } from '../types';
 
 /**
  * Ризик ордера: вердикт, короткі бейджі й висновок моделі.
@@ -17,30 +18,59 @@ import { parseRiskFlag, RISK_TONE, RiskLevel } from '../lib/riskFlags';
  * саме рішення не повинно називатись по-різному в двох місцях.
  */
 export function RiskPanel({
-  riskFlag, score = 0, compact = false,
+  riskFlag, score = 0, compact = false, ai = null, children,
 }: {
   riskFlag?: string | null;
   score?: number;
   /** Компактний режим: без розгорнутого тексту, лише вердикт і бейджі. */
   compact?: boolean;
+  /**
+   * Висновок моделі з таблиці вердиктів. Показується і тоді, коли ризиків
+   * немає: «✅ Безпечно» з поясненням — теж відповідь, і саме її бракувало
+   * ордерам із порожнім прапорцем.
+   */
+  ai?: AiVerdict | null;
+  /**
+   * Текст умов мерчанта. Стоїть між вижимкою і висновком моделі — саме в
+   * тому порядку, в якому це читають: спершу вердикт, далі те, що написав
+   * мерчант, і лише потім що про це думає модель.
+   */
+  children?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const risk = parseRiskFlag(riskFlag);
 
-  if (risk.level === 'ok' && score <= 0) return null;
+  const aiText = [ai?.reason, ai?.reviewsAnalysis].filter(Boolean) as string[];
+  const hasAi = Boolean(ai && (aiText.length || ai.termsSummary));
+
+  if (risk.level === 'ok' && score <= 0 && !hasAi) return null;
 
   const tone = RISK_TONE[risk.level];
-  const hasThoughts = risk.explanations.length > 0;
+  // Пояснення з таблиці вердиктів повніше за те, що влізло у прапорець.
+  const explanations = aiText.length ? aiText : risk.explanations;
+  const hasThoughts = explanations.length > 0;
+
+  // Для «безпечних» прапорець порожній, і єдиний вердикт — від моделі.
+  const verdictLabel = risk.verdict || ai?.recommendationLabel || '';
+  const verdictTone = risk.verdict
+    ? tone
+    : ai?.recommendation === 'REJECT'
+      ? RISK_TONE.block
+      : ai?.recommendation === 'CONDITIONAL'
+        ? RISK_TONE.suspicious
+        : ai?.recommendation === 'APPROVE'
+          ? RISK_TONE.ok
+          : RISK_TONE.pending;
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-1.5">
-        {risk.verdict && (
+        {verdictLabel && (
           <span className={cn(
             'px-2 py-0.5 rounded-md text-[11px] font-bold border',
-            tone
+            verdictTone
           )}>
-            {risk.verdict}
+            {verdictLabel}
           </span>
         )}
 
@@ -83,6 +113,17 @@ export function RiskPanel({
         </div>
       )}
 
+      {/* Вижимка умов. Мерчанти пишуть їх абзацами, і модель зводить до
+          кількох рядків — саме це бот друкує під «📋 Умови». */}
+      {ai?.termsSummary && !compact && (
+        <div className="flex items-start gap-1.5 text-[11px] text-slate-400 leading-snug">
+          <FileText className="w-3.5 h-3.5 shrink-0 mt-px text-slate-500" />
+          <span>{ai.termsSummary}</span>
+        </div>
+      )}
+
+      {children}
+
       {hasThoughts && !compact && (
         <div className="rounded-xl bg-slate-950/60 border border-slate-800/70 overflow-hidden">
           <button
@@ -101,7 +142,7 @@ export function RiskPanel({
 
           {open && (
             <div className="px-3 pb-3 space-y-2">
-              {risk.explanations.map((text, i) => (
+              {explanations.map((text, i) => (
                 <p key={i} className="text-[11px] text-slate-300 leading-relaxed">
                   {text}
                 </p>
@@ -113,7 +154,7 @@ export function RiskPanel({
 
       {hasThoughts && compact && (
         <p className="text-[11px] text-slate-400 leading-snug line-clamp-2">
-          {risk.explanations[0]}
+          {explanations[0]}
         </p>
       )}
     </div>

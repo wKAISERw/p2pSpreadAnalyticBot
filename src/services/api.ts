@@ -27,6 +27,7 @@ import {
   MerchantThresholds,
   Bank,
   BankProfile,
+  CardMatch,
   RejectionStats,
   ReadinessReport,
   SyncState,
@@ -434,6 +435,15 @@ export const api = {
   getTakerReadiness: (mode?: string) =>
     apiClient.get<any, ReadinessReport>('/taker/readiness', {
       params: mode ? { mode } : {},
+    }),
+
+  /**
+   * Які картки підходять під конкретну угоду — те саме, що бот шле
+   * окремим повідомленням після алерта.
+   */
+  getCardMatch: (bank: string, amount: number, direction: 'buy' | 'sell') =>
+    apiClient.get<any, CardMatch>('/cards/match', {
+      params: { bank, amount, direction },
     }),
 
   /** Де лежить USDT: фандинг продається зараз, спот і Earn — ще ні. */
