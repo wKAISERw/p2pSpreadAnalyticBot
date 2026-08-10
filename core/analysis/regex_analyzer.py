@@ -37,6 +37,33 @@ LLM_SCORE_THRESHOLD    = 30   # мінімум для ескалації в LLM
 MIN_MULTI_SIGNAL_SCORE = 20   # поріг при >= 2 різних категоріях
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Правила, які взагалі мають право дивитись на УМОВИ УГОДИ
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# `review_only` — прапорець на правилі, який каже: це написано під мову
+# ВІДГУКІВ, не під мову оголошення. «Кинув», «шахрай», «дроп» у відгуку пише
+# потерпілий, і вага 100 там доречна. Те саме слово в умовах пише сам
+# мерчант — найчастіше щоб від цього відхреститись.
+#
+# `review_fetcher` цей прапорець поважав завжди. Цей модуль — ні: цикли нижче
+# ходили по ВСІХ SOFT_RULES і SAFE_RULES. А з 25 SOFT-правил 18 мають
+# review_only=True, серед них сім із вагою 100 і сім із вагою 50 — при порозі
+# ескалації 30. Тобто одне випадкове спрацювання review-правила на тексті
+# оголошення давало score 100, verdict=NEEDS_LLM і risk_type=TRIANGLE, і LLM
+# отримувала промпт, у якому вже написано «Regex main risk: TRIANGLE».
+#
+# У базі це виглядало як 892 BLOCK із 1290 вердиктів (69%), з них TRIANGLE
+# 457 і FINCRIME 247.
+#
+# Фільтруємо один раз на імпорті, а не в кожному виклику: analyze() працює
+# на кожен ордер кожного циклу.
+TERMS_HARD_RULES = [r for r in HARD_RULES if not r.review_only]
+TERMS_SOFT_RULES = [r for r in SOFT_RULES if not r.review_only]
+TERMS_SAFE_RULES = [r for r in SAFE_RULES if not r.review_only]
+TERMS_WARN_RULES = [r for r in WARN_RULES if not r.review_only]
+
+
 # Custom patterns for user-configurable blocks
 FOP_TOV_PATTERN = re.compile(
     r"\b(?:фоп[ауие]?|тов[ау]?|ооо|іп[ау]?|флп[ау]?|юр\.?\s*особ[аиуї]?|підприєм[еацїік]{2,6})\b|"
@@ -220,7 +247,7 @@ def analyze(
     # suppress_hard містить імена HARD категорій що треба скасувати при збігу.
     # Стара _SUPPRESSOR_MAP по назві категорії suppressor-правила — видалена.
     suppressed_hard: set[str] = set()
-    for rule in SAFE_RULES:
+    for rule in TERMS_SAFE_RULES:
         sh = getattr(rule, "suppress_hard", None)
         if not sh:
             continue
@@ -234,7 +261,7 @@ def analyze(
             )
 
     # ── 1. HARD BLOCKS ────────────────────────────────────────────────────────
-    for rule in HARD_RULES:
+    for rule in TERMS_HARD_RULES:
         if rule.category in suppressed_hard:
             logger.debug(
                 "Suppressed HARD %s (rule %s) через suppressed_hard=%s",
@@ -258,7 +285,7 @@ def analyze(
     raw_score  = 0
     collected: list[RegexMatch] = []
 
-    for rule in SOFT_RULES:
+    for rule in TERMS_SOFT_RULES:
         m = _search_rule(rule, raw_text, fuzzy)
         if not m:
             continue
@@ -268,7 +295,7 @@ def analyze(
         ))
         raw_score += rule.weight
 
-    for rule in SAFE_RULES:
+    for rule in TERMS_SAFE_RULES:
         m = _search_rule(rule, raw_text, fuzzy)
         if not m:
             continue
@@ -282,7 +309,7 @@ def analyze(
     result.score   = max(0, raw_score)   # score не може бути від'ємним
 
     # ── 3. WARN (незалежно від score) ─────────────────────────────────────────
-    for rule in WARN_RULES:
+    for rule in TERMS_WARN_RULES:
         m = _search_rule(rule, raw_text, fuzzy)
         if m:
             result.warn_flags.append((rule.category, _excerpt(raw_text, m)))

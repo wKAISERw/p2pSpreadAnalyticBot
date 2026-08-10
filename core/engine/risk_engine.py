@@ -165,6 +165,55 @@ def _is_trusted_merchant(order, risk_score: int = 0) -> bool:
 REVIEWS_BLIND_STATUSES = reviews_status.BLIND
 
 
+def _note_terms_unavailable(order: Order, status: str) -> str:
+    """
+    Записує ПРИЧИНУ, чому повних умов дістати не вдалось — не чіпаючи умови.
+
+    Шість місць нижче робили протилежне:
+
+        order.trade_terms = "не вдалося отримати доступ до умов через ..."
+
+    Тобто службове речення про НАС підставлялось у поле, яке має містити
+    слова МЕРЧАНТА. Далі воно жило власним життям: `regex_analyze` проганяв
+    його через правила, LLM отримувала його всередині <merchant_terms> і
+    переказувала в terms_summary як умови угоди, а `hash_terms` від нього
+    виходив однаковим для всіх мерчантів без сесії — тобто ставав спільним
+    ключем кешу вердиктів і полем terms_hash у снапшотах.
+
+    `core/engine/terms_status.py` створили саме щоб цього більше не було;
+    Wallet і CryptoBot виправили, а ріск-енджин лишився з тією ж звичкою.
+
+    Короткі умови з пошукової видачі при невдачі ЗБЕРІГАЮТЬСЯ: вони обрізані,
+    але це справжні слова мерчанта, і вони кращі за порожнечу. Статус
+    ставимо лише тоді, коли не маємо взагалі нічого.
+    """
+    existing = (getattr(order, "trade_terms", "") or "").strip()
+    if existing:
+        return existing
+
+    order.trade_terms = ""
+    order.terms_status = status
+    return ""
+
+
+def _note_terms_fetched(order: Order, remarks: str, had_terms: str) -> str:
+    """Успішна спроба: або повні умови, або доведено порожні."""
+    if remarks:
+        order.trade_terms = remarks.strip().lower()
+        order.terms_status = terms_status.OK
+        return order.trade_terms
+
+    if had_terms.strip():
+        # Профіль не дав умов, але коротка версія з видачі є — лишаємо її.
+        return had_terms
+
+    # Профіль отримано, і в жодному оголошенні умов немає: мерчант справді
+    # нічого не написав. Це факт про НЬОГО, на відміну від решти гілок.
+    order.trade_terms = ""
+    order.terms_status = terms_status.EMPTY
+    return ""
+
+
 def _build_review_flags_from_summary(summary: dict | None) -> list[str]:
     if not summary:
         return[]
@@ -488,8 +537,7 @@ class RiskEngine:
                     # Отримуємо сесію Binance з БД для обходу Cloudflare
                     headers, cookies, _ = await self._db.get_auth_session("Binance")
                     if not headers or not cookies:
-                        order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
-                        terms = order.trade_terms
+                        terms = _note_terms_unavailable(order, terms_status.NO_SESSION)
                     else:
                         profile = await self._review_fetcher._binance.fetch_merchant_profile(
                             mid, session_headers=headers, session_cookies=cookies
@@ -510,43 +558,32 @@ class RiskEngine:
                                     if rem.strip():
                                         found_remarks = rem
                                         break
+                            terms = _note_terms_fetched(order, found_remarks, terms)
                             if found_remarks:
-                                order.trade_terms = found_remarks.strip().lower()
-                                terms = order.trade_terms
                                 logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                            else:
-                                order.trade_terms = ""
                         else:
-                            order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
-                            terms = order.trade_terms
+                            terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
                 except Exception as pe:
                     logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
-                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
-                    terms = order.trade_terms
+                    terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
 
             elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
                 try:
                     headers, cookies, _ = await self._db.get_auth_session("OKX")
                     if not headers or not cookies or "authorization" not in headers:
-                        order.trade_terms = "не вдалося отримати доступ до умов через відсутність активної сесії"
-                        terms = order.trade_terms
+                        terms = _note_terms_unavailable(order, terms_status.NO_SESSION)
                     else:
                         ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
                         if ad_data:
                             desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
+                            terms = _note_terms_fetched(order, desc, terms)
                             if desc:
-                                order.trade_terms = desc.strip().lower()
-                                terms = order.trade_terms
                                 logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                            else:
-                                order.trade_terms = ""
                         else:
-                            order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
-                            terms = order.trade_terms
+                            terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
                 except Exception as pe:
                     logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
-                    order.trade_terms = "не вдалося отримати доступ до умов через технічну помилку сесії"
-                    terms = order.trade_terms
+                    terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
 
             cache_key = (exchange, mid)
 
