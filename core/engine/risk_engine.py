@@ -242,7 +242,18 @@ def _trusted_reason(order: Order, summary: dict | None, terms: str, status: str)
         f"{order.finish_rate_pct:.1f}% успішності), поглиблена перевірка не запускалась."
     )
     coverage = getattr(order, "risk_coverage", None)
-    gaps = coverage.gaps() if coverage else []
+    if coverage is not None:
+        gaps = coverage.gaps()
+    else:
+        # Покриття не порахували — і це саме по собі привід не мовчати.
+        # `gaps = []` тут означало б «усе перевірено», тобто рівно ту
+        # підміну «не знаю» на «безпечно», проти якої весь етап 0.
+        # Тому падаємо назад на те, що знаємо з аргументів.
+        gaps = []
+        if terms_status.is_blind(status):
+            gaps.append(terms_status.label(status))
+        if reviews_status.is_dark(summary):
+            gaps.append("відгуків не бачили")
     if gaps:
         return f"{base} Увага: {'; '.join(gaps)} — висновок неповний."
     return f"{base} За наявними даними ризиків не виявлено."

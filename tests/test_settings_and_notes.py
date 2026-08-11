@@ -120,10 +120,28 @@ class TestVerdictTextsDescribeWhatWeChecked(unittest.TestCase):
         self.assertIn("не вказав", _terms_note("", ts.EMPTY))
 
     def test_trusted_reason_admits_the_gaps(self):
+        # Прив'язуємось до змісту, а не до слів: формулювання прогалин
+        # тепер приходить із `risk_coverage`/`terms_status`, і переписати
+        # мітку там не має ламати цей тест.
         reason = _trusted_reason(self._order(ts.NO_SESSION), self.DARK, "", ts.NO_SESSION)
-        self.assertIn("відгуків не бачили", reason)
-        self.assertIn("умов не бачили", reason)
+        self.assertIn("відгук", reason)
+        self.assertIn("умов", reason)
         self.assertIn("неповний", reason)
+
+    def test_missing_coverage_is_not_read_as_all_clear(self):
+        """
+        Найнебезпечніший стан: покриття не порахували взагалі.
+
+        Порожній список прогалин тут означав би «усе перевірено» — тобто
+        рівно ту підміну «не знаю» на «безпечно», проти якої весь етап 0.
+        Тому за відсутності покриття причини виводяться з аргументів.
+        """
+        order = self._order(ts.NO_SESSION)
+        self.assertIsNone(getattr(order, "risk_coverage", None))
+
+        reason = _trusted_reason(order, self.DARK, "", ts.NO_SESSION)
+        self.assertIn("неповний", reason)
+        self.assertNotIn("ризиків не виявлено", reason)
 
     def test_trusted_reason_stays_positive_when_everything_was_checked(self):
         reason = _trusted_reason(self._order(), self.CLEAN, "тільки своя картка", ts.OK)
