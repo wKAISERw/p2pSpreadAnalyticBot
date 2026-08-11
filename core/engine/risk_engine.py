@@ -613,59 +613,27 @@ class RiskEngine:
             terms     = getattr(order, "trade_terms", "") or ""
 
             # ── Динамічне підтягування умов ордеру ────────────────
-            # Завжди намагаємось підтягнути ПОВНІ умови для спреду, оскільки в пошуковій видачі вони обрізані або застарілі.
-            if exchange == "Binance" and mid and self._review_fetcher and getattr(self._review_fetcher, "_binance", None):
-                try:
-                    # Отримуємо сесію Binance з БД для обходу Cloudflare
-                    headers, cookies, _ = await self._db.get_auth_session("Binance")
-                    if not headers or not cookies:
-                        terms = _note_terms_unavailable(order, terms_status.NO_SESSION)
-                    else:
-                        profile = await self._review_fetcher._binance.fetch_merchant_profile(
-                            mid, session_headers=headers, session_cookies=cookies
+            # У пошуковій видачі умови обрізані або застарілі, тож для
+            # кандидатів спреду тягнемо повні. Раніше цей блок робив запит
+            # до бази за сесією плюс HTTP до біржі на КОЖЕН ордер КОЖНОГО
+            # циклу — а цикл іде раз на три секунди. Тепер це один виклик
+            # `ad_terms` із кешем на 15 хвилин; сам текст оголошення
+            # змінюється незрівнянно рідше.
+            if exchange in ("Binance", "OKX") and self._review_fetcher and mid:
+                fetched, why = await self._review_fetcher.ad_terms(
+                    exchange, ad_id=order.id or "", merchant_id=mid,
+                )
+                if fetched is None:
+                    if why:
+                        # Причина йде в terms_status, а не в текст умов:
+                        # «немає сесії» і «не дістали» людині кажуть різне.
+                        terms = _note_terms_unavailable(order, why)
+                else:
+                    terms = _note_terms_fetched(order, fetched, terms)
+                    if fetched:
+                        logger.debug(
+                            "🎯 %s terms: %s — %s", exchange, order.merchant_name, terms[:80],
                         )
-                        if profile:
-                            # Шукаємо наш ордер за advNo (вилучаємо з order.id)
-                            adv_no = order.id.replace("bn_", "") if order.id else ""
-                            all_ads = profile.get("sellList", []) + profile.get("buyList", [])
-                            found_remarks = ""
-                            for ad in all_ads:
-                                if str(ad.get("advNo", "")) == adv_no:
-                                    found_remarks = ad.get("remarks") or ""
-                                    break
-                            # Fallback на перші непусті умови будь-якого активного оголошення
-                            if not found_remarks:
-                                for ad in all_ads:
-                                    rem = ad.get("remarks") or ""
-                                    if rem.strip():
-                                        found_remarks = rem
-                                        break
-                            terms = _note_terms_fetched(order, found_remarks, terms)
-                            if found_remarks:
-                                logger.debug("🎯 Binance terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                        else:
-                            terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
-                except Exception as pe:
-                    logger.debug("Не вдалось завантажити умови реклами Binance для %s: %s", order.merchant_name, pe)
-                    terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
-
-            elif exchange == "OKX" and order.id and self._review_fetcher and hasattr(self._review_fetcher, "fetch_okx_ad_detail"):
-                try:
-                    headers, cookies, _ = await self._db.get_auth_session("OKX")
-                    if not headers or not cookies or "authorization" not in headers:
-                        terms = _note_terms_unavailable(order, terms_status.NO_SESSION)
-                    else:
-                        ad_data = await self._review_fetcher.fetch_okx_ad_detail(order.id)
-                        if ad_data:
-                            desc = ad_data.get("tradingOrderInfo", {}).get("tradeOrderDesc") or ""
-                            terms = _note_terms_fetched(order, desc, terms)
-                            if desc:
-                                logger.debug("🎯 OKX terms retrieved for %s: %s", order.merchant_name, terms[:100])
-                        else:
-                            terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
-                except Exception as pe:
-                    logger.debug("Не вдалось завантажити умови реклами OKX для %s: %s", order.merchant_name, pe)
-                    terms = _note_terms_unavailable(order, terms_status.FETCH_FAILED)
 
             cache_key = (exchange, mid)
 

@@ -19,6 +19,8 @@ from typing import Optional, TYPE_CHECKING
 from core.storage.merchant_db import MerchantDB
 from core.analysis.rules import ALL_RULES
 from core.risk.matcher import match_text
+from core.utils.cache import TTLCache
+from core.engine import terms_status
 from core.risk.signals import SCOPE_REVIEWS
 from core.utils.tasks import spawn
 
@@ -158,6 +160,11 @@ class ReviewFetcher:
         self._exchange_fails: dict[str, int] = {"Binance": 0, "Bybit": 0, "OKX": 0, "MEXC": 0, "CryptoBot": 0}
         self._exchange_cooldown: dict[str, float] = {"Binance": 0.0, "Bybit": 0.0, "OKX": 0.0, "MEXC": 0.0,
                                                      "CryptoBot": 0.0}
+        # Умови оголошення міняються рідше, ніж іде цикл сканера (3 с).
+        # П'ятнадцять хвилин — компроміс: мерчант устигає переписати
+        # оголошення й ми це побачимо, але сотні однакових HTTP-запитів
+        # за цей час не підемо робити.
+        self._ad_cache = TTLCache(ttl_seconds=900.0, max_size=2000)
 
     def bind_clients(self, binance=None, bybit=None, okx=None, mexc=None, cryptobot=None, wallet=None) -> None:
         if binance is not None: self._binance = binance
@@ -196,6 +203,82 @@ class ReviewFetcher:
             "ReviewFetcher зупинено. Оброблено: %d, помилок: %d, у польоті: %d",
             self._processed, self._errors, self._in_flight,
         )
+
+    async def ad_terms(self, exchange: str, ad_id: str, merchant_id: str = "") -> tuple[str | None, str]:
+        """
+        Повні умови оголошення — з кешем і з ПРИЧИНОЮ, коли не вийшло.
+
+        Ці два запити (OKX `fetch_okx_ad_detail`, Binance
+        `fetch_merchant_profile`) робились у `RiskEngine` на КОЖЕН ордер
+        КОЖНОГО циклу, без кешу. Кожен — це запит до бази за сесією плюс
+        HTTP до біржі, а цикл іде раз на три секунди. При двох десятках
+        кандидатів спреду виходило кілька десятків мережевих викликів на
+        цикл заради тексту, який не змінюється тижнями.
+
+        Таймер `🐌 %s фетч зайняв` цього не показував: він огортає лише
+        `fetch_both_multi`, тобто стакан. А ці виклики сидять усередині
+        `analyze_for_spread`, яку сканер чекає, — тож вони лягали в час
+        циклу, не маючи власного рядка в лозі.
+
+        Повертає `(текст, статус)`, і статус тут головне. «Немає сесії» і
+        «запит не вдався» — різні речі: перше кажеш людині як «увійдіть на
+        біржу», друге як «спробуємо ще раз». Обидва не можна подавати як
+        «мерчант не вказав умов».
+        """
+        key = f"{exchange}:{ad_id or merchant_id}"
+        cached = self._ad_cache.get(key)
+        if cached is not None:
+            return cached
+
+        result: tuple[str | None, str]
+        try:
+            if exchange == "OKX" and ad_id:
+                headers, _, _ = await self._db.get_auth_session("OKX")
+                if not headers or "authorization" not in headers:
+                    # Умови OKX без авторизації не віддає взагалі — це не
+                    # збій, а відомий стан, і кешувати його не треба:
+                    # сесія може з'явитись будь-якої миті.
+                    return None, terms_status.NO_SESSION
+                data = await self.fetch_okx_ad_detail(ad_id)
+                if not data:
+                    return None, terms_status.FETCH_FAILED
+                result = ((data.get("tradingOrderInfo", {}) or {}).get("tradeOrderDesc") or "",
+                          terms_status.OK)
+
+            elif exchange == "Binance" and merchant_id and self._binance:
+                headers, cookies, _ = await self._db.get_auth_session("Binance")
+                if not headers or not cookies:
+                    return None, terms_status.NO_SESSION
+                profile = await self._binance.fetch_merchant_profile(
+                    merchant_id, session_headers=headers, session_cookies=cookies,
+                )
+                if not profile:
+                    return None, terms_status.FETCH_FAILED
+                result = (self._pick_remarks(profile, ad_id), terms_status.OK)
+
+            else:
+                return None, ""
+
+        except Exception as e:
+            logger.debug("ad_terms %s/%s: %s", exchange, ad_id or merchant_id, e)
+            return None, terms_status.FETCH_FAILED
+
+        self._ad_cache.set(key, result)
+        return result
+
+    @staticmethod
+    def _pick_remarks(profile: dict, ad_id: str) -> str:
+        """Умови саме нашого оголошення, інакше — перші непорожні з профілю."""
+        adv_no = (ad_id or "").replace("bn_", "")
+        ads = (profile.get("sellList") or []) + (profile.get("buyList") or [])
+        for ad in ads:
+            if str(ad.get("advNo", "")) == adv_no:
+                return (ad.get("remarks") or "").strip()
+        for ad in ads:
+            remarks = (ad.get("remarks") or "").strip()
+            if remarks:
+                return remarks
+        return ""
 
     async def _last_known(
             self, exchange: str, merchant_id: str, status: str, error_reason: str = "",

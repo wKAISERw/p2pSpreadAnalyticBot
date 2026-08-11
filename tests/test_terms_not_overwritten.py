@@ -157,6 +157,9 @@ class TestEngineBranchesUseTheHelpers(unittest.IsolatedAsyncioTestCase):
         fetcher = MagicMock()
         fetcher._binance = MagicMock()
         fetcher.fetch_now = AsyncMock(return_value={})
+        # Умови тягне один кешований виклик, і він повертає ПРИЧИНУ окремо:
+        # «немає сесії» та «запит не вдався» кажуть людині різне.
+        fetcher.ad_terms = AsyncMock(return_value=(None, terms_status.NO_SESSION))
 
         engine = RiskEngine(db=db, llm_pool=None, review_fetcher=fetcher)
         order = _order(terms="", status=terms_status.UNKNOWN)
@@ -165,6 +168,42 @@ class TestEngineBranchesUseTheHelpers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order.trade_terms, "")
         self.assertEqual(order.terms_status, terms_status.NO_SESSION)
         self.assertIn("UNKNOWN:TERMS:NO_SESSION", order.risk_flag)
+
+    async def test_fetch_failure_is_told_apart_from_a_missing_session(self):
+        """
+        Дві різні причини — два різні статуси.
+
+        «Немає сесії» людині кажеш як «увійдіть на біржу», «запит не вдався»
+        — як «спробуємо ще раз». Звести їх в одне означає не сказати нічого.
+        """
+        from core.engine.risk_engine import RiskEngine
+
+        db = MagicMock()
+        db.is_blacklisted = AsyncMock(return_value=(False, ""))
+        db.get_reviews_summary = AsyncMock(
+            return_value={"positive": 0, "negative": 0, "neutral": 0,
+                          "bad_texts": [], "status": "OK", "data_at": 0}
+        )
+        db.get_recent_snapshots = AsyncMock(return_value=[])
+        db.find_digital_twins = AsyncMock(return_value=[])
+        db.get_verdict = AsyncMock(return_value=None)
+        db.get_risk_score = AsyncMock(return_value=0)
+        db.get_verdict_timestamp = AsyncMock(return_value=0)
+        db.get_trade_recommendation = AsyncMock(return_value="PENDING")
+        db.needs_review_fetch = AsyncMock(return_value=False)
+        db.save_verdict = AsyncMock()
+
+        fetcher = MagicMock()
+        fetcher._binance = MagicMock()
+        fetcher.fetch_now = AsyncMock(return_value={})
+        fetcher.ad_terms = AsyncMock(return_value=(None, terms_status.FETCH_FAILED))
+
+        engine = RiskEngine(db=db, llm_pool=None, review_fetcher=fetcher)
+        order = _order(terms="", status=terms_status.UNKNOWN)
+        await engine._async_analyze_inner(order, [])
+
+        self.assertEqual(order.terms_status, terms_status.FETCH_FAILED)
+        self.assertIn("UNKNOWN:TERMS:FETCH_FAILED", order.risk_flag)
 
 
 if __name__ == "__main__":
