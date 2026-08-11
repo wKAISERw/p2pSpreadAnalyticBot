@@ -26,6 +26,8 @@ from core.engine.price_advisor import PriceAdvisor
 from core.storage.merchant_db import MerchantDB
 from core.utils.circuit_breaker import CircuitBreaker
 from core.utils.dedup_cache import TTLCache
+from core.utils.cache import TTLCache as ValueCache
+from core.engine.alert_dedup import AlertGate
 from core.utils.tasks import spawn
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
@@ -340,9 +342,15 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         required_hits=settings.stability_required_hits,
         ttl_seconds=settings.stability_ttl_seconds,
     )
-    dedup_cache = TTLCache(
-        ttl_seconds=getattr(settings, "dedup_ttl_seconds", 60.0),
-        max_size=getattr(settings, "dedup_max_size", 1000),
+    # Дедуп ключується ПАРОЮ мерчантів, а не ціною: у P2P ціна тікає
+    # щосекунди, і ключ із ціною робив кожен тік «новим спредом».
+    # Повторно показуємо лише тоді, коли спред помітно виріс.
+    alert_gate = AlertGate(
+        cache=ValueCache(
+            ttl_seconds=getattr(settings, "dedup_ttl_seconds", 600.0),
+            max_size=getattr(settings, "dedup_max_size", 1000),
+        ),
+        improvement_pp=getattr(settings, "alert_improvement_pp", 0.5),
     )
     matcher = CrossMatchingEngine(
         max_capital_uah=settings.working_capital_uah,
@@ -898,9 +906,12 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             logger.debug("⏭ Скіп: max_alerts (%d)", current_max_alerts)
                             continue
 
-                        dedup_key = f"spread:{matcher._merge_key(opp)}"
-                        if dedup_cache.seen(dedup_key):
-                            logger.debug("⏭ Скіп: dedup [%s→%s]", buy_o.merchant_name, sell_o.merchant_name)
+                        show, gate_reason = alert_gate.allow(opp)
+                        if not show:
+                            logger.debug(
+                                "⏭ Скіп: dedup [%s→%s] %s",
+                                buy_o.merchant_name, sell_o.merchant_name, gate_reason,
+                            )
                             continue
 
                         if not stability_filter.check(
@@ -911,7 +922,6 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                             logger.debug("⏭ Скіп: stability [%s→%s]", buy_o.merchant_name, sell_o.merchant_name)
                             continue
 
-                        dedup_cache.mark(dedup_key)
                         sent_count += 1
 
                         # Пропозиція зберігається персонально під кожного юзера
