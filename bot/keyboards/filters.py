@@ -21,6 +21,7 @@ def settings_menu_kb(scanner_mode: str = "SPREAD", is_admin: bool = False) -> In
     )
     builder.row(
         InlineKeyboardButton(text="📊 Фільтри мерчантів", callback_data="set:merchant_filters"),
+        InlineKeyboardButton(text="🛡 Ріск-енджин", callback_data="set:risk_engine"),
     )
     builder.row(
         InlineKeyboardButton(text="🔍 Режим сканування", callback_data="set:scanner_mode"),
@@ -310,6 +311,7 @@ def filters_menu_kb(scanner_mode: str = "SPREAD", is_alerts_active: bool = True)
     )
     builder.row(
         InlineKeyboardButton(text="🏪 Фільтри мерчантів", callback_data="set:merchant_filters"),
+        InlineKeyboardButton(text="🛡 Ріск-енджин", callback_data="set:risk_engine"),
     )
     builder.row(
         InlineKeyboardButton(text="🔍 Режим сканування", callback_data="set:scanner_mode"),

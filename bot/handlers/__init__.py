@@ -5,7 +5,7 @@ import logging
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message
 
-from bot.handlers import monitoring, exchanges, filters, trading, system, cards
+from bot.handlers import monitoring, exchanges, filters, trading, system, cards, risk
 
 logger = logging.getLogger("Main")
 
@@ -21,6 +21,7 @@ def get_router() -> Router:
     root.include_router(trading.router)
     root.include_router(system.router)
     root.include_router(cards.router)
+    root.include_router(risk.router)
 
     # Створюємо окремий роутер для фолбеків, щоб вони не перехоплювали запити до модульних роутерів.
     # Aiogram перевіряє хендлери самого роутера перед тим, як спускатися в його sub-routers.

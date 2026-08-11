@@ -9,6 +9,10 @@ from bot.keyboards.common import (
     back_to_balance_kb, back_to_sessions_kb, back_to_filters_kb
 )
 from bot.keyboards.menu import main_menu_kb, system_menu_kb
+from bot.keyboards.risk import (
+    risk_main_kb, risk_profile_kb, risk_categories_kb,
+    risk_group_kb, risk_signal_kb, risk_custom_kb, risk_back_kb,
+)
 from bot.keyboards.exchanges import (
     keys_menu_kb, exchange_connect_kb, exchange_down_kb,
     exchange_cooldown_kb, exchanges_status_kb, exchange_toggle_kb,
