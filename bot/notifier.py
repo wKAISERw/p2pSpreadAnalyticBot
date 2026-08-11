@@ -97,7 +97,8 @@ class TelegramNotifier:
         }
         defaults = {
             "show_ai_terms_summary": True, "show_full_terms": True,
-            "show_ai_logic": True, "show_bank_details": True,
+            "show_ai_logic": True, "show_ai_thoughts": False,
+            "show_bank_details": True,
             "show_llm_summary": True, "show_card_recommendation": True,
             "alert_cooldown": -1.0, "group_active_alerts": True,
             "auto_cooldown_json": default_auto_cooldown

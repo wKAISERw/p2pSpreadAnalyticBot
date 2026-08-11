@@ -726,6 +726,9 @@ class MerchantDB:
                                   "INTEGER DEFAULT 1")  # AI вижимка умов (inline)
         await self._ensure_column("scanner_users", "show_full_terms", "INTEGER DEFAULT 1")  # Повні умови (спойлер)
         await self._ensure_column("scanner_users", "show_ai_logic", "INTEGER DEFAULT 1")  # Логіка AI (спойлер)
+        # Хід думок моделі. Вимкнено за замовчуванням свідомо: він довгий,
+        # а в парному алерті йде двічі — увімкнути має той, кому треба.
+        await self._ensure_column("scanner_users", "show_ai_thoughts", "INTEGER DEFAULT 0")
         await self._ensure_column("scanner_users", "show_bank_details", "INTEGER DEFAULT 1")  # Деталі банків (спойлер)
         await self._ensure_column("scanner_users", "is_hybrid_routes_enabled",
                                   "INTEGER DEFAULT 0")  # Підтримка кнопок T-M та M-T
@@ -786,6 +789,15 @@ class MerchantDB:
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
+        # Вижимка умов переліком фактів із цитатами (JSON). Окремо від
+        # `terms_summary`, а не замість: те поле читає дашборд — окремий
+        # репозиторій, — і міняти під ним формат на льоту означало б
+        # зламати його мовчки. Туди й далі кладеться звичний текст,
+        # зібраний із цієї ж структури.
+        await self._ensure_column("merchant_verdict", "terms_facts", "TEXT DEFAULT ''")
+        # Роздуми моделі. Досі вони писались лише в logs/llm_decisions.log,
+        # тож тумблер «показати логіку AI» показував reason, а не роздуми.
+        await self._ensure_column("merchant_verdict", "thought_process", "TEXT DEFAULT ''")
         # Коли САМІ ВІДГУКИ востаннє успішно зібрано.
         #
         # `updated_at` для цього не годиться: він оновлюється і при невдалій

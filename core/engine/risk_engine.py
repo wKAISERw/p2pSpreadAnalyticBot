@@ -1181,6 +1181,9 @@ class RiskEngine:
                     behavior_flags    = behavior_flags,
                     account_age_days  = getattr(order, "account_age_days", 0),
                     review_summary    = review_summary_raw or {},  # ← відгуки явно
+                    # Межа видимості — та сама, що піде людині в алерт.
+                    # Без неї воркер міг би описати непереверене як чисте.
+                    coverage          = getattr(order, "risk_coverage", None),
                 )
 
                 if scheduled:

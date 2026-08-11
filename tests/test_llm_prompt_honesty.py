@@ -67,7 +67,7 @@ class TestRealReviewsKeepTheirWording(unittest.TestCase):
             "bad_texts": [], "data_at": time.time(),
         }
         prompt = _build_prompt(_task(), summary)
-        self.assertIn("ВІДГУКИ ПОВНІСТЮ ЧИСТІ", prompt)
+        self.assertIn("репутація чиста", prompt)
 
 
 class TestStaleReviewsAreAnnouncedToTheModel(unittest.TestCase):

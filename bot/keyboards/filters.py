@@ -80,6 +80,10 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         callback_data="disp:toggle:show_ai_logic",
     ))
     builder.row(InlineKeyboardButton(
+        text=f"{'✅' if current.get('show_ai_thoughts', False) else '❌'} Хід думок AI (спойлер)",
+        callback_data="disp:toggle:show_ai_thoughts",
+    ))
+    builder.row(InlineKeyboardButton(
         text=f"{_icon('show_bank_details')} Деталі банків (спойлер)",
         callback_data="disp:toggle:show_bank_details",
     ))

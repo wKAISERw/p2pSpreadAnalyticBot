@@ -34,6 +34,9 @@ load_dotenv()
 
 from core.storage.merchant_db import MerchantDB
 from core.analysis.regex_analyzer import RegexResult
+from core.engine import reviews_status, terms_status
+from core.engine.risk_coverage import RiskCoverage
+from core.workers.terms_facts import parse_facts, to_json as facts_to_json, to_summary
 
 logger = logging.getLogger("LLMWorker")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
@@ -144,7 +147,7 @@ SYSTEM_PROMPT = """Ти — антифрод-система для P2P крип�
 - Якщо є тексти негативних відгуків — вони ВАЖЛИВІШІ за кількість. Один відгук "шахрай, кинув на 5000 грн" важить більше ніж 50 позитивних.
 
 ВІДПОВІДАЙ ВИКЛЮЧНО JSON (без жодного тексту поза ним):
-{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт","trade_recommendation":"APPROVE"|"CONDITIONAL"|"REJECT","terms_summary":"коротка вижимка умов мерчанта (1-2 речення): ключові вимоги, ліміти, особливості, нюанси. Без оцінки ризику — лише факти з умов.","reviews_analysis":"текстова сумаризація негативних відгуків: скільки про затримки, чи є скарги на скам"}
+{"thought_process":"детальний логічний ланцюжок: 1) аналіз умов 2) аналіз відгуків 3) аналіз поведінки 4) загальний висновок","status":"OK"|"SUSPICIOUS"|"BLOCK","risk":"ОДНА_З_КАТЕГОРІЙ","reason":"розгорнутий підсумок (2-3 речення): що виявлено, стан відгуків, чому саме такий вердикт","trade_recommendation":"APPROVE"|"CONDITIONAL"|"REJECT","terms_facts":[{"topic":"…","quote":"дослівна цитата","meaning":"…"}],"terms_summary":"1-2 речення для сумісності","reviews_analysis":"текстова сумаризація негативних відгуків: скільки про затримки, чи є скарги на скам"}
 
 ПОЛЕ trade_recommendation — ОБОВ'ЯЗКОВЕ. Пряма відповідь: чи варто проводити P2P-угоду з цим мерчантом ЗАРАЗ?
 APPROVE     — торгувати можна. Ризиків немає або вони мінімальні.
@@ -152,7 +155,23 @@ CONDITIONAL — можна, але з застереженням (новий а�
 REJECT      — НЕ торгувати. Чіткі ознаки скаму, бот-процесингу або небезпеки для коштів.
 Правило відповідності: status=OK → APPROVE; status=SUSPICIOUS → CONDITIONAL; status=BLOCK → ЗАВЖДИ REJECT.
 
-ПОЛЕ terms_summary — ОБОВ'ЯЗКОВЕ. Коротка вижимка умов мерчанта БЕЗ оцінки ризику:
+ПОЛЕ terms_facts — ОБОВ'ЯЗКОВЕ. Перелік фактів про умови, а НЕ переказ.
+Формат: [{"topic":"про що","quote":"дослівна цитата з умов","meaning":"що це означає"}]
+
+Чому переліком, а не абзацом: коли просять «коротко двома реченнями»,
+доводиться щось викидати — і викидається саме те, що людині потрібне.
+Мерчант написав п'ять вимог — має бути п'ять пунктів.
+
+ЦИТАТА ОБОВ'ЯЗКОВА і має бути ДОСЛІВНОЮ. Не переказуй її своїми словами,
+не виправляй відмінки, не додавай нічого від себе. Цитата звіряється з
+оригіналом автоматично, і розбіжність буде позначена як сумнівна.
+Якщо факт із тексту не випливає — не пиши його взагалі.
+
+Приклад для умов «кидаю на монобанку і конверт приват, оплата 15 хв»:
+[{"topic":"Куди йде платіж","quote":"кидаю на монобанку і конверт приват","meaning":"два накопичувальні рахунки, не картка"},
+ {"topic":"Час на оплату","quote":"оплата 15 хв","meaning":"15 хвилин на переказ"}]
+
+ПОЛЕ terms_summary — залишається для сумісності, 1-2 речення:
 - Тільки факти: які банки приймає, вимоги до оплати, ліміти часу, обмеження, особливості.
 - НЕ дублюй reason — terms_summary це ПРО УМОВИ, reason це ПРО РИЗИК.
 - Якщо умов немає — "Умови не вказані."
@@ -163,8 +182,13 @@ REJECT      — НЕ торгувати. Чіткі ознаки скаму, б�
   • "повільно/не відповідає: X скарг" — якщо відгуки переважно про затримки або мовчання мерчанта.
   • "скам/рефанд/трикутник: X скарг" — якщо є обвинувачення в шахрайстві або рефандах.
   • "інше: X скарг" — інші негативні відгуки без явної категорії.
-  Якщо відгуків нема або вони чисті — "Відгуки чисті, загроз не виявлено".
-  Якщо їх не завантажено — "Тексти відгуків недоступні".
+  Три РІЗНІ випадки, які не можна плутати між собою:
+  • відгуки бачили і вони чисті — "Відгуки чисті, загроз не виявлено";
+  • біржа відповіла, що відгуків немає — "Відгуків на біржі немає";
+  • ми їх не бачили (сесія, помилка API) — "Відгуків не бачили — <причина>".
+  Третє НЕ є ані першим, ані другим: це межа нашої видимості, а не факт
+  про мерчанта. Дивись блок «МЕЖА ВИДИМОСТІ» — там сказано, що саме ми
+  перевірили.
   ОБОВ'ЯЗКОВО зазнач кількість в кожній категорії якщо є декілька відгуків.""".replace(
     "{BANK_GLOSSARY}", "\n".join(glossary_lines())
 )
@@ -185,6 +209,9 @@ class LLMTask:
     behavior_flags: list[str] = field(default_factory=list)
     account_age_days: int = 0
     review_summary: dict = field(default_factory=dict)
+    # Межа видимості на момент постановки в чергу. Порахована в движку —
+    # тут її лише переказують моделі, а не рахують удруге.
+    coverage: RiskCoverage | None = None
 
 
 class LLMWorkerPool:
@@ -234,6 +261,7 @@ class LLMWorkerPool:
             behavior_flags: list[str] = None,
             account_age_days: int = 0,
             review_summary: dict = None,
+            coverage: RiskCoverage | None = None,
     ) -> bool:
         cache_key = f"{exchange}:{merchant_id}"
         key = (exchange, merchant_id)
@@ -253,6 +281,7 @@ class LLMWorkerPool:
             behavior_flags=behavior_flags or [],
             account_age_days=account_age_days,
             review_summary=review_summary or {},
+            coverage=coverage,
         )
         try:
             self._queue.put_nowait(task)
@@ -322,6 +351,8 @@ class LLMWorkerPool:
         reason = (result.get("reason", "") or "")[:900]
         source = result.get("source", "unknown")
         terms_summary = (result.get("terms_summary", "") or "")[:300]
+        terms_facts = (result.get("terms_facts", "") or "")
+        thought_process = (result.get("thought_process", "") or "")[:2000]
 
         if verdict == "BLOCK":
             self._stats["blocks"] += 1
@@ -334,7 +365,9 @@ class LLMWorkerPool:
             task.trade_terms, verdict, risk_type, reason, source,
             trade_recommendation=trade_recommendation,
             terms_summary=terms_summary,
-            reviews_analysis=reviews_analysis
+            reviews_analysis=reviews_analysis,
+            terms_facts=terms_facts,
+            thought_process=thought_process,
         )
 
         rr = task.regex_result
@@ -374,6 +407,8 @@ class LLMWorkerPool:
         import time as _time
 
         user_msg = _build_prompt(task, review_summary)
+        # Цитати з відповіді звіряються саме з ЦИМ текстом.
+        source_terms = getattr(task.regex_result, "normalized_text", "") or task.trade_terms
 
         now = _time.monotonic()
         groq_available = LLMWorkerPool._groq_cooldown_until <= now
@@ -387,7 +422,7 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_groq(user_msg), timeout=LLM_TIMEOUT
+                    self._call_groq(user_msg, source_terms), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"groq_{GROQ_MODEL}"
                 LLMWorkerPool._groq_consecutive_429 = 0
@@ -430,7 +465,7 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_gemini(user_msg), timeout=LLM_TIMEOUT
+                    self._call_gemini(user_msg, source_terms), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"gemini_{GEMINI_MODEL}"
                 try:
@@ -477,7 +512,7 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_openai(user_msg), timeout=LLM_TIMEOUT
+                    self._call_openai(user_msg, source_terms), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"openai_{OPENAI_MODEL}"
                 try:
@@ -525,7 +560,7 @@ class LLMWorkerPool:
             "trade_recommendation": "CONDITIONAL"
         }
 
-    async def _call_groq(self, user_msg: str) -> dict:
+    async def _call_groq(self, user_msg: str, source_terms: str = "") -> dict:
         groq_key = os.getenv("GROQ_API_KEY", "")
         if not groq_key:
             raise PermanentModelError("GROQ_API_KEY не встановлено")
@@ -550,9 +585,9 @@ class LLMWorkerPool:
                 raise RuntimeError(f"Groq server error {resp.status}")
             data = await resp.json()
         text = data["choices"][0]["message"]["content"]
-        return _parse_json(text)
+        return _parse_json(text, source_terms)
 
-    async def _call_openai(self, user_msg: str) -> dict:
+    async def _call_openai(self, user_msg: str, source_terms: str = "") -> dict:
         # 🚀 ДОДАНО: Метод виклику OpenAI API
         openai_key = os.getenv("OPENAI_API_KEY", "")
         if not openai_key:
@@ -581,9 +616,9 @@ class LLMWorkerPool:
             data = await resp.json()
 
         text = data["choices"][0]["message"]["content"]
-        return _parse_json(text)
+        return _parse_json(text, source_terms)
 
-    async def _call_gemini(self, user_msg: str) -> dict:
+    async def _call_gemini(self, user_msg: str, source_terms: str = "") -> dict:
         gemini_key = os.getenv("GEMINI_API_KEY", "")
         if not gemini_key:
             raise PermanentModelError("GEMINI_API_KEY")
@@ -620,7 +655,7 @@ class LLMWorkerPool:
         except (IndexError, KeyError) as e:
             raise RuntimeError(f"Gemini response parse error: {e}, data={data}")
 
-        return _parse_json(text)
+        return _parse_json(text, source_terms)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -688,6 +723,221 @@ def _build_behavior_block(task: LLMTask) -> list[str]:
     return lines
 
 
+# Біржі, які взагалі не віддають відгуків: там сліпота — властивість
+# майданчика, а не збій у нас.
+_NO_REVIEW_EXCHANGES = {"Wallet"}
+
+
+def _coverage_of(task: LLMTask, review_summary: dict | None) -> RiskCoverage:
+    """
+    Межа видимості для промпту.
+
+    Готове покриття приходить із движка. Запасний шлях потрібен для прямих
+    викликів (тести, ручний `risk_probe`) і навмисно обережний: він визнає
+    лише те, що видно з самого завдання, а поведінку й клонів вважає
+    неперевіреними. Помилитись у бік «ми цього не бачили» дешево, у
+    протилежний — ні.
+    """
+    if task.coverage is not None:
+        return task.coverage
+    summary = review_summary or {}
+    return RiskCoverage(
+        # Порожні умови без статусу двозначні: чи то мерчант нічого не
+        # написав, чи то ми їх не дістали. UNKNOWN — обережніше з двох.
+        terms=terms_status.OK if (task.trade_terms or "").strip() else terms_status.UNKNOWN,
+        reviews=summary.get("status") or reviews_status.UNKNOWN,
+        snapshots=0,
+        identity_checked=False,
+        review_texts=bool(summary.get("bad_texts")),
+    )
+
+
+def _build_coverage_block(task: LLMTask, review_summary: dict | None) -> list[str]:
+    """
+    Одна секція про те, на що ми дивились, а на що ні.
+
+    Раніше це розповідали дев'ять взаємовиключних гілок по `rev_status`, і
+    кожна формулювала правило «не штрафуй за нашу сліпоту» своїми словами.
+    Гілки писались у різний час, тож подекуди суперечили одна одній: та сама
+    протухла сесія в одному місці була «технічною помилкою нашої системи», а
+    в іншому мовчки перетворювалась на «відгуків немає».
+
+    Тепер джерело одне — `RiskCoverage`, той самий об'єкт, який бачить
+    користувач в алерті. Модель і людина читають однаковий список прогалин.
+    """
+    cov = _coverage_of(task, review_summary)
+    gaps = cov.gaps()
+
+    out = ["", "МЕЖА ВИДИМОСТІ (що ми встигли перевірити):"]
+    if cov.terms_seen:
+        out.append("- Умови: бачили")
+    else:
+        out.append(f"- Умови: НЕ бачили — {terms_status.label(cov.terms)}")
+    if cov.reviews_seen:
+        out.append(
+            f"- Відгуки: бачили ({'з текстами' if cov.review_texts else 'лише лічильники'})"
+        )
+    else:
+        out.append(f"- Відгуки: НЕ бачили — {reviews_status.label(cov.reviews)}")
+    out.append(
+        f"- Поведінка: {'є історія' if cov.behavior_seen else 'замало історії'} "
+        f"({cov.snapshots} снапшотів)"
+    )
+    out.append(f"- Клони на інших біржах: {'шукали' if cov.identity_checked else 'НЕ шукали'}")
+
+    if gaps:
+        out.append(
+            "⚠️ ПРОГАЛИНИ: " + "; ".join(gaps) + ". "
+            "Це межа НАШОЇ видимості, а не факт про мерчанта. Не штрафуй за неї — "
+            "але й не називай непереверене чистим. Кожну прогалину, що вплинула на "
+            "висновок, назви в thought_process своїми словами."
+        )
+    else:
+        out.append("Прогалин немає: всі чотири джерела перевірені.")
+
+    from config.runtime import runtime_config
+    if runtime_config.get("require_sessions", "true") != "true":
+        out.append(
+            "ℹ️ Сесії вимкнені користувачем — доступу до відгуків не очікується взагалі."
+        )
+    if task.exchange in _NO_REVIEW_EXCHANGES:
+        out.append(
+            f"ℹ️ Біржа {task.exchange} не має API відгуків: сліпота тут постійна, "
+            "оцінюй за умовами, поведінкою та статистикою."
+        )
+    return out
+
+
+def _build_reviews_block(task: LLMTask, review_summary: dict | None) -> list[str]:
+    """
+    Самі відгуки: скільки, наскільки свіжі й чи це взагалі відгуки.
+
+    Три осі замість дев'яти гілок:
+
+    * бачимо свіже чи ні (`reviews_status.is_blind`);
+    * маємо хоч якісь дані чи ні (`has_data`) — стан «сліпі, але вчорашнє
+      знаємо» найцінніший і найлегше губиться;
+    * лічильники справжні чи вирахувані з completion rate
+      (`estimated_from_stats`) — оцінка не є відгуками й не дає права
+      говорити про репутацію.
+    """
+    summary = review_summary or {}
+    status = summary.get("status") or reviews_status.UNKNOWN
+    pos = int(summary.get("positive", 0) or 0)
+    neg = int(summary.get("negative", 0) or 0)
+    neutral = int(summary.get("neutral", 0) or 0)
+    total = pos + neg + neutral
+    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
+    bad_texts = summary.get("bad_texts") or []
+    is_estimated = bool(summary.get("estimated_from_stats"))
+    error_reason = str(summary.get("error_reason", "") or "")[:220]
+
+    out: list[str] = [""]
+
+    # 1. Нічого не бачили — і сказати нічого.
+    if reviews_status.is_dark(summary):
+        out.append(
+            f"❌ ВІДГУКІВ НЕ БАЧИЛИ ЖОДНОГО РАЗУ: {reviews_status.label(status)}"
+            + (f" ({error_reason})" if error_reason else "")
+        )
+        out.append(
+            "Про репутацію не роби ЖОДНИХ висновків — ні добрих, ні поганих. "
+            "У reviews_analysis напиши рівно: «відгуків не бачили — "
+            f"{reviews_status.label(status)}». Не називай це чистою репутацією і "
+            "не штрафуй мерчанта за нашу сліпоту."
+        )
+        return out
+
+    # 2. Дані є, але не сьогоднішні.
+    #
+    # Відколи невдалий фетч перестав затирати вже зібране, цей стан став
+    # окремим: лічильники й тексти лишились із минулого успішного збору.
+    # Без віку модель опише вчорашню картину як поточну.
+    data_at = float(summary.get("data_at", 0) or 0)
+    if reviews_status.is_blind(status) and data_at > 0:
+        age_h = max(0.0, (time.time() - data_at) / 3600.0)
+        out.append(
+            f"⏳ ВІДГУКИ НЕ ОНОВЛЮВАЛИСЬ {age_h:.0f} год ({reviews_status.label(status)}): "
+            "нижче — останні відомі дані. Говори про них у минулому часі "
+            f"(«станом на {age_h:.0f} год тому»). Нових скарг за цей час ми б не "
+            "побачили — це невизначеність, а не чистота."
+        )
+
+    # 3. Що саме в лічильниках.
+    if is_estimated and total > 0:
+        # Це НЕ відгуки. Це кількість УГОД, перерахована через positive_rate
+        # там, де профіль біржі віддав нулі. Раніше оцінка йшла в ту саму
+        # гілку, що й реальні відгуки, і при neg=0 модель отримувала прямий
+        # наказ написати «бездоганна репутація» про мерчанта, чиїх відгуків
+        # ніхто не бачив.
+        out.append(
+            f"⚠️ ЦЕ НЕ ВІДГУКИ, А ОЦІНКА ЗІ СТАТИСТИКИ УГОД: ~{pos} успішних / "
+            f"~{neg} проблемних з {total} угод — похідна від completion rate профілю. "
+            "КАТЕГОРИЧНО не називай це відгуками, не пиши «відгуки чисті» і не роби "
+            "висновків про репутацію. У reviews_analysis напиши рівно: "
+            "«відгуків немає, є лише статистика угод»."
+        )
+    elif total > 0:
+        out.append(f"Відгуки: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%")
+        if neg == 0:
+            out.append(
+                "⬆️ Жодного негативного відгуку — репутація чиста. Так і напиши в "
+                "thought_process, reason та reviews_analysis."
+            )
+        elif neg_pct < 3.0:
+            out.append(f"⬆️ Переважно чисті: лише {neg} негативних ({neg_pct:.1f}%).")
+    elif status == reviews_status.NO_FEEDBACK:
+        out.append(
+            "Відгуки: біржа відповіла успішно й повернула нуль — відгуків справді немає. "
+            "Це відповідь про мерчанта, а не наша сліпота. Якщо угод багато "
+            "(понад ~200), а відгуків нуль — це підозріло (скидання чи накрутка "
+            "профілю). Якщо угод мало — нормально. Опиши це в thought_process."
+        )
+    else:
+        out.append(
+            "Відгуки: мерчант новий або ще не має відгуків. Оцінюй за умовами та "
+            "поведінкою; зазнач це як невизначеність, НЕ як ризик."
+        )
+
+    # 4. Тексти скарг — або чесне «їх немає».
+    if bad_texts:
+        flagged = sum(1 for t in bad_texts if isinstance(t, dict) and t.get("keyword_flagged"))
+        out.append(f"НЕГАТИВНІ ВІДГУКИ ({len(bad_texts)} шт, з них {flagged} з ключовими словами):")
+        out.append(
+            "  🟡 = збіг з відомими ключовими словами/патернами (regex); без маркера — "
+            "відгук без тригерів, проаналізуй САМОСТІЙНО."
+        )
+        for i, t in enumerate(bad_texts[:10], 1):
+            if isinstance(t, dict):
+                text = str(t.get("text", "")).replace("\n", " ").strip()[:250]
+                score = t.get("score", 0)
+                cats = t.get("categories", [])
+                excerpt = str(t.get("excerpt", "")).replace("\n", " ").strip()[:100]
+                marker = "🟡" if t.get("keyword_flagged") else "  "
+                if cats:
+                    out.append(f"  {marker} {i}. [{', '.join(cats)}, score={score}] {text}")
+                else:
+                    out.append(f"  {marker} {i}. {text}")
+                if excerpt and excerpt not in text:
+                    out.append(f"     ↳ ключовий фрагмент: «{excerpt}»")
+            else:
+                out.append(f"     {i}. {str(t).replace(chr(10), ' ').strip()[:250]}")
+        out.append(
+            "  ⚠️ ПРОАНАЛІЗУЙ ЗМІСТ КОЖНОГО негативного відгуку (особливо відповіді мейкера "
+            "після '| Відповідь мейкера:'). Детально опиши характер скарг у 'reason' та "
+            "'reviews_analysis': затримки, звинувачення в податках/комісіях, скарги на скам. "
+            "Якщо відгуки про шахрайство/трикутники/рефанди — ставити BLOCK."
+        )
+    elif neg > 0:
+        out.append(
+            f"❌ ТЕКСТИ ВІДГУКІВ НЕДОСТУПНІ: у статистиці {neg} негативних, самих текстів "
+            f"немає. Причини НЕВІДОМІ — так і напиши в thought_process та reason: «тексти "
+            f"негативних відгуків недоступні, причини {neg} негативних невідомі». "
+            "НЕ придумуй зміст скарг!"
+        )
+    return out
+
+
 def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     rr = task.regex_result
 
@@ -698,16 +948,6 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
     risk_type = getattr(rr, "risk_type", "") or "NONE"
     categories = _regex_categories(rr)
     excerpts = _top_excerpts(rr)
-
-    rev_status = review_summary.get("status", "OK") if review_summary else "UNKNOWN"
-    rev_error_reason = (review_summary.get("error_reason", "") if review_summary else "") or ""
-    pos = int((review_summary or {}).get("positive", 0) or 0)
-    neg = int((review_summary or {}).get("negative", 0) or 0)
-    neutral = int((review_summary or {}).get("neutral", 0) or 0)
-    total = pos + neg + neutral
-    neg_pct = (neg / total * 100.0) if total > 0 else 0.0
-    bad_texts = (review_summary or {}).get("bad_texts", []) or []
-    is_estimated = bool((review_summary or {}).get("estimated_from_stats"))
 
     failed_orders = int(task.month_order_count * (100.0 - task.finish_rate) / 100.0)
     age_note = _build_account_age_note(task)
@@ -744,149 +984,8 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
         "",
     ]
 
-    _NO_REVIEW_EXCHANGES = {"Wallet"}
-    if rev_status != "OK" or rev_error_reason:
-        diag = f"Reviews diagnostics: status={rev_status}"
-        if rev_error_reason:
-            diag += f", reason={rev_error_reason[:220]}"
-        lines.append(diag)
-
-    # Дані є, але вони не сьогоднішні.
-    #
-    # Відколи невдалий фетч перестав затирати відомі відгуки, з'явився третій
-    # стан між «є свіжі» і «немає нічого»: лічильники й тексти лишились із
-    # минулого успішного збору. Модель має знати вік цих даних, інакше
-    # опише вчорашню картину як поточну.
-    _data_at = float((review_summary or {}).get("data_at", 0) or 0)
-    if _data_at > 0 and rev_status != "OK":
-        _age_h = max(0.0, (time.time() - _data_at) / 3600.0)
-        lines.append(
-            f"⏳ ВІДГУКИ НЕ ОНОВЛЮВАЛИСЬ {_age_h:.0f} год: свіжих дістати не вдалось "
-            f"(status={rev_status}), нижче — останні відомі дані. Говори про них як про "
-            f"минулі («станом на {_age_h:.0f} год тому»), не як про поточні. "
-            "Нових скарг за цей час ми б не побачили — врахуй це як невизначеність."
-        )
-
-    from config.runtime import runtime_config
-    require_sessions = runtime_config.get("require_sessions", "true") == "true"
-    if not require_sessions:
-        lines.append(
-            "⚠️ РЕЖИМ ІГНОРУВАННЯ СЕСІЙ АКТИВНИЙ: Сесії вимкнені користувачем. Доступ до відгуків не очікується. НЕ вважайте відсутність відгуків підозрілим сигналом."
-        )
-    elif rev_status in ("NO_SESSION", "SESSION_EXPIRED"):
-        lines.append(
-            "⚠️ ТЕХНІЧНА ПОМИЛКА СЕСІЇ: Сесії увімкнені, але наразі недійсні (NO_SESSION/SESSION_EXPIRED). Тексти відгуків недоступні через технічну проблему з сесією. НЕ вважайте відсутність відгуків підозрілим фактором мерчанта."
-        )
-
-    # Пояснення доступності відгуків та інструкції для LLM
-    if task.exchange in _NO_REVIEW_EXCHANGES or rev_status == "NOT_SUPPORTED":
-        lines.append(
-            f"Reviews: Біржа {task.exchange} не має API відгуків. Оцінюй ТІЛЬКИ за умовами, поведінкою та статистикою. НЕ штрафуй за відсутність відгуків."
-        )
-    elif rev_status == "NO_AUTH":
-        lines.append(
-            "Reviews: API відгуків потребує автентифікації — тимчасово недоступний. Оцінюй за умовами та поведінкою. НЕ вважай відсутність відгуків фактором ризику."
-        )
-    elif rev_status in ("NO_SESSION", "SESSION_EXPIRED"):
-        lines.append(
-            f"Reviews (⚠️ ТЕХНІЧНА ПОМИЛКА СЕСІЇ): Тексти відгуків недоступні через те, що браузерна сесія наразі не перехоплена або протухла (status={rev_status}). "
-            "Це технічна проблема нашої системи, а не підозріла поведінка мерчанта. "
-            "Якщо за статистикою є негативні відгуки, напиши чесно у thought_process: 'тексти негативних відгуків недоступні через технічну помилку сесії (NO_SESSION)'. "
-            "НЕ вважайте відсутність відгуків підозрілим фактором і НЕ штрафуйте мерчанта за це."
-        )
-        if is_estimated and total > 0:
-            lines.append(
-                f"Статистика відгуків (⚠️ ОЦІНКА з completion rate): ~pos≈{pos}, ~neg≈{neg}, ~neg%≈{neg_pct:.1f}%"
-            )
-            if neg > 0:
-                lines.append(
-                    "❌ ТЕКСТИ ВІДГУКІВ НЕДОСТУПНІ (немає активної сесії). Ми НЕ ЗНАЄМО причини негативних відгуків. "
-                    "Вкажи це ЧЕСНО у thought_process: 'тексти відгуків недоступні, причини neg≈X невідомі'. НЕ придумуй деталі відгуків!"
-                )
-            else:
-                lines.append(
-                    "Reviews: Жодного негативного відгуку не прогнозується на основі статистики профілю."
-                )
-    elif rev_status in ("API_ERROR", "UNAVAILABLE"):
-        lines.append(
-            f"Reviews (⚠️ ТЕХНІЧНА ПОМИЛКА API): Біржа повернула технічну помилку API при спробі завантажити відгуки (status={rev_status}). "
-            "Тексти відгуків тимчасово недоступні через збій API. "
-            "Напиши чесно у thought_process: 'тексти негативних відгуків недоступні через тимчасовий збій API' і НЕ вважайте це підозрілим фактором мерчанта."
-        )
-    elif rev_status == "NO_FEEDBACK":
-        lines.append(
-            "Reviews: API біржі повернув 0 відгуків для цього мерчанта. Відгуків на біржі взагалі немає. "
-            "Якщо мерчант має дуже багато угод (наприклад, >200 угод), але 0 відгуків, це підозріло (можливе скидання або накрутка профілю). "
-            "Якщо угод мало, це нормальна ситуація. Опиши це в thought_process."
-        )
-    else:
-        # Успішно завантажені відгуки (rev_status == "OK")
-        if total > 0 and is_estimated:
-            # Це НЕ відгуки. Це кількість УГОД, перерахована через
-            # positive_rate там, де профіль біржі віддав нулі. Раніше ця
-            # оцінка йшла в ту саму гілку, що й реальні відгуки, і при neg=0
-            # модель отримувала прямий наказ написати «бездоганна репутація»
-            # про мерчанта, чиїх відгуків ніхто не бачив.
-            lines.append(
-                f"⚠️ ВІДГУКІВ НЕМАЄ — НИЖЧЕ ОЦІНКА ЗІ СТАТИСТИКИ УГОД, А НЕ ВІДГУКИ: "
-                f"~{pos} успішних / ~{neg} проблемних з {total} угод. "
-                "Це похідна від completion rate профілю, а не відгуки користувачів. "
-                "КАТЕГОРИЧНО не називай це відгуками, не пиши «відгуки чисті» і не роби "
-                "висновків про репутацію. У reviews_analysis напиши рівно: "
-                "«відгуків немає, є лише статистика угод»."
-            )
-        elif total > 0:
-            lines.append(
-                f"Reviews: Успішно завантажено відгуки. Статистика: pos={pos}, neg={neg}, neutral={neutral}, neg%={neg_pct:.1f}%"
-            )
-            if neg == 0:
-                lines.append(
-                    "⬆️ ВІДГУКИ ПОВНІСТЮ ЧИСТІ: Жодного негативного відгуку! Мейкер має бездоганну репутацію. "
-                    "Обов'язково вкажи у thought_process, reason та reviews_analysis: 'відгуки чисті, негативні відгуки відсутні, репутація чиста'."
-                )
-            elif neg_pct < 3.0:
-                lines.append(f"⬆️ ВІДГУКИ ПЕРЕВАЖНО ЧИСТІ: Лише {neg} негативних ({neg_pct:.1f}%).")
-        else:
-            lines.append(
-                "Reviews: Мерчант новий або ще не має відгуків. Оцінюй за умовами та поведінкою. "
-                "Зазнач це у thought_process як фактор невизначеності (НЕ як ризик)."
-            )
-
-    if bad_texts:
-        flagged_count = sum(1 for t in bad_texts if isinstance(t, dict) and t.get("keyword_flagged"))
-        unflagged_count = len(bad_texts) - flagged_count
-        lines.append(f"НЕГАТИВНІ ВІДГУКИ ({len(bad_texts)} шт, з них {flagged_count} з ключовими словами):")
-        lines.append("  🟡 = збіг з відомими ключовими словами/патернами (regex); без маркера = відгук без тригерів — проаналізуй САМОСТІЙНО.")
-        for i, t in enumerate(bad_texts[:10], 1):
-            if isinstance(t, dict):
-                text = str(t.get("text", "")).replace("\n", " ").strip()[:250]
-                score = t.get("score", 0)
-                cats = t.get("categories", [])
-                excerpt = str(t.get("excerpt", "")).replace("\n", " ").strip()[:100]
-                is_flagged = t.get("keyword_flagged", False)
-                marker = "🟡" if is_flagged else "  "
-                if cats:
-                    cat_str = ", ".join(cats)
-                    lines.append(f"  {marker} {i}. [{cat_str}, score={score}] {text}")
-                else:
-                    lines.append(f"  {marker} {i}. {text}")
-                if excerpt and excerpt not in text:
-                    lines.append(f"     ↳ ключовий фрагмент: «{excerpt}»")
-            else:
-                clean_t = str(t).replace("\n", " ").strip()
-                lines.append(f"     {i}. {clean_t[:250]}")
-        lines.append(
-            "  ⚠️ ПРОАНАЛІЗУЙ ЗМІСТ КОЖНОГО негативного відгуку (особливо відповіді мейкера, якщо вони є, вказані після '| Відповідь мейкера:'). "
-            "ОБОВ'ЯЗКОВО детально опиши характер та зміст цих конкретних скарг у полях 'reason' та 'reviews_analysis' (наприклад: скаржаться на затримки, звинувачують у податках/комісіях, чи є скарги на скам). "
-            "Не ігноруй деталі! Якщо відгуки про шахрайство/трикутники/рефанди -> ставити BLOCK."
-        )
-    elif neg > 0:
-        # Є негативні, але немає текстів (наприклад, не завантажилися)
-        lines.append(
-            f"❌ ТЕКСТИ ВІДГУКІВ НЕДОСТУПНІ: Є {neg} негативних відгуків у статистиці, але їх тексти відсутні. "
-            f"Причини негативних відгуків НЕВІДОМІ. Обов'язково вкажи це чесно у thought_process та reason: "
-            f"'тексти негативних відгуків недоступні, причини {neg} негативних відгуків невідомі'. НЕ придумуй зміст скарг!"
-        )
+    lines += _build_coverage_block(task, review_summary)
+    lines += _build_reviews_block(task, review_summary)
 
     if excerpts:
         lines.append("Regex фрагменти:")
@@ -894,7 +993,7 @@ def _build_prompt(task: LLMTask, review_summary: dict) -> str:
             lines.append(f"  {i}. {ex}")
 
     lines.append(
-        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту","trade_recommendation":"APPROVE|CONDITIONAL|REJECT","terms_summary":"коротка вижимка умов мерчанта (факти, без оцінки ризику)","reviews_analysis":"текстова сумаризація негативних відгуків: скільки про затримки, чи є скарги на скам"}'
+        '\nПоверни JSON: {"thought_process":"детальний аналіз: умови → відгуки → поведінка → висновок","status":"OK|SUSPICIOUS|BLOCK","risk":"...","reason":"2-3 речення: що виявлено, стан відгуків, обґрунтування вердикту","trade_recommendation":"APPROVE|CONDITIONAL|REJECT","terms_facts":[{"topic":"…","quote":"дослівна цитата","meaning":"…"}],"terms_summary":"1-2 речення","reviews_analysis":"текстова сумаризація негативних відгуків: скільки про затримки, чи є скарги на скам"}'
     )
     return "\n".join(lines)
 
@@ -930,7 +1029,7 @@ def _top_excerpts(regex_result: RegexResult) -> list[str]:
     return out
 
 
-def _parse_json(text: str) -> dict:
+def _parse_json(text: str, source_terms: str = "") -> dict:
     clean = (
         text.strip()
         .removeprefix("```json")
@@ -994,6 +1093,15 @@ def _parse_json(text: str) -> dict:
     # якого не існує, а людина не бачила, ЩО саме пишуть у поганих відгуках.
     reviews_analysis = str(data.get("reviews_analysis", "")).strip()[:500]
 
+    # Перелік фактів із цитатами. Цитати звіряються з оригіналом умов —
+    # найдешевша перевірка на вигадку, і саме вона ловить «приймає монобанк
+    # і приватбанк» там, де мерчант писав «на монобанку і конверт приват».
+    facts = parse_facts(data.get("terms_facts"), source_terms)
+    if facts and not terms_summary:
+        # Старе поле лишається заповненим для тих, хто читає його досі
+        # (дашборд — окремий репозиторій).
+        terms_summary = to_summary(facts)
+
     return {
         "status": status,
         "risk": risk or "NONE",
@@ -1001,4 +1109,6 @@ def _parse_json(text: str) -> dict:
         "trade_recommendation": trade_recommendation,
         "terms_summary": terms_summary,
         "reviews_analysis": reviews_analysis,
+        "terms_facts": facts_to_json(facts) if facts else "",
+        "thought_process": str(thought or "").strip()[:2000],
     }

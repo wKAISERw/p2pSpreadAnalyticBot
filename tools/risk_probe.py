@@ -16,6 +16,7 @@
     python tools/risk_probe.py --negations        # що заглушили заперечення
     python tools/risk_probe.py --drift            # розбіжність із тим, що в базі
     python tools/risk_probe.py --verdicts         # розподіл вердиктів у базі
+    python tools/risk_probe.py --facts            # чи дослівно модель цитує умови
     python tools/risk_probe.py --text "кидаю на монобанку"   # розбір одного тексту
 
 Порядок роботи після зміни сигналів:
@@ -269,6 +270,58 @@ def report_verdicts(db: sqlite3.Connection) -> None:
         print(f"\n  інвалідовано (updated_at=0): {stale} — чекають на перерахунок")
 
 
+def report_facts(db: sqlite3.Connection, limit: int = 12) -> None:
+    """
+    Чи цитує модель дослівно — на збережених вердиктах.
+
+    Звірка цитат нічого не варта, поки на неї ніхто не дивиться: позначку
+    «⚠️» побачить користувач в одному алерті, а систематичну вигадку —
+    тільки той, хто гляне на всі одразу. Висока частка непідтверджених
+    означає, що промпт перестав триматись, а не що мерчанти дивні.
+    """
+    from core.workers.terms_facts import from_json
+
+    _head("ФАКТИ ПРО УМОВИ: чи дослівні цитати")
+    try:
+        rows = db.execute(
+            "SELECT exchange, merchant_name, terms_facts FROM merchant_verdict "
+            "WHERE COALESCE(terms_facts, '') NOT IN ('', '[]')"
+        ).fetchall()
+    except sqlite3.Error as e:
+        print(f"Колонки ще немає: {e}")
+        return
+    if not rows:
+        print("Жодного вердикту з фактами. Етап 6 ще не доїхав до цієї бази.")
+        return
+
+    total = bad = 0
+    per_topic: Counter = Counter()
+    examples: list[tuple[str, str, str]] = []
+    for exchange, name, raw in rows:
+        for fact in from_json(raw):
+            total += 1
+            per_topic[fact.topic] += 1
+            if not fact.verified:
+                bad += 1
+                if len(examples) < limit:
+                    examples.append((f"{exchange}/{name}", fact.topic, fact.quote))
+
+    share = bad * 100 // total if total else 0
+    print(f"  вердиктів із фактами: {len(rows)}, фактів усього: {total}")
+    print(f"  цитат не знайдено в оригіналі: {bad} ({share}%)")
+    if share > 20:
+        print("  ⚠️ Забагато. Модель переказує замість цитувати — перевір промпт.")
+
+    if examples:
+        print("\n  Приклади непідтверджених цитат:")
+        for who, topic, quote in examples:
+            print(f"    {_short(who, 28):30} [{_short(topic, 18)}] «{_short(quote, 50)}»")
+
+    print("\n  Найчастіші теми:")
+    for topic, n in per_topic.most_common(10):
+        print(f"    {_short(topic, 30):32} {n}")
+
+
 def explain(text: str) -> None:
     """Розбір одного тексту: що спрацювало, що заглушено і чому."""
     reg = builtin_registry()
@@ -325,6 +378,7 @@ def main() -> int:
     ap.add_argument("--negations", action="store_true")
     ap.add_argument("--drift", action="store_true")
     ap.add_argument("--verdicts", action="store_true")
+    ap.add_argument("--facts", action="store_true")
     ap.add_argument("--registry", action="store_true")
     args = ap.parse_args()
 
@@ -339,7 +393,7 @@ def main() -> int:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
     chosen = any((args.signals, args.silent, args.negations,
-                  args.drift, args.verdicts, args.registry))
+                  args.drift, args.verdicts, args.registry, args.facts))
     everything = not chosen
 
     terms = reviews = None
@@ -354,6 +408,8 @@ def main() -> int:
             report_registry()
         if everything or args.verdicts:
             report_verdicts(db)
+        if everything or args.facts:
+            report_facts(db)
         if everything or args.signals:
             report_signals(*_data())
         if everything or args.silent:

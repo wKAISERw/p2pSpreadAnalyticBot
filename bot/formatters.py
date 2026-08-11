@@ -224,18 +224,30 @@ def _llm_verdict_block(
     show_ai_logic: bool = True,
     show_ai_terms_summary: bool = True,  # залишаємо для сумісності
     reviews_analysis: str = "",
+    thought_process: str = "",
+    show_ai_thoughts: bool = False,
 ) -> str:
     """Форматує вердикт AI для buy/sell мерчанта (лише вердикт + логіка)."""
     rec_upper = (rec or "PENDING").upper()
     rec_text = REC_LABELS.get(rec_upper, f"🔍 {rec_upper}")
     line = f"🧠 <b>{label}:</b> {rec_text}\n"
- 
+
     # 🔘 Логіка AI (reason під спойлером)
     if show_ai_logic and reason and rec_upper not in ("PENDING",):
         safe_reason = escape(str(reason).strip()[:300])
         prefix = "💬 " if rec_upper != "RECHECKING" else "💬 (попередній аналіз) "
         line += f"<blockquote expandable>{prefix}{safe_reason}</blockquote>\n"
- 
+
+    # 🧩 Хід думок — окремим перемикачем, бо в парному алерті йде двічі.
+    # `reason` каже, ЩО вирішено; ланцюжок — ЧОМУ саме так, включно з
+    # прогалинами, які на це вплинули.
+    if (
+        show_ai_thoughts and thought_process
+        and str(thought_process).strip() and rec_upper != "PENDING"
+    ):
+        safe_thought = escape(str(thought_process).strip()[:600])
+        line += f"<blockquote expandable>🧩 Хід думок: {safe_thought}</blockquote>\n"
+
     # 📝 Аналіз відгуків (якщо є)
     if reviews_analysis and str(reviews_analysis).strip():
         safe_rev = escape(str(reviews_analysis).strip()[:300])
@@ -250,6 +262,7 @@ def _terms_block(
     show_ai_terms_summary: bool = True,
     show_full_terms: bool = True,
     terms_status: str = "",
+    terms_facts: str = "",
 ) -> str:
     """
     Розділ «📋 Умови» між ризиками та вердиктом LLM.
@@ -285,8 +298,19 @@ def _terms_block(
     # Заголовок завжди один, але кожен блок — окремий expandable blockquote
     block = "📋 <b>Умови</b>\n"
     if has_summary:
-        safe_s = escape(str(terms_summary).strip()[:250])
-        block += f"<blockquote expandable>🤖 {safe_s}</blockquote>\n"
+        # Перелік фактів із цитатами замість абзацу — якщо модель його дала.
+        # Абзац змушував її обирати, що викинути, і викидалось саме те, що
+        # людині потрібне: мерчант написав п'ять вимог, у вижимку влізло дві.
+        rendered = ""
+        if terms_facts:
+            from core.workers.terms_facts import from_json, render_block
+
+            rendered = render_block(from_json(terms_facts))
+        if rendered:
+            block += f"<blockquote expandable>🤖 {escape(rendered)}</blockquote>\n"
+        else:
+            safe_s = escape(str(terms_summary).strip()[:250])
+            block += f"<blockquote expandable>🤖 {safe_s}</blockquote>\n"
     if has_full:
         safe_t = escape(str(terms_raw).strip()[:500])
         block += f"<blockquote expandable>📝 {safe_t}</blockquote>\n"

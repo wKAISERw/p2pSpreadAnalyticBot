@@ -295,7 +295,8 @@ async def send_taker_single(
     """
     ds = display_settings or {
         "show_ai_terms_summary": True, "show_full_terms": True,
-        "show_ai_logic": True, "show_bank_details": True, "show_llm_summary": True,
+        "show_ai_logic": True, "show_ai_thoughts": False,
+        "show_bank_details": True, "show_llm_summary": True,
     }
 
     is_buy = mode == "TAKER_BUY"
@@ -308,6 +309,8 @@ async def send_taker_single(
     llm_reason = ""
     terms_summary = ""
     rev_analysis = ""
+    order_terms_facts = ""
+    order_thought = ""
     if notifier._db:
         try:
             rec, _, reason, t_sum, rev_analyz = await notifier._db.get_trade_recommendation_full(
@@ -331,6 +334,10 @@ async def send_taker_single(
                 await notifier._db.get_reviews_summary(order.exchange, order.merchant_id)
             ):
                 rev_analysis = rev_analyz
+            extras = await notifier._db.get_verdict_extras(
+                order.exchange, order.merchant_id)
+            order_terms_facts = extras["terms_facts"]
+            order_thought = extras["thought_process"]
         except Exception:
             pass
 
@@ -425,6 +432,7 @@ async def send_taker_single(
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
         terms_status=getattr(order, "terms_status", ""),
+        terms_facts=order_terms_facts,
     )
     if terms_blk:
         text += terms_blk
@@ -436,7 +444,9 @@ async def send_taker_single(
             terms_summary=terms_summary,
             show_ai_logic=ds.get("show_ai_logic", True),
             show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
-            reviews_analysis=rev_analysis
+            reviews_analysis=rev_analysis,
+            thought_process=order_thought,
+            show_ai_thoughts=ds.get("show_ai_thoughts", False),
         )
     else:
         llm_block = _llm_verdict_block(

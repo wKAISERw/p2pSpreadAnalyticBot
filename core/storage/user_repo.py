@@ -611,7 +611,7 @@ class UserRepo:
     async def get_user_display_settings(self, chat_id: int) -> dict:
         """
         Повертає per-user налаштування виводу повідомлень.
-        Ключі: show_ai_terms_summary, show_full_terms, show_ai_logic,
+        Ключі: show_ai_terms_summary, show_full_terms, show_ai_logic, show_ai_thoughts,
                show_bank_details, show_llm_summary, alert_cooldown, group_active_alerts, auto_cooldown_json
         """
         import json
@@ -628,6 +628,7 @@ class UserRepo:
             "show_ai_terms_summary": True,
             "show_full_terms": True,
             "show_ai_logic": True,
+            "show_ai_thoughts": False,
             "show_bank_details": True,
             "show_llm_summary": True,
             "is_hybrid_routes_enabled": False,
@@ -646,6 +647,7 @@ class UserRepo:
                     """SELECT COALESCE(show_ai_terms_summary, 1)    as show_ai_terms_summary,
                               COALESCE(show_full_terms, 1)          as show_full_terms,
                               COALESCE(show_ai_logic, 1)            as show_ai_logic,
+                              COALESCE(show_ai_thoughts, 0)         as show_ai_thoughts,
                               COALESCE(show_bank_details, 1)        as show_bank_details,
                               COALESCE(show_llm_summary, 1)         as show_llm_summary,
                               COALESCE(is_hybrid_routes_enabled, 0) as is_hybrid_routes_enabled,
@@ -677,6 +679,7 @@ class UserRepo:
                 "show_ai_terms_summary": bool(row["show_ai_terms_summary"]),
                 "show_full_terms": bool(row["show_full_terms"]),
                 "show_ai_logic": bool(row["show_ai_logic"]),
+                "show_ai_thoughts": bool(row["show_ai_thoughts"]),
                 "show_bank_details": bool(row["show_bank_details"]),
                 "show_llm_summary": bool(row["show_llm_summary"]),
                 "is_hybrid_routes_enabled": bool(row["is_hybrid_routes_enabled"]),
@@ -699,6 +702,7 @@ class UserRepo:
         show_ai_terms_summary = 1 if settings_dict.get("show_ai_terms_summary", True) else 0
         show_full_terms = 1 if settings_dict.get("show_full_terms", True) else 0
         show_ai_logic = 1 if settings_dict.get("show_ai_logic", True) else 0
+        show_ai_thoughts = 1 if settings_dict.get("show_ai_thoughts", False) else 0
         show_bank_details = 1 if settings_dict.get("show_bank_details", True) else 0
         show_llm_summary = 1 if settings_dict.get("show_llm_summary", True) else 0
         is_hybrid_routes_enabled = 1 if settings_dict.get("is_hybrid_routes_enabled", False) else 0
@@ -714,6 +718,7 @@ class UserRepo:
                SET show_ai_terms_summary = ?,
                    show_full_terms = ?,
                    show_ai_logic = ?,
+                   show_ai_thoughts = ?,
                    show_bank_details = ?,
                    show_llm_summary = ?,
                    is_hybrid_routes_enabled = ?,
@@ -728,6 +733,7 @@ class UserRepo:
                 show_ai_terms_summary,
                 show_full_terms,
                 show_ai_logic,
+                show_ai_thoughts,
                 show_bank_details,
                 show_llm_summary,
                 is_hybrid_routes_enabled,

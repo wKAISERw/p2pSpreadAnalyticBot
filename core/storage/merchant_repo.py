@@ -347,6 +347,36 @@ class MerchantRepo:
             rec = "PENDING"
         return rec, verdict, reason, terms_summary, reviews_analysis
 
+    async def get_verdict_extras(self, exchange: str, merchant_id: str) -> dict:
+        """
+        Довгі поля вердикту: перелік фактів про умови і хід думок моделі.
+
+        Окремим запитом, а не через `get_trade_recommendation_full`: той
+        повертає кортеж, який розпаковують у чотирнадцяти місцях, і дописати
+        до нього поля означало б зачепити їх усі заради двох, яким воно
+        потрібне. Обидва поля беремо разом — вони йдуть в один алерт.
+        """
+        empty = {"terms_facts": "", "thought_process": ""}
+        if not self._db:
+            return empty
+        async with self._db.execute(
+            "SELECT COALESCE(terms_facts, '') AS terms_facts, "
+            "       COALESCE(thought_process, '') AS thought_process "
+            "FROM merchant_verdict WHERE exchange = ? AND merchant_id = ?",
+            (exchange, merchant_id),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return empty
+        return {
+            "terms_facts": row["terms_facts"] or "",
+            "thought_process": row["thought_process"] or "",
+        }
+
+    async def get_terms_facts(self, exchange: str, merchant_id: str) -> str:
+        """Тільки факти про умови — для тих, кому хід думок не потрібен."""
+        return (await self.get_verdict_extras(exchange, merchant_id))["terms_facts"]
+
     async def save_verdict(
             self,
             exchange: str,
@@ -360,6 +390,8 @@ class MerchantRepo:
             trade_recommendation: str = "CONDITIONAL",  # ← НОВЕ
             terms_summary: str = "",  # 🔘 AI вижимка умов
             reviews_analysis: str = "",  # 📝 AI вижимка відгуків
+            terms_facts: str = "",       # перелік фактів із цитатами (JSON)
+            thought_process: str = "",   # роздуми моделі
     ) -> None:
         now = time.time()
         t_hash = hash_terms(trade_terms)
@@ -382,8 +414,8 @@ class MerchantRepo:
             (exchange, merchant_id, merchant_name, terms_hash,
              verdict, risk_type, reason, risk_score,
              llm_calls_count, save_count, updated_at, trade_recommendation, terms_summary, reviews_analysis,
-             llm_decision)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
+             llm_decision, terms_facts, thought_process)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange, merchant_id) DO
             UPDATE SET
                 merchant_name = excluded.merchant_name,
                 terms_hash = excluded.terms_hash,
@@ -407,7 +439,9 @@ class MerchantRepo:
                    початку, але в INSERT її не було жодного разу — у базі
                    всі 1290 рядків мали 'UNKNOWN', і дізнатись, яка модель
                    винесла вердикт, можна було лише з logs/llm_decisions. */
-                llm_decision = excluded.llm_decision
+                llm_decision = excluded.llm_decision,
+                terms_facts = excluded.terms_facts,
+                thought_process = excluded.thought_process
             """,
             (
                 exchange,
@@ -425,6 +459,8 @@ class MerchantRepo:
                 terms_summary,
                 reviews_analysis,
                 (source or "unknown")[:64],
+                terms_facts,
+                thought_process,
                 llm_inc,
             ),
         )

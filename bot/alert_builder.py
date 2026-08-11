@@ -57,6 +57,10 @@ class SpreadAlert:
     buy_terms_summary: str = ""
     sell_terms_summary: str = ""
     buy_reviews_analysis: str = ""
+    buy_terms_facts: str = ""
+    sell_terms_facts: str = ""
+    buy_thought_process: str = ""
+    sell_thought_process: str = ""
     sell_reviews_analysis: str = ""
     timestamp: datetime = None
 
@@ -86,7 +90,8 @@ async def send_single(
     # Display settings (per-user)
     ds = display_settings or {
         "show_ai_terms_summary": True, "show_full_terms": True,
-        "show_ai_logic": True, "show_bank_details": True, "show_llm_summary": True,
+        "show_ai_logic": True, "show_ai_thoughts": False,
+        "show_bank_details": True, "show_llm_summary": True,
     }
 
     # 🔄 Refresh LLM verdicts from DB (LLM може завершитись після створення алерту)
@@ -110,6 +115,14 @@ async def send_single(
 
             # Також підвантажуємо актуальні відгуки та оновлюємо risk_flag і stats
             risk_resolver = await notifier._db.resolver_for(chat_id or notifier._chat_id)
+            b_extras = await notifier._db.get_verdict_extras(
+                alert.buy_order.exchange, alert.buy_order.merchant_id)
+            s_extras = await notifier._db.get_verdict_extras(
+                alert.sell_order.exchange, alert.sell_order.merchant_id)
+            alert.buy_terms_facts = b_extras["terms_facts"]
+            alert.sell_terms_facts = s_extras["terms_facts"]
+            alert.buy_thought_process = b_extras["thought_process"]
+            alert.sell_thought_process = s_extras["thought_process"]
             b_rev_sum = await notifier._db.get_reviews_summary(alert.buy_order.exchange, alert.buy_order.merchant_id)
             s_rev_sum = await notifier._db.get_reviews_summary(alert.sell_order.exchange, alert.sell_order.merchant_id)
 
@@ -288,14 +301,18 @@ async def send_single(
             terms_summary=getattr(alert, "buy_terms_summary", ""),
             show_ai_logic=ds.get("show_ai_logic", True),
             show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
-            reviews_analysis=getattr(alert, "buy_reviews_analysis", "")
+            reviews_analysis=getattr(alert, "buy_reviews_analysis", ""),
+            thought_process=getattr(alert, "buy_thought_process", ""),
+            show_ai_thoughts=ds.get("show_ai_thoughts", False),
         )
         sell_llm = _llm_verdict_block(
             "Sell", alert.sell_rec, alert.sell_reason,
             terms_summary=getattr(alert, "sell_terms_summary", ""),
             show_ai_logic=ds.get("show_ai_logic", True),
             show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
-            reviews_analysis=getattr(alert, "sell_reviews_analysis", "")
+            reviews_analysis=getattr(alert, "sell_reviews_analysis", ""),
+            thought_process=getattr(alert, "sell_thought_process", ""),
+            show_ai_thoughts=ds.get("show_ai_thoughts", False),
         )
     else:
         buy_llm = _llm_verdict_block("Buy", alert.buy_rec, "", show_ai_logic=False, show_ai_terms_summary=False)
@@ -370,6 +387,7 @@ async def send_single(
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
         terms_status=getattr(alert.buy_order, "terms_status", ""),
+        terms_facts=getattr(alert, "buy_terms_facts", ""),
     )
     if buy_terms_blk:
         text += buy_terms_blk
@@ -393,6 +411,7 @@ async def send_single(
         show_ai_terms_summary=ds.get("show_ai_terms_summary", True),
         show_full_terms=ds.get("show_full_terms", True),
         terms_status=getattr(alert.sell_order, "terms_status", ""),
+        terms_facts=getattr(alert, "sell_terms_facts", ""),
     )
     if sell_terms_blk:
         text += sell_terms_blk
