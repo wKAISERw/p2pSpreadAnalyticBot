@@ -27,7 +27,19 @@ from core.risk.signals import (
 )
 
 _ZERO_WIDTH = re.compile(r"[​-‏⁠﻿]")
-_SPACES = re.compile(r"\s+")
+# Горизонтальні пробіли схлопуємо, переноси рядків — НІ.
+#
+# Раніше тут стояло `\s+` → " ", і це було нешкідливо, поки не з'явилась
+# перевірка заперечень. Мерчанти й автори відгуків пишуть списками, і після
+# схлопування заперечення з наступного рядка починало стосуватись
+# попереднього:
+#
+#     «оплатив гроші до того як скинув\nНе цінує свій та чужий час»
+#
+# ставало одним твердженням, і «Не» з другого рядка гасило сигнал із
+# першого. Перенос рядка — така сама межа твердження, як крапка й кома.
+_H_SPACES = re.compile(r"[^\S\n]+")
+_MULTI_NEWLINE = re.compile(r"\n{2,}")
 
 # Латиниця, якою маскують кирилицю: «оbнал», «kазино».
 _HOMOGLYPHS = str.maketrans({
@@ -39,8 +51,9 @@ _HOMOGLYPHS = str.maketrans({
 def normalize(text: str) -> str:
     text = (text or "").lower()
     text = _ZERO_WIDTH.sub("", text)
-    text = text.replace("ё", "е")
-    return _SPACES.sub(" ", text).strip()
+    text = text.replace("ё", "е").replace("\r", "\n")
+    text = _H_SPACES.sub(" ", text)
+    return _MULTI_NEWLINE.sub("\n", text).strip()
 
 
 def deobfuscate(text: str) -> str:

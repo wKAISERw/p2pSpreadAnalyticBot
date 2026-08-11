@@ -60,6 +60,7 @@ CATEGORY_TITLES: dict[str, str] = {
     "SUSPICIOUS_BIZ": "Підозрілий бізнес-контекст",
     "RECEIPT_REQUIRED": "Вимога квитанції",
     "PAYMENT_TARGET": "Куди саме йде платіж",
+    "SCAM_REPORT": "Пряме звинувачення у відгуку",
     "SAFE": "Захисні формулювання мерчанта",
 }
 
@@ -182,6 +183,25 @@ def _payment_target_signals() -> list[Signal]:
             example_safe="тільки на картку, без банок",
             confidence=0.9,
         ))
+    scam = compile_phrases(vocab.SCAM_ACCUSATION_TERMS)
+    if scam:
+        out.append(Signal(
+            key="REVIEW_SCAM_CLAIM",
+            category="SCAM_REPORT",
+            title="Пряме звинувачення в шахрайстві",
+            pattern=scam,
+            layer=LAYER_SOFT,
+            # Вага як у критичних review-правил: свідчення людини, яка вже
+            # торгувала з цим мерчантом, важить не менше за збіг патерна.
+            weight=100,
+            scope=SCOPE_REVIEWS,
+            why=vocab.SCAM_WHY,
+            negations=vocab.SCAM_ACCUSATION_NEGATIONS,
+            example_risky="кинув на 5000, скам",
+            example_safe="мерчант не кидає, все чесно",
+            confidence=0.95,
+        ))
+
     biz = compile_phrases(vocab.BUSINESS_TERMS)
     if biz:
         out.append(Signal(

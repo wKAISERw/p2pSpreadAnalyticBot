@@ -183,6 +183,46 @@ class TestPaymentTargetVocabulary(unittest.TestCase):
         self.assertEqual(check_custom_blocks_metadata("тільки фізособа, не фоп"), [])
 
 
+class TestDirectScamAccusations(unittest.TestCase):
+    """
+    Прогалина, знайдена на 2978 збережених текстах відгуків: сигналу на саме
+    слово «скам» не було ЖОДНОГО. Відгук «не скинув гроші) дуже довго. Скам»
+    отримував FINCRIME — але не за «скам», а помилково, за «скинув гроші» в
+    патерні про брудні кошти. Прибравши хибне спрацювання, ми лишились би з
+    нулем на прямому звинуваченні.
+    """
+
+    def _cats(self, text: str) -> list[str]:
+        return [m.category for m in match_text(text, SCOPE_REVIEWS).matches]
+
+    def test_direct_accusation_is_caught(self):
+        for text in ("скам", "це шахрай", "кидала, не повернув кошти",
+                     "розвів на гроші", "scammer"):
+            with self.subTest(text=text):
+                self.assertIn("SCAM_REPORT", self._cats(text))
+
+    def test_the_review_that_exposed_the_gap(self):
+        text = "Позначив ордер як оплачений, не скинув гроші) дуже довго. Скам"
+        self.assertIn("SCAM_REPORT", self._cats(text))
+
+    def test_denial_of_scam_is_not_an_accusation(self):
+        for text in ("не скам, все ок", "мерчант не шахрай", "чесний, не кидала"):
+            with self.subTest(text=text):
+                self.assertNotIn("SCAM_REPORT", self._cats(text))
+
+    def test_slow_service_is_not_fraud(self):
+        for text in ("повільно відповідає", "довго закривав ордер",
+                     "некомпетентний продавець, не вміє рахувати"):
+            with self.subTest(text=text):
+                self.assertEqual(self._cats(text), [])
+
+    def test_accusations_do_not_leak_into_terms(self):
+        # Мерчант у власних умовах пише «не скам» — це не звинувачення.
+        self.assertNotIn("SCAM_REPORT", [
+            m.category for m in match_text("я не скам, працюю чесно", SCOPE_TERMS).matches
+        ])
+
+
 class TestPhraseCompiler(unittest.TestCase):
     """Користувач у боті пише фрази, а не регекси (етап 4)."""
 
