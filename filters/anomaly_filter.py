@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from typing import Iterable, Literal, Sequence
 
 from config import settings
+from core.utils.cache import TTLCache
 from exchanges.base import Order
 
 logger = logging.getLogger("AnomalyFilter")
@@ -65,6 +66,13 @@ METHOD_LABELS: dict[str, str] = {
     "median": "відхилення від медіани",
     "mean": "стандартне відхилення від середнього",
 }
+
+# Як часто повторювати в лозі незмінну картину.
+#
+# Не «ніколи»: рядок, який не з'являвся годину, читається як «фільтр
+# вимкнувся», а не як «нічого не змінилось». П'ять хвилин — компроміс між
+# тишею і підтвердженням життя.
+LOG_REPEAT_SEC = 300.0
 
 
 @dataclass(frozen=True)
@@ -140,11 +148,73 @@ class AnomalyFilter:
             )
             self.method = "mad"
 
+    # ── Лог ──────────────────────────────────────────────────────────────
+    #
+    # Кеш класовий, а не на екземплярі, свідомо: `AnomalyFilter()` створюється
+    # заново на кожному проході сканера (`taker_scanner.py`), тож пам'ять на
+    # екземплярі не пережила б жодного циклу й не дедуплювала б нічого.
+    _log_cache: TTLCache = TTLCache(ttl_seconds=LOG_REPEAT_SEC, max_size=64)
+
+    def _log_result(
+        self, side: Side, label: str, n_rejected: int, n_total: int,
+        center: float, threshold: float,
+    ) -> None:
+        """
+        Рядок у лог — лише коли картина змінилась.
+
+        Раніше це був беззастережний INFO на кожен виклик. Цикл сканера
+        триває близько трьох секунд, а викликів шість (три групи × два боки),
+        тож у лог ішло ~120 однакових рядків на хвилину:
+
+            🎯 Аномалії (mad, buy): відкинуто 5 із 204 — ринок ≈ 45.44 ₴…
+            🎯 Аномалії (mad, buy): відкинуто 5 із 204 — ринок ≈ 45.44 ₴…
+
+        Ті самі числа, бо ринок за три секунди не рухається. Такий лог не
+        просто незручний — він ховає в собі те, заради чого лог і читають.
+
+        Дедуп по сигнатурі, той самий прийом, що й для підозри на бота
+        (`_should_log_behavior_alert`): зміна відразу видно, стабільний стан
+        повторюється не частіше ніж раз на `LOG_REPEAT_SEC`. Ціна округлена
+        до десятої гривні — інакше кожен тік у копійку рахувався б за зміну
+        й дедуп не дедуплював би нічого.
+        """
+        # Сигнатура — про КАРТИНУ ринку, не про точні числа.
+        #
+        # `n_total` тут свідомо немає, хоч у повідомленні він є: розмір
+        # стакану пливе щоцикла на один-два ордери (204 → 205 → 204), і
+        # варто йому потрапити в сигнатуру, як дедуп перестає дедуплювати —
+        # двадцять циклів дають двадцять рядків, тільки з іншим числом.
+        # Ціна округлена до десятої з тієї ж причини: 45.49 і 45.50 — це не
+        # «ринок змінився».
+        key = (self.method, side, label)
+        signature = f"{n_rejected}|{center:.1f}|{threshold:.1f}"
+
+        if self._log_cache.get(key) == signature:
+            logger.debug(
+                "🎯 Аномалії (%s, %s%s): без змін — відкинуто %d із %d",
+                self.method, side, f", {label}" if label else "", n_rejected, n_total,
+            )
+            return
+
+        self._log_cache.set(key, signature)
+        logger.info(
+            "🎯 Аномалії (%s, %s%s): відкинуто %d із %d — ринок ≈ %.2f ₴, допуск ±%.2f ₴",
+            self.method, side, f", {label}" if label else "",
+            n_rejected, n_total, center, threshold,
+        )
+
     # ── Публічний API ────────────────────────────────────────────────────
 
-    def analyze(self, orders: Sequence[Order], side: Side) -> AnomalyResult:
+    def analyze(self, orders: Sequence[Order], side: Side, label: str = "") -> AnomalyResult:
         """
         Розбирає стакан на «нормальні» й «аномальні» ціни.
+
+        `label` — чий це стакан (код банку). Не косметика: стакани різних
+        банків мають різні ціни й аналізуються окремо, а в лозі вони
+        виглядали однаково — «відкинуто 5 із 204» без жодної згадки, ЯКОГО
+        ринку це стосується. Він же дає стабільний ключ для дедупу: розмір
+        стакану пливе щоцикла на одиницю, і ключувати ним означало б
+        писати новий рядок щоразу, коли з'явився один ордер.
 
         Повертає результат із поясненням, а не голий список: причина
         відкидання потрібна і в логах, і в інтерфейсі — інакше зникнення
@@ -185,10 +255,7 @@ class AnomalyFilter:
                 kept.append(order)
 
         if rejected:
-            logger.info(
-                "🎯 Аномалії (%s, %s): відкинуто %d із %d — ринок ≈ %.2f ₴, допуск ±%.2f ₴",
-                self.method, side, len(rejected), len(orders), center, threshold,
-            )
+            self._log_result(side, label, len(rejected), len(orders), center, threshold)
             for item in rejected[:5]:
                 logger.debug("   🗑 %s — %s", item.order.merchant_name, item.reason)
 

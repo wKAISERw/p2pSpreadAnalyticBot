@@ -274,7 +274,7 @@ class TakerScanner:
         for bank_code, bank_orders in source_grouped.items():
             if bank_code not in user_banks:
                 continue
-            result = anomaly_filter.analyze(bank_orders, anomaly_side)
+            result = anomaly_filter.analyze(bank_orders, anomaly_side, label=bank_code)
             clean_grouped[bank_code] = result.kept
             for item in result.rejected:
                 logger.debug(

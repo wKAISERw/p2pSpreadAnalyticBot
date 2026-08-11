@@ -59,6 +59,33 @@ from core.engine.terms_status import blind_label as blind_terms_label
 logger = logging.getLogger("Scanner")
 
 
+# Як часто повторювати попередження про повільну біржу.
+_SLOW_FETCH_COOLDOWN = 300.0
+_slow_fetch_log = ValueCache(ttl_seconds=_SLOW_FETCH_COOLDOWN, max_size=32)
+
+
+def _should_warn_slow(exchange: str, duration: float) -> bool:
+    """
+    Чи варто сказати вголос, що біржа повільна.
+
+    Поріг «довше за секунду» спрацьовував на кожному циклі, а цикл іде раз
+    на три секунди: CryptoBot стабільно віддає за 1.1–1.3s, тож WARNING про
+    це йшов у лог двадцять разів на хвилину. Попередження, яке звучить
+    постійно, перестає бути попередженням — його перестають читати разом з
+    усім, що поруч.
+
+    Тому: перший раз кажемо одразу, далі мовчимо, поки не стало помітно
+    ГІРШЕ (наступна ціла секунда) або поки не мине кулдаун. Погіршення —
+    це новина, стабільна повільність — ні.
+    """
+    bucket = int(duration)
+    prev = _slow_fetch_log.get(exchange)
+    if prev is not None and bucket <= prev:
+        return False
+    _slow_fetch_log.set(exchange, bucket)
+    return True
+
+
 def safe_float(val) -> float:
     """Безпечне перетворення в float. Визначено на рівні модуля (не в циклі)."""
     try:
@@ -461,7 +488,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         timeout=timeout,
                     )
                     f_duration = time.monotonic() - f_start
-                    if f_duration > 1.0:
+                    if f_duration > 1.0 and _should_warn_slow(name, f_duration):
                         logger.warning("🐌 %s фетч зайняв %.2fs!", name, f_duration)
                     exchange_manager.reset_failures(name)
                     return result
@@ -909,10 +936,25 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
 
                         show, gate_reason = alert_gate.allow(opp)
                         if not show:
-                            logger.debug(
-                                "⏭ Скіп: dedup [%s→%s] %s",
-                                buy_o.merchant_name, sell_o.merchant_name, gate_reason,
-                            )
+                            # Рівень той самий, що й у «додано в батч» нижче, і
+                            # це принципово. Поки цей рядок був DEBUG, у
+                            # консоль (вона на INFO) він не потрапляв ніколи —
+                            # і його відсутність у `docker compose logs` читалась
+                            # як «гейт не спрацьовує жодного разу». Насправді
+                            # вона не означала нічого: діагностика, якої не
+                            # видно, гірша за її відсутність, бо на ній будують
+                            # висновки.
+                            if runtime_config.get("show_spread_logs", "true") == "true":
+                                logger.info(
+                                    "⏭ Скіп: dedup [%s→%s] %s [%s]",
+                                    buy_o.merchant_name, sell_o.merchant_name,
+                                    gate_reason, alert_pair_key(opp),
+                                )
+                            else:
+                                logger.debug(
+                                    "⏭ Скіп: dedup [%s→%s] %s",
+                                    buy_o.merchant_name, sell_o.merchant_name, gate_reason,
+                                )
                             continue
 
                         if not stability_filter.check(
