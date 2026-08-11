@@ -197,6 +197,7 @@ def _payment_target_signals() -> list[Signal]:
             scope=SCOPE_REVIEWS,
             why=vocab.SCAM_WHY,
             negations=vocab.SCAM_ACCUSATION_NEGATIONS,
+            only_explicit_negation=True,
             example_risky="кинув на 5000, скам",
             example_safe="мерчант не кидає, все чесно",
             confidence=0.95,

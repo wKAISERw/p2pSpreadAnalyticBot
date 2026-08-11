@@ -55,6 +55,17 @@ class Signal:
     why: str = ""
     # Коли збіг НЕ означає ризику: словами, а не регексом.
     negations: tuple[str, ...] = ()
+    # Заперечувати ЛИШЕ точними формулюваннями з `negations`, без загальної
+    # конструкції «не …» поруч.
+    #
+    # Потрібно там, де текст сам по собі є свідченням, а не описом умов.
+    # Відгук «Не скинув грошей шахрай» — це звинувачення, і «Не» в ньому
+    # стосується «скинув», а не «шахрай». Загальне правило цього не бачить:
+    # для нього будь-яке «не» поруч гасить сигнал. На живих даних це глушило
+    # реальні скарги — «не звязуйтесь шахраї!!!», «ШАХРАЙ НЕ ПРАЦЮВАТИ».
+    #
+    # Заперечити звинувачення можна лише прямо: «не шахрай», «чесний».
+    only_explicit_negation: bool = False
     # Категорії, які цей сигнал глушить (для SAFE-шару).
     suppresses: frozenset = frozenset()
     # Приклади в обидва боки — для тестів і для пояснення людині.
@@ -134,7 +145,11 @@ _NEGATION_TAIL_WINDOW = 25
 _CLAUSE_BOUNDARIES = ".!?;,\n"
 
 
-def is_negated(text: str, start: int, end: int, extra: tuple[str, ...] = ()) -> bool:
+def is_negated(
+    text: str, start: int, end: int,
+    extra: tuple[str, ...] = (),
+    explicit_only: bool = False,
+) -> bool:
     """
     Чи стоїть збіг під запереченням.
 
@@ -155,6 +170,9 @@ def is_negated(text: str, start: int, end: int, extra: tuple[str, ...] = ()) -> 
     for phrase in extra:
         if phrase and phrase.lower() in lowered:
             return True
+
+    if explicit_only:
+        return False
 
     head = lowered[max(0, start - _NEGATION_WINDOW):start]
     cut = max(head.rfind(c) for c in _CLAUSE_BOUNDARIES)

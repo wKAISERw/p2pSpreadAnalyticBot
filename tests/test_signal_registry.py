@@ -210,6 +210,29 @@ class TestDirectScamAccusations(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("SCAM_REPORT", self._cats(text))
 
+    def test_a_nearby_ne_does_not_silence_the_accusation(self):
+        """
+        Знайдено `tools/risk_probe.py --negations` на живих відгуках:
+        загальне правило про заперечення глушило СПРАВЖНІ скарги.
+
+        «Не скинув грошей шахрай» — «Не» стосується «скинув», а не «шахрай».
+        Відгук сам по собі є свідченням, тож заперечити його можна лише
+        прямо: «не шахрай», «чесний».
+        """
+        for text in ("Не скинув грошей шахрай",
+                     "не звязуйтесь шахраї!!!",
+                     "ШАХРАЙ НЕ ПРАЦЮВАТИ",
+                     "не рекомендую, кидала"):
+            with self.subTest(text=text):
+                self.assertIn("SCAM_REPORT", self._cats(text),
+                              "справжня скарга заглушена запереченням")
+
+    def test_explicit_only_flag_is_set_where_it_matters(self):
+        from core.risk.registry import builtin_registry
+
+        signal = builtin_registry().by_key("REVIEW_SCAM_CLAIM")
+        self.assertTrue(signal.only_explicit_negation)
+
     def test_slow_service_is_not_fraud(self):
         for text in ("повільно відповідає", "довго закривав ордер",
                      "некомпетентний продавець, не вміє рахувати"):

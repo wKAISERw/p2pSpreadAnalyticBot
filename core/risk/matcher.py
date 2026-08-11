@@ -130,7 +130,10 @@ def match_text(
         if signal.layer != LAYER_SAFE:
             # Перевіряємо на ТОМУ ТЕКСТІ, де знайшли збіг: у деобфускованому
             # варіанті зсуви інші.
-            if is_negated(source, m.start(), m.end(), signal.negations):
+            if is_negated(
+                source, m.start(), m.end(), signal.negations,
+                explicit_only=signal.only_explicit_negation,
+            ):
                 result.negated.append(signal.key)
                 return None
         return Match(signal, excerpt_around(source, m.start(), m.end()), m.span())
