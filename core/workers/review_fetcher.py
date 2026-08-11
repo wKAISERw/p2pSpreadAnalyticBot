@@ -18,6 +18,8 @@ from typing import Optional, TYPE_CHECKING
 
 from core.storage.merchant_db import MerchantDB
 from core.analysis.rules import ALL_RULES
+from core.risk.matcher import match_text
+from core.risk.signals import SCOPE_REVIEWS
 from core.utils.tasks import spawn
 
 if TYPE_CHECKING:
@@ -48,9 +50,6 @@ _BASIC_BAD = [
     "fake", "не платить", "обманув", "обдурив", "кинули",
 ]
 
-# Тільки review_only правила для аналізу текстів
-_REVIEW_ONLY_RULES = [r for r in ALL_RULES if getattr(r, "review_only", False)]
-
 # Усі правила для цільових категорій (для швидкого фільтру)
 _TARGET_CATEGORIES = {"TRIANGLE", "CASINO", "FINCRIME", "CHARGEBACK", "APPEAL_PRESSURE"}
 
@@ -79,32 +78,27 @@ def _has_bad_keywords(text: str) -> bool:
 
 def _analyze_review_text(text: str) -> dict:
     """
-    Повноцінний аналіз тексту відгуку по review_only правилах.
-    Повертає: {score, categories, top_excerpt}
+    Аналіз тексту відгуку через спільний матчер.
+
+    Тут була власна копія проходу по `review_only` правилах — і ще одна,
+    дослівна, у `core/analysis/review_analyzer.py`, яку не імпортував ніхто.
+    Обидві не знали ні про заперечення, ні про SAFE-шар: відгук «мерчант не
+    кидає, все чесно» рахувався нарівні зі скаргою.
+
+    Тепер прохід один, із scope=reviews.
     """
-    if not text or not _REVIEW_ONLY_RULES:
+    found = match_text(text, scope=SCOPE_REVIEWS)
+    if not found.matches:
         return {"score": 0, "categories": [], "top_excerpt": ""}
 
-    t = text.lower()
-    score = 0
-    categories: list[str] = []
-    top_excerpt = ""
-
-    for rule in _REVIEW_ONLY_RULES:
-        m = rule.pattern.search(t)
-        if m:
-            score += rule.weight
-            if rule.category not in categories:
-                categories.append(rule.category)
-            if not top_excerpt:
-                start = max(0, m.start() - 20)
-                end = min(len(t), m.end() + 20)
-                top_excerpt = t[start:end].strip()
+    positive = [m for m in found.matches if m.weight > 0]
+    if not positive:
+        return {"score": 0, "categories": [], "top_excerpt": ""}
 
     return {
-        "score": min(100, max(0, score)),
-        "categories": categories,
-        "top_excerpt": top_excerpt[:100],
+        "score": min(100, max(0, sum(m.weight for m in positive))),
+        "categories": list(dict.fromkeys(m.category for m in positive)),
+        "top_excerpt": positive[0].excerpt[:100],
     }
 
 

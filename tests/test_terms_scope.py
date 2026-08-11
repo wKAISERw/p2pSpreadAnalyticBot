@@ -25,33 +25,49 @@ from core.analysis.rules import HARD_RULES, SAFE_RULES, SOFT_RULES, WARN_RULES
 
 
 class TestReviewRulesStayOutOfTerms(unittest.TestCase):
-    def test_no_review_only_rule_can_judge_terms(self):
-        for name, rules in (
-            ("HARD", ra.TERMS_HARD_RULES),
-            ("SOFT", ra.TERMS_SOFT_RULES),
-            ("SAFE", ra.TERMS_SAFE_RULES),
-            ("WARN", ra.TERMS_WARN_RULES),
-        ):
-            with self.subTest(layer=name):
-                leaked = [r.id for r in rules if r.review_only]
-                self.assertEqual(leaked, [], f"{name}: review-правила судять умови: {leaked}")
+    """
+    Інваріант той самий, але живе він тепер не в списках усередині
+    аналізатора, а в полі `scope` самого сигналу (етап 1). Область — це
+    властивість правила, а не домовленість між двома модулями, які можуть
+    розійтись.
+    """
 
-    def test_the_filter_actually_removes_something(self):
-        # Якщо колись усі review_only приберуть із SOFT_RULES, цей тест
-        # нагадає, що фільтр став беззмістовним — а не мовчки зеленітиме.
-        self.assertLess(len(ra.TERMS_SOFT_RULES), len(SOFT_RULES))
-        self.assertLess(len(ra.TERMS_SAFE_RULES), len(SAFE_RULES))
+    def setUp(self):
+        from core.risk.registry import builtin_registry
 
-    def test_terms_only_rules_are_all_kept(self):
-        for name, full, kept in (
-            ("HARD", HARD_RULES, ra.TERMS_HARD_RULES),
-            ("SOFT", SOFT_RULES, ra.TERMS_SOFT_RULES),
-            ("SAFE", SAFE_RULES, ra.TERMS_SAFE_RULES),
-            ("WARN", WARN_RULES, ra.TERMS_WARN_RULES),
-        ):
-            with self.subTest(layer=name):
-                expected = [r.id for r in full if not r.review_only]
-                self.assertEqual([r.id for r in kept], expected)
+        self.reg = builtin_registry()
+
+    def test_no_review_signal_can_judge_terms(self):
+        from core.risk.signals import LAYER_HARD, LAYER_SAFE, LAYER_SOFT, LAYER_WARN, SCOPE_TERMS
+
+        for layer in (LAYER_HARD, LAYER_SOFT, LAYER_WARN, LAYER_SAFE):
+            with self.subTest(layer=layer):
+                leaked = [
+                    s.key for s in self.reg.for_scope(SCOPE_TERMS, layer)
+                    if s.scope == "reviews"
+                ]
+                self.assertEqual(leaked, [], f"{layer}: review-сигнали судять умови: {leaked}")
+
+    def test_the_split_actually_separates_something(self):
+        # Якщо колись усі сигнали стануть однієї області, цей тест нагадає,
+        # що поділ став беззмістовним — а не мовчки зеленітиме.
+        from core.risk.signals import SCOPE_REVIEWS, SCOPE_TERMS
+
+        terms = {s.key for s in self.reg.signals if s.applies_to(SCOPE_TERMS)}
+        reviews = {s.key for s in self.reg.signals if s.applies_to(SCOPE_REVIEWS)}
+        self.assertTrue(terms - reviews, "жоден сигнал не є суто термовим")
+        self.assertTrue(reviews - terms, "жоден сигнал не є суто відгуковим")
+
+    def test_scope_matches_the_generated_review_only_flag(self):
+        # Джерело правди про область — досі `review_only` у rules.py.
+        # Реєстр мусить його переносити один в один, без самодіяльності.
+        for rules in (HARD_RULES, SOFT_RULES, WARN_RULES, SAFE_RULES):
+            for rule in rules:
+                with self.subTest(rule=rule.id):
+                    signal = self.reg.by_key(rule.id)
+                    self.assertIsNotNone(signal, f"{rule.id} не потрапив у реєстр")
+                    expected = "reviews" if rule.review_only else "terms"
+                    self.assertEqual(signal.scope, expected)
 
 
 class TestRealTermsDoNotBlowUp(unittest.TestCase):
