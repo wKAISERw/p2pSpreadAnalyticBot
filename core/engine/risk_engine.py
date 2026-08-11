@@ -27,6 +27,7 @@ from core.analysis.identity_analyzer import analyze_identity
 from core.utils.cache import TTLCache
 from core.utils.tasks import spawn
 from core.engine import terms_status, reviews_status
+from core.engine import risk_coverage
 from core.engine import risk_flags as risk_flags_mod
 from config.defaults import (
     MIN_ORDERS, MIN_COMPLETION,
@@ -232,18 +233,18 @@ def _trusted_reason(order: Order, summary: dict | None, terms: str, status: str)
     Пояснення для довіреного мерчанта, пропущеного повз модель.
 
     Головне — не сказати «ризиків не виявлено» там, де ми їх не шукали.
+    Прогалини беремо з `order.risk_coverage`, а не рахуємо тут удруге:
+    інакше два місця відповідали б на те саме питання й рано чи пізно
+    розійшлись би.
     """
     base = (
         f"Довірений мерчант ({order.month_order_count} угод, "
         f"{order.finish_rate_pct:.1f}% успішності), поглиблена перевірка не запускалась."
     )
-    gaps = []
-    if reviews_status.is_dark(summary):
-        gaps.append("відгуків не бачили")
-    if terms_status.is_blind(status):
-        gaps.append("умов не бачили")
+    coverage = getattr(order, "risk_coverage", None)
+    gaps = coverage.gaps() if coverage else []
     if gaps:
-        return f"{base} Увага: {', '.join(gaps)} — висновок неповний."
+        return f"{base} Увага: {'; '.join(gaps)} — висновок неповний."
     return f"{base} За наявними даними ризиків не виявлено."
 
 
@@ -861,6 +862,17 @@ class RiskEngine:
 
             # ── v2.1: CompositeScorer ───────────────────────────────────────
             # Рахуємо composite на поточному стані (без LLM — він async)
+            # ── Покриття: на що ми дивились, а на що ні ─────────────────
+            # Збирається з уже прочитаного, нічого не запитує додатково.
+            # До цього поведінка й пошук клонів свою сліпоту не повідомляли
+            # взагалі: «історії ще немає» виглядало як «поведінка нормальна».
+            order.risk_coverage = risk_coverage.from_analysis(
+                order,
+                review_summary_raw,
+                snapshots_raw,
+                identity_checked=bool(order.merchant_name) and twins_raw is not None,
+            )
+
             composite_score = CompositeScorer.compute(
                 regex_score        = order.regex_score,
                 behavior_score     = behavior_score,

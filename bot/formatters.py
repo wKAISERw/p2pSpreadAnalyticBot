@@ -579,6 +579,13 @@ def _risk_badge(order: Order, short: bool = False) -> str:
         if f in badges:
             lines.append(badges[f])
 
+    # Покриття знає про прогалини більше, ніж прапори: поведінка й пошук
+    # клонів своєї сліпоти в risk_flag не пишуть узагалі. Якщо воно є —
+    # беремо звідти, бо це одне джерело на всі чотири джерела даних.
+    coverage = getattr(order, "risk_coverage", None)
+    if coverage is not None:
+        unknown_gaps = coverage.gaps()
+
     # Пробіли в перевірці — окремим рядком і без бейджа ризику: це не
     # звинувачення мерчанта, а межа нашої видимості. Ставимо в кінець,
     # щоб знайдені ризики лишались першими.

@@ -39,6 +39,10 @@ class Order:
     terms_status: str = "UNKNOWN"
     # Вирок RiskEngine: "OK", "TRIANGLE", "CASINO", "LOW_STATS", "EMPTY_TERMS"
     risk_flag: str = ""
+    # Межа нашої видимості на момент вердикту: що встигли перевірити,
+    # а що ні. Заповнює RiskEngine; None означає, що аналіз ще не
+    # доходив до цього ордера — і це теж не «все чисто».
+    risk_coverage: object | None = None
     # Верифікований мерчант (жовта/синя галочка де доступно)
     is_verified: bool = False
 # ── НОВІ ПОЛЯ (ДОДАТИ СЮДИ) ──
