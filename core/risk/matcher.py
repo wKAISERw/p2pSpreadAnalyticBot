@@ -101,6 +101,7 @@ def match_text(
     text: str,
     scope: str = SCOPE_TERMS,
     registry: SignalRegistry | None = None,
+    categories: frozenset[str] | set[str] | None = None,
 ) -> MatchResult:
     """
     Проганяє текст через сигнали, дозволені для цієї області.
@@ -109,11 +110,19 @@ def match_text(
       1. SAFE — спершу, бо він вирішує, які категорії взагалі слухати;
       2. HARD — перший збіг завершує розбір;
       3. SOFT і WARN — накопичуються.
+
+    `categories` звужує прохід до кількох категорій. Потрібно там, де
+    відповідь наперед вузька: `check_custom_blocks_metadata` питає лише про
+    PAYMENT_TARGET, а ганяти заради цього всі 18 сигналів — подвійна робота
+    на кожному ордері кожного циклу.
     """
     reg = registry or builtin_registry()
     result = MatchResult()
     if not text or not str(text).strip():
         return result
+
+    def allowed(signal: Signal) -> bool:
+        return categories is None or signal.category in categories
 
     raw = normalize(text)
     fuzzy = deobfuscate(raw)
@@ -140,6 +149,8 @@ def match_text(
 
     # ── 1. SAFE ──────────────────────────────────────────────────────────
     for signal in reg.for_scope(scope, LAYER_SAFE):
+        if not allowed(signal):
+            continue
         found = hit(signal)
         if found:
             result.matches.append(found)
@@ -147,7 +158,7 @@ def match_text(
 
     # ── 2. HARD ──────────────────────────────────────────────────────────
     for signal in reg.for_scope(scope, LAYER_HARD):
-        if signal.category in result.suppressed:
+        if not allowed(signal) or signal.category in result.suppressed:
             continue
         found = hit(signal)
         if found:
@@ -157,7 +168,7 @@ def match_text(
     # ── 3. SOFT + WARN ───────────────────────────────────────────────────
     for layer in (LAYER_SOFT, LAYER_WARN):
         for signal in reg.for_scope(scope, layer):
-            if signal.category in result.suppressed:
+            if not allowed(signal) or signal.category in result.suppressed:
                 continue
             found = hit(signal)
             if found:

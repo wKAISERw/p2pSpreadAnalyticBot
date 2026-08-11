@@ -101,6 +101,8 @@ class CompositeScorer:
     @classmethod
     async def load_weights(cls, db) -> None:
         """Loads weights from bot_settings database table."""
+        before = (cls.W_REGEX, cls.W_BEHAVIOR, cls.W_REVIEWS_PCT,
+                  cls.W_REVIEWS_TEXT, cls.W_LLM, cls.W_IDENTITY)
         try:
             conn = getattr(db, "db", None) or getattr(db, "_db", db)
             async with conn.execute(
@@ -112,8 +114,15 @@ class CompositeScorer:
                 val = row[1] if isinstance(row, tuple) else row["value"]
                 if val is not None:
                     setattr(cls, key, float(val))
-            logger.info("CompositeScorer weights loaded: W_REGEX=%.2f, W_BEHAVIOR=%.2f, W_REVIEWS_PCT=%.2f, W_REVIEWS_TEXT=%.2f, W_LLM=%.2f, W_IDENTITY=%.2f",
-                        cls.W_REGEX, cls.W_BEHAVIOR, cls.W_REVIEWS_PCT, cls.W_REVIEWS_TEXT, cls.W_LLM, cls.W_IDENTITY)
+            # Ваги перечитуються зі сканерного циклу раз на 10 секунд, а
+            # міняються раз на місяць. INFO на кожне читання — це шість
+            # рядків на хвилину ні про що. Говоримо, лише коли справді
+            # змінилось.
+            current = (cls.W_REGEX, cls.W_BEHAVIOR, cls.W_REVIEWS_PCT,
+                       cls.W_REVIEWS_TEXT, cls.W_LLM, cls.W_IDENTITY)
+            level = logger.info if current != before else logger.debug
+            level("CompositeScorer weights: W_REGEX=%.2f, W_BEHAVIOR=%.2f, W_REVIEWS_PCT=%.2f, W_REVIEWS_TEXT=%.2f, W_LLM=%.2f, W_IDENTITY=%.2f",
+                  *current)
         except Exception as e:
             logger.warning("Failed to load weights from bot_settings: %s", e)
 
@@ -738,7 +747,14 @@ class RiskEngine:
                 # Кома в причині рве прапор навпіл — рядок склеєний саме
                 # комами. `_build_cached_flag` це врахував, ця гілка ні.
                 order.risk_flag = f"BLOCK:BLACKLIST:{risk_flags_mod.scrub(bl_reason)}"
-                logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
+                # Мерчант із чорного списку трапляється в стакані щоцикла, і
+                # WARNING на кожен прохід забивав лог одним рядком по 15 разів
+                # на хвилину. Причина не змінюється — досить сказати раз на
+                # кулдаун. Той самий дедуп, що й для підозри на бота.
+                if _should_log_behavior_alert(
+                    self._bot_alert_cache, exchange, f"bl:{mid}", str(bl_reason),
+                ):
+                    logger.warning("🚫 Blacklist: %s [%s] — %s", order.merchant_name, exchange, bl_reason)
                 return
 
             # ── 1.1 Regex Direct Block check (always runs to catch absolute stop-words) ──

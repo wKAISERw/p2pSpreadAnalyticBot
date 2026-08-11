@@ -25,6 +25,10 @@ from dataclasses import dataclass
 from core.risk.matcher import match_text
 from core.risk.signals import LAYER_SAFE, LAYER_SOFT, LAYER_WARN, SCOPE_TERMS
 
+# Персональні фільтри питають лише про одну категорію — решту сигналів
+# ганяти заради цього нема сенсу.
+PAYMENT_TARGET_ONLY = frozenset({"PAYMENT_TARGET"})
+
 logger = logging.getLogger("RegexAnalyzer")
 
 LLM_SCORE_THRESHOLD    = 30   # мінімум для ескалації в LLM
@@ -47,8 +51,8 @@ def check_custom_blocks_metadata(terms: str) -> list[str]:
     Назви прапорів лишаються старі: їх читають alert_builder,
     alert_dispatcher, monitoring і formatters.
     """
-    found = match_text(terms, scope=SCOPE_TERMS)
-    keys = {m.signal.key for m in found.matches if m.category == "PAYMENT_TARGET"}
+    found = match_text(terms, scope=SCOPE_TERMS, categories=PAYMENT_TARGET_ONLY)
+    keys = {m.signal.key for m in found.matches}
 
     flags = []
     if "PAY_BUSINESS" in keys:
