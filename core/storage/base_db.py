@@ -736,6 +736,53 @@ class MerchantDB:
         await self._ensure_column("scanner_users", "filter_banka_jar", "TEXT DEFAULT 'hide'")  # Фільтр Банка/Сейф (hide/warn/show)
         await self._ensure_column("scanner_users", "auto_cooldown_json", "TEXT DEFAULT '{}'")  # Налаштування автоматичного кд (JSON)
         await self._ensure_column("scanner_users", "cryptobot_profile_mode", "TEXT DEFAULT 'chat'")  # Режим посилань CryptoBot: chat | webapp
+        # Профіль суворості ріск-енджину: careful | balanced | relaxed.
+        # Пресет не перелічує сигнали, а зсуває суворість — інакше кожен
+        # новий сигнал доводилось би дописувати в три місця.
+        await self._ensure_column("scanner_users", "risk_profile", "TEXT DEFAULT 'balanced'")
+
+        # ── Персональні налаштування ріск-енджину ────────────────────────
+        #
+        # Факти про мерчанта глобальні (merchant_verdict спільна), а рішення
+        # персональні — саме тому вони живуть окремо. Порожня таблиця дає
+        # рівно теперішню поведінку: резолвер падає на дефолти сигналу.
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS risk_policies (
+                user_id         INTEGER NOT NULL,
+                signal_key      TEXT    NOT NULL,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                -- Дія окремо на купівлю і на продаж: один і той самий
+                -- сигнал коштує різного залежно від напрямку угоди.
+                on_buy          TEXT    NOT NULL DEFAULT 'warn',
+                on_sell         TEXT    NOT NULL DEFAULT 'warn',
+                weight_override INTEGER,
+                updated_at      REAL,
+                PRIMARY KEY (user_id, signal_key)
+            )
+        """)
+
+        # Власні сигнали користувача. Вбудовані живуть у реєстрі й не
+        # мутуються ніколи — тут лише те, що людина додала сама.
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS risk_user_signals (
+                user_id     INTEGER NOT NULL,
+                key         TEXT    NOT NULL,
+                category    TEXT    NOT NULL,
+                title       TEXT    NOT NULL,
+                -- Фрази людською мовою, не регекс: компіляція — робота
+                -- движка (core/risk/signals.compile_phrases).
+                phrases_json   TEXT NOT NULL DEFAULT '[]',
+                negations_json TEXT NOT NULL DEFAULT '[]',
+                layer       TEXT    NOT NULL DEFAULT 'soft',
+                weight      INTEGER NOT NULL DEFAULT 30,
+                scope       TEXT    NOT NULL DEFAULT 'terms',
+                why         TEXT    NOT NULL DEFAULT '',
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                created_at  REAL,
+                PRIMARY KEY (user_id, key)
+            )
+        """)
+        await self._db.commit()
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")
