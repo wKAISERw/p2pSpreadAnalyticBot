@@ -746,6 +746,14 @@ class RiskEngine:
             )
             order.regex_warn_flags = list(getattr(regex_result, "warn_flags", []) or [])
             order.regex_score      = int(getattr(regex_result, "score", 0) or 0)
+            # Ключі спрацьованих сигналів — щоб персональна політика мала до
+            # чого застосовуватись. `risk_flag` для цього не годиться: там
+            # категорії впереміш зі статусами й вільним текстом, і відновити
+            # з нього, ЯКЕ саме правило спрацювало, можна лише вгадуванням.
+            order.risk_signals = [
+                m.rule_id for m in (getattr(regex_result, "matches", []) or [])
+                if getattr(m, "weight", 0) > 0
+            ]
 
             from core.analysis.rules import HARD_DIRECT_BLOCK
             if regex_result.verdict == "BLOCK" and regex_result.risk_type in HARD_DIRECT_BLOCK:
