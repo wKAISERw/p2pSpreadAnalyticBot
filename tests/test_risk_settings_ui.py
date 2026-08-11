@@ -64,7 +64,19 @@ class TestEveryButtonIsHandled(unittest.TestCase):
         "risk:act:", "risk:tog:", "risk:rst:", "risk:del:", "risk:mine",
         "risk:add", "risk:test", "risk:reset_all", "risk:noop",
         "menu:settings",
+        # Свої ключі до моделей — окремий роутер (bot/handlers/byok.py),
+        # підключений у bot/handlers/__init__.py.
+        "byok:",
     )
+
+    def test_byok_router_is_actually_registered(self):
+        # Префікс у списку вище нічого не доводить: він лише каже, що
+        # кнопку хтось мав би ловити. Перевіряємо, що роутер реально
+        # підключений — інакше кнопка веде в тишу.
+        from bot.handlers import byok, get_router
+
+        names = {r.name for r in get_router().sub_routers}
+        self.assertIn(byok.router.name, names)
 
     def _check(self, kb):
         for data in _all_callbacks(kb):

@@ -315,15 +315,31 @@ class MerchantRepo:
         return rec if rec in ("APPROVE", "CONDITIONAL", "REJECT", "PENDING", "RECHECKING") else "PENDING"
 
     async def get_trade_recommendation_full(
-            self, exchange: str, merchant_id: str
+            self, exchange: str, merchant_id: str, user_id: int = 0,
     ) -> tuple[str, str, str, str, str]:
         """
         Повертає (recommendation, verdict, reason, terms_summary, reviews_analysis) — повну інфу від LLM.
         Якщо trade_recommendation ще PENDING, але verdict вже є —
         автоматично виводимо рекомендацію з verdict.
+
+        `user_id` — власний вердикт, зроблений ключем цієї людини. Він має
+        перевагу, але НЕ підміняє базовий: немає персонального або він
+        застарів — повертаємо спільний. Ховати базову оцінку за наявністю
+        чужого ключа означало б, що без ключа бот працює гірше, а це вже
+        інша угода з користувачем, ніж та, на яку він підписувався.
         """
         if not self._db:
             return "PENDING", "", "", "", ""
+        if user_id:
+            personal = await self.get_personal_verdict(user_id, exchange, merchant_id)
+            if personal:
+                return (
+                    (personal["trade_recommendation"] or "PENDING").strip().upper(),
+                    (personal["verdict"] or "").strip().upper(),
+                    (personal["reason"] or "").strip(),
+                    (personal["terms_summary"] or "").strip(),
+                    (personal["reviews_analysis"] or "").strip(),
+                )
         async with self._db.execute(
                 "SELECT trade_recommendation, verdict, reason, COALESCE(terms_summary, '') as terms_summary, COALESCE(reviews_analysis, '') as reviews_analysis FROM merchant_verdict "
                 "WHERE exchange = ? AND merchant_id = ?",
@@ -347,7 +363,9 @@ class MerchantRepo:
             rec = "PENDING"
         return rec, verdict, reason, terms_summary, reviews_analysis
 
-    async def get_verdict_extras(self, exchange: str, merchant_id: str) -> dict:
+    async def get_verdict_extras(
+        self, exchange: str, merchant_id: str, user_id: int = 0,
+    ) -> dict:
         """
         Довгі поля вердикту: перелік фактів про умови і хід думок моделі.
 
@@ -359,6 +377,13 @@ class MerchantRepo:
         empty = {"terms_facts": "", "thought_process": ""}
         if not self._db:
             return empty
+        if user_id:
+            personal = await self.get_personal_verdict(user_id, exchange, merchant_id)
+            if personal:
+                return {
+                    "terms_facts": personal["terms_facts"] or "",
+                    "thought_process": personal["thought_process"] or "",
+                }
         async with self._db.execute(
             "SELECT COALESCE(terms_facts, '') AS terms_facts, "
             "       COALESCE(thought_process, '') AS thought_process "

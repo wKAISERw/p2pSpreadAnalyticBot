@@ -314,7 +314,7 @@ async def send_taker_single(
     if notifier._db:
         try:
             rec, _, reason, t_sum, rev_analyz = await notifier._db.get_trade_recommendation_full(
-                order.exchange, order.merchant_id,
+                order.exchange, order.merchant_id, user_id=chat_id or 0,
             )
             llm_rec = rec
             llm_reason = reason
@@ -335,7 +335,7 @@ async def send_taker_single(
             ):
                 rev_analysis = rev_analyz
             extras = await notifier._db.get_verdict_extras(
-                order.exchange, order.merchant_id)
+                order.exchange, order.merchant_id, user_id=chat_id or 0)
             order_terms_facts = extras["terms_facts"]
             order_thought = extras["thought_process"]
         except Exception:

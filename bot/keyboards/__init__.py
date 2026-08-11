@@ -13,6 +13,7 @@ from bot.keyboards.risk import (
     risk_main_kb, risk_profile_kb, risk_categories_kb,
     risk_group_kb, risk_signal_kb, risk_custom_kb, risk_back_kb,
 )
+from bot.keyboards.byok import byok_main_kb, byok_mode_kb, byok_key_kb
 from bot.keyboards.exchanges import (
     keys_menu_kb, exchange_connect_kb, exchange_down_kb,
     exchange_cooldown_kb, exchanges_status_kb, exchange_toggle_kb,
@@ -36,6 +37,9 @@ from bot.keyboards.monitoring import (
 )
 
 __all__ = [
+    "byok_main_kb",
+    "byok_mode_kb",
+    "byok_key_kb",
     "back_to_main_kb",
     "back_to_settings_kb",
     "back_to_keys_kb",

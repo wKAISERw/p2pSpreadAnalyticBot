@@ -5,13 +5,23 @@ import logging
 from aiogram import Router
 from aiogram.types import CallbackQuery, Message
 
-from bot.handlers import monitoring, exchanges, filters, trading, system, cards, risk
+from bot.handlers import monitoring, exchanges, filters, trading, system, cards, risk, byok
 
 logger = logging.getLogger("Main")
+
+# Зібраний корінь. Sub-router'и — модульні синглтони, і aiogram забороняє
+# чіпляти той самий роутер удвічі: другий виклик падав із «Router is already
+# attached». У проді це один виклик (`main.py`), тож помітно не було, але
+# будь-яка спроба перезібрати меню на льоту вбила б бота.
+_root: Router | None = None
 
 
 def get_router() -> Router:
     """Повертає головний router зі всіма підключеними handlers."""
+    global _root
+    if _root is not None:
+        return _root
+
     root = Router()
 
     # Підключаємо модульні хендлери
@@ -22,6 +32,7 @@ def get_router() -> Router:
     root.include_router(system.router)
     root.include_router(cards.router)
     root.include_router(risk.router)
+    root.include_router(byok.router)
 
     # Створюємо окремий роутер для фолбеків, щоб вони не перехоплювали запити до модульних роутерів.
     # Aiogram перевіряє хендлери самого роутера перед тим, як спускатися в його sub-routers.
@@ -76,4 +87,5 @@ def get_router() -> Router:
 
     root.include_router(fallback_router)
 
+    _root = root
     return root

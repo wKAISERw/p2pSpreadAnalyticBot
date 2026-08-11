@@ -36,6 +36,7 @@ from core.storage.merchant_db import MerchantDB
 from core.analysis.regex_analyzer import RegexResult
 from core.engine import reviews_status, terms_status
 from core.engine.risk_coverage import RiskCoverage
+from core.storage.llm_keys_repo import SHARED, LLMCredentials
 from core.workers.terms_facts import parse_facts, to_json as facts_to_json, to_summary
 
 logger = logging.getLogger("LLMWorker")
@@ -59,6 +60,59 @@ def _setup_llm_log() -> logging.Logger:
         llm_log.setLevel(logging.INFO)
         llm_log.propagate = False
     return llm_log
+
+
+class _Cooldowns:
+    """
+    Пауза після 429 — по КЛЮЧУ, а не по провайдеру.
+
+    Досі це були атрибути класу: `_groq_cooldown_until` один на весь процес.
+    Поки ключ був один, різниці не було. З власними ключами вона стає
+    принциповою: чийсь вичерпаний ліміт глушив би Groq для всіх, зокрема й
+    для тих, хто своїх ключів не додавав і чужу квоту не витрачав.
+
+    Ключ сюди не потрапляє — тільки його відбиток. Це не «на всяк випадок»:
+    словник кулдаунів переживає весь процес і легко опиняється в дампі при
+    діагностиці.
+    """
+
+    def __init__(self) -> None:
+        self._until: dict[str, float] = {}
+        self._strikes: dict[str, int] = {}
+
+    @staticmethod
+    def fingerprint(provider: str, api_key: str) -> str:
+        import hashlib
+
+        if not api_key:
+            return f"{provider}:none"
+        digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+        return f"{provider}:{digest}"
+
+    def ready(self, provider: str, api_key: str) -> bool:
+        if not api_key:
+            return False
+        return self._until.get(self.fingerprint(provider, api_key), 0.0) <= time.monotonic()
+
+    def ok(self, provider: str, api_key: str) -> None:
+        """Успіх обнуляє серію — інакше давня невдача штрафувала б вічно."""
+        self._strikes.pop(self.fingerprint(provider, api_key), None)
+
+    def rate_limited(self, provider: str, api_key: str, base: float = 30.0,
+                     cap: float = 300.0) -> tuple[int, float]:
+        fp = self.fingerprint(provider, api_key)
+        n = self._strikes.get(fp, 0) + 1
+        self._strikes[fp] = n
+        wait = min(base * (2 ** min(n - 1, 4)), cap)
+        self._until[fp] = time.monotonic() + wait
+        return n, wait
+
+    def reset(self) -> None:
+        self._until.clear()
+        self._strikes.clear()
+
+
+_cooldowns = _Cooldowns()
 
 
 class RateLimitError(RuntimeError):
@@ -212,6 +266,13 @@ class LLMTask:
     # Межа видимості на момент постановки в чергу. Порахована в движку —
     # тут її лише переказують моделі, а не рахують удруге.
     coverage: RiskCoverage | None = None
+    # Чиїми ключами дзвонити і кому належить результат.
+    #
+    # `SHARED` (owner_id=0) — спільні ключі проєкту, вердикт іде в спільний
+    # кеш. Персональні креденшли означають персональний вердикт: він
+    # зроблений чужим ключем і, можливо, за іншим промптом, тож класти його
+    # туди, звідки читають усі, не можна.
+    credentials: LLMCredentials = SHARED
 
 
 class LLMWorkerPool:
@@ -262,9 +323,14 @@ class LLMWorkerPool:
             account_age_days: int = 0,
             review_summary: dict = None,
             coverage: RiskCoverage | None = None,
+            credentials: LLMCredentials | None = None,
     ) -> bool:
-        cache_key = f"{exchange}:{merchant_id}"
-        key = (exchange, merchant_id)
+        # Власник у ключі дедупу обов'язковий: інакше персональна перевірка
+        # своїм ключем виглядала б як дубль спільної й тихо не ставала в
+        # чергу — людина натиснула кнопку, а не сталось нічого.
+        owner = (credentials or SHARED).owner_id
+        cache_key = f"{owner}:{exchange}:{merchant_id}"
+        key = (owner, exchange, merchant_id)
         if key in self._pending or self._recent_calls.seen(cache_key):
             return False
         task = LLMTask(
@@ -282,6 +348,7 @@ class LLMWorkerPool:
             account_age_days=account_age_days,
             review_summary=review_summary or {},
             coverage=coverage,
+            credentials=credentials or SHARED,
         )
         try:
             self._queue.put_nowait(task)
@@ -314,7 +381,9 @@ class LLMWorkerPool:
                 try:
                     await self._process(task)
                 finally:
-                    self._pending.discard((task.exchange, task.merchant_id))
+                    self._pending.discard(
+                        (task.credentials.owner_id, task.exchange, task.merchant_id)
+                    )
                     self._queue.task_done()
                     try:
                         from core.analytics.metrics import llm_queue_size
@@ -330,13 +399,15 @@ class LLMWorkerPool:
                 await asyncio.sleep(1.0)
 
     async def _process(self, task: LLMTask) -> None:
-        rec = await self._db.get_trade_recommendation(task.exchange, task.merchant_id)
-        if rec != "RECHECKING":
-            cached = await self._db.get_verdict(
-                task.exchange, task.merchant_id, task.trade_terms
-            )
-            if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
-                return
+        personal = task.credentials.is_personal
+        if not personal:
+            rec = await self._db.get_trade_recommendation(task.exchange, task.merchant_id)
+            if rec != "RECHECKING":
+                cached = await self._db.get_verdict(
+                    task.exchange, task.merchant_id, task.trade_terms
+                )
+                if cached and cached not in ("UNKNOWN", "NEEDS_LLM"):
+                    return
 
         if task.review_summary:
             review_summary = task.review_summary
@@ -360,15 +431,34 @@ class LLMWorkerPool:
         trade_recommendation = result.get("trade_recommendation", "CONDITIONAL")
         reviews_analysis = (result.get("reviews_analysis", "") or "")[:500]
 
-        await self._db.save_verdict(
-            task.exchange, task.merchant_id, task.merchant_name,
-            task.trade_terms, verdict, risk_type, reason, source,
-            trade_recommendation=trade_recommendation,
-            terms_summary=terms_summary,
-            reviews_analysis=reviews_analysis,
-            terms_facts=terms_facts,
-            thought_process=thought_process,
-        )
+        if personal:
+            # Судження, зроблене чужим ключем, у спільний кеш не йде: там
+            # лежить те, що однакове для всіх. Інакше перший користувач із
+            # власним ключем вирішував би, що побачать решта.
+            from core.storage.base_db import hash_terms
+
+            await self._db.save_personal_verdict(
+                task.credentials.owner_id, task.exchange, task.merchant_id,
+                terms_hash=hash_terms(task.trade_terms),
+                verdict=verdict, risk_type=risk_type, reason=reason,
+                trade_recommendation=trade_recommendation,
+                terms_summary=terms_summary, terms_facts=terms_facts,
+                reviews_analysis=reviews_analysis, thought_process=thought_process,
+                source=source,
+            )
+            provider = result.get("provider", "")
+            if provider and verdict != "UNKNOWN":
+                await self._db.mark_key_ok(task.credentials.owner_id, provider)
+        else:
+            await self._db.save_verdict(
+                task.exchange, task.merchant_id, task.merchant_name,
+                task.trade_terms, verdict, risk_type, reason, source,
+                trade_recommendation=trade_recommendation,
+                terms_summary=terms_summary,
+                reviews_analysis=reviews_analysis,
+                terms_facts=terms_facts,
+                thought_process=thought_process,
+            )
 
         rr = task.regex_result
         score = getattr(rr, "score", 0)
@@ -386,7 +476,9 @@ class LLMWorkerPool:
                 source, task.merchant_name, task.exchange, risk_type, reason,
             )
 
-        self._recent_calls.mark(f"{task.exchange}:{task.merchant_id}")
+        self._recent_calls.mark(
+            f"{task.credentials.owner_id}:{task.exchange}:{task.merchant_id}"
+        )
 
         # 🔄 Trigger alert redraw after verdict is saved — edits sent Telegram messages
         if self._notifier is not None:
@@ -396,11 +488,23 @@ class LLMWorkerPool:
                 logger_=logger,
             )
 
-    # ── Groq / OpenAI / Gemini cooldown (class-level) ─────────────────────────
-    _groq_cooldown_until: float = 0.0
-    _groq_consecutive_429: int = 0
-    _openai_cooldown_until: float = 0.0  # 🚀 ДОДАНО OPENAI
-    _gemini_cooldown_until: float = 0.0
+    def _note_key_error(self, task: LLMTask, provider: str, error: str) -> None:
+        """
+        Записує, ЧОМУ чужий ключ не спрацював — і тільки для свого власника.
+
+        Причина, а не факт: «ключ не працює» людина полагодити не може, а
+        «401 Unauthorized» і «429 quota exceeded» вимагають різного. Спільні
+        ключі сюди не потрапляють — про них розповідає лог, і власника в
+        них немає.
+        """
+        creds = task.credentials
+        if not creds.is_personal or not creds.key_for(provider):
+            return
+        spawn(
+            self._db.mark_key_error(creds.owner_id, provider, error),
+            f"llm-key-error-{creds.owner_id}-{provider}",
+            logger_=logger,
+        )
 
     async def _call_with_fallback(self, task: LLMTask, review_summary: dict) -> dict:
         import random
@@ -410,10 +514,15 @@ class LLMWorkerPool:
         # Цитати з відповіді звіряються саме з ЦИМ текстом.
         source_terms = getattr(task.regex_result, "normalized_text", "") or task.trade_terms
 
-        now = _time.monotonic()
-        groq_available = LLMWorkerPool._groq_cooldown_until <= now
-        gemini_available = LLMWorkerPool._gemini_cooldown_until <= now
-        openai_available = LLMWorkerPool._openai_cooldown_until <= now
+        # Чиїми ключами дзвонимо. Порожньо — спільними з .env.
+        creds = task.credentials or SHARED
+        groq_key = creds.key_for("groq") or os.getenv("GROQ_API_KEY", "")
+        gemini_key = creds.key_for("gemini") or os.getenv("GEMINI_API_KEY", "")
+        openai_key = creds.key_for("openai") or os.getenv("OPENAI_API_KEY", "")
+
+        groq_available = _cooldowns.ready("groq", groq_key)
+        gemini_available = _cooldowns.ready("gemini", gemini_key)
+        openai_available = _cooldowns.ready("openai", openai_key)
 
         # В callwithfallback — для кожного провайдера:
 
@@ -422,10 +531,11 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_groq(user_msg, source_terms), timeout=LLM_TIMEOUT
+                    self._call_groq(user_msg, source_terms, groq_key), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"groq_{GROQ_MODEL}"
-                LLMWorkerPool._groq_consecutive_429 = 0
+                result["provider"] = "groq"
+                _cooldowns.ok("groq", groq_key)
                 try:
                     from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
                     llm_requests_total.labels(provider="groq", status="success").inc()
@@ -439,11 +549,9 @@ class LLMWorkerPool:
                     llm_requests_total.labels(provider="groq", status="rate_limit").inc()
                 except Exception:
                     pass
-                n = LLMWorkerPool._groq_consecutive_429 + 1
-                LLMWorkerPool._groq_consecutive_429 = n
-                wait = min(30.0 * (2 ** min(n - 1, 4)), 300.0)
-                LLMWorkerPool._groq_cooldown_until = _time.monotonic() + wait
+                n, wait = _cooldowns.rate_limited("groq", groq_key)
                 logger.warning("Groq 429 (серія=%d) cooldown=%.0fs → Gemini", n, wait)
+                self._note_key_error(task, "groq", f"429 (rate limit), пауза {wait:.0f}с")
             except asyncio.TimeoutError:
                 try:
                     from core.analytics.metrics import llm_requests_total
@@ -465,9 +573,11 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_gemini(user_msg, source_terms), timeout=LLM_TIMEOUT
+                    self._call_gemini(user_msg, source_terms, gemini_key), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"gemini_{GEMINI_MODEL}"
+                result["provider"] = "gemini"
+                _cooldowns.ok("gemini", gemini_key)
                 try:
                     from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
                     llm_requests_total.labels(provider="gemini", status="success").inc()
@@ -482,6 +592,7 @@ class LLMWorkerPool:
                 except Exception:
                     pass
                 logger.error("Gemini 404: %s → OpenAI", e)
+                self._note_key_error(task, "gemini", str(e)[:120])
                 # НЕ return — падаємо на OpenAI
             except ProviderRateLimitError:
                 try:
@@ -489,8 +600,9 @@ class LLMWorkerPool:
                     llm_requests_total.labels(provider="gemini", status="rate_limit").inc()
                 except Exception:
                     pass
-                LLMWorkerPool._gemini_cooldown_until = _time.monotonic() + 60.0
+                _cooldowns.rate_limited("gemini", gemini_key, base=60.0)
                 logger.warning("Gemini 429 → OpenAI")
+                self._note_key_error(task, "gemini", "429 (rate limit)")
             except asyncio.TimeoutError:
                 try:
                     from core.analytics.metrics import llm_requests_total
@@ -512,9 +624,11 @@ class LLMWorkerPool:
             t0 = _time.monotonic()
             try:
                 result = await asyncio.wait_for(
-                    self._call_openai(user_msg, source_terms), timeout=LLM_TIMEOUT
+                    self._call_openai(user_msg, source_terms, openai_key), timeout=LLM_TIMEOUT
                 )
                 result["source"] = f"openai_{OPENAI_MODEL}"
+                result["provider"] = "openai"
+                _cooldowns.ok("openai", openai_key)
                 try:
                     from core.analytics.metrics import llm_requests_total, llm_request_duration_seconds
                     llm_requests_total.labels(provider="openai", status="success").inc()
@@ -534,8 +648,9 @@ class LLMWorkerPool:
                     llm_requests_total.labels(provider="openai", status="rate_limit").inc()
                 except Exception:
                     pass
-                LLMWorkerPool._openai_cooldown_until = _time.monotonic() + 30.0
+                _cooldowns.rate_limited("openai", openai_key, base=30.0)
                 logger.warning("OpenAI 429")
+                self._note_key_error(task, "openai", "429 (rate limit)")
             except asyncio.TimeoutError:
                 try:
                     from core.analytics.metrics import llm_requests_total
@@ -560,8 +675,8 @@ class LLMWorkerPool:
             "trade_recommendation": "CONDITIONAL"
         }
 
-    async def _call_groq(self, user_msg: str, source_terms: str = "") -> dict:
-        groq_key = os.getenv("GROQ_API_KEY", "")
+    async def _call_groq(self, user_msg: str, source_terms: str = "", api_key: str = "") -> dict:
+        groq_key = api_key or os.getenv("GROQ_API_KEY", "")
         if not groq_key:
             raise PermanentModelError("GROQ_API_KEY не встановлено")
         payload = {
@@ -587,9 +702,9 @@ class LLMWorkerPool:
         text = data["choices"][0]["message"]["content"]
         return _parse_json(text, source_terms)
 
-    async def _call_openai(self, user_msg: str, source_terms: str = "") -> dict:
+    async def _call_openai(self, user_msg: str, source_terms: str = "", api_key: str = "") -> dict:
         # 🚀 ДОДАНО: Метод виклику OpenAI API
-        openai_key = os.getenv("OPENAI_API_KEY", "")
+        openai_key = api_key or os.getenv("OPENAI_API_KEY", "")
         if not openai_key:
             raise PermanentModelError("OPENAI_API_KEY не встановлено")
 
@@ -618,8 +733,8 @@ class LLMWorkerPool:
         text = data["choices"][0]["message"]["content"]
         return _parse_json(text, source_terms)
 
-    async def _call_gemini(self, user_msg: str, source_terms: str = "") -> dict:
-        gemini_key = os.getenv("GEMINI_API_KEY", "")
+    async def _call_gemini(self, user_msg: str, source_terms: str = "", api_key: str = "") -> dict:
+        gemini_key = api_key or os.getenv("GEMINI_API_KEY", "")
         if not gemini_key:
             raise PermanentModelError("GEMINI_API_KEY")
 
@@ -738,8 +853,12 @@ def _coverage_of(task: LLMTask, review_summary: dict | None) -> RiskCoverage:
     неперевіреними. Помилитись у бік «ми цього не бачили» дешево, у
     протилежний — ні.
     """
-    if task.coverage is not None:
+    if isinstance(task.coverage, RiskCoverage):
         return task.coverage
+    # Перевірка типу, а не на `None`, свідомо: ордер серіалізується в базу
+    # разом з алертом, і `risk_coverage` там стає рядком (`str(v)` для
+    # невідомих типів). Відновлений звідти ордер приніс би сюди рядок, і
+    # падало б аж у рендері промпту — далеко від причини.
     summary = review_summary or {}
     return RiskCoverage(
         # Порожні умови без статусу двозначні: чи то мерчант нічого не

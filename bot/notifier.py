@@ -74,9 +74,9 @@ class TelegramNotifier:
         self._db = db
         self.card_notifier = CardNotifier(db, self._bot)
 
-    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None, maker_monitor=None, session_manager=None) -> None:
+    def bind_commands(self, db: MerchantDB, account_clients: dict, trade_worker=None, single_leg_executor=None, maker_monitor=None, session_manager=None, llm_pool=None) -> None:
         """Оновлює змінні модуля. Router вже підключений в __init__."""
-        bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor, maker_monitor=maker_monitor, session_manager=session_manager)
+        bot_commands.setup(db, account_clients, trade_worker, notifier=self, single_leg_executor=single_leg_executor, maker_monitor=maker_monitor, session_manager=session_manager, llm_pool=llm_pool)
         self._taker_cache = bot_commands._taker_order_cache
 
     async def _get_display_settings(self, chat_id: int) -> dict:

@@ -59,6 +59,7 @@ def risk_main_kb(profile: str, custom_count: int, tuned_count: int) -> InlineKey
     # Тест-стенд не прикраса: це єдиний спосіб для людини перевірити свою
     # фразу до того, як вона почне мовчки різати ордери.
     b.row(InlineKeyboardButton(text="🧪 Перевірити текст", callback_data="risk:test"))
+    b.row(InlineKeyboardButton(text="🔑 Свої ключі до AI", callback_data="byok:main"))
     if tuned_count or profile != "balanced":
         b.row(InlineKeyboardButton(text="♻️ Скинути все до дефолтів", callback_data="risk:reset_all"))
     b.row(InlineKeyboardButton(text="🔙 Назад", callback_data="menu:settings"))

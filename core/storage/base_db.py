@@ -785,7 +785,69 @@ class MerchantDB:
                 PRIMARY KEY (user_id, key)
             )
         """)
+
+        # ── BYOK: свої ключі до моделей ──────────────────────────────────
+        #
+        # Окрема таблиця, а не `user_credentials`: там колонка зветься
+        # `exchange` і на неї зав'язані чотири методи й HTTP API. Класти
+        # туди «groq» під виглядом біржі означало б навчити всіх читачів
+        # відрізняти одне від одного — і рано чи пізно хтось не навчиться.
+        #
+        # Ключ лежить зашифрованим (Fernet, той самий ENCRYPTION_KEY).
+        # Розшифровується рівно в момент HTTP-виклику й нікуди більше не
+        # їде: ні в лог, ні у вердикт, ні в помилку.
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS user_llm_keys (
+                user_id       INTEGER NOT NULL,
+                provider      TEXT    NOT NULL,
+                api_key       TEXT    NOT NULL,
+                enabled       INTEGER NOT NULL DEFAULT 1,
+                created_at    REAL,
+                updated_at    REAL,
+                -- Коли ключ востаннє СПРАЦЮВАВ. Потрібне, щоб відрізнити
+                -- «ще не пробували» від «пробували, не вийшло»: перше не
+                -- привід нічого казати, друге привід сказати негайно.
+                last_ok_at    REAL    NOT NULL DEFAULT 0,
+                last_error    TEXT    NOT NULL DEFAULT '',
+                last_error_at REAL    NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, provider)
+            )
+        """)
+
+        # Персональні вердикти — окремо від спільних.
+        #
+        # Спільний `merchant_verdict` лишається недоторканим: він містить
+        # ВИТЯГ (що написано в умовах), однаковий для всіх. Тут лежить
+        # СУДЖЕННЯ, зроблене чиїмось власним ключем і, можливо, за чиїмось
+        # власним промптом. Змішати їх в одній таблиці означало б, що
+        # перший користувач вирішує, що побачать решта.
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS merchant_verdict_user (
+                user_id              INTEGER NOT NULL,
+                exchange             TEXT    NOT NULL,
+                merchant_id          TEXT    NOT NULL,
+                verdict              TEXT    NOT NULL DEFAULT 'UNKNOWN',
+                risk_type            TEXT    NOT NULL DEFAULT '',
+                reason               TEXT    NOT NULL DEFAULT '',
+                trade_recommendation TEXT    NOT NULL DEFAULT 'PENDING',
+                terms_summary        TEXT    NOT NULL DEFAULT '',
+                terms_facts          TEXT    NOT NULL DEFAULT '',
+                reviews_analysis     TEXT    NOT NULL DEFAULT '',
+                thought_process      TEXT    NOT NULL DEFAULT '',
+                terms_hash           TEXT    NOT NULL DEFAULT '',
+                source               TEXT    NOT NULL DEFAULT '',
+                updated_at           REAL,
+                PRIMARY KEY (user_id, exchange, merchant_id)
+            )
+        """)
         await self._db.commit()
+        # Як користувач хоче витрачати свій ключ:
+        #   off      — не використовувати (він є, але вимкнений);
+        #   ondemand — тільки коли натиснув «перевірити моїм ключем»;
+        #   always   — на кожного мерчанта, якого йому показують.
+        # Дефолт свідомо `ondemand`: чужа квота — не те, що можна почати
+        # витрачати за людину мовчки.
+        await self._ensure_column("scanner_users", "llm_byok_mode", "TEXT DEFAULT 'ondemand'")
         # 🚀 AI вижимка умов мерчанта
         await self._ensure_column("merchant_verdict", "terms_summary", "TEXT DEFAULT ''")
         await self._ensure_column("merchant_verdict", "reviews_analysis", "TEXT DEFAULT ''")

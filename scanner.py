@@ -333,6 +333,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         single_leg_executor=single_leg_executor,
         maker_monitor=maker_monitor,
         session_manager=session_manager,
+        llm_pool=llm_pool,
     )
     # Імена мають збігатися з полями Settings. Тут стояли stability_hits і
     # stability_ttl, яких у Settings немає, — getattr мовчки повертав дефолт,
@@ -359,7 +360,7 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
         safety_buffer_pct=getattr(settings, "safety_buffer_pct", 0.3),
     )
     target_banks = {code: BANK_NAMES[code] for code in DEFAULT_BANK_CODES if code in BANK_NAMES}
-    dispatcher = AlertDispatcher(merchant_db, notifier)
+    dispatcher = AlertDispatcher(merchant_db, notifier, llm_pool=llm_pool)
     taker_scanner = TakerScanner(merchant_db)
     taker_dedup = TTLCache(
         ttl_seconds=getattr(settings, "taker_dedup_ttl", 43200.0),  # 12 hours default to prevent flood

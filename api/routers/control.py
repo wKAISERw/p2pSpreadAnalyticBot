@@ -25,6 +25,7 @@ from api.security import require_api_key
 from api.utils import dict_to_camel, dict_to_snake
 from config.banks import bank_display_name, bank_view_list, normalize_bank
 from core.engine.terms_status import blind_label as blind_terms_label
+from core.engine.reviews_status import blind_label as blind_reviews_label
 
 router = APIRouter(prefix="/api/v1", tags=["Control"], dependencies=[Depends(require_api_key)])
 logger = logging.getLogger("ApiControl")
@@ -994,6 +995,16 @@ def _order_to_dict(order) -> dict:
         "compositeScore": order.composite_score,
         "reviewScore": order.review_score,
         "reviewNegPct": order.review_neg_pct,
+        # Нуль у відгуках означає дві протилежні речі: «скарг немає» і «ми
+        # їх не бачили». Без цих двох полів дашборд показував друге як
+        # перше — той самий почерк, що й з умовами.
+        "reviewsSeen": bool(getattr(order, "review_fetched", False)),
+        "reviewsStatusLabel": (
+            "" if getattr(order, "review_fetched", False)
+            else blind_reviews_label(
+                getattr(getattr(order, "risk_coverage", None), "reviews", "") or "UNKNOWN"
+            )
+        ),
         "tradeTerms": order.trade_terms or "",
         # Порожні умови означають дві протилежні речі: «мерчант нічого не
         # написав» і «ми не змогли дістати». Друге — факт про нас, і читати

@@ -43,3 +43,9 @@ project_dump.txt
 frontend_dump.txt
 # Разові скрипти діагностики
 scratch/
+
+# Чернетки генератора правил: build_rules.py пише їх, щоб можна було
+# порівняти з бойовим файлом перед `--apply`. У репозиторії вони зайві —
+# два майже однакові rules.py поруч рано чи пізно розійдуться.
+core/analysis/rules_generated.py
+tests/core/test_rules_generated.py

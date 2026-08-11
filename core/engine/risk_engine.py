@@ -750,10 +750,13 @@ class RiskEngine:
             # чого застосовуватись. `risk_flag` для цього не годиться: там
             # категорії впереміш зі статусами й вільним текстом, і відновити
             # з нього, ЯКЕ саме правило спрацювало, можна лише вгадуванням.
-            order.risk_signals = [
-                m.rule_id for m in (getattr(regex_result, "matches", []) or [])
-                if getattr(m, "weight", 0) > 0
-            ]
+            #
+            # Беремо `signal_keys`, а не `matches`: останній несе тільки те,
+            # що має вагу, і через це `PAY_JAR` із `PAY_BUSINESS` (вага 0 —
+            # вони називають факт, а не ризик) під політику не потрапляли
+            # взагалі. Саме тому налаштування «ховати банки» нічого не
+            # ховало: ключа, на який воно діє, в ордері не було.
+            order.risk_signals = list(getattr(regex_result, "signal_keys", []) or [])
 
             from core.analysis.rules import HARD_DIRECT_BLOCK
             if regex_result.verdict == "BLOCK" and regex_result.risk_type in HARD_DIRECT_BLOCK:
@@ -786,6 +789,32 @@ class RiskEngine:
                 review_text_score = float(sum(text_scores) / len(text_scores)) if text_scores else 0.0
             else:
                 review_text_score = 0.0
+
+            # Тексти скарг кладемо на ордер — інакше персональне правило по
+            # відгуках нічого не побачить: рішення приймається пізніше й
+            # окремо для кожного користувача, коли зведення відгуків уже
+            # недоступне. Обрізаємо жорстко: ордер ще й серіалізується в
+            # базу разом з алертом.
+            order.review_texts = [
+                str(bt.get("text", "") if isinstance(bt, dict) else bt).strip()[:200]
+                for bt in bad_texts[:5]
+            ][:5]
+
+            # Поля відгуків заповнює тепер движок, а не рендер.
+            #
+            # `review_score` не писав НІХТО: дашборд показував `reviewScore`,
+            # який завжди дорівнював нулю, і читався він як «зауважень до
+            # відгуків немає». `review_neg_pct` і `review_fetched` виставляв
+            # `alert_builder` під час малювання алерта — тобто спільний ордер
+            # мутувався під першого користувача в циклі, а API бачив те, що
+            # лишилось після нього.
+            #
+            # `review_fetched` тут означає рівно «ми бачили відгуки», а не
+            # «запит було зроблено»: нуль при сліпоті й нуль при чистій
+            # репутації — різні нулі.
+            order.review_score = int(review_text_score)
+            order.review_neg_pct = review_neg_pct
+            order.review_fetched = reviews_status.has_data(rev_summary)
 
             # ── v2.2: Тренд відгуків (зберігаємо снапшот + рахуємо штраф) ───────────
             review_trend_penalty = 0
@@ -1345,6 +1374,10 @@ class RiskEngine:
         )
         order.regex_warn_flags = list(getattr(result, "warn_flags", []) or [])
         order.regex_score      = int(getattr(result, "score", 0) or 0)
+        # Без бази політика працює так само, як із нею: рішення персональне,
+        # а сигнали — ті самі. Без цього рядка фолбек мовчки віддавав ордер
+        # без жодного ключа, і всі персональні правила на ньому не діяли.
+        order.risk_signals     = list(getattr(result, "signal_keys", []) or [])
 
         flags: list[str] = []
         if result.verdict == "BLOCK":

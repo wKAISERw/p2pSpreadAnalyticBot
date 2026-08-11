@@ -14,11 +14,12 @@ from core.storage.user_repo     import UserRepo
 from core.storage.stats_repo    import StatsRepo
 from core.storage.card_repo     import CardRepo
 from core.storage.risk_repo     import RiskRepo
+from core.storage.llm_keys_repo import LLMKeysRepo
 
 DB_PATH = Path("data/merchants.db")
 
 
-class MerchantDB(_BaseDB, MerchantRepo, UserRepo, StatsRepo, CardRepo, RiskRepo):
+class MerchantDB(_BaseDB, MerchantRepo, UserRepo, StatsRepo, CardRepo, RiskRepo, LLMKeysRepo):
     """
     Єдина точка входу — збирає всі репозиторії через множинне наслідування.
     Зовнішній API (назви методів) залишається незмінним.

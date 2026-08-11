@@ -11,6 +11,10 @@ from core.engine.network_fee_engine import NetworkFeeEngine
 from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
 from core.engine import risk_flags as risk_flags_mod
 from core.engine.risk_decision import decide
+from core.engine.risk_report import (
+    BLIND as RR_BLIND, BLOCK as RR_BLOCK, PENDING as RR_PENDING,
+    REVIEWS as RR_REVIEWS, RISK as RR_RISK, RiskReport,
+)
 from core.risk.policy import SIDE_BUY, SIDE_SELL
 from bot.deeplinks import resolve_target, tg_button_url, tg_button_url_async
 from bot.handlers import core as bot_commands
@@ -31,6 +35,45 @@ from bot.formatters import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _byok_buttons(notifier, chat_id: int | None, alert) -> list:
+    """
+    Кнопки «перевірити моїм ключем» — по одній на ногу зв'язки.
+
+    Порожньо, якщо ключа немає або людина вимкнула його використання. Це не
+    економія рядків: кнопка, яка в більшості випадків відповідає «спочатку
+    підключи ключ», — це реклама всередині алерта.
+
+    Ноги дві й перевіряються окремо: мерчанти різні, і питання «чи можна з
+    ним торгувати» до кожного своє.
+    """
+    db = getattr(notifier, "_db", None)
+    uid = chat_id or getattr(notifier, "_chat_id", 0)
+    if db is None or not uid:
+        return []
+    try:
+        creds = await db.credentials_for(uid)
+    except Exception as e:
+        logger.debug("BYOK: не вдалось перевірити ключі для %s: %s", uid, e)
+        return []
+    if not creds.is_personal:
+        return []
+
+    row = []
+    for order, label in ((alert.buy_order, "🔑 Buy AI"), (alert.sell_order, "🔑 Sell AI")):
+        if not order.merchant_id:
+            continue
+        data = f"aicheck:{order.exchange}:{order.merchant_id}"
+        # Telegram відхиляє callback_data довший за 64 байти — і разом із
+        # ним усе повідомлення. Втратити алерт через додаткову кнопку —
+        # найгірший з можливих обмінів, тож у рідкісному випадку довгого
+        # id кнопки просто не буде.
+        if len(data.encode()) > 64:
+            logger.debug("BYOK: кнопка не влізла в callback_data (%s)", data[:40])
+            continue
+        row.append(InlineKeyboardButton(text=label, callback_data=data))
+    return row
 
 
 @dataclass
@@ -98,11 +141,16 @@ async def send_single(
     _reviews_checked = False
     if notifier._db:
         try:
+            # Від чийого імені читаємо вердикт: якщо в людини свій ключ і
+            # ним уже щось перевірено, вона побачить власну оцінку, а не
+            # спільну. Немає своєї — повернеться базова, і це не «гірше»,
+            # це те саме, що бачать усі.
+            viewer_id = chat_id or notifier._chat_id
             b_rec, b_verdict, b_reason, b_terms, b_rev = await notifier._db.get_trade_recommendation_full(
-                alert.buy_order.exchange, alert.buy_order.merchant_id
+                alert.buy_order.exchange, alert.buy_order.merchant_id, user_id=viewer_id
             )
             s_rec, s_verdict, s_reason, s_terms, s_rev = await notifier._db.get_trade_recommendation_full(
-                alert.sell_order.exchange, alert.sell_order.merchant_id
+                alert.sell_order.exchange, alert.sell_order.merchant_id, user_id=viewer_id
             )
             alert.buy_rec = b_rec
             alert.sell_rec = s_rec
@@ -114,11 +162,11 @@ async def send_single(
             alert.sell_reviews_analysis = s_rev
 
             # Також підвантажуємо актуальні відгуки та оновлюємо risk_flag і stats
-            risk_resolver = await notifier._db.resolver_for(chat_id or notifier._chat_id)
+            risk_resolver = await notifier._db.resolver_for(viewer_id)
             b_extras = await notifier._db.get_verdict_extras(
-                alert.buy_order.exchange, alert.buy_order.merchant_id)
+                alert.buy_order.exchange, alert.buy_order.merchant_id, user_id=viewer_id)
             s_extras = await notifier._db.get_verdict_extras(
-                alert.sell_order.exchange, alert.sell_order.merchant_id)
+                alert.sell_order.exchange, alert.sell_order.merchant_id, user_id=viewer_id)
             alert.buy_terms_facts = b_extras["terms_facts"]
             alert.sell_terms_facts = s_extras["terms_facts"]
             alert.buy_thought_process = b_extras["thought_process"]
@@ -169,38 +217,35 @@ async def send_single(
                     neg = int(rev_sum.get("negative", 0) or 0)
                     neutral = int(rev_sum.get("neutral", 0) or 0)
                     total = pos + neg + neutral
-                    if total > 0:
-                        order.review_neg_pct = (neg / total) * 100.0
-                    else:
-                        order.review_neg_pct = 0.0
-                    order.review_fetched = True
+                    order.review_neg_pct = (neg / total * 100.0) if total > 0 else 0.0
+                    # `True` тут стояло беззастережно: невдалий фетч теж
+                    # вважався «відгуки отримано». Питання ж інше — чи ми їх
+                    # БАЧИЛИ. Відповідь на нього дає стан, а не факт спроби.
+                    order.review_fetched = _rs.has_data(rev_sum)
                 
-                # 3. Зберігаємо існуючі не-LLM і не-відгукові прапори з оригінального risk_flag
-                orig_flags = [f.strip() for f in getattr(order, "risk_flag", "").split(",") if f.strip()]
-                for f in orig_flags:
-                    is_llm_flag = (
-                        f.startswith("LLM_PENDING") or 
-                        f.startswith("BLOCK") or 
-                        f.startswith("LLM_SUSPICIOUS") or 
-                        f.startswith("LLM_UNKNOWN") or
-                        f == "OK" or 
-                        f == "PENDING"
-                    )
-                    is_review_flag = (
-                        f.startswith("NEEDS_LLM:BADREVIEWS") or
-                        f.startswith("BADREVIEWS_TEXTS") or
-                        f.startswith("BADREVIEWS") or
-                        f.startswith("REVIEW_SOFT") or
-                        f.startswith("REVIEW_UNFLAGGED") or
-                        # Стан перевірки відгуків щойно перерахований вище з
-                        # свіжого rev_sum. Старий прапор лишати не можна:
-                        # у STALE_REVIEWS зашитий вік даних, і два різні віки
-                        # в одному алерті — це два рядки про одне й те саме.
-                        f.startswith("STALE_REVIEWS") or
-                        f.startswith("UNKNOWN:REVIEWS")
-                    )
-                    if not (is_llm_flag or is_review_flag):
-                        flags.append(f)
+                # 3. Лишаємо тільки те, що НЕ перераховане щойно вище.
+                #
+                # Вердикт моделі й стан відгуків уже взяті зі свіжих даних;
+                # старі прапори про них лишати не можна. У STALE_REVIEWS
+                # зашитий вік даних, і два різні віки в одному алерті — це
+                # два рядки про одне й те саме.
+                #
+                # Тут стояли вісім `startswith` двома купами. Тепер розбір
+                # один (`RiskReport`), і новий вид прапора не провалюється
+                # мовчки повз усі гілки — саме так `UNKNOWN:REVIEWS:*`
+                # півроку не показувався людині взагалі.
+                _REFRESHED = {RR_BLOCK, RR_RISK, RR_REVIEWS, RR_BLIND, RR_PENDING}
+                for finding in RiskReport.from_order(order).findings:
+                    if finding.raw in ("OK", "PENDING"):
+                        continue
+                    if finding.kind in _REFRESHED and finding.kind != RR_RISK:
+                        continue
+                    # Із «ризиків» перераховуються лише вердикти моделі —
+                    # регексні й поведінкові знахідки не залежать від LLM
+                    # і мають дожити до алерта.
+                    if finding.raw.startswith(("LLM_SUSPICIOUS", "LLM_BLOCK", "LLM_UNKNOWN")):
+                        continue
+                    flags.append(finding.raw)
                 
                 # Записуємо очищені дедубльовані прапори
                 unique_flags = []
@@ -535,6 +580,13 @@ async def send_single(
             InlineKeyboardButton(text="🔵 Чек", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:receipt"),
             InlineKeyboardButton(text="🔵 ТГ", callback_data=f"fb:{alert.sell_order.exchange}:{s_mid}:chat"),
         ])
+
+    # 🔑 Перевірка своїм ключем — тільки тим, у кого він є і хто не вимкнув.
+    # Показувати кнопку всім означало б рекламувати те, що в більшості не
+    # працює; ховати від тих, у кого ключ є, — ховати те, за що вони платять.
+    ai_row = await _byok_buttons(notifier, chat_id, alert)
+    if ai_row:
+        kb.append(ai_row)
 
     # ── КАРТКОВИЙ БЛОК З ДИНАМІЧНИМ ПРОРАХУНКОМ АСИМЕТРІЇ ──
     card_text_combined = ""

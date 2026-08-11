@@ -34,9 +34,23 @@ TRADE_TERMS_FILE = SOURCE_DIR / "antifrod_trade_terms.json"
 REVIEWS_FILE     = SOURCE_DIR / "antifrod_reviews.json"
 CONCEPTS_FILE    = SOURCE_DIR / "antifrod_concepts.json"
 
-# 🚀 ВКАЗУЄМО СКРИПТУ ПИСАТИ ОДРАЗУ В БОЙОВІ ФАЙЛИ:
-OUT_RULES  = SOURCE_DIR / "core" / "rules.py"
-OUT_TESTS  = SOURCE_DIR / "core" / "test_rules.py"
+# Куди писати.
+#
+# Тут стояло `SOURCE_DIR / "core" / "rules.py"`, тобто `tools/core/rules.py` —
+# теки, якої не існує. Генератор падав на `write_text` і не оновлював нічого
+# з 25.07, а бойовий `core/analysis/rules.py` жив далі як заморожена копія,
+# яку колись скопіювали руками. Найгірший стан із можливих: інструмент ніби
+# є, документація на нього посилається, а працює він у порожнечу.
+#
+# Тепер шляхи справжні, але за замовчуванням запис іде В ЧЕРНЕТКУ. Правила
+# з 25.07 правились і руками; мовчки затерти їх згенерованим — рівно та
+# помилка, від якої тут і чиститься. Щоб перезаписати бойове, треба сказати
+# це вголос: `--apply`.
+ROOT = SOURCE_DIR.parent
+LIVE_RULES  = ROOT / "core" / "analysis" / "rules.py"
+LIVE_TESTS  = ROOT / "tests" / "core" / "test_rules.py"
+DRAFT_RULES = ROOT / "core" / "analysis" / "rules_generated.py"
+DRAFT_TESTS = ROOT / "tests" / "core" / "test_rules_generated.py"
 
 # Short atoms that MUST be ambiguous=SOFT regardless of source claims
 FORCE_SOFT_ATOMS = {
@@ -795,18 +809,28 @@ def main():
             if len(clean) <= 4 and r.effective_severity not in ("SAFE",):
                 print(f"  ⚡ [{r.rule_id}] {repr(atom)} → severity={r.effective_severity} ambiguous={r.ambiguous}")
 
-    print(f"\n📝 Генеруємо {OUT_RULES}...")
-    OUT_RULES.write_text(generate_rules_py(rules), encoding="utf-8")
-    print(f"   ✅ {OUT_RULES}")
+    apply = "--apply" in sys.argv
+    out_rules = LIVE_RULES if apply else DRAFT_RULES
+    out_tests = LIVE_TESTS if apply else DRAFT_TESTS
+    out_rules.parent.mkdir(parents=True, exist_ok=True)
+    out_tests.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"📝 Генеруємо {OUT_TESTS}...")
-    OUT_TESTS.write_text(generate_tests(rules), encoding="utf-8")
-    print(f"   ✅ {OUT_TESTS}")
+    print(f"\n📝 Генеруємо {out_rules}...")
+    out_rules.write_text(generate_rules_py(rules), encoding="utf-8")
+    print(f"   ✅ {out_rules}")
 
-    print("\n✅ Готово. Наступні кроки:")
-    print("   1. Перегляньте rules_generated.py — скопіюйте нові правила в production rules.py")
-    print("   2. Запустіть: pytest test_rules_generated.py -v")
-    print("   3. Для false positives: pytest test_rules_generated.py -k 'clean_text' -v")
+    print(f"📝 Генеруємо {out_tests}...")
+    out_tests.write_text(generate_tests(rules), encoding="utf-8")
+    print(f"   ✅ {out_tests}")
+
+    if apply:
+        print("\n⚠️  Бойові правила перезаписано. Прожени весь набір:")
+        print("   pytest tests/ -q")
+    else:
+        print("\n✅ Готово — це ЧЕРНЕТКА, бойові правила не змінені.")
+        print(f"   1. Порівняй:  git diff --no-index {LIVE_RULES} {out_rules}")
+        print(f"   2. Перевір:   pytest {out_tests} -q")
+        print("   3. Якщо все гаразд: python tools/build_rules.py --apply")
 
 
 if __name__ == "__main__":

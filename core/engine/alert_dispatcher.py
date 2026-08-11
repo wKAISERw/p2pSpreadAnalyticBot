@@ -77,12 +77,81 @@ class AlertDispatcher:
     на основі повного перетину підтримуваних мерчантом банків.
     """
 
-    def __init__(self, db: MerchantDB, notifier: TelegramNotifier, cache_ttl: float = 5.0):
+    def __init__(self, db: MerchantDB, notifier: TelegramNotifier, cache_ttl: float = 5.0,
+                 llm_pool=None):
         self._db = db
         self._notifier = notifier
         self._cache_ttl = cache_ttl
         self._users_cache: list[dict] = []
         self._cache_loaded_at: float = 0.0
+        # Потрібен лише для BYOK: персональний аналіз ставиться саме звідси,
+        # бо тут уже відомо, КОМУ показуємо. Движок цього не знає й знати не
+        # має — він рахує факти один раз на всіх.
+        self._llm = llm_pool
+
+    async def _schedule_personal_llm(self, uid: int, matches: list) -> None:
+        """
+        Персональний аналіз для тих, хто ввімкнув «завжди своїм ключем».
+
+        Чому звідси, а не з движка: движок проходить по мерчантах один раз
+        і не знає користувачів. Персональна інференція за визначенням знає —
+        і платиться чужим ключем, тож ставити її має той, хто бачить, чий
+        саме ключ і чи людина цього просила.
+
+        Мовчазних витрат тут немає: без ключа або в режимі, відмінному від
+        `always`, не робиться нічого.
+        """
+        if self._llm is None or not self._db or not uid:
+            return
+        try:
+            from core.storage.llm_keys_repo import MODE_ALWAYS
+
+            if await self._db.get_byok_mode(uid) != MODE_ALWAYS:
+                return
+            creds = await self._db.credentials_for(uid)
+            if not creds.is_personal:
+                return
+
+            from core.analysis.regex_analyzer import analyze as regex_analyze
+            from core.storage.base_db import hash_terms
+
+            seen: set[tuple[str, str]] = set()
+            for local_alert, _opp, _sniper in matches:
+                for order in (local_alert.buy_order, local_alert.sell_order):
+                    pair = (order.exchange, order.merchant_id)
+                    if pair in seen:
+                        continue
+                    seen.add(pair)
+                    fresh = await self._db.get_personal_verdict(
+                        uid, order.exchange, order.merchant_id,
+                        hash_terms(order.trade_terms or ""),
+                    )
+                    if fresh:
+                        continue
+                    self._llm.schedule(
+                        exchange=order.exchange,
+                        merchant_id=order.merchant_id,
+                        merchant_name=order.merchant_name,
+                        trade_terms=order.trade_terms or "",
+                        regex_result=regex_analyze(
+                            order.trade_terms or "", order.finish_rate_pct,
+                            order.month_order_count, order.is_verified,
+                        ),
+                        finish_rate=order.finish_rate_pct,
+                        month_order_count=order.month_order_count,
+                        is_verified=order.is_verified,
+                        min_limit=float(order.min_limit),
+                        max_limit=float(order.max_limit),
+                        review_summary=await self._db.get_reviews_summary(
+                            order.exchange, order.merchant_id
+                        ),
+                        coverage=getattr(order, "risk_coverage", None),
+                        credentials=creds,
+                    )
+        except Exception as e:
+            # Персональна інференція — надбудова. Її збій не має заважати
+            # людині побачити алерт: базовий вердикт у неї вже є.
+            logger.debug("BYOK: не вдалось поставити персональний аналіз для %s: %s", uid, e)
 
     async def _get_users(self) -> list[dict]:
         """Повертає active_users з кешем TTL=5s."""
@@ -608,6 +677,11 @@ class AlertDispatcher:
 
             # Сортуємо за спредом (найбільший спочатку)
             user_matches.sort(key=lambda x: x[0].spread_pct, reverse=True)
+
+            # Свій ключ у режимі «завжди»: ставимо персональну перевірку на
+            # мерчантів, яких людині зараз покажуть. Результат прилетить у
+            # перемальований алерт — базовий вердикт вона бачить одразу.
+            await self._schedule_personal_llm(uid, user_matches)
 
             group_scanner = user.get("group_scanner_alerts", True)
 

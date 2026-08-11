@@ -96,11 +96,15 @@ _trade_worker_impl = None
 _single_leg_executor_impl = None
 _maker_monitor_impl = None
 _session_manager_impl = None
+# Пул LLM: потрібен хендлеру «перевірити моїм ключем», щоб поставити
+# персональну задачу в ту саму чергу, що й сканер.
+_llm_pool_impl = None
 
 _trade_worker = GlobalProxy("_trade_worker_impl")
 _single_leg_executor = GlobalProxy("_single_leg_executor_impl")
 _maker_monitor = GlobalProxy("_maker_monitor_impl")
 _session_manager = GlobalProxy("_session_manager_impl")
+_llm_pool = GlobalProxy("_llm_pool_impl")
 _active_repricers: dict = {}  # ad_id → asyncio.Task (AdRepricer)
 
 # ── Кеші для Single-Leg / Spread кнопок (заповнюються з notifier.py) ──────
@@ -384,8 +388,8 @@ def is_muted() -> bool:
 
 
 def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_leg_executor=None,
-          maker_monitor=None, bot=None, session_manager=None) -> None:
-    global _db_impl, _account_clients_impl, _trade_worker_impl, _notifier_impl, _single_leg_executor_impl, _maker_monitor_impl, _bot_impl, _session_manager_impl
+          maker_monitor=None, bot=None, session_manager=None, llm_pool=None) -> None:
+    global _db_impl, _account_clients_impl, _trade_worker_impl, _notifier_impl, _single_leg_executor_impl, _maker_monitor_impl, _bot_impl, _session_manager_impl, _llm_pool_impl
     if _trade_worker_impl and trade_worker and _trade_worker_impl is not trade_worker:
         logger.warning("setup(): TradeWorker перезаписується!")
     _db_impl = db
@@ -407,6 +411,8 @@ def setup(db, account_clients: dict, trade_worker=None, notifier=None, single_le
         _single_leg_executor_impl = single_leg_executor
     if maker_monitor is not None:
         _maker_monitor_impl = maker_monitor
+    if llm_pool is not None:
+        _llm_pool_impl = llm_pool
 
 
 def update_stats(**kwargs) -> None:

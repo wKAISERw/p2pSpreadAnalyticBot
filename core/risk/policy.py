@@ -178,9 +178,39 @@ class PolicyResolver:
     """
 
     def __init__(self, profile: str = PROFILE_BALANCED,
-                 overrides: dict[str, SignalPolicy] | None = None):
+                 overrides: dict[str, SignalPolicy] | None = None,
+                 signals: list[Signal] | None = None):
         self.profile = profile if profile in PROFILES else PROFILE_BALANCED
         self.overrides = overrides or {}
+        # Сигнали, які людина написала сама.
+        #
+        # Вони живуть тут, а не в спільному реєстрі, з тієї ж причини, з
+        # якої політика не їде в промпт: движок рахує факти ОДИН раз на всіх,
+        # і додати туди чиєсь особисте правило означало б, що перший
+        # користувач вирішує, що побачать решта. Тому власні сигнали
+        # прикладаються до тексту вже на боці рішення — там, де контекст
+        # персональний за визначенням.
+        self.signals: tuple[Signal, ...] = tuple(signals or ())
+        self._custom_registry = None
+
+    @property
+    def has_custom(self) -> bool:
+        return bool(self.signals)
+
+    def custom_registry(self):
+        """
+        Реєстр із самих лише власних сигналів, зібраний один раз.
+
+        `SignalRegistry` розкладає сигнали по шарах у конструкторі, і робити
+        це на кожен ордер кожного циклу — рівно та марна робота, від якої
+        реєстр і рятує. Резолвер живе один прохід диспетчера, тож кеш тут
+        не переживе зміну налаштувань довше, ніж треба.
+        """
+        if self._custom_registry is None:
+            from core.risk.signals import SignalRegistry
+
+            self._custom_registry = SignalRegistry(list(self.signals))
+        return self._custom_registry
 
     def for_signal(self, signal: Signal) -> SignalPolicy:
         override = self.overrides.get(signal.key)

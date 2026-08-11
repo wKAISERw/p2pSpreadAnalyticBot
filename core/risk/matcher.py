@@ -87,6 +87,26 @@ class MatchResult:
     def by_layer(self, layer: str) -> list[Match]:
         return [m for m in self.matches if m.signal.layer == layer]
 
+    @property
+    def actionable_keys(self) -> list[str]:
+        """
+        Ключі всього, до чого може застосуватись персональна політика.
+
+        Вага тут не критерій, і саме на цьому все ламалось: `PAY_JAR` і
+        `PAY_BUSINESS` мають вагу 0 — вони не підвищують ризик, вони
+        називають факт («платіж іде на банку»). Рішення, що з цим фактом
+        робити, — персональне. Відбір `weight > 0` викидав їх з-під
+        політики зовсім, тож налаштування «ховати банки» не мало на що
+        подіяти.
+
+        SAFE не входить: він знеструмлює категорії, а не називає ризик.
+        Ховати ордер за те, що мерчант написав «без третіх осіб», було б
+        протилежною помилкою.
+        """
+        return list(dict.fromkeys(
+            m.signal.key for m in self.matches if m.signal.layer != LAYER_SAFE
+        ))
+
 
 def _search(signal: Signal, raw: str, fuzzy: str) -> tuple[re.Match | None, str]:
     """Шукаємо в оригіналі, потім у деобфускованому варіанті."""

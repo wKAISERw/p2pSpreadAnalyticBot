@@ -57,6 +57,56 @@ def side_of(order) -> str:
     return SIDE_SELL if getattr(order, "side", "") == "sell" else SIDE_BUY
 
 
+def _as_list(value) -> list[str]:
+    """Список рядків із того, що прийшло: рядок — це один елемент, не набір літер."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value]
+
+
+def _custom_matches(order, resolver: PolicyResolver) -> list:
+    """
+    Власні сигнали користувача — прикладені до тексту саме тут.
+
+    Спільний прохід движка їх не бачить і бачити не може: він рахує факти
+    один раз на всіх, а це правило написала одна людина. Тому текст
+    проганяється вдруге — але лише по її власних сигналах, яких одиниці, і
+    лише тоді, коли вони взагалі є.
+
+    Умови й відгуки розводяться за `scope` не для акуратності: правило
+    «якщо в тексті є слово „скам“» на умовах мерчанта означає «він пише, що
+    скаму не буде», а на відгуках — «його називають скамером». Одне слово,
+    протилежний зміст.
+    """
+    if not resolver.has_custom:
+        return []
+
+    from core.risk.matcher import match_text
+    from core.risk.signals import SCOPE_REVIEWS, SCOPE_TERMS
+
+    registry = resolver.custom_registry()
+    out: list = []
+    seen: set[str] = set()
+    sources = (
+        (SCOPE_TERMS, getattr(order, "trade_terms", "") or ""),
+        # `or []` мало б вистачати, але ордер їздить через серіалізацію в
+        # базу й назад, а звідти поле може повернутись рядком. `"\n".join`
+        # на рядку не падає — він мовчки склеює його ПОСИМВОЛЬНО, і сигнал
+        # почав би спрацьовувати на випадкових збігах.
+        (SCOPE_REVIEWS, "\n".join(_as_list(getattr(order, "review_texts", None)))),
+    )
+    for scope, text in sources:
+        if not text.strip():
+            continue
+        for m in match_text(text, scope, registry=registry).matches:
+            if m.signal.key not in seen:
+                seen.add(m.signal.key)
+                out.append(m.signal)
+    return out
+
+
 def decide(order, resolver: PolicyResolver, side: str | None = None) -> Decision:
     """
     Рішення по одному ордеру під конкретного користувача.
@@ -66,11 +116,9 @@ def decide(order, resolver: PolicyResolver, side: str | None = None) -> Decision
     розмова: рішення про показ і чесність про покриття — різні речі.
     """
     keys = list(getattr(order, "risk_signals", None) or [])
-    if not keys:
-        return Decision()
-
     registry = builtin_registry()
     signals = [s for s in (registry.by_key(k) for k in keys) if s is not None]
+    signals += _custom_matches(order, resolver)
     if not signals:
         return Decision()
 

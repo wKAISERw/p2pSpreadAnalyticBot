@@ -314,4 +314,9 @@ class RiskRepo:
         return PolicyResolver(
             profile=await self.get_risk_profile(user_id),
             overrides=await self.get_policies(user_id),
+            # Без цього рядка конфігуратор дозволяв додати власний сигнал,
+            # який ніде не спрацьовував: спільний прохід движка знає лише
+            # вбудований реєстр, а персональні правила туди не потрапляють
+            # і не мають потрапляти.
+            signals=await self.get_user_signals(user_id),
         )

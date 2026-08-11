@@ -80,6 +80,7 @@ class RegexResult:
         "matches",
         "warn_flags",
         "normalized_text",
+        "signal_keys",
     )
 
     def __init__(
@@ -99,6 +100,12 @@ class RegexResult:
         # warn_flags: [(category, excerpt), ...]  — RECEIPT_REQUIRED та ін.
         # excerpt дозволяє показати в алерті конкретний фрагмент умов.
         self.normalized_text = ""
+        # Ключі ВСЬОГО, що спрацювало, — окремо від `matches`.
+        #
+        # `matches` несе лише те, що має вагу, бо на ньому тримається
+        # score. Персональній політиці потрібне інше: факт «платіж іде на
+        # банку» ваги не має взагалі, але саме його людина хоче ховати.
+        self.signal_keys: list[str] = []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +167,7 @@ def analyze(
         result.matches = [
             RegexMatch(hard.signal.key, hard.category, f'"{hard.excerpt}"', hard.weight)
         ]
+        result.signal_keys = found.actionable_keys
         result.score     = hard.weight
         result.verdict   = "BLOCK"
         result.risk_type = hard.category
@@ -172,6 +180,7 @@ def analyze(
         RegexMatch(m.signal.key, m.category, f'"{m.excerpt}"', m.weight) for m in scored
     ]
     result.score = max(0, sum(m.weight for m in scored))
+    result.signal_keys = found.actionable_keys
 
     # ── 3. WARN ──────────────────────────────────────────────────────────
     for m in found.by_layer(LAYER_WARN):
