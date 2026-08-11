@@ -20,6 +20,8 @@ from bot.keyboards.exchanges import exchanges_status_kb, exchange_toggle_kb, exc
 from bot.keyboards.common import back_to_status_kb, EXCHANGE_ICONS, back_to_main_kb
 from config.runtime import runtime_config
 from core.engine import risk_flags as risk_flags_mod
+from core.engine.risk_decision import decide
+from core.risk.policy import SIDE_BUY, SIDE_SELL
 
 from bot.handlers.core import (
     _is_admin, _db, _bot, _notifier, _account_clients,
@@ -362,6 +364,10 @@ async def cmd_active(message: Message) -> None:
 
         merchant_filters = user_row.get("merchant_filters") or {}
         ex_merchant_filters = user_row.get("exchange_merchant_filters") or {}
+        # Резолвер кладе сюди викликач: `_passes` синхронна, а зібрати
+        # політику — це два запити до бази. Робити їх на кожну зв'язку
+        # означало б сотні звернень на одну команду.
+        risk_resolver = user_row.get("_risk_resolver")
         buy_order = getattr(spread_alert, "buy_order", None)
         sell_order = getattr(spread_alert, "sell_order", None)
         if not buy_order or not sell_order:
@@ -372,15 +378,13 @@ async def cmd_active(message: Message) -> None:
         # міститься всередині FOP_TOV_BLOCKED / BANKA_JAR_BLOCKED — тобто
         # ордер із ФОП чи банкою відкидався ще до того, як хтось питав
         # налаштування користувача.
-        filter_fop = user_row.get("filter_fop_tov", "hide")
-        filter_banka = user_row.get("filter_banka_jar", "hide")
-
         for order_obj in (buy_order, sell_order):
             risk_flags = getattr(order_obj, "risk_flag", "") or ""
-            if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
-                return False, "FOP_TOV blocked for user"
-            if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
-                return False, "Banka/Jar blocked for user"
+            if risk_resolver is not None:
+                leg = SIDE_BUY if order_obj is buy_order else SIDE_SELL
+                decision = decide(order_obj, risk_resolver, leg)
+                if decision.hide:
+                    return False, f"Ріск-енджин: {', '.join(decision.reasons)}"
             if risk_flags_mod.has_block(risk_flags):
                 side = "buy" if order_obj is buy_order else "sell"
                 return False, f"{side} order blocked"
@@ -446,15 +450,16 @@ async def cmd_active(message: Message) -> None:
                     logger.error("Error analyzing manual Taker orders in RiskEngine: %s", re_err)
 
             # Фільтруємо ордери після аналізу відповідно до особистих налаштувань
-            filter_fop = user_full.get("filter_fop_tov", "hide")
-            filter_banka = user_full.get("filter_banka_jar", "hide")
-            
+            # Тейкер-режим має один напрямок на весь прохід: TAKER_BUY —
+            # людина купує, TAKER_SELL — продає. Брати напрямок з ордера
+            # тут не можна: у стакані він означає бік МЕРЧАНТА.
+            taker_side = SIDE_BUY if mode == "TAKER_BUY" else SIDE_SELL
+            risk_resolver = await _db.resolver_for(message.from_user.id)
+
             filtered = []
             for o in t_orders:
                 risk_flags = getattr(o, "risk_flag", "") or ""
-                if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
-                    continue
-                if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
+                if decide(o, risk_resolver, taker_side).hide:
                     continue
                 if risk_flags_mod.has_block(risk_flags):
                     continue
@@ -495,6 +500,8 @@ async def cmd_active(message: Message) -> None:
         # Preload used subsidies for per-exchange filtering
         if _db:
             user["_used_subsidies"] = await _db.get_used_subsidies(user.get("user_id", 0))
+            # Політика ріск-енджину — один раз на команду, а не на алерт.
+            user["_risk_resolver"] = await _db.resolver_for(user.get("user_id", 0))
         alerts = [a for a in alerts if _matches_user_filters(user, a)[0]]
     if not alerts:
         return await message.answer(

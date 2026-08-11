@@ -9,6 +9,9 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from exchanges.base import Order
 from core.engine.network_fee_engine import NetworkFeeEngine
 from core.analytics.merchant_profile import build_profile_url, build_app_profile_url
+from core.engine import risk_flags as risk_flags_mod
+from core.engine.risk_decision import decide
+from core.risk.policy import SIDE_BUY, SIDE_SELL
 from bot.deeplinks import resolve_target, tg_button_url, tg_button_url_async
 from bot.handlers import core as bot_commands
 from bot.formatters import (
@@ -106,6 +109,7 @@ async def send_single(
             alert.sell_reviews_analysis = s_rev
 
             # Також підвантажуємо актуальні відгуки та оновлюємо risk_flag і stats
+            risk_resolver = await notifier._db.resolver_for(chat_id or notifier._chat_id)
             b_rev_sum = await notifier._db.get_reviews_summary(alert.buy_order.exchange, alert.buy_order.merchant_id)
             s_rev_sum = await notifier._db.get_reviews_summary(alert.sell_order.exchange, alert.sell_order.merchant_id)
 
@@ -191,25 +195,27 @@ async def send_single(
                     if f not in unique_flags:
                         unique_flags.append(f)
                 
-                # 4. Припасовуємо прапори під персональні налаштування відображення юзера (hide/warn/show)
-                filter_fop_tov = ds.get("filter_fop_tov", "hide")
-                filter_banka_jar = ds.get("filter_banka_jar", "hide")
-                
-                final_flags = []
-                for f in unique_flags:
-                    if "FOP_TOV_BLOCKED" in f:
-                        if filter_fop_tov == "hide":
-                            final_flags.append("BLOCK:FOP_TOV_BLOCKED")
-                        elif filter_fop_tov == "warn":
-                            final_flags.append("FOP_TOV_WARN")
-                    elif "BANKA_JAR_BLOCKED" in f:
-                        if filter_banka_jar == "hide":
-                            final_flags.append("BLOCK:BANKA_JAR_BLOCKED")
-                        elif filter_banka_jar == "warn":
-                            final_flags.append("BANKA_JAR_WARN")
-                    else:
-                        final_flags.append(f)
-                
+                # 4. Персональна політика вирішує, як показати знайдене.
+                #
+                # Тут були дві захардкоджені гілки на ФОП і банку — єдині
+                # дві категорії з шістнадцяти, які взагалі можна було
+                # налаштувати. Тепер рішення дає resolver, і воно знає про
+                # напрямок: на buy_order людина купує, на sell_order продає.
+                #
+                # Ховати тут уже нічого не треба — ордери з дією «block»
+                # відсіяв диспетчер. Лишається сказати про те, що показуємо
+                # з попередженням.
+                final_flags = list(unique_flags)
+                if risk_resolver is not None:
+                    leg = SIDE_BUY if order is alert.buy_order else SIDE_SELL
+                    decision = decide(order, risk_resolver, leg)
+                    if decision.warn:
+                        final_flags.append(
+                            "RISK_WARN:" + risk_flags_mod.scrub(
+                                ", ".join(decision.reasons), limit=90
+                            )
+                        )
+
                 order.risk_flag = ",".join(final_flags) if final_flags else "OK"
 
         except Exception as e:

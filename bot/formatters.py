@@ -519,6 +519,13 @@ def _risk_badge(order: Order, short: bool = False) -> str:
             continue
  
         # ── Синергії (раніше BLOCK:SYNERGY → тепер SYNERGY:) ──────────
+        # Попередження від персональної політики: людина сама попросила
+        # показувати такі ордери, але з позначкою.
+        if f.startswith("RISK_WARN:"):
+            detail = f[len("RISK_WARN:"):]
+            lines.append(f"⚠️ УВАГА: {escape(detail[:80])}\n" if not short else "⚠️")
+            continue
+
         if f.startswith("SYNERGY:"):
             detail = f[len("SYNERGY:"):]
             lines.append(f"🔗 КОМБО: {escape(detail[:60])}\n" if not short else "🔗")

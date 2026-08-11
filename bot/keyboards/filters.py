@@ -88,21 +88,10 @@ def display_settings_kb(current: dict) -> InlineKeyboardMarkup:
         callback_data="disp:toggle:show_llm_summary",
     ))
 
-    # Фільтрація ФОП/ТОВ
-    fop_val = current.get("filter_fop_tov", "hide")
-    fop_label = "Приховати 🚫" if fop_val == "hide" else ("Попередити ⚠️" if fop_val == "warn" else "Ігнорувати 🟢")
-    builder.row(InlineKeyboardButton(
-        text=f"🏢 ФОП / ТОВ: {fop_label}",
-        callback_data="disp:toggle:filter_fop_tov",
-    ))
-
-    # Фільтрація Банка/Сейф
-    banka_val = current.get("filter_banka_jar", "hide")
-    banka_label = "Приховати 🚫" if banka_val == "hide" else ("Попередити ⚠️" if banka_val == "warn" else "Ігнорувати 🟢")
-    builder.row(InlineKeyboardButton(
-        text=f"🍯 Банка / Сейф: {banka_label}",
-        callback_data="disp:toggle:filter_banka_jar",
-    ))
+    # Фільтри ФОП/ТОВ і Банка переїхали в «🛡 Ріск-енджин»: вони роблять
+    # те саме, що політика для категорії PAYMENT_TARGET, і тримати два
+    # налаштування з тим самим сенсом означає рано чи пізно їх розвести.
+    # Старий вибір переноситься автоматично (RiskRepo.migrate_legacy_filters).
 
     # Налаштування затримки
     cooldown_val = current.get("alert_cooldown", -1.0)

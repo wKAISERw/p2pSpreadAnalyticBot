@@ -4,6 +4,9 @@ import logging
 from bot.handlers.core import is_muted
 from core.engine.price_advisor import PriceAdvisor
 from core.utils.tasks import spawn
+from core.engine import risk_flags as risk_flags_mod
+from core.engine.risk_decision import decide
+from core.risk.policy import SIDE_BUY, SIDE_SELL
 
 logger = logging.getLogger("Scanner.Helpers")
 
@@ -175,17 +178,25 @@ async def process_taker_path(
                     except Exception as re_err:
                         logger.error("Error analyzing Taker orders in RiskEngine: %s", re_err)
 
-                # Фільтруємо ордери відповідно до особистих налаштувань користувача
-                filter_fop = t_user.get("filter_fop_tov", "hide")
-                filter_banka = t_user.get("filter_banka_jar", "hide")
+                # Персональна політика. Напрямок у тейкері один на весь
+                # прохід і береться з РЕЖИМУ: у стакані `order.side` означає
+                # бік мерчанта, а не користувача.
+                #
+                # Тут же був четвертий екземпляр перевірки `"BLOCK" in
+                # risk_flags` — той самий підрядок, що ловиться всередині
+                # `..._BLOCKED`, тобто ордер із банкою відкидався незалежно
+                # від налаштування.
+                taker_side = SIDE_BUY if t_mode == "TAKER_BUY" else SIDE_SELL
+                risk_resolver = (
+                    await taker_scanner.db.resolver_for(t_user["user_id"])
+                    if getattr(taker_scanner, "db", None) else None
+                )
 
                 for o in candidates:
                     risk_flags = getattr(o, "risk_flag", "") or ""
-                    if filter_fop == "hide" and "FOP_TOV_BLOCKED" in risk_flags:
+                    if risk_resolver is not None and decide(o, risk_resolver, taker_side).hide:
                         continue
-                    if filter_banka == "hide" and "BANKA_JAR_BLOCKED" in risk_flags:
-                        continue
-                    if "BLOCK" in risk_flags:
+                    if risk_flags_mod.has_block(risk_flags):
                         continue
                     fresh.append(o)
 

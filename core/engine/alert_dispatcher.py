@@ -7,6 +7,8 @@ from bot.notifier import TelegramNotifier, SpreadAlert
 from config.banks import normalize_bank
 from core.engine.bank_scope import resolve_banks
 from core.engine import risk_flags as risk_flags_mod
+from core.engine.risk_decision import decide
+from core.risk.policy import SIDE_BUY, SIDE_SELL
 from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 from core.utils.tasks import spawn
@@ -238,8 +240,6 @@ class AlertDispatcher:
             return False, f"modes={','.join(modes)}", entry
 
         # 0. Перевірка FOP та Banka/Jar блокування (per-user)
-        filter_fop = user.get("filter_fop_tov", "hide")
-        filter_banka = user.get("filter_banka_jar", "hide")
         buy_o = opp["buy_order"]
         sell_o = opp["sell_order"]
 
@@ -273,10 +273,18 @@ class AlertDispatcher:
             if in_personal_blacklist(order_obj, bl_by_id, bl_by_name):
                 return False, f"Особистий чорний список: {order_obj.merchant_name}", entry
 
-            if filter_fop == "hide" and risk_flags_mod.has(risk_flags, "FOP_TOV_BLOCKED"):
-                return False, "FOP_TOV blocked for user", entry
-            if filter_banka == "hide" and risk_flags_mod.has(risk_flags, "BANKA_JAR_BLOCKED"):
-                return False, "Banka/Jar blocked for user", entry
+            # Персональна політика: одне рішення на всі шістнадцять
+            # категорій замість двох захардкоджених фільтрів.
+            #
+            # Напрямок береться з ноги, а не з ордера: на buy_o людина
+            # купує, на sell_o продає, і та сама згадка третіх осіб коштує
+            # різного. `resolver` уже зібраний під цього користувача.
+            resolver = user.get("_risk_resolver")
+            if resolver is not None:
+                side = SIDE_BUY if order_obj is buy_o else SIDE_SELL
+                decision = decide(order_obj, resolver, side)
+                if decision.hide:
+                    return False, f"Ріск-енджин: {', '.join(decision.reasons)}", entry
 
             if risk_flags_mod.is_blacklist_block(risk_flags):
                 bl_mode = mf.get("blacklist_mode", "block").lower()
@@ -407,6 +415,9 @@ class AlertDispatcher:
         # без нього особистий чорний список і субсидії просто не діяли б.
         used_subsidies = await self._db.get_used_subsidies(user_id)
         personal_bl = await self._db._user_blacklist_index(user_id)
+        # Політика ріск-енджину незмінна в межах проходу — збираємо один
+        # раз, а не на кожну зв'язку: усередині два запити до бази.
+        risk_resolver = await self._db.resolver_for(user_id)
         card_settings = await self._db.get_user_card_settings(user_id)
         card_module_enabled = bool(
             card_settings and card_settings.get("card_module_mode") != "off"
@@ -435,6 +446,7 @@ class AlertDispatcher:
 
             local_user["_used_subsidies"] = used_subsidies
             local_user["_personal_blacklist"] = personal_bl
+            local_user["_risk_resolver"] = risk_resolver
 
             try:
                 wants, reason, _ = self._user_wants(local_user, opp)
@@ -489,6 +501,7 @@ class AlertDispatcher:
             personal_bl = (
                 await self._db._user_blacklist_index(uid) if self._db else ({}, {})
             )
+            risk_resolver = await self._db.resolver_for(uid) if self._db else None
             try:
                 user_cards_active = await self._db.get_cards(owner_id=uid, status="active")
                 user_cards_all = await self._db.get_cards(owner_id=uid)
@@ -543,6 +556,7 @@ class AlertDispatcher:
 
                 local_user["_used_subsidies"] = used_subsidies
                 local_user["_personal_blacklist"] = personal_bl
+                local_user["_risk_resolver"] = risk_resolver
 
                 wants, skip_reason, scaled_amount = self._user_wants(local_user, opp)
 

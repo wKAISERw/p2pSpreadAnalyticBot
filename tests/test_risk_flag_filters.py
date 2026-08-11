@@ -102,51 +102,82 @@ def _user(**over) -> dict:
         "user_id": 1, "capital": 5000.0, "min_spread": 1.0,
         "bank_codes": ["43"], "buy_bank_codes": ["43"], "sell_bank_codes": ["43"],
         "merchant_filters": {},
-        "filter_fop_tov": "hide", "filter_banka_jar": "hide",
     }
     base.update(over)
     return base
 
 
-class TestPersonalFiltersAreActuallyHonoured(unittest.TestCase):
-    """Три режими ФОП/банки мусять давати три різні наслідки."""
+def _user_with_jar(action: str) -> dict:
+    """
+    Користувач із заданою реакцією на банку.
+
+    Раніше це були колонки `filter_fop_tov` / `filter_banka_jar` — два
+    захардкоджені фільтри на шістнадцять категорій. Тепер те саме робить
+    персональна політика, і старий вибір переноситься в неї автоматично
+    (`RiskRepo.migrate_legacy_filters`).
+    """
+    from core.risk.policy import PolicyResolver, SignalPolicy
+
+    return _user(_risk_resolver=PolicyResolver(
+        overrides={"PAY_JAR": SignalPolicy("PAY_JAR", on_buy=action, on_sell=action)}
+    ))
+
+
+class TestPersonalPolicyDecidesTheOrder(unittest.TestCase):
+    """
+    Три режими мають давати три різні наслідки.
+
+    Досі це було неможливо: підрядок «BLOCK» ловився всередині
+    `BANKA_JAR_BLOCKED`, і ордер відкидався в будь-якому режимі. Тепер
+    рішення ухвалює політика, і вона знає про напрямок угоди.
+    """
 
     def setUp(self):
         self.d = AlertDispatcher(notifier=MagicMock(), db=MagicMock())
 
-    def _wants(self, user: dict, flag: str) -> bool:
-        return self.d._user_wants(user, _opp(sell_flag=flag))[0]
+    def _wants(self, user: dict, signals: list[str]) -> bool:
+        opp = _opp()
+        opp["sell_order"].risk_signals = signals
+        opp["buy_order"].risk_signals = []
+        return self.d._user_wants(user, opp)[0]
 
-    def test_hide_still_hides(self):
-        self.assertFalse(self._wants(_user(filter_banka_jar="hide"), "BANKA_JAR_BLOCKED"))
-        self.assertFalse(self._wants(_user(filter_fop_tov="hide"), "FOP_TOV_BLOCKED"))
+    def test_block_hides_the_order(self):
+        self.assertFalse(self._wants(_user_with_jar("block"), ["PAY_JAR"]))
 
     def test_warn_lets_the_order_through(self):
-        # Це і був недосяжний режим: ордер зникав через підрядкову перевірку.
-        self.assertTrue(self._wants(_user(filter_banka_jar="warn"), "BANKA_JAR_BLOCKED"))
-        self.assertTrue(self._wants(_user(filter_fop_tov="warn"), "FOP_TOV_BLOCKED"))
+        self.assertTrue(self._wants(_user_with_jar("warn"), ["PAY_JAR"]))
 
-    def test_show_lets_the_order_through(self):
-        self.assertTrue(self._wants(_user(filter_banka_jar="show"), "BANKA_JAR_BLOCKED"))
-        self.assertTrue(self._wants(_user(filter_fop_tov="show"), "FOP_TOV_BLOCKED"))
+    def test_ignore_lets_the_order_through(self):
+        self.assertTrue(self._wants(_user_with_jar("ignore"), ["PAY_JAR"]))
 
-    def test_metadata_next_to_other_flags_still_passes(self):
-        self.assertTrue(
-            self._wants(_user(filter_banka_jar="warn"), "LOW_STATS,BANKA_JAR_BLOCKED")
-        )
+    def test_clean_order_passes_in_every_mode(self):
+        for action in ("block", "warn", "ignore"):
+            with self.subTest(action=action):
+                self.assertTrue(self._wants(_user_with_jar(action), []))
 
-    def test_genuine_block_is_still_dropped_in_every_mode(self):
-        for mode in ("hide", "warn", "show"):
-            with self.subTest(mode=mode):
-                self.assertFalse(
-                    self._wants(_user(filter_banka_jar=mode), "BLOCK:LLM_BLOCK:скам")
-                )
+    def test_direction_matters(self):
+        # Трикутник за замовчуванням ховає ордер на продажі й лише
+        # попереджає на купівлі.
+        from core.risk.policy import PolicyResolver
 
-    def test_blacklist_keeps_its_own_mode(self):
-        blocked = _user(merchant_filters={"blacklist_mode": "block"})
-        warned = _user(merchant_filters={"blacklist_mode": "warn"})
-        self.assertFalse(self._wants(blocked, "BLOCK:BLACKLIST:кинув"))
-        self.assertTrue(self._wants(warned, "BLOCK:BLACKLIST:кинув"))
+        user = _user(_risk_resolver=PolicyResolver())
+        opp = _opp()
+        opp["sell_order"].risk_signals = ["GEN_H02_TRIANGLE"]
+        opp["buy_order"].risk_signals = []
+        self.assertFalse(self.d._user_wants(user, opp)[0])
+
+        opp2 = _opp()
+        opp2["buy_order"].risk_signals = ["GEN_H02_TRIANGLE"]
+        opp2["sell_order"].risk_signals = []
+        self.assertTrue(self.d._user_wants(user, opp2)[0])
+
+    def test_user_without_policy_is_not_filtered_by_it(self):
+        # Резолвера немає — політика мовчить, решта перевірок працює.
+        self.assertTrue(self._wants(_user(), ["PAY_JAR"]))
+
+    def test_genuine_block_flag_is_still_dropped(self):
+        opp = _opp(sell_flag="BLOCK:LLM_BLOCK:скам")
+        self.assertFalse(self.d._user_wants(_user(), opp)[0])
 
 
 class TestOrdersAreNotSharedBetweenUsers(unittest.TestCase):

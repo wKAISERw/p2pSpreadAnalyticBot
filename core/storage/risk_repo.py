@@ -244,6 +244,61 @@ class RiskRepo:
         await self._db.commit()
         return cur.rowcount > 0
 
+    # ── Міграція зі старих тумблерів ─────────────────────────────────────
+
+    # Два персональні фільтри, які жили в `scanner_users` окремими
+    # колонками й робили рівно те, що тепер уміє політика для
+    # PAYMENT_TARGET. Тримати два налаштування з тим самим сенсом означає
+    # рано чи пізно їх розвести — ми це вже бачили на BEHAVIOR_ALERT_SCORE,
+    # що існував у двох екземплярах, і на чотирьох копіях мапи банків.
+    _LEGACY_FILTERS = (
+        ("filter_banka_jar", "PAY_JAR"),
+        ("filter_fop_tov", "PAY_BUSINESS"),
+    )
+    # «hide» — це ДЕФОЛТ колонки, і відрізнити «людина обрала ховати» від
+    # «людина ніколи туди не заходила» неможливо. Переносимо лише те, що
+    # вимагало свідомої дії; для решти діють нові дефолти сигналу, які
+    # враховують напрямок угоди.
+    #
+    # Інакше кожен користувач мовчки отримав би block/block на ФОП і банку —
+    # суворіше, ніж задумано, і без жодної його участі.
+    _LEGACY_ACTIONS = {"warn": "warn", "show": "ignore"}
+
+    async def migrate_legacy_filters(self, user_id: int) -> int:
+        """
+        Переносить старий вибір користувача в персональну політику.
+
+        Стара дія застосовується до ОБОХ напрямків: тумблер не знав про
+        купівлю й продаж, тож вигадувати за людину асиметрію не можна —
+        вона сама її налаштує, коли захоче.
+
+        Не чіпає сигнали, для яких політика вже є: якщо людина встигла
+        налаштувати їх у новому меню, її вибір головніший за старий.
+        """
+        async with self._db.execute(
+            "SELECT filter_banka_jar, filter_fop_tov FROM scanner_users WHERE user_id = ?",
+            (int(user_id),),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return 0
+
+        existing = await self.get_policies(user_id)
+        moved = 0
+        for column, signal_key in self._LEGACY_FILTERS:
+            if signal_key in existing:
+                continue
+            action = self._LEGACY_ACTIONS.get((row[column] or "").strip())
+            if not action:
+                continue
+            await self.set_policy(user_id, SignalPolicy(
+                signal_key, on_buy=action, on_sell=action,
+            ))
+            moved += 1
+        if moved:
+            logger.info("Перенесено старих фільтрів у політику для %s: %d", user_id, moved)
+        return moved
+
     # ── Усе разом ────────────────────────────────────────────────────────
 
     async def resolver_for(self, user_id: int):
@@ -255,6 +310,7 @@ class RiskRepo:
         """
         from core.risk.policy import PolicyResolver
 
+        await self.migrate_legacy_filters(user_id)
         return PolicyResolver(
             profile=await self.get_risk_profile(user_id),
             overrides=await self.get_policies(user_id),

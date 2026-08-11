@@ -19,6 +19,8 @@ from core.engine.buy_budget import resolve_buy_budget
 from core.engine.card_routing import resolve_route
 from filters.anomaly_filter import AnomalyFilter
 from core.engine import risk_flags as risk_flags_mod
+from core.engine.risk_decision import decide
+from core.risk.policy import SIDE_BUY, SIDE_SELL
 from core.engine.personal_blacklist import in_personal_blacklist
 from core.storage.merchant_db import MerchantDB
 
@@ -179,11 +181,16 @@ class TakerScanner:
         # Особистий чорний список: індекс тягнемо один раз на прохід, бо
         # перевірка нижче йде в циклі по всіх ордерах біржі.
         personal_bl: tuple[dict, dict] = ({}, {})
+        risk_resolver = None
+        # Напрямок угоди з точки зору КОРИСТУВАЧА: TAKER_BUY — купує,
+        # TAKER_SELL — продає.
+        taker_side = SIDE_BUY if mode == "TAKER_BUY" else SIDE_SELL
         if self.db:
             uid = user.get("user_id", 0)
             used_subs = await self.db.get_used_subsidies(uid) if uid else {}
             if uid:
                 personal_bl = await self.db._user_blacklist_index(uid)
+                risk_resolver = await self.db.resolver_for(uid)
 
         # ── Smart Card Pre-filtering Setup ──
         # Нормалізація банків живе в config/banks.py: та сама мапа лежала
@@ -548,6 +555,13 @@ class TakerScanner:
                     continue
 
                 # Check blacklist setting: if "blacklist_mode" is "warn", we allow BLOCK:BLACKLIST to pass but keep the flag for warning presentation
+                # Персональна політика. Напрямок у тейкері один на весь
+                # прохід і береться з РЕЖИМУ, а не з ордера: у стакані
+                # `order.side` означає бік мерчанта, і сплутати їх означало
+                # б перевернути асиметрію догори дриґом.
+                if risk_resolver is not None and decide(order, risk_resolver, taker_side).hide:
+                    continue
+
                 risk_flag = getattr(order, "risk_flag", "") or ""
                 if risk_flags_mod.is_blacklist_block(risk_flag):
                     bl_mode = mf.get("blacklist_mode", "block").lower()

@@ -27,7 +27,7 @@ from core.storage.merchant_db import MerchantDB
 from core.utils.circuit_breaker import CircuitBreaker
 from core.utils.dedup_cache import TTLCache
 from core.utils.cache import TTLCache as ValueCache
-from core.engine.alert_dedup import AlertGate
+from core.engine.alert_dedup import AlertGate, pair_key as alert_pair_key
 from core.utils.tasks import spawn
 from core.workers.llm_worker import LLMWorkerPool
 from core.workers.review_fetcher import ReviewFetcher
@@ -929,7 +929,16 @@ async def run_scanner(notifier: TelegramNotifier, stop_event: asyncio.Event, sha
                         # алерт реально пішов у чат.
                         if not is_muted():
                             if runtime_config.get("show_spread_logs", "true") == "true":
-                                logger.info("📤 Додано в dispatch-батч алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
+                                # Ключ пари в лозі — не косметика. Дедуп
+                                # тримається саме на ньому, і коли той самий
+                                # спред прилітає щоциклу, з логу видно
+                                # одразу: ключ повторюється (гейт зламаний)
+                                # чи щоразу новий (нестабільний merchant_id).
+                                logger.info(
+                                    "📤 Додано в dispatch-батч алерт: %s→%s %.2f%% [%s]",
+                                    buy_o.merchant_name, sell_o.merchant_name,
+                                    opp["net_spread_pct"], alert_pair_key(opp),
+                                )
                             else:
                                 logger.debug("📤 Додано в dispatch-батч алерт: %s→%s %.2f%%", buy_o.merchant_name, sell_o.merchant_name, opp["net_spread_pct"])
                             alerts_to_dispatch.append((alert, opp))
